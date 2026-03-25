@@ -36,6 +36,20 @@ const envSchema = z.object({
   EXECUTOR_ADDRESS_8453: z.string().optional(),
   EXECUTOR_ADDRESS_42161: z.string().optional(),
   EXECUTOR_ADDRESS_137: z.string().optional(),
+
+  // Revenue — fee collection wallet (0x Ethereum address)
+  OPERATOR_FEE_WALLET: z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'Must be a valid 0x Ethereum address'),
+
+  // Stripe billing (optional — Stripe features disabled if not set)
+  STRIPE_SECRET_KEY: z.string().optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().optional(),
+  STRIPE_PRO_PRICE_ID: z.string().optional(),
+
+  // Admin dashboard — required to protect /admin/* routes
+  ADMIN_SECRET: z.string().min(1),
+
+  // Safe smart wallet deployer — optional (falls back to Turnkey EOA if not set)
+  SAFE_DEPLOYER_PRIVATE_KEY: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
