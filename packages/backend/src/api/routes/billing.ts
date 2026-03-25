@@ -60,7 +60,7 @@ export async function billingRoutes(fastify: FastifyInstance) {
 
       try {
         await stripeService.handleWebhook(
-          Buffer.from(JSON.stringify(request.body)),
+          request.body as Buffer,
           signature,
         );
         return reply.code(200).send({ received: true });

@@ -15,6 +15,26 @@ import { startTransactionWorker } from './queues/transaction.queue.js';
 
 const fastify = Fastify({ logger: logger as any });
 
+// Stripe webhook needs the raw request body for signature verification.
+// Register a raw content-type parser BEFORE any other plugins so Fastify
+// does not JSON-parse the /v1/billing/webhook payload.
+fastify.addContentTypeParser(
+  'application/json',
+  { parseAs: 'buffer' },
+  (req, body, done) => {
+    if (req.routeOptions?.url === '/v1/billing/webhook') {
+      // Keep as Buffer — passed directly to stripe.webhooks.constructEvent
+      done(null, body);
+    } else {
+      try {
+        done(null, JSON.parse(body.toString()));
+      } catch (err) {
+        done(err as Error, undefined);
+      }
+    }
+  },
+);
+
 async function start() {
   // Security middleware
   await fastify.register(cors, {
