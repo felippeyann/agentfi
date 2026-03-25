@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [develop]
+
+jobs:
+  lint-typecheck:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run typecheck --workspaces --if-present
+      - run: npm run lint --workspaces --if-present
+
+  backend-test:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: agentfi
+          POSTGRES_PASSWORD: agentfi
+          POSTGRES_DB: agentfi_test
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - working-directory: packages/backend
+        env:
+          DATABASE_URL: postgresql://agentfi:agentfi@localhost:5432/agentfi_test
+          REDIS_URL: redis://localhost:6379
+          API_SECRET: test-secret-min-32-chars-long-here
+          ALCHEMY_API_KEY: test
+          TURNKEY_API_PUBLIC_KEY: test
+          TURNKEY_API_PRIVATE_KEY: test
+          TURNKEY_ORGANIZATION_ID: test
+        run: npm test
+
+  contracts-test:
+    name: Foundry Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+      - working-directory: packages/contracts
+        run: forge test -vvv
+      - working-directory: packages/contracts
+        run: forge coverage --report summary

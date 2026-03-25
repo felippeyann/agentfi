@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Claude_Preview__preview_start",
+      "Bash(npx tsc:*)",
+      "Bash(forge build:*)",
+      "Read(//c/Users/felip/.foundry/**)",
+      "Read(//c/Users/felip/OneDrive/Área de Trabalho/agentfi/$HOME/.foundry/**)",
+      "mcp__knowledge-base__directory_tree",
+      "Read(//mnt/c/Users/felip/.foundry/**)",
+      "Read(//c/Users/felip/**)",
+      "Bash(cmd.exe /c \"where forge 2>&1\")",
+      "Bash(cmd.exe /c \"dir /s /b %USERPROFILE%\\\\.foundry\\\\bin\\\\forge.exe 2>&1\")"
+    ]
+  }
+}

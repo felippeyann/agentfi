@@ -1,0 +1,74 @@
+name: Deploy Production
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  deploy-contracts:
+    name: Deploy Contracts (if changed)
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: Check for contract changes
+        id: check
+        run: |
+          if git diff HEAD~1 --name-only | grep -q "packages/contracts/src"; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+      - name: Deploy contracts
+        if: steps.check.outputs.changed == 'true'
+        working-directory: packages/contracts
+        env:
+          PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          OPERATOR_ADDRESS: ${{ vars.OPERATOR_ADDRESS }}
+          ALCHEMY_API_KEY_RPC_MAINNET: https://eth-mainnet.g.alchemy.com/v2/${{ secrets.ALCHEMY_API_KEY }}
+        run: |
+          forge script script/Deploy.s.sol --rpc-url mainnet --broadcast --verify
+          forge script script/Deploy.s.sol --rpc-url base --broadcast --verify
+
+  deploy-api:
+    name: Deploy API & MCP (rolling)
+    runs-on: ubuntu-latest
+    environment: production
+    needs: deploy-contracts
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get version tag
+        id: tag
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build and push images
+        run: |
+          docker buildx build -f Dockerfile.backend -t ghcr.io/${{ github.repository }}/api:${{ steps.tag.outputs.version }} -t ghcr.io/${{ github.repository }}/api:latest --push .
+          docker buildx build -f Dockerfile.mcp -t ghcr.io/${{ github.repository }}/mcp:${{ steps.tag.outputs.version }} -t ghcr.io/${{ github.repository }}/mcp:latest --push .
+          docker buildx build -f Dockerfile.admin -t ghcr.io/${{ github.repository }}/admin:${{ steps.tag.outputs.version }} -t ghcr.io/${{ github.repository }}/admin:latest --push .
+
+      - name: Run preflight check
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          REDIS_URL: ${{ secrets.PROD_REDIS_URL }}
+          ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+          TURNKEY_API_PUBLIC_KEY: ${{ secrets.TURNKEY_API_PUBLIC_KEY }}
+          TURNKEY_API_PRIVATE_KEY: ${{ secrets.TURNKEY_API_PRIVATE_KEY }}
+          TURNKEY_ORGANIZATION_ID: ${{ secrets.TURNKEY_ORGANIZATION_ID }}
+        run: npx tsx scripts/preflight.ts
+
+      - name: Post-deploy health check
+        run: |
+          sleep 30
+          curl -f ${{ vars.PROD_API_URL }}/health/ready || exit 1

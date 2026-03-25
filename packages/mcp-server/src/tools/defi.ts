@@ -1,0 +1,170 @@
+import { z } from 'zod';
+import { api } from '../api-client.js';
+
+export const defiTools = [
+  {
+    name: 'transfer_token',
+    description:
+      'Transfers ETH or an ERC-20 token to any Ethereum address. ' +
+      'Use "ETH" as the token identifier to send native ETH, or provide a contract address for ERC-20.',
+    inputSchema: z.object({
+      token: z
+        .string()
+        .describe(
+          'Token to transfer. Use "ETH" for native ETH, or the ERC-20 contract address.',
+        ),
+      to: z.string().describe('Destination Ethereum address (checksummed).'),
+      amount: z
+        .string()
+        .describe('Amount in human-readable units. Example: "100" for 100 USDC.'),
+      chain_id: z.number().default(1),
+    }),
+    handler: async (input: { token: string; to: string; amount: string; chain_id: number }) => {
+      const result = await api.post<{ transactionId: string; status: string }>(
+        '/v1/transactions/transfer',
+        {
+          token: input.token,
+          to: input.to,
+          amount: input.amount,
+          chainId: input.chain_id,
+        },
+      );
+
+      return {
+        transactionId: result.transactionId,
+        status: result.status,
+        next: 'Call get_transaction_status to track confirmation.',
+      };
+    },
+  },
+
+  {
+    name: 'deposit_aave',
+    description:
+      'Supplies an asset to Aave V3 lending protocol to earn yield. ' +
+      'The supplied amount earns the current supply APY and can be withdrawn at any time. ' +
+      'Call get_defi_rates first to check current rates.',
+    inputSchema: z.object({
+      asset: z
+        .string()
+        .describe('ERC-20 token address to supply. Common: USDC, DAI, WETH contract addresses.'),
+      amount: z.string().describe('Amount to supply in human-readable units.'),
+      chain_id: z.number().default(1),
+    }),
+    handler: async (input: { asset: string; amount: string; chain_id: number }) => {
+      const result = await api.post<{ transactionId: string; status: string }>(
+        '/v1/transactions/deposit',
+        {
+          asset: input.asset,
+          amount: input.amount,
+          chainId: input.chain_id,
+        },
+      );
+
+      return {
+        transactionId: result.transactionId,
+        status: result.status,
+        next: 'Call get_transaction_status to confirm. After confirmation, you will hold aTokens representing your position.',
+      };
+    },
+  },
+
+  {
+    name: 'withdraw_aave',
+    description:
+      'Withdraws a previously supplied asset from Aave V3. ' +
+      'Pass "max" as the amount to withdraw your entire position.',
+    inputSchema: z.object({
+      asset: z.string().describe('ERC-20 token address to withdraw.'),
+      amount: z
+        .string()
+        .describe('Amount to withdraw. Use "max" to withdraw entire position.'),
+      chain_id: z.number().default(1),
+    }),
+    handler: async (input: { asset: string; amount: string; chain_id: number }) => {
+      const result = await api.post<{ transactionId: string; status: string }>(
+        '/v1/transactions/withdraw',
+        {
+          asset: input.asset,
+          amount: input.amount,
+          chainId: input.chain_id,
+        },
+      );
+
+      return {
+        transactionId: result.transactionId,
+        status: result.status,
+        next: 'Call get_transaction_status to track confirmation.',
+      };
+    },
+  },
+
+  {
+    name: 'get_defi_rates',
+    description:
+      'Returns current supply and borrow APY rates for major assets on Aave V3. ' +
+      'Use this to decide where to deploy capital for yield.',
+    inputSchema: z.object({
+      chain_id: z.number().default(1).describe('Chain ID to fetch rates for.'),
+    }),
+    handler: async (input: { chain_id: number }) => {
+      // Fetch from Aave subgraph (public, no auth required)
+      const subgraphUrls: Record<number, string> = {
+        1: 'https://api.thegraph.com/subgraphs/name/aave/protocol-v3',
+        137: 'https://api.thegraph.com/subgraphs/name/aave/protocol-v3-polygon',
+        42161: 'https://api.thegraph.com/subgraphs/name/aave/protocol-v3-arbitrum',
+        8453: 'https://api.thegraph.com/subgraphs/name/aave/protocol-v3-base',
+      };
+
+      const url = subgraphUrls[input.chain_id];
+      if (!url) {
+        return { error: `Aave rates not available for chain ${input.chain_id}` };
+      }
+
+      const query = `{
+        reserves(first: 10, orderBy: totalLiquidity, orderDirection: desc) {
+          name
+          symbol
+          liquidityRate
+          variableBorrowRate
+          stableBorrowRate
+          totalLiquidity
+          availableLiquidity
+        }
+      }`;
+
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query }),
+        });
+        const data = (await res.json()) as {
+          data: {
+            reserves: Array<{
+              name: string;
+              symbol: string;
+              liquidityRate: string;
+              variableBorrowRate: string;
+            }>;
+          };
+        };
+
+        const RAY = 1e27;
+        return {
+          chainId: input.chain_id,
+          rates: data.data.reserves.map((r) => ({
+            asset: r.symbol,
+            supplyApy: ((parseFloat(r.liquidityRate) / RAY) * 100).toFixed(2) + '%',
+            borrowApy: ((parseFloat(r.variableBorrowRate) / RAY) * 100).toFixed(2) + '%',
+          })),
+          timestamp: new Date().toISOString(),
+        };
+      } catch {
+        return {
+          error: 'Failed to fetch Aave rates. Try again or check chain availability.',
+        };
+      }
+    },
+  },
+];

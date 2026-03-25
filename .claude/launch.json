@@ -1,0 +1,37 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backend",
+      "runtimeExecutable": "C:/PROGRA~1/nodejs/node.exe",
+      "runtimeArgs": [
+        "C:/Users/felip/OneDrive/READET~1/agentfi/node_modules/tsx/dist/cli.mjs",
+        "watch",
+        "packages/backend/src/index.ts"
+      ],
+      "port": 3000
+    },
+    {
+      "name": "admin",
+      "runtimeExecutable": "C:/PROGRA~1/nodejs/node.exe",
+      "runtimeArgs": [
+        "C:/Users/felip/OneDrive/READET~1/agentfi/node_modules/next/dist/bin/next",
+        "dev",
+        "--port",
+        "3001",
+        "packages/admin"
+      ],
+      "port": 3001
+    },
+    {
+      "name": "mcp-server",
+      "runtimeExecutable": "C:/PROGRA~1/nodejs/node.exe",
+      "runtimeArgs": [
+        "C:/Users/felip/OneDrive/READET~1/agentfi/node_modules/tsx/dist/cli.mjs",
+        "watch",
+        "packages/mcp-server/src/index.ts"
+      ],
+      "port": 3002
+    }
+  ]
+}

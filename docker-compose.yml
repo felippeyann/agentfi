@@ -1,0 +1,96 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agentfi
+      POSTGRES_PASSWORD: agentfi
+      POSTGRES_DB: agentfi
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U agentfi']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    restart: unless-stopped
+    command: >
+      anvil
+      --fork-url ${ALCHEMY_API_KEY:+https://eth-mainnet.g.alchemy.com/v2/}${ALCHEMY_API_KEY}
+      --fork-block-number 19500000
+      --chain-id 1
+      --host 0.0.0.0
+      --port 8545
+    ports:
+      - '8545:8545'
+    profiles:
+      - dev
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://agentfi:agentfi@postgres:5432/agentfi
+      REDIS_URL: redis://redis:6379
+    ports:
+      - '3000:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      AGENTFI_API_URL: http://api:3000
+      MCP_TRANSPORT: sse
+      MCP_PORT: 3002
+    ports:
+      - '3002:3002'
+    depends_on:
+      - api
+
+  admin:
+    build:
+      context: .
+      dockerfile: Dockerfile.admin
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NEXT_PUBLIC_API_URL: http://api:3000
+    ports:
+      - '3001:3001'
+    depends_on:
+      - api
+
+volumes:
+  postgres-data:
+  redis-data:

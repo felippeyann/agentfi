@@ -1,0 +1,143 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Agent {
+  id           String      @id @default(cuid())
+  name         String
+  apiKeyHash   String      @unique
+  apiKeyPrefix String
+  walletId     String      @unique
+  safeAddress  String      @unique
+  chainIds     Int[]
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  active       Boolean     @default(true)
+  tier         AgentTier   @default(FREE)
+
+  transactions Transaction[]
+  policy       AgentPolicy?
+  billing      AgentBilling?
+
+  @@index([apiKeyHash])
+}
+
+// Subscription tiers — drives rate limits and fee rates
+enum AgentTier {
+  FREE       // 100 tx/month, 0.3% protocol fee
+  PRO        // 10,000 tx/month, 0.15% protocol fee — $99/month
+  ENTERPRISE // Unlimited tx/month, 0.05% protocol fee — custom pricing
+}
+
+// Per-agent billing record (subscription + accumulated fees)
+model AgentBilling {
+  id                    String    @id @default(cuid())
+  agentId               String    @unique
+  agent                 Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  subscriptionActive    Boolean   @default(false)
+  subscriptionPeriodEnd DateTime?
+  stripeCustomerId      String?   @unique
+  stripeSubscriptionId  String?   @unique
+  // Protocol fees collected from this agent (in USD, as string)
+  totalFeesCollectedUsd String    @default("0")
+  // Tx count this billing period
+  txCountThisPeriod     Int       @default(0)
+  periodStart           DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  feeEvents FeeEvent[]
+}
+
+// Immutable log of each fee collected
+model FeeEvent {
+  id            String       @id @default(cuid())
+  billingId     String
+  billing       AgentBilling @relation(fields: [billingId], references: [id])
+  transactionId String
+  transaction   Transaction  @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  feeUsd        String       // fee amount in USD
+  feeTokens     String       // fee in native token units (wei)
+  feeBps        Int          // basis points applied
+  collectedAt   DateTime     @default(now())
+
+  @@index([billingId])
+  @@index([transactionId])
+  @@index([collectedAt(sort: Desc)])
+}
+
+model AgentPolicy {
+  id                String   @id @default(cuid())
+  agentId           String   @unique
+  agent             Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  maxValuePerTxEth  String   @default("1.0")
+  maxDailyVolumeUsd String   @default("10000")
+  allowedContracts  String[]
+  allowedTokens     String[]
+  cooldownSeconds   Int      @default(60)
+  active            Boolean  @default(true)
+  updatedAt         DateTime @updatedAt
+}
+
+model Transaction {
+  id             String    @id @default(cuid())
+  idempotencyKey String?   @unique
+  agentId        String
+  agent          Agent     @relation(fields: [agentId], references: [id])
+  chainId        Int
+  txHash         String?   @unique
+  status         TxStatus  @default(QUEUED)
+  type           TxType
+  fromToken      String?
+  toToken        String?
+  amountIn       String?
+  amountOut      String?
+  gasUsed        String?
+  gasPrice       String?
+  error          String?
+  simulation     Json?
+  metadata       Json?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  confirmedAt    DateTime?
+
+  feeEvents  FeeEvent[]
+
+  @@index([agentId, createdAt(sort: Desc)])
+  @@index([status])
+  @@index([txHash])
+}
+
+model DailyVolume {
+  id        String   @id @default(cuid())
+  agentId   String
+  date      String   // YYYY-MM-DD
+  volumeUsd String   @default("0")
+  updatedAt DateTime @updatedAt
+
+  @@unique([agentId, date], name: "agentId_date")
+  @@index([date])
+}
+
+enum TxStatus {
+  PENDING
+  SIMULATING
+  QUEUED
+  SUBMITTED
+  CONFIRMED
+  FAILED
+  REVERTED
+}
+
+enum TxType {
+  SWAP
+  TRANSFER
+  DEPOSIT
+  WITHDRAW
+  APPROVE
+  BATCH
+}

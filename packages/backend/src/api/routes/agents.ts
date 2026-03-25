@@ -1,0 +1,205 @@
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { PrismaClient } from '@prisma/client';
+import { TurnkeyService } from '../../services/wallet/turnkey.service.js';
+import { SafeService } from '../../services/wallet/safe.service.js';
+import { generateApiKey } from '../middleware/auth.js';
+import { PolicyService } from '../../services/policy/policy.service.js';
+import { logger } from '../middleware/logger.js';
+
+const db = new PrismaClient();
+const turnkey = new TurnkeyService();
+const safeService = new SafeService();
+const policyService = new PolicyService(db);
+
+const createAgentSchema = z.object({
+  name: z.string().min(1).max(100),
+  chainIds: z.array(z.number()).min(1).default([1]),
+  tier: z.enum(['FREE', 'PRO', 'ENTERPRISE']).default('FREE'),
+  policy: z
+    .object({
+      maxValuePerTxEth: z.string().default('1.0'),
+      maxDailyVolumeUsd: z.string().default('10000'),
+      allowedContracts: z.array(z.string()).default([]),
+      allowedTokens: z.array(z.string()).default([]),
+      cooldownSeconds: z.number().default(60),
+    })
+    .optional(),
+});
+
+const updatePolicySchema = z.object({
+  maxValuePerTxEth: z.string().optional(),
+  maxDailyVolumeUsd: z.string().optional(),
+  allowedContracts: z.array(z.string()).optional(),
+  allowedTokens: z.array(z.string()).optional(),
+  cooldownSeconds: z.number().optional(),
+  active: z.boolean().optional(),
+});
+
+export async function agentRoutes(fastify: FastifyInstance) {
+  /**
+   * POST /v1/agents — register a new agent, provision wallet, return API key.
+   * The API key plaintext is returned ONCE. It cannot be recovered.
+   */
+  fastify.post('/v1/agents', async (request, reply) => {
+    const body = createAgentSchema.parse(request.body);
+    const { plaintext, hash, prefix } = generateApiKey();
+
+    // Provision Turnkey MPC wallet
+    const { walletId, address } = await turnkey.createWallet(body.name);
+
+    // Deploy Safe smart wallet if a deployer key is configured.
+    // Falls back to EOA address for testnet / local dev without a funded deployer.
+    let safeAddress = address;
+    const deployerKey = process.env['SAFE_DEPLOYER_PRIVATE_KEY'];
+    const primaryChain = body.chainIds[0] ?? 1;
+
+    if (deployerKey) {
+      try {
+        const deployed = await safeService.deploySafeForAgent({
+          ownerAddress: address as `0x${string}`,
+          chainId: primaryChain,
+          signerPrivateKey: deployerKey,
+        });
+        safeAddress = deployed.safeAddress;
+        logger.info({ agentId: 'pending', safeAddress }, 'Safe deployed');
+      } catch (err) {
+        logger.warn({ err }, 'Safe deployment failed — using EOA address as fallback');
+      }
+    } else {
+      logger.info('SAFE_DEPLOYER_PRIVATE_KEY not set — skipping Safe deployment, using EOA');
+    }
+
+    const agent = await db.agent.create({
+      data: {
+        name: body.name,
+        apiKeyHash: hash,
+        apiKeyPrefix: prefix,
+        walletId,
+        safeAddress,
+        chainIds: body.chainIds,
+        tier: body.tier,
+        billing: { create: {} },
+        ...(body.policy && {
+          policy: {
+            create: {
+              maxValuePerTxEth: body.policy.maxValuePerTxEth,
+              maxDailyVolumeUsd: body.policy.maxDailyVolumeUsd,
+              allowedContracts: body.policy.allowedContracts,
+              allowedTokens: body.policy.allowedTokens,
+              cooldownSeconds: body.policy.cooldownSeconds,
+            },
+          },
+        }),
+      },
+    });
+
+    logger.info({ agentId: agent.id, name: body.name }, 'Agent registered');
+
+    // Return plaintext API key only once
+    return reply.code(201).send({
+      id: agent.id,
+      name: agent.name,
+      apiKey: plaintext, // shown once, never stored
+      apiKeyPrefix: prefix,
+      walletAddress: address,
+      safeAddress,
+      chainIds: body.chainIds,
+      tier: body.tier,
+    });
+  });
+
+  /**
+   * GET /v1/agents/me — agent info resolved from API key. Used by MCP server.
+   */
+  fastify.get('/v1/agents/me', async (request) => {
+    const agent = await db.agent.findUnique({
+      where: { id: request.agentId },
+      include: { policy: true, billing: true },
+    });
+
+    if (!agent) return { error: 'Agent not found' };
+
+    return {
+      id: agent.id,
+      name: agent.name,
+      apiKeyPrefix: agent.apiKeyPrefix,
+      walletAddress: agent.safeAddress,
+      chainIds: agent.chainIds,
+      active: agent.active,
+      tier: agent.tier,
+      policy: agent.policy,
+      billing: agent.billing
+        ? {
+            txCountThisPeriod: agent.billing.txCountThisPeriod,
+            totalFeesCollectedUsd: agent.billing.totalFeesCollectedUsd,
+            subscriptionActive: agent.billing.subscriptionActive,
+          }
+        : null,
+    };
+  });
+
+  /**
+   * GET /v1/agents/:id — agent status and config.
+   */
+  fastify.get<{ Params: { id: string } }>('/v1/agents/:id', async (request, reply) => {
+    if (request.agentId !== request.params.id) {
+      return reply.code(403).send({ error: 'Access denied' });
+    }
+
+    const agent = await db.agent.findUnique({
+      where: { id: request.params.id },
+      include: { policy: true, billing: true },
+    });
+
+    if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+    return {
+      id: agent.id,
+      name: agent.name,
+      apiKeyPrefix: agent.apiKeyPrefix,
+      walletAddress: agent.safeAddress,
+      chainIds: agent.chainIds,
+      active: agent.active,
+      tier: agent.tier,
+      policy: agent.policy,
+      billing: agent.billing
+        ? {
+            txCountThisPeriod: agent.billing.txCountThisPeriod,
+            totalFeesCollectedUsd: agent.billing.totalFeesCollectedUsd,
+            subscriptionActive: agent.billing.subscriptionActive,
+          }
+        : null,
+    };
+  });
+
+  /**
+   * PATCH /v1/agents/:id/policy — update operational policy.
+   */
+  fastify.patch<{ Params: { id: string } }>('/v1/agents/:id/policy', async (request, reply) => {
+    if (request.agentId !== request.params.id) {
+      return reply.code(403).send({ error: 'Access denied' });
+    }
+
+    const updates = updatePolicySchema.parse(request.body);
+    const policy = await policyService.setPolicy(request.params.id, updates as any);
+    return policy;
+  });
+
+  /**
+   * DELETE /v1/agents/:id — deactivate agent (soft delete).
+   */
+  fastify.delete<{ Params: { id: string } }>('/v1/agents/:id', async (request, reply) => {
+    if (request.agentId !== request.params.id) {
+      return reply.code(403).send({ error: 'Access denied' });
+    }
+
+    await db.agent.update({
+      where: { id: request.params.id },
+      data: { active: false },
+    });
+
+    await policyService.emergencyPause(request.params.id);
+    return reply.code(204).send();
+  });
+}
