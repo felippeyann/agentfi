@@ -95,7 +95,7 @@ jobs:
           TURNKEY_API_PRIVATE_KEY: ${{ secrets.TURNKEY_API_PRIVATE_KEY }}
           TURNKEY_ORGANIZATION_ID: ${{ secrets.TURNKEY_ORGANIZATION_ID }}
           NODE_ENV: production
-        run: npx tsx packages/backend/scripts/preflight.ts
+        run: npx tsx scripts/preflight.ts
 
       - name: Deploy to production server via SSH
         uses: appleboy/ssh-action@v1.0.3
