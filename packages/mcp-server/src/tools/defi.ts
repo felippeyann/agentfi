@@ -17,7 +17,7 @@ export const defiTools = [
       amount: z
         .string()
         .describe('Amount in human-readable units. Example: "100" for 100 USDC.'),
-      chain_id: z.number().default(1),
+      chain_id: z.number().default(1).describe('Chain ID. Default: 1 (Ethereum mainnet).'),
     }),
     handler: async (input: { token: string; to: string; amount: string; chain_id: number }) => {
       const result = await api.post<{ transactionId: string; status: string }>(
@@ -49,7 +49,7 @@ export const defiTools = [
         .string()
         .describe('ERC-20 token address to supply. Common: USDC, DAI, WETH contract addresses.'),
       amount: z.string().describe('Amount to supply in human-readable units.'),
-      chain_id: z.number().default(1),
+      chain_id: z.number().default(1).describe('Chain ID. Default: 1 (Ethereum mainnet).'),
     }),
     handler: async (input: { asset: string; amount: string; chain_id: number }) => {
       const result = await api.post<{ transactionId: string; status: string }>(
@@ -79,7 +79,7 @@ export const defiTools = [
       amount: z
         .string()
         .describe('Amount to withdraw. Use "max" to withdraw entire position.'),
-      chain_id: z.number().default(1),
+      chain_id: z.number().default(1).describe('Chain ID. Default: 1 (Ethereum mainnet).'),
     }),
     handler: async (input: { asset: string; amount: string; chain_id: number }) => {
       const result = await api.post<{ transactionId: string; status: string }>(

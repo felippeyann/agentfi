@@ -26,14 +26,16 @@ async function request<T>(
     }
   }
 
-  const response = await fetch(url.toString(), {
+  const init: RequestInit = {
     method,
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': API_KEY,
     },
-    ...(body !== undefined && { body: JSON.stringify(body) }),
-  });
+  };
+  if (body !== undefined) init.body = JSON.stringify(body);
+
+  const response = await fetch(url.toString(), init);
 
   if (!response.ok) {
     const error = (await response.json().catch(() => ({ error: response.statusText }))) as {

@@ -73,8 +73,8 @@ export const swapTools = [
       from_token: z.string().describe('Token to sell. Must match simulate_swap call.'),
       to_token: z.string().describe('Token to buy. Must match simulate_swap call.'),
       amount_in: z.string().describe('Amount to sell. Must match simulate_swap call.'),
-      chain_id: z.number().default(1),
-      slippage_tolerance: z.number().min(0.01).max(50).default(0.5),
+      chain_id: z.number().default(1).describe('Chain ID. Default: 1 (Ethereum mainnet).'),
+      slippage_tolerance: z.number().min(0.01).max(50).default(0.5).describe('Max slippage tolerance in percentage. Example: 0.5 = 0.5%.'),
       simulation_id: z
         .string()
         .describe('The simulation_id returned by simulate_swap. Required for safety.'),
