@@ -16,9 +16,9 @@ RUN cd packages/admin && npm run build
 FROM base AS runner
 ENV NODE_ENV=production
 ENV PORT=3001
-WORKDIR /app/packages/admin
+WORKDIR /app
 COPY --from=builder /app/packages/admin/.next/standalone ./
-COPY --from=builder /app/packages/admin/.next/static ./.next/static
-COPY --from=builder /app/packages/admin/public ./public
+COPY --from=builder /app/packages/admin/.next/static ./packages/admin/.next/static
+COPY --from=builder /app/packages/admin/public ./packages/admin/public
 EXPOSE 3001
-CMD ["node", "server.js"]
+CMD ["node", "packages/admin/server.js"]
