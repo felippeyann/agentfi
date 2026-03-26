@@ -17,6 +17,7 @@ RUN cd packages/backend && npm run build
 FROM base AS runner
 ENV NODE_ENV=production
 WORKDIR /app/packages/backend
+RUN apk add --no-cache openssl
 COPY --from=builder /app/packages/backend/dist ./dist
 COPY --from=builder /app/node_modules ../../node_modules
 COPY --from=builder /app/packages/backend/src/db/schema.prisma ./src/db/schema.prisma

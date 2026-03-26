@@ -90,7 +90,7 @@ jobs:
 
             # Run DB migrations (idempotent — safe to run on every deploy)
             docker compose exec -T api \
-              npx prisma migrate deploy --schema=src/db/schema.prisma
+              node /app/node_modules/.bin/prisma migrate deploy --schema=src/db/schema.prisma
 
       - name: Smoke tests
         run: |
