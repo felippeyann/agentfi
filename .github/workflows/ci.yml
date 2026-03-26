@@ -17,6 +17,7 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm ci
+      - run: npx prisma generate --schema=packages/backend/src/db/schema.prisma
       - run: npm run typecheck --workspaces --if-present
       - run: npm run lint --workspaces --if-present
 
@@ -64,6 +65,9 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: nightly
+      - name: Install forge dependencies
+        working-directory: packages/contracts
+        run: forge install foundry-rs/forge-std --no-git
       - working-directory: packages/contracts
         run: forge test -vvv
       - working-directory: packages/contracts
