@@ -119,6 +119,25 @@ jobs:
             set -e
             cd /opt/agentfi
 
+            # Write production .env (overwrites staging values)
+            cat > .env <<'ENVEOF'
+            NODE_ENV=production
+            DATABASE_URL=${{ secrets.PROD_DATABASE_URL }}
+            REDIS_URL=${{ secrets.PROD_REDIS_URL }}
+            ALCHEMY_API_KEY=${{ secrets.ALCHEMY_API_KEY }}
+            TURNKEY_API_PUBLIC_KEY=${{ secrets.TURNKEY_API_PUBLIC_KEY }}
+            TURNKEY_API_PRIVATE_KEY=${{ secrets.TURNKEY_API_PRIVATE_KEY }}
+            TURNKEY_ORGANIZATION_ID=${{ secrets.TURNKEY_ORGANIZATION_ID }}
+            TURNKEY_WALLET_ID=${{ secrets.TURNKEY_WALLET_ID }}
+            OPERATOR_API_SECRET=${{ secrets.OPERATOR_API_SECRET }}
+            JWT_SECRET=${{ secrets.JWT_SECRET }}
+            STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }}
+            STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}
+            FEE_WALLET_ADDRESS=${{ vars.FEE_WALLET_ADDRESS }}
+            POLICY_MODULE_ADDRESS_8453=${{ vars.POLICY_MODULE_ADDRESS_8453 }}
+            EXECUTOR_ADDRESS_8453=${{ vars.EXECUTOR_ADDRESS_8453 }}
+            ENVEOF
+
             # Authenticate to GHCR on the server
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
               -u ${{ github.actor }} --password-stdin
