@@ -17,14 +17,15 @@ export class AgentFiClient {
   }
 
   async call<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await fetch(`${this.apiUrl}${path}`, {
+    const init: RequestInit = {
       method,
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': this.apiKey,
       },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    };
+    if (body !== undefined) init.body = JSON.stringify(body);
+    const res = await fetch(`${this.apiUrl}${path}`, init);
 
     if (!res.ok) {
       const err = (await res.json().catch(() => ({ error: res.statusText }))) as { error: string };

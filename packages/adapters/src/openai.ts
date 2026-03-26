@@ -86,7 +86,7 @@ export function getAgentFiTools(): OpenAITool[] {
             to_token: { type: 'string', description: 'Token to buy' },
             amount_in: { type: 'string', description: 'Amount to sell' },
             chain_id: { type: 'number', description: 'Chain ID', default: 1 },
-            slippage_tolerance: { type: 'number', default: 0.5 },
+            slippage_tolerance: { type: 'number', description: 'Max slippage % e.g. 0.5', default: 0.5 },
             simulation_id: {
               type: 'string',
               description: 'simulation_id from agentfi_simulate_swap',
@@ -110,7 +110,7 @@ export function getAgentFiTools(): OpenAITool[] {
             },
             to: { type: 'string', description: 'Destination address' },
             amount: { type: 'string', description: 'Amount in human-readable units' },
-            chain_id: { type: 'number', default: 1 },
+            chain_id: { type: 'number', description: 'Chain ID. Default: 1 (Ethereum mainnet).', default: 1 },
           },
           required: ['token', 'to', 'amount'],
         },
@@ -126,7 +126,7 @@ export function getAgentFiTools(): OpenAITool[] {
           properties: {
             asset: { type: 'string', description: 'ERC-20 token address to supply' },
             amount: { type: 'string', description: 'Amount to supply' },
-            chain_id: { type: 'number', default: 1 },
+            chain_id: { type: 'number', description: 'Chain ID. Default: 1 (Ethereum mainnet).', default: 1 },
           },
           required: ['asset', 'amount'],
         },
@@ -158,7 +158,7 @@ export function getAgentFiTools(): OpenAITool[] {
         parameters: {
           type: 'object',
           properties: {
-            chain_id: { type: 'number', default: 1 },
+            chain_id: { type: 'number', description: 'Chain ID. Default: 1 (Ethereum mainnet).', default: 1 },
           },
           required: [],
         },
