@@ -56,6 +56,15 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Copy compose files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          source: "docker-compose.yml,docker-compose.prod.yml"
+          target: /opt/agentfi
+
       - name: Deploy to staging server via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
