@@ -55,6 +55,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     needs: deploy-contracts
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - uses: actions/checkout@v4
@@ -97,6 +100,15 @@ jobs:
           NODE_ENV: production
         run: npx tsx scripts/preflight.ts
 
+      - name: Copy compose files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          source: "docker-compose.yml,docker-compose.prod.yml"
+          target: /opt/agentfi
+
       - name: Deploy to production server via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -123,7 +135,10 @@ jobs:
 
             # Run migrations before bringing up other services
             docker compose exec -T api \
-              npx prisma migrate deploy --schema=src/db/schema.prisma
+              node /app/node_modules/.bin/prisma migrate resolve \
+              --applied 0001_init --schema=src/db/schema.prisma || true
+            docker compose exec -T api \
+              node /app/node_modules/.bin/prisma migrate deploy --schema=src/db/schema.prisma
 
             docker compose -f docker-compose.yml -f docker-compose.prod.yml \
               up -d --no-deps --remove-orphans mcp admin
