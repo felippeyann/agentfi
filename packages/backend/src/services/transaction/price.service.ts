@@ -36,6 +36,11 @@ const CHAIN_NATIVE_TOKEN: Record<number, string> = {
   137: 'matic-network',
 };
 
+/** Clears the in-process price cache. Used in tests to avoid cross-test contamination. */
+export function clearPriceCache(): void {
+  priceCache.clear();
+}
+
 /**
  * Converts a wei amount (bigint) to a USD string.
  * Returns '0' if price lookup fails — fee accounting degrades gracefully.
