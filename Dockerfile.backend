@@ -8,6 +8,7 @@ RUN npm ci --workspace=packages/backend --include-workspace-root
 
 FROM base AS builder
 WORKDIR /app
+RUN apk add --no-cache openssl
 COPY --from=deps /app/node_modules ./node_modules
 COPY tsconfig.base.json ./tsconfig.base.json
 COPY packages/backend ./packages/backend
