@@ -28,6 +28,14 @@ export class PolicyService {
     if (!policy) return { allowed: true }; // no policy = no restrictions
     if (!policy.active) return { allowed: false, reason: 'Agent policy is paused (kill switch active)' };
 
+    // Check temporary policy expiration
+    if (policy.expiresAt && policy.expiresAt < new Date()) {
+      return {
+        allowed: false,
+        reason: `Agent policy expired at ${policy.expiresAt.toISOString()}. Update the policy to continue.`,
+      };
+    }
+
     // Check max value per tx
     const value = parseFloat(params.valueEth);
     const maxValue = parseFloat(policy.maxValuePerTxEth);

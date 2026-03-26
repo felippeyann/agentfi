@@ -72,16 +72,30 @@ model FeeEvent {
 }
 
 model AgentPolicy {
-  id                String   @id @default(cuid())
-  agentId           String   @unique
-  agent             Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  maxValuePerTxEth  String   @default("1.0")
-  maxDailyVolumeUsd String   @default("10000")
+  id                String    @id @default(cuid())
+  agentId           String    @unique
+  agent             Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  maxValuePerTxEth  String    @default("1.0")
+  maxDailyVolumeUsd String    @default("10000")
   allowedContracts  String[]
   allowedTokens     String[]
-  cooldownSeconds   Int      @default(60)
-  active            Boolean  @default(true)
-  updatedAt         DateTime @updatedAt
+  cooldownSeconds   Int       @default(60)
+  active            Boolean   @default(true)
+  /// Optional expiry for temporary task-scoped policies (null = no expiration)
+  expiresAt         DateTime?
+  updatedAt         DateTime  @updatedAt
+}
+
+/// Tracks consumed x402 payment nonces to prevent replay attacks
+model X402Nonce {
+  id        String    @id @default(cuid())
+  nonce     String    @unique
+  chainId   Int
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([nonce])
+  @@index([createdAt])
 }
 
 model Transaction {

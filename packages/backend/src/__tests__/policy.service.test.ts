@@ -30,6 +30,7 @@ function basePolicy(overrides: Partial<AgentPolicy> = {}): AgentPolicy {
     allowedContracts: [],
     allowedTokens: [],
     maxDailyVolumeUsd: '0', // 0 = no daily limit
+    expiresAt: null,
     updatedAt: new Date(),
     ...overrides,
   };
