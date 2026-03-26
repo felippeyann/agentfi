@@ -88,6 +88,12 @@ jobs:
             docker compose -f docker-compose.yml -f docker-compose.prod.yml \
               up -d --remove-orphans
 
+            # Resolve any migration marked as failed (e.g. from a prior db push).
+            # This is idempotent — if the migration is already applied it's a no-op.
+            docker compose exec -T api \
+              node /app/node_modules/.bin/prisma migrate resolve \
+              --applied 0001_init --schema=src/db/schema.prisma || true
+
             # Run DB migrations (idempotent — safe to run on every deploy)
             docker compose exec -T api \
               node /app/node_modules/.bin/prisma migrate deploy --schema=src/db/schema.prisma
