@@ -34,6 +34,8 @@ const updatePolicySchema = z.object({
   allowedTokens: z.array(z.string()).optional(),
   cooldownSeconds: z.number().optional(),
   active: z.boolean().optional(),
+  /// ISO 8601 timestamp — sets a temporary policy that expires automatically (null clears expiry)
+  expiresAt: z.string().datetime().nullish(),
 });
 
 export async function agentRoutes(fastify: FastifyInstance) {
@@ -175,14 +177,25 @@ export async function agentRoutes(fastify: FastifyInstance) {
 
   /**
    * PATCH /v1/agents/:id/policy — update operational policy.
+   *
+   * Pass `expiresAt` (ISO 8601) to create a temporary task-scoped policy.
+   * The policy will be automatically rejected after that timestamp.
+   * Pass `expiresAt: null` to clear a previous expiry and make the policy permanent.
    */
   fastify.patch<{ Params: { id: string } }>('/v1/agents/:id/policy', async (request, reply) => {
     if (request.agentId !== request.params.id) {
       return reply.code(403).send({ error: 'Access denied' });
     }
 
-    const updates = updatePolicySchema.parse(request.body);
-    const policy = await policyService.setPolicy(request.params.id, updates as any);
+    const { expiresAt, ...policyFields } = updatePolicySchema.parse(request.body);
+
+    // Convert ISO 8601 → Date for Prisma; undefined means field not touched
+    const policyData: Record<string, unknown> = { ...policyFields };
+    if (expiresAt !== undefined) {
+      policyData['expiresAt'] = expiresAt ? new Date(expiresAt) : null;
+    }
+
+    const policy = await policyService.setPolicy(request.params.id, policyData as any);
     return policy;
   });
 

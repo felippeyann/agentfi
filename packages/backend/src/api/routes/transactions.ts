@@ -618,28 +618,26 @@ export async function transactionRoutes(fastify: FastifyInstance) {
   });
 
   /**
-   * POST /v1/transactions/batch — execute multiple actions atomically via AgentExecutor.executeBatch.
+   * POST /v1/transactions/batch — execute multiple raw calldata actions atomically.
    *
-   * Each action is one of: swap, transfer, deposit, withdraw.
-   * All actions simulate individually, then the entire batch is encoded and submitted
-   * as a single call to AgentExecutor.executeBatch on-chain — atomic: all or nothing.
+   * Each action maps directly to AgentExecutor.Action: { to, value, data }.
+   * Actions are validated individually via PolicyService, then encoded into a single
+   * AgentExecutor.executeBatch call — atomic: all succeed or all revert.
    *
-   * Example body:
-   *   { "chainId": 8453, "actions": [
-   *     { "type": "transfer", "token": "ETH", "to": "0x...", "amount": "0.01" },
-   *     { "type": "deposit",  "asset": "0x833589...", "amount": "100" }
-   *   ]}
+   * Body: { chainId, actions: [{ to, value, data }], idempotencyKey? }
+   *   - to:    target contract address
+   *   - value: ETH value in wei (as decimal string, e.g. "0" or "1000000000000000")
+   *   - data:  hex-encoded calldata (e.g. "0x" for plain ETH transfers)
    */
   fastify.post('/v1/transactions/batch', async (request, reply) => {
     const batchSchema = z.object({
       chainId: z.number().default(1),
       idempotencyKey: z.string().optional(),
-      actions: z.array(z.discriminatedUnion('type', [
-        z.object({ type: z.literal('transfer'), token: z.string(), to: z.string(), amount: z.string() }),
-        z.object({ type: z.literal('swap'), fromToken: z.string(), toToken: z.string(), amountIn: z.string(), slippageTolerance: z.number().min(0.01).max(50).default(0.5) }),
-        z.object({ type: z.literal('deposit'), asset: z.string(), amount: z.string() }),
-        z.object({ type: z.literal('withdraw'), asset: z.string(), amount: z.string() }),
-      ])).min(1).max(10),
+      actions: z.array(z.object({
+        to:    z.string(),
+        value: z.string().default('0'),
+        data:  z.string().regex(/^0x[0-9a-fA-F]*$/).default('0x'),
+      })).min(1).max(20),
     });
 
     const body = batchSchema.parse(request.body);
@@ -656,108 +654,59 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       return reply.code(429).send({ error: 'Monthly transaction limit reached' });
     }
 
-    const { createPublicClient, http, encodeFunctionData } = await import('viem');
-    const { getChain, RPC_URLS } = await import('../../config/chains.js');
     const contracts = getContracts(body.chainId);
-
     if (!contracts.executor) {
       return reply.code(400).send({
         error: `AgentExecutor not deployed on chain ${body.chainId}. Deploy contracts first.`,
       });
     }
 
-    const publicClient = createPublicClient({
-      chain: getChain(body.chainId),
-      transport: http(RPC_URLS[body.chainId] ?? ''),
-    });
-
-    // Resolve pool address once (needed for Aave actions)
-    const getPoolAddress = async (): Promise<Address> =>
-      publicClient.readContract({
-        address: contracts.aavePoolAddressProvider,
-        abi: [{ name: 'getPool', type: 'function', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'address' }] }] as const,
-        functionName: 'getPool',
+    // Validate each action individually via PolicyService before touching the chain
+    for (let i = 0; i < body.actions.length; i++) {
+      const action = body.actions[i]!;
+      const valueWei = BigInt(action.value);
+      // Convert wei → ETH string for policy comparison (precision adequate for limits check)
+      const valueEth = valueWei === 0n ? '0' : (Number(valueWei) / 1e18).toFixed(9).replace(/\.?0+$/, '');
+      const policyResult = await policyService.validateTransaction({
+        agentId: request.agentId,
+        targetContract: getAddress(action.to),
+        valueEth,
       });
-
-    // Build calldata for each action
-    type OnChainAction = { target: Address; value: bigint; data: `0x${string}` };
-    const onChainActions: OnChainAction[] = [];
-    let totalValueWei = 0n;
-
-    for (const action of body.actions) {
-      let txData: { to: Address; value: bigint; data: `0x${string}` };
-
-      if (action.type === 'transfer') {
-        if (action.token.toUpperCase() === 'ETH') {
-          txData = builder.buildEthTransfer({ to: getAddress(action.to), amountEth: action.amount });
-        } else {
-          const decimals = await getTokenDecimals(action.token, body.chainId);
-          txData = builder.buildTokenTransfer({
-            tokenAddress: getAddress(action.token),
-            to: getAddress(action.to),
-            amount: action.amount,
-            decimals,
-          });
-        }
-      } else if (action.type === 'swap') {
-        const amountIn = parseUnits(action.amountIn, 18);
-        txData = builder.buildUniswapSwap({
-          chainId: body.chainId,
-          tokenIn: getAddress(action.fromToken),
-          tokenOut: getAddress(action.toToken),
-          fee: 500,
-          recipient: getAddress(agent.safeAddress),
-          amountIn,
-          amountOutMinimum: 0n,
-        });
-      } else if (action.type === 'deposit') {
-        const decimals = await getTokenDecimals(action.asset, body.chainId);
-        const amount = parseUnits(action.amount, decimals);
-        const poolAddress = await getPoolAddress();
-        txData = builder.buildAaveSupply({
-          poolAddress,
-          asset: getAddress(action.asset),
-          amount,
-          onBehalfOf: getAddress(agent.safeAddress),
-        });
-      } else {
-        // withdraw
-        const { maxUint256: MU } = await import('viem');
-        const decimals = action.amount === 'max' ? 18 : await getTokenDecimals(action.asset, body.chainId);
-        const amount = action.amount === 'max' ? MU : parseUnits(action.amount, decimals);
-        const poolAddress = await getPoolAddress();
-        txData = builder.buildAaveWithdraw({
-          poolAddress,
-          asset: getAddress(action.asset),
-          amount,
-          to: getAddress(agent.safeAddress),
+      if (!policyResult.allowed) {
+        return reply.code(403).send({
+          error: `Action at index ${i} blocked by policy: ${policyResult.reason}`,
+          actionIndex: i,
         });
       }
-
-      onChainActions.push({ target: txData.to, value: txData.value, data: txData.data });
-      totalValueWei += txData.value;
     }
 
+    const { encodeFunctionData } = await import('viem');
+
+    // Build on-chain action array (matches AgentExecutor.Action struct)
+    type OnChainAction = { target: Address; value: bigint; data: `0x${string}` };
+    const onChainActions: OnChainAction[] = body.actions.map(a => ({
+      target: getAddress(a.to) as Address,
+      value:  BigInt(a.value),
+      data:   a.data as `0x${string}`,
+    }));
+    const totalValueWei = onChainActions.reduce((sum, a) => sum + a.value, 0n);
+
     // AgentExecutor.executeBatch ABI
-    const EXECUTOR_ABI = [
-      {
-        name: 'executeBatch',
-        type: 'function',
-        stateMutability: 'payable',
-        inputs: [
-          {
-            name: 'actions',
-            type: 'tuple[]',
-            components: [
-              { name: 'target', type: 'address' },
-              { name: 'value',  type: 'uint256' },
-              { name: 'data',   type: 'bytes'   },
-            ],
-          },
+    const EXECUTOR_ABI = [{
+      name: 'executeBatch',
+      type: 'function',
+      stateMutability: 'payable',
+      inputs: [{
+        name: 'actions',
+        type: 'tuple[]',
+        components: [
+          { name: 'target', type: 'address' },
+          { name: 'value',  type: 'uint256' },
+          { name: 'data',   type: 'bytes'   },
         ],
-        outputs: [],
-      },
-    ] as const;
+      }],
+      outputs: [],
+    }] as const;
 
     const batchCalldata = encodeFunctionData({
       abi: EXECUTOR_ABI,
@@ -765,7 +714,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       args: [onChainActions],
     });
 
-    // Simulate the full batch call against the executor
+    // Simulate the full batch against the executor contract
     const sim = await simulator.simulate({
       chainId: body.chainId,
       from: getAddress(agent.safeAddress),

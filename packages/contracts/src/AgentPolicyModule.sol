@@ -34,6 +34,7 @@ contract AgentPolicyModule {
     error Unauthorized();
     error PolicyNotFound();
     error PolicyPausedError();
+    error PolicyExpired(uint256 expiredAt, uint256 currentTime);
     error ValueExceedsLimit(uint256 value, uint256 limit);
     error ContractNotWhitelisted(address target);
     error TokenNotWhitelisted(address token);
@@ -59,6 +60,20 @@ contract AgentPolicyModule {
         address[] allowedTokens;
         /// @notice Kill switch: if false, all transactions are blocked.
         bool active;
+        /// @notice Unix timestamp after which this policy expires (0 = no expiration).
+        uint256 policyExpiresAt;
+    }
+
+    /**
+     * @notice Policy parameters without the expiry field.
+     *         Used as input to setTemporaryPolicy so expiry is always explicit.
+     */
+    struct PolicyParams {
+        uint256   maxValuePerTx;
+        uint256   cooldownBetweenTx;
+        address[] allowedContracts;
+        address[] allowedTokens;
+        bool      active;
     }
 
     // -------------------------------------------------------------------------
@@ -102,15 +117,47 @@ contract AgentPolicyModule {
         if (policy.maxValuePerTx == 0) revert InvalidPolicy();
 
         _policies[safe] = AgentPolicy({
-            maxValuePerTx: policy.maxValuePerTx,
+            maxValuePerTx:     policy.maxValuePerTx,
             cooldownBetweenTx: policy.cooldownBetweenTx,
-            allowedContracts: policy.allowedContracts,
-            allowedTokens: policy.allowedTokens,
-            active: policy.active
+            allowedContracts:  policy.allowedContracts,
+            allowedTokens:     policy.allowedTokens,
+            active:            policy.active,
+            policyExpiresAt:   policy.policyExpiresAt,
         });
         _hasPolicy[safe] = true;
 
         emit PolicySet(safe, policy);
+    }
+
+    /**
+     * @notice Sets a temporary policy that expires at a given timestamp.
+     * @dev Only callable by the operator. Use this for task-scoped permissions
+     *      (e.g. allow DeFi operations for 24 hours without redeploying a Safe module).
+     * @param safe      The Safe wallet address.
+     * @param params    Policy parameters (without expiry — expiry is always explicit here).
+     * @param expiresAt Unix timestamp when the policy expires. Must be in the future.
+     */
+    function setTemporaryPolicy(
+        address safe,
+        PolicyParams calldata params,
+        uint256 expiresAt
+    ) external {
+        if (msg.sender != operator) revert Unauthorized();
+        if (safe == address(0)) revert ZeroAddress();
+        if (params.maxValuePerTx == 0) revert InvalidPolicy();
+        if (expiresAt <= block.timestamp) revert InvalidPolicy();
+
+        _policies[safe] = AgentPolicy({
+            maxValuePerTx:     params.maxValuePerTx,
+            cooldownBetweenTx: params.cooldownBetweenTx,
+            allowedContracts:  params.allowedContracts,
+            allowedTokens:     params.allowedTokens,
+            active:            params.active,
+            policyExpiresAt:   expiresAt,
+        });
+        _hasPolicy[safe] = true;
+
+        emit PolicySet(safe, _policies[safe]);
     }
 
     /**
@@ -155,6 +202,11 @@ contract AgentPolicyModule {
         AgentPolicy storage policy = _policies[safe];
 
         if (!policy.active) revert PolicyPausedError();
+
+        // Check policy expiration (temporary policies only)
+        if (policy.policyExpiresAt != 0 && block.timestamp > policy.policyExpiresAt) {
+            revert PolicyExpired(policy.policyExpiresAt, block.timestamp);
+        }
 
         // Check max value per transaction
         if (value > policy.maxValuePerTx) {
