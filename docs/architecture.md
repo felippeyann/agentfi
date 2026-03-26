@@ -55,3 +55,13 @@ All fee events are immutably logged in `FeeEvent` table.
 | Base | 8453 | Uniswap V3, Aave V3 |
 | Arbitrum One | 42161 | Uniswap V3, Aave V3 |
 | Polygon | 137 | Uniswap V3, Aave V3 |
+
+## Deployed Infrastructure (Staging)
+
+| Service | URL | Port |
+|---------|-----|------|
+| API | https://api.agentfi.cc | 3000 |
+| Admin | https://admin.agentfi.cc | 3001 |
+| MCP (SSE) | https://mcp.agentfi.cc | 3002 |
+
+**Stack:** DigitalOcean Droplet (Ubuntu 22.04) · nginx reverse proxy · Let's Encrypt SSL · Docker Compose · GitHub Actions CI/CD · GHCR image registry

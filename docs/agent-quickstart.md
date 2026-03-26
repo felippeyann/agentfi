@@ -2,20 +2,16 @@
 
 Get an AI agent executing DeFi transactions in under 5 minutes.
 
-## 1. Install the MCP Server
+## 1. Connect to the MCP Server
 
-```bash
-npx @agentfi/mcp-server
-```
-
-Or add to your Claude Desktop `claude_desktop_config.json`:
+**Hosted (SSE transport)** — add to your Claude Desktop `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "agentfi": {
-      "command": "npx",
-      "args": ["@agentfi/mcp-server"],
+      "type": "sse",
+      "url": "https://mcp.agentfi.cc/sse",
       "env": {
         "AGENTFI_API_KEY": "agfi_live_your_key_here"
       }
@@ -24,10 +20,18 @@ Or add to your Claude Desktop `claude_desktop_config.json`:
 }
 ```
 
+**Self-hosted (stdio transport)** — clone the repo and run locally:
+
+```bash
+git clone https://github.com/felippeyann/agentfi
+cd agentfi && npm install
+cd packages/mcp-server && npm run dev
+```
+
 ## 2. Register an Agent (get your API key)
 
 ```bash
-curl -X POST https://api.agentfi.xyz/v1/agents \
+curl -X POST https://api.agentfi.cc/v1/agents \
   -H "Content-Type: application/json" \
   -d '{"name": "my-agent", "chainIds": [1, 8453]}'
 ```
