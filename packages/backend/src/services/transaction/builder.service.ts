@@ -17,6 +17,7 @@ import { getContracts } from '../../config/contracts.js';
 const WETH_ADDRESSES: Record<number, string> = {
   1:     '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', // Ethereum
   8453:  '0x4200000000000000000000000000000000000006', // Base
+  84532: '0x4200000000000000000000000000000000000006', // Base Sepolia
   42161: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1', // Arbitrum
   137:   '0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619', // Polygon
 };
