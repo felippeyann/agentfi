@@ -16,13 +16,17 @@ runs = 256
 runs = 1000
 
 [rpc_endpoints]
-mainnet = "${ALCHEMY_API_KEY_RPC_MAINNET}"
-base = "${ALCHEMY_API_KEY_RPC_BASE}"
-arbitrum = "${ALCHEMY_API_KEY_RPC_ARB}"
-polygon = "${ALCHEMY_API_KEY_RPC_POLYGON}"
+mainnet      = "${ALCHEMY_API_KEY_RPC_MAINNET}"
+base         = "${ALCHEMY_API_KEY_RPC_BASE}"
+arbitrum     = "${ALCHEMY_API_KEY_RPC_ARB}"
+polygon      = "${ALCHEMY_API_KEY_RPC_POLYGON}"
+base_sepolia = "https://sepolia.base.org"
+arb_sepolia  = "https://sepolia-rollup.arbitrum.io/rpc"
 
 [etherscan]
-mainnet = { key = "${ETHERSCAN_API_KEY}" }
-base = { key = "${BASESCAN_API_KEY}", url = "https://api.basescan.org/api" }
-arbitrum = { key = "${ARBISCAN_API_KEY}", url = "https://api.arbiscan.io/api" }
-polygon = { key = "${POLYGONSCAN_API_KEY}", url = "https://api.polygonscan.com/api" }
+mainnet      = { key = "${ETHERSCAN_API_KEY}" }
+base         = { key = "${BASESCAN_API_KEY}",    url = "https://api.basescan.org/api" }
+arbitrum     = { key = "${ARBISCAN_API_KEY}",    url = "https://api.arbiscan.io/api" }
+polygon      = { key = "${POLYGONSCAN_API_KEY}", url = "https://api.polygonscan.com/api" }
+base_sepolia = { key = "${BASESCAN_API_KEY}",    url = "https://api-sepolia.basescan.org/api" }
+arb_sepolia  = { key = "${ARBISCAN_API_KEY}",    url = "https://api-sepolia.arbiscan.io/api" }
