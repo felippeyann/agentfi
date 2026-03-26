@@ -4,7 +4,7 @@
 
 import { createPublicClient, http, type Hex } from 'viem';
 import type { PrismaClient } from '@prisma/client';
-import { getChain, RPC_URLS } from '../../config/chains.js';
+import { getChain, withFallbackRpc } from '../../config/chains.js';
 import { logger } from '../../api/middleware/logger.js';
 
 export class MonitorService {
@@ -21,10 +21,7 @@ export class MonitorService {
     maxAttempts?: number;
   }): Promise<void> {
     const { txHash, chainId, transactionId, maxAttempts = 20 } = params;
-    const client = createPublicClient({
-      chain: getChain(chainId),
-      transport: http(RPC_URLS[chainId] ?? ''),
-    });
+    const chain = getChain(chainId);
 
     let attempt = 0;
     let delay = 2000; // start at 2s
@@ -35,7 +32,10 @@ export class MonitorService {
       delay = Math.min(delay * 1.5, 30_000); // cap at 30s
 
       try {
-        const receipt = await client.getTransactionReceipt({ hash: txHash });
+        const receipt = await withFallbackRpc(chainId, (url) => {
+          const client = createPublicClient({ chain, transport: http(url) });
+          return client.getTransactionReceipt({ hash: txHash });
+        });
 
         if (receipt) {
           const confirmed = receipt.status === 'success';

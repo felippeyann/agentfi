@@ -2,7 +2,7 @@
  * Transaction Queue — BullMQ workers for async tx processing.
  */
 
-import { Queue, Worker, type Job } from 'bullmq';
+import { Queue, Worker, type Job, type WorkerOptions } from 'bullmq';
 import { PrismaClient } from '@prisma/client';
 import { env } from '../config/env.js';
 import { SubmitterService } from '../services/transaction/submitter.service.js';
@@ -36,9 +36,9 @@ const feeService = new FeeService(db);
 export const transactionQueue = new Queue<TransactionJobData>('transactions', {
   connection,
   defaultJobOptions: {
-    // Retry up to 3 times with exponential backoff (2s, 4s, 8s)
+    // 3 retries with exponential backoff: 5s → 10s → 20s
     attempts: 3,
-    backoff: { type: 'exponential', delay: 2000 },
+    backoff: { type: 'exponential', delay: 5000 },
   },
 });
 
@@ -59,7 +59,7 @@ async function addDailyVolumeAtomic(agentId: string, date: string, valueUsd: str
 }
 
 export function startTransactionWorker(): Worker<TransactionJobData> {
-  return new Worker<TransactionJobData>(
+  const worker = new Worker<TransactionJobData>(
     'transactions',
     async (job: Job<TransactionJobData>) => {
       const { data } = job;
@@ -131,6 +131,33 @@ export function startTransactionWorker(): Worker<TransactionJobData> {
       concurrency: 5,
       removeOnComplete: { count: 1000 },
       removeOnFail: { count: 500 },
-    },
+    } satisfies WorkerOptions,
   );
+
+  // On final failure (all retries exhausted), mark transaction as FAILED in the DB.
+  worker.on('failed', async (job: Job<TransactionJobData> | undefined, err: Error) => {
+    if (!job) return;
+    const isLastAttempt = (job.attemptsMade ?? 0) >= (job.opts.attempts ?? 1);
+    if (!isLastAttempt) return;
+
+    const { transactionId } = job.data;
+    logger.error(
+      { transactionId, err: err.message, attempts: job.attemptsMade },
+      'Transaction job permanently failed — marking FAILED in DB',
+    );
+
+    try {
+      await db.transaction.update({
+        where: { id: transactionId },
+        data: {
+          status: 'FAILED',
+          error: err.message.slice(0, 500),
+        },
+      });
+    } catch (dbErr) {
+      logger.error({ transactionId, dbErr }, 'Failed to update transaction status to FAILED');
+    }
+  });
+
+  return worker;
 }
