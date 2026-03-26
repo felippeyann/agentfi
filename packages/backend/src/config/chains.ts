@@ -1,4 +1,4 @@
-import { mainnet, base, arbitrum, polygon } from 'viem/chains';
+import { mainnet, base, arbitrum, polygon, baseSepolia } from 'viem/chains';
 import type { Chain } from 'viem';
 
 export const SUPPORTED_CHAINS: Record<number, Chain> = {
@@ -6,9 +6,10 @@ export const SUPPORTED_CHAINS: Record<number, Chain> = {
   8453: base,
   42161: arbitrum,
   137: polygon,
+  84532: baseSepolia,
 };
 
-export const CHAIN_IDS = [1, 8453, 42161, 137] as const;
+export const CHAIN_IDS = [1, 8453, 42161, 137, 84532] as const;
 export type SupportedChainId = (typeof CHAIN_IDS)[number];
 
 export function getChain(chainId: number): Chain {
@@ -22,6 +23,7 @@ export const RPC_URLS: Record<number, string> = {
   8453: `https://base-mainnet.g.alchemy.com/v2/${process.env['ALCHEMY_API_KEY']}`,
   42161: `https://arb-mainnet.g.alchemy.com/v2/${process.env['ALCHEMY_API_KEY']}`,
   137: `https://polygon-mainnet.g.alchemy.com/v2/${process.env['ALCHEMY_API_KEY']}`,
+  84532: `https://base-sepolia.g.alchemy.com/v2/${process.env['ALCHEMY_API_KEY']}`,
 };
 
 /** Infura-based fallback (used when INFURA_API_KEY is set). */
@@ -38,6 +40,7 @@ export const PUBLIC_RPC_URLS: Record<number, string> = {
   8453: 'https://mainnet.base.org',
   42161: 'https://arb1.arbitrum.io/rpc',
   137: 'https://polygon-rpc.com',
+  84532: 'https://sepolia.base.org',
 };
 
 /**

@@ -35,6 +35,14 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
     uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
     aavePoolAddressProvider: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb',
   },
+  // Base Sepolia (testnet)
+  84532: {
+    policyModule: (process.env['POLICY_MODULE_ADDRESS_84532'] as Address) || '0x771444Ff5483ef3A62b492a816Cb439e4f017203',
+    executor: (process.env['EXECUTOR_ADDRESS_84532'] as Address) || '0x1fE2A4e79899A9cB03bED301f978d2Ce2F91Fc5d',
+    uniswapV3Router: '0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4',
+    uniswapV3Quoter: '0xC5290058841028F1614F3A6F0F5816cAd0df5E27',
+    aavePoolAddressProvider: '0x0000000000000000000000000000000000000000', // not deployed on testnet
+  },
   // Polygon
   137: {
     policyModule: (process.env['POLICY_MODULE_ADDRESS_137'] as Address) || undefined,
