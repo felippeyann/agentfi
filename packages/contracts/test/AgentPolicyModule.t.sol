@@ -37,7 +37,8 @@ contract AgentPolicyModuleTest is Test {
             cooldownBetweenTx: cooldown,
             allowedContracts:  contracts,
             allowedTokens:     tokens,
-            active:            active
+            active:            active,
+            policyExpiresAt:   0
         });
     }
 

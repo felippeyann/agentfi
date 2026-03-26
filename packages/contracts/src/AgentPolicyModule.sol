@@ -122,7 +122,7 @@ contract AgentPolicyModule {
             allowedContracts:  policy.allowedContracts,
             allowedTokens:     policy.allowedTokens,
             active:            policy.active,
-            policyExpiresAt:   policy.policyExpiresAt,
+            policyExpiresAt:   policy.policyExpiresAt
         });
         _hasPolicy[safe] = true;
 
@@ -153,7 +153,7 @@ contract AgentPolicyModule {
             allowedContracts:  params.allowedContracts,
             allowedTokens:     params.allowedTokens,
             active:            params.active,
-            policyExpiresAt:   expiresAt,
+            policyExpiresAt:   expiresAt
         });
         _hasPolicy[safe] = true;
 

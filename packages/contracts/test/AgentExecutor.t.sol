@@ -123,7 +123,8 @@ contract AgentExecutorTest is Test {
             cooldownBetweenTx: 0,
             allowedContracts:  new address[](0),
             allowedTokens:     new address[](0),
-            active:            true
+            active:            true,
+            policyExpiresAt:   0
         });
     }
 
@@ -481,7 +482,8 @@ contract AgentExecutorTest is Test {
             cooldownBetweenTx: 0,
             allowedContracts:  new address[](0),
             allowedTokens:     new address[](0),
-            active:            true
+            active:            true,
+            policyExpiresAt:   0
         });
         vm.prank(operator);
         policyModule.setPolicy(safe, p);
@@ -510,7 +512,8 @@ contract AgentExecutorTest is Test {
             cooldownBetweenTx: 0,
             allowedContracts:  allowed,
             allowedTokens:     new address[](0),
-            active:            true
+            active:            true,
+            policyExpiresAt:   0
         });
         vm.prank(operator);
         policyModule.setPolicy(safe, p);
@@ -536,7 +539,8 @@ contract AgentExecutorTest is Test {
             cooldownBetweenTx: 0,
             allowedContracts:  allowed,
             allowedTokens:     new address[](0),
-            active:            true
+            active:            true,
+            policyExpiresAt:   0
         });
         vm.prank(operator);
         policyModule.setPolicy(safe, p);
@@ -555,7 +559,8 @@ contract AgentExecutorTest is Test {
             cooldownBetweenTx: 60,
             allowedContracts:  new address[](0),
             allowedTokens:     new address[](0),
-            active:            true
+            active:            true,
+            policyExpiresAt:   0
         });
         vm.prank(operator);
         policyModule.setPolicy(safe, p);
@@ -581,7 +586,8 @@ contract AgentExecutorTest is Test {
             cooldownBetweenTx: 60,
             allowedContracts:  new address[](0),
             allowedTokens:     new address[](0),
-            active:            true
+            active:            true,
+            policyExpiresAt:   0
         });
         vm.prank(operator);
         policyModule.setPolicy(safe, p);
@@ -769,7 +775,8 @@ contract AgentExecutorTest is Test {
             cooldownBetweenTx: 0,
             allowedContracts:  new address[](0),
             allowedTokens:     new address[](0),
-            active:            true
+            active:            true,
+            policyExpiresAt:   0
         });
         vm.prank(operator);
         policyModule.setPolicy(safe, p);
