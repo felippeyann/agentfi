@@ -228,13 +228,13 @@ contract AgentPolicyModuleTest is Test {
     function test_ValidateTransaction_NoPolicy_AlwaysPasses() public {
         // No policy means no restrictions — any value, any target, any token
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 999 ether, tokenAddr);
+        module.validateTransaction(safe, targetAddr, 999 ether, tokenAddr);
         // Must not revert
     }
 
     function test_ValidateTransaction_NoPolicy_DoesNotCreatePolicy() public {
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 1, address(0));
+        module.validateTransaction(safe, targetAddr, 1, address(0));
 
         assertFalse(module.hasPolicy(safe));
     }
@@ -248,7 +248,7 @@ contract AgentPolicyModuleTest is Test {
         module.setPolicy(safe, defaultPolicy);
 
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
         // Must not revert
     }
 
@@ -261,7 +261,7 @@ contract AgentPolicyModuleTest is Test {
 
         vm.prank(safe);
         vm.expectRevert(AgentPolicyModule.PolicyPausedError.selector);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
     }
 
     // =========================================================================
@@ -273,7 +273,7 @@ contract AgentPolicyModuleTest is Test {
         module.setPolicy(safe, defaultPolicy);
 
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 1 ether, address(0));
+        module.validateTransaction(safe, targetAddr, 1 ether, address(0));
     }
 
     function test_ValidateTransaction_ValueBelowLimit_Passes() public {
@@ -281,7 +281,7 @@ contract AgentPolicyModuleTest is Test {
         module.setPolicy(safe, defaultPolicy);
 
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0.5 ether, address(0));
+        module.validateTransaction(safe, targetAddr, 0.5 ether, address(0));
     }
 
     function test_ValidateTransaction_ZeroValue_Passes() public {
@@ -289,7 +289,7 @@ contract AgentPolicyModuleTest is Test {
         module.setPolicy(safe, defaultPolicy);
 
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
     }
 
     function test_ValidateTransaction_ValueExceedsLimit_Reverts() public {
@@ -304,7 +304,7 @@ contract AgentPolicyModuleTest is Test {
                 1 ether
             )
         );
-        module.validateTransaction(targetAddr, 2 ether, address(0));
+        module.validateTransaction(safe, targetAddr, 2 ether, address(0));
     }
 
     function test_ValidateTransaction_ValueByOne_Reverts() public {
@@ -319,7 +319,7 @@ contract AgentPolicyModuleTest is Test {
                 1 ether
             )
         );
-        module.validateTransaction(targetAddr, 1 ether + 1, address(0));
+        module.validateTransaction(safe, targetAddr, 1 ether + 1, address(0));
     }
 
     // =========================================================================
@@ -332,7 +332,7 @@ contract AgentPolicyModuleTest is Test {
         module.setPolicy(safe, defaultPolicy);
 
         vm.prank(safe);
-        module.validateTransaction(address(0xBEEF), 0, address(0));
+        module.validateTransaction(safe, address(0xBEEF), 0, address(0));
     }
 
     function test_ValidateTransaction_TargetInWhitelist_Passes() public {
@@ -343,7 +343,7 @@ contract AgentPolicyModuleTest is Test {
         module.setPolicy(safe, p);
 
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
     }
 
     function test_ValidateTransaction_TargetNotInWhitelist_Reverts() public {
@@ -357,7 +357,7 @@ contract AgentPolicyModuleTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(AgentPolicyModule.ContractNotWhitelisted.selector, targetAddr)
         );
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
     }
 
     function test_ValidateTransaction_MultipleContractWhitelist_MatchesCorrectly() public {
@@ -374,7 +374,7 @@ contract AgentPolicyModuleTest is Test {
 
         // targetAddr is in the list — should pass
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
     }
 
     // =========================================================================
@@ -390,7 +390,7 @@ contract AgentPolicyModuleTest is Test {
         module.setPolicy(safe, p);
 
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
     }
 
     function test_ValidateTransaction_EmptyTokenList_AllowsAnyToken() public {
@@ -399,7 +399,7 @@ contract AgentPolicyModuleTest is Test {
         module.setPolicy(safe, defaultPolicy);
 
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, tokenAddr);
+        module.validateTransaction(safe, targetAddr, 0, tokenAddr);
     }
 
     function test_ValidateTransaction_TokenInWhitelist_Passes() public {
@@ -410,7 +410,7 @@ contract AgentPolicyModuleTest is Test {
         module.setPolicy(safe, p);
 
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, tokenAddr);
+        module.validateTransaction(safe, targetAddr, 0, tokenAddr);
     }
 
     function test_ValidateTransaction_TokenNotInWhitelist_Reverts() public {
@@ -424,7 +424,7 @@ contract AgentPolicyModuleTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(AgentPolicyModule.TokenNotWhitelisted.selector, tokenAddr)
         );
-        module.validateTransaction(targetAddr, 0, tokenAddr);
+        module.validateTransaction(safe, targetAddr, 0, tokenAddr);
     }
 
     // =========================================================================
@@ -438,7 +438,7 @@ contract AgentPolicyModuleTest is Test {
         // Even with cooldown set, first tx has no prior timestamp
         vm.warp(1000);
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
         // Must not revert
     }
 
@@ -448,11 +448,11 @@ contract AgentPolicyModuleTest is Test {
 
         vm.warp(1000);
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
 
         vm.warp(1060); // exactly 60 s later
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
     }
 
     function test_ValidateTransaction_SecondTxAfterCooldown_Passes() public {
@@ -461,11 +461,11 @@ contract AgentPolicyModuleTest is Test {
 
         vm.warp(1000);
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
 
         vm.warp(1061);
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
     }
 
     function test_ValidateTransaction_SecondTxTooEarly_Reverts() public {
@@ -474,14 +474,14 @@ contract AgentPolicyModuleTest is Test {
 
         vm.warp(1000);
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
 
         vm.warp(1030); // only 30 s elapsed; 30 s remaining
         vm.prank(safe);
         vm.expectRevert(
             abi.encodeWithSelector(AgentPolicyModule.CooldownActive.selector, 30)
         );
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
     }
 
     function test_ValidateTransaction_ZeroCooldown_AlwaysPasses() public {
@@ -493,11 +493,11 @@ contract AgentPolicyModuleTest is Test {
 
         vm.warp(1000);
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
 
         // Immediately again — no cooldown
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
     }
 
     function test_ValidateTransaction_UpdatesLastTxTimestamp() public {
@@ -506,7 +506,7 @@ contract AgentPolicyModuleTest is Test {
 
         vm.warp(5000);
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
 
         assertEq(module.getLastTxTimestamp(safe), 5000);
     }
@@ -518,7 +518,7 @@ contract AgentPolicyModuleTest is Test {
         vm.prank(safe);
         vm.expectEmit(true, true, false, true);
         emit AgentPolicyModule.TransactionValidated(safe, targetAddr, 0);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
     }
 
     // =========================================================================
@@ -535,7 +535,7 @@ contract AgentPolicyModuleTest is Test {
 
         vm.prank(safe);
         vm.expectRevert(AgentPolicyModule.PolicyPausedError.selector);
-        module.validateTransaction(targetAddr, 999 ether, address(0));
+        module.validateTransaction(safe, targetAddr, 999 ether, address(0));
     }
 
     // =========================================================================
@@ -590,7 +590,7 @@ contract AgentPolicyModuleTest is Test {
 
         vm.prank(safe);
         vm.expectRevert(AgentPolicyModule.PolicyPausedError.selector);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
     }
 
     // =========================================================================
@@ -659,7 +659,7 @@ contract AgentPolicyModuleTest is Test {
         module.resume(safe);
 
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
         // Must not revert
     }
 
@@ -677,7 +677,7 @@ contract AgentPolicyModuleTest is Test {
 
         vm.warp(9999);
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
 
         assertEq(module.getLastTxTimestamp(safe), 9999);
     }
@@ -691,7 +691,7 @@ contract AgentPolicyModuleTest is Test {
 
         vm.warp(500);
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
 
         // safe2 has not yet transacted
         assertEq(module.getLastTxTimestamp(safe2), 0);
@@ -714,10 +714,9 @@ contract AgentPolicyModuleTest is Test {
 
         // safe can send 0.5 ETH
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0.5 ether, address(0));
+        module.validateTransaction(safe, targetAddr, 0.5 ether, address(0));
 
         // safe2 cannot send 0.5 ETH
-        vm.prank(safe2);
         vm.expectRevert(
             abi.encodeWithSelector(
                 AgentPolicyModule.ValueExceedsLimit.selector,
@@ -725,7 +724,7 @@ contract AgentPolicyModuleTest is Test {
                 0.1 ether
             )
         );
-        module.validateTransaction(targetAddr, 0.5 ether, address(0));
+        module.validateTransaction(safe2, targetAddr, 0.5 ether, address(0));
     }
 
     // =========================================================================
@@ -750,7 +749,7 @@ contract AgentPolicyModuleTest is Test {
 
         if (value <= 1 ether) {
             vm.prank(safe);
-            module.validateTransaction(targetAddr, value, address(0));
+            module.validateTransaction(safe, targetAddr, value, address(0));
         } else {
             vm.prank(safe);
             vm.expectRevert(
@@ -760,7 +759,7 @@ contract AgentPolicyModuleTest is Test {
                     1 ether
                 )
             );
-            module.validateTransaction(targetAddr, value, address(0));
+            module.validateTransaction(safe, targetAddr, value, address(0));
         }
     }
 
@@ -780,7 +779,7 @@ contract AgentPolicyModuleTest is Test {
         uint256 startTime = 100_000;
         vm.warp(startTime);
         vm.prank(safe);
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
 
         vm.warp(startTime + elapsed);
         uint256 remaining = cooldown - elapsed;
@@ -789,6 +788,6 @@ contract AgentPolicyModuleTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(AgentPolicyModule.CooldownActive.selector, remaining)
         );
-        module.validateTransaction(targetAddr, 0, address(0));
+        module.validateTransaction(safe, targetAddr, 0, address(0));
     }
 }

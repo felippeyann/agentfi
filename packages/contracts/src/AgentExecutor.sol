@@ -121,7 +121,7 @@ contract AgentExecutor {
 
             // Validate against policy if one exists
             if (policyModule.hasPolicy(msg.sender)) {
-                policyModule.validateTransaction(action.target, action.value, address(0));
+                policyModule.validateTransaction(msg.sender, action.target, action.value, address(0));
             }
 
             (bool success, bytes memory returnData) = action.target.call{value: action.value}(
@@ -162,7 +162,7 @@ contract AgentExecutor {
         }
 
         if (policyModule.hasPolicy(msg.sender)) {
-            policyModule.validateTransaction(action.target, action.value, address(0));
+            policyModule.validateTransaction(msg.sender, action.target, action.value, address(0));
         }
 
         (bool success, bytes memory returnData) = action.target.call{value: action.value}(

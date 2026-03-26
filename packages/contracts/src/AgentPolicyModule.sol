@@ -145,12 +145,11 @@ contract AgentPolicyModule {
      * @param tokenAddress Token involved in the operation (address(0) if ETH-only).
      */
     function validateTransaction(
+        address safe,
         address target,
         uint256 value,
         address tokenAddress
     ) external {
-        address safe = msg.sender;
-
         if (!_hasPolicy[safe]) return; // No policy = no restrictions
 
         AgentPolicy storage policy = _policies[safe];
