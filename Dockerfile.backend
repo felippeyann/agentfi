@@ -7,15 +7,18 @@ COPY packages/backend/package.json ./packages/backend/package.json
 RUN npm ci --workspace=packages/backend --include-workspace-root
 
 FROM base AS builder
+WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
-COPY packages/backend ./
-RUN npx prisma generate --schema=src/db/schema.prisma
-RUN npm run build
+COPY tsconfig.base.json ./tsconfig.base.json
+COPY packages/backend ./packages/backend
+RUN cd packages/backend && npx prisma generate --schema=src/db/schema.prisma
+RUN cd packages/backend && npm run build
 
 FROM base AS runner
 ENV NODE_ENV=production
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/src/db/schema.prisma ./src/db/schema.prisma
+WORKDIR /app/packages/backend
+COPY --from=builder /app/packages/backend/dist ./dist
+COPY --from=builder /app/node_modules ../../node_modules
+COPY --from=builder /app/packages/backend/src/db/schema.prisma ./src/db/schema.prisma
 EXPOSE 3000
 CMD ["node", "dist/index.js"]

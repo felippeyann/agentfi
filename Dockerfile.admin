@@ -7,15 +7,18 @@ COPY packages/admin/package.json ./packages/admin/package.json
 RUN npm ci --workspace=packages/admin --include-workspace-root
 
 FROM base AS builder
+WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
-COPY packages/admin ./
-RUN npm run build
+COPY tsconfig.base.json ./tsconfig.base.json
+COPY packages/admin ./packages/admin
+RUN cd packages/admin && npm run build
 
 FROM base AS runner
 ENV NODE_ENV=production
 ENV PORT=3001
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public
+WORKDIR /app/packages/admin
+COPY --from=builder /app/packages/admin/.next/standalone ./
+COPY --from=builder /app/packages/admin/.next/static ./.next/static
+COPY --from=builder /app/packages/admin/public ./public
 EXPOSE 3001
 CMD ["node", "server.js"]

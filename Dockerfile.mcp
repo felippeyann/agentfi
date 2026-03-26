@@ -7,13 +7,16 @@ COPY packages/mcp-server/package.json ./packages/mcp-server/package.json
 RUN npm ci --workspace=packages/mcp-server --include-workspace-root
 
 FROM base AS builder
+WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
-COPY packages/mcp-server ./
-RUN npm run build
+COPY tsconfig.base.json ./tsconfig.base.json
+COPY packages/mcp-server ./packages/mcp-server
+RUN cd packages/mcp-server && npm run build
 
 FROM base AS runner
 ENV NODE_ENV=production
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
+WORKDIR /app/packages/mcp-server
+COPY --from=builder /app/packages/mcp-server/dist ./dist
+COPY --from=builder /app/node_modules ../../node_modules
 EXPOSE 3002
 CMD ["node", "dist/index.js"]
