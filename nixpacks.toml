@@ -5,7 +5,7 @@ nixPkgs = ["nodejs_20"]
 cmds = ["npm install --legacy-peer-deps"]
 
 [phases.build]
-cmds = ["npm run db:generate --workspace=packages/backend"]
+cmds = ["cd packages/backend && npx prisma generate --schema=src/db/schema.prisma"]
 
 [start]
 cmd = "node --import tsx/esm packages/backend/src/index.ts"
