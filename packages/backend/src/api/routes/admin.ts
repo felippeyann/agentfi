@@ -174,6 +174,31 @@ export async function adminRoutes(fastify: FastifyInstance) {
   );
 
   /**
+   * GET /admin/volume — daily volume for the last 7 days (chart data).
+   */
+  fastify.get('/admin/volume', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+
+    const days = 7;
+    const rows = await db.dailyVolume.findMany({
+      orderBy: { date: 'asc' },
+      take: days,
+    });
+
+    // Fill missing days with zero
+    const result: { date: string; volumeUsd: number }[] = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const dateStr = d.toISOString().slice(0, 10);
+      const row = rows.find((r) => r.date === dateStr);
+      result.push({ date: dateStr, volumeUsd: row ? parseFloat(row.volumeUsd) : 0 });
+    }
+
+    return { volume: result };
+  });
+
+  /**
    * GET /admin/revenue — revenue breakdown for accounting.
    */
   fastify.get('/admin/revenue', async (request, reply) => {
