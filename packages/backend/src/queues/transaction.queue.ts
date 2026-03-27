@@ -25,6 +25,8 @@ export interface TransactionJobData {
   feeAmountWei: string; // bigint as string
   feeUsd: string;
   feeBps: number;
+  /** True when transaction was wrapped via AgentExecutor — fee collected on-chain. */
+  routedViaExecutor?: boolean;
 }
 
 const connection = { url: env.REDIS_URL };

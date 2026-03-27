@@ -4,6 +4,7 @@ import { PrismaClient } from '@prisma/client';
 import { getAddress, parseUnits, maxUint256, createPublicClient, http } from 'viem';
 import { TransactionBuilder } from '../../services/transaction/builder.service.js';
 import { SimulatorService } from '../../services/transaction/simulator.service.js';
+import { ExecutorService } from '../../services/transaction/executor.service.js';
 import { PolicyService } from '../../services/policy/policy.service.js';
 import { FeeService } from '../../services/policy/fee.service.js';
 import { transactionQueue, type TransactionJobData } from '../../queues/transaction.queue.js';
@@ -15,6 +16,7 @@ import type { Address } from 'viem';
 const db = new PrismaClient();
 const builder = new TransactionBuilder();
 const simulator = new SimulatorService();
+const executor = new ExecutorService();
 const policyService = new PolicyService(db);
 const feeService = new FeeService(db);
 
@@ -270,13 +272,20 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       amountOutMinimum,
     });
 
+    // Wrap via AgentExecutor for on-chain fee collection (if deployed on this chain)
+    const wrapped = executor.wrapSingle(body.chainId, txData);
+    logger.info({
+      routedViaExecutor: wrapped.routedViaExecutor,
+      feeWei: wrapped.feeWei.toString(),
+    }, 'Executor wrap');
+
     // Simulate before submitting
     const sim = await simulator.simulate({
       chainId: body.chainId,
       from: getAddress(agent.safeAddress),
-      to: txData.to,
-      data: txData.data,
-      value: txData.value,
+      to: wrapped.to,
+      data: wrapped.data,
+      value: wrapped.value,
     });
 
     if (!sim.success) {
@@ -307,7 +316,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       },
     });
 
-    // Enqueue for processing
+    // Enqueue for processing — use wrapped tx so executor handles fee on-chain
     await transactionQueue.add(
       'swap',
       {
@@ -315,14 +324,17 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         chainId: body.chainId,
         walletId: agent.walletId,
         from: getAddress(agent.safeAddress),
-        to: txData.to,
-        data: txData.data,
-        value: txData.value.toString(),
+        to: wrapped.to,
+        data: wrapped.data,
+        value: wrapped.value.toString(),
         agentId: request.agentId,
         tier: request.agentTier,
-        feeAmountWei: feeCalc.feeAmountWei.toString(),
-        feeUsd: '0', // resolved after price lookup in worker
+        feeAmountWei: wrapped.routedViaExecutor
+          ? wrapped.feeWei.toString()
+          : feeCalc.feeAmountWei.toString(),
+        feeUsd: '0',
         feeBps: feeCalc.feeBps,
+        routedViaExecutor: wrapped.routedViaExecutor,
       },
       { priority: 1 },
     );
