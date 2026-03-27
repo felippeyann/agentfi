@@ -1,12 +1,23 @@
 name: Deploy Staging
 
+# Railway auto-deploys on push to develop — this workflow is a no-op.
+# Monitor at: https://railway.app/project/74e1a346-aeda-44a2-92b9-748c62e2872c
+
 on:
   push:
     branches: [develop]
 
 jobs:
-  deploy:
-    name: Build & Deploy to Staging
+  deploy-info:
+    name: Railway Auto-Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Railway deploys automatically
+        run: echo "Railway handles deployment for the develop branch. Check Railway dashboard for status."
+
+  _disabled_deploy:
+    name: Build & Deploy to Staging (disabled)
+    if: false
     runs-on: ubuntu-latest
     environment: staging
     permissions:

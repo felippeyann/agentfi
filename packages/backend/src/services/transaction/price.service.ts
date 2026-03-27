@@ -50,6 +50,7 @@ export async function weiToUsd(amountWei: bigint, chainId: number): Promise<stri
   const price = await fetchPrice(tokenId);
   if (price === 0) return '0';
 
+  if (amountWei === 0n) return '0';
   const eth = parseFloat(formatEther(amountWei));
   return (eth * price).toFixed(6);
 }
