@@ -3,7 +3,8 @@ import 'dotenv/config';
 
 const envSchema = z.object({
   // Server
-  API_PORT: z.coerce.number().default(3000),
+  // Railway injects PORT, fallback to API_PORT, then 3000
+  API_PORT: z.coerce.number().default(parseInt(process.env['PORT'] ?? process.env['API_PORT'] ?? '3000')),
   API_SECRET: z.string().min(32),
   NODE_ENV: z.enum(['development', 'staging', 'production']).default('development'),
 
