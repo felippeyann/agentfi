@@ -1,0 +1,27 @@
+{
+  "name": "@agentfi/mcp-server",
+  "version": "0.1.0",
+  "description": "AgentFi MCP Server — crypto transaction tools for AI agents",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "agentfi-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "start": "node --import tsx/esm src/index.ts"
+  },
+  "keywords": ["mcp", "defi", "ethereum", "ai-agents", "uniswap", "aave"],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.22.4",
+    "dotenv": "^16.4.5",
+    "tsx": "^4.7.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.11.0"
+  }
+}

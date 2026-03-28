@@ -1,0 +1,28 @@
+{
+  "name": "@agentfi/adapters",
+  "version": "0.1.0",
+  "description": "AgentFi adapters for LangChain, LlamaIndex, and Eliza agent frameworks",
+  "type": "module",
+  "exports": {
+    "./langchain": "./dist/langchain.js",
+    "./eliza": "./dist/eliza.js",
+    "./openai": "./dist/openai.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["agentfi", "langchain", "eliza", "ai-agents", "defi", "mcp"],
+  "peerDependencies": {
+    "@langchain/core": ">=0.2.0",
+    "openai": ">=4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@langchain/core": { "optional": true },
+    "openai": { "optional": true }
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.11.0"
+  }
+}

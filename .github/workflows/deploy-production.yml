@@ -1,0 +1,172 @@
+name: Deploy Production
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  deploy-contracts:
+    name: Deploy Contracts (if changed)
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: Check for contract changes
+        id: check
+        run: |
+          if git diff HEAD~1 --name-only | grep -q "packages/contracts/src"; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy contracts to mainnet + base
+        if: steps.check.outputs.changed == 'true'
+        working-directory: packages/contracts
+        env:
+          PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+          OPERATOR_ADDRESS: ${{ vars.OPERATOR_ADDRESS }}
+          ETH_RPC_URL: https://eth-mainnet.g.alchemy.com/v2/${{ secrets.ALCHEMY_API_KEY }}
+          BASE_RPC_URL: https://base-mainnet.g.alchemy.com/v2/${{ secrets.ALCHEMY_API_KEY }}
+        run: |
+          forge script script/Deploy.s.sol \
+            --rpc-url $ETH_RPC_URL \
+            --broadcast \
+            --verify \
+            --etherscan-api-key ${{ secrets.ETHERSCAN_API_KEY }}
+          forge script script/Deploy.s.sol \
+            --rpc-url $BASE_RPC_URL \
+            --broadcast \
+            --verify \
+            --etherscan-api-key ${{ secrets.BASESCAN_API_KEY }}
+
+  deploy-api:
+    name: Deploy API, MCP & Admin (rolling)
+    runs-on: ubuntu-latest
+    environment: production
+    needs: deploy-contracts
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get version tag
+        id: tag
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build and push all images
+        run: |
+          for svc in backend mcp admin; do
+            name=$([ "$svc" = "backend" ] && echo "api" || echo "$svc")
+            docker buildx build \
+              -f Dockerfile.$svc \
+              -t ghcr.io/${{ github.repository }}/$name:${{ steps.tag.outputs.version }} \
+              -t ghcr.io/${{ github.repository }}/$name:latest \
+              --cache-from type=gha \
+              --cache-to type=gha,mode=max \
+              --push .
+          done
+
+      - name: Run preflight check
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          REDIS_URL: ${{ secrets.PROD_REDIS_URL }}
+          ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+          TURNKEY_API_PUBLIC_KEY: ${{ secrets.TURNKEY_API_PUBLIC_KEY }}
+          TURNKEY_API_PRIVATE_KEY: ${{ secrets.TURNKEY_API_PRIVATE_KEY }}
+          TURNKEY_ORGANIZATION_ID: ${{ secrets.TURNKEY_ORGANIZATION_ID }}
+          NODE_ENV: production
+        run: npx tsx scripts/preflight.ts
+
+      - name: Copy compose files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          source: "docker-compose.yml,docker-compose.prod.yml"
+          target: /opt/agentfi
+
+      - name: Deploy to production server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/agentfi
+
+            # Write production .env (overwrites staging values)
+            cat > .env <<'ENVEOF'
+            NODE_ENV=production
+            DATABASE_URL=${{ secrets.PROD_DATABASE_URL }}
+            REDIS_URL=${{ secrets.PROD_REDIS_URL }}
+            ALCHEMY_API_KEY=${{ secrets.ALCHEMY_API_KEY }}
+            TURNKEY_API_PUBLIC_KEY=${{ secrets.TURNKEY_API_PUBLIC_KEY }}
+            TURNKEY_API_PRIVATE_KEY=${{ secrets.TURNKEY_API_PRIVATE_KEY }}
+            TURNKEY_ORGANIZATION_ID=${{ secrets.TURNKEY_ORGANIZATION_ID }}
+            TURNKEY_WALLET_ID=${{ secrets.TURNKEY_WALLET_ID }}
+            OPERATOR_API_SECRET=${{ secrets.OPERATOR_API_SECRET }}
+            JWT_SECRET=${{ secrets.JWT_SECRET }}
+            STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }}
+            STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}
+            FEE_WALLET_ADDRESS=${{ vars.FEE_WALLET_ADDRESS }}
+            POLICY_MODULE_ADDRESS_8453=${{ vars.POLICY_MODULE_ADDRESS_8453 }}
+            EXECUTOR_ADDRESS_8453=${{ vars.EXECUTOR_ADDRESS_8453 }}
+            ENVEOF
+
+            # Authenticate to GHCR on the server
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
+              -u ${{ github.actor }} --password-stdin
+
+            export GITHUB_REPOSITORY=${{ github.repository }}
+            export IMAGE_TAG=${{ steps.tag.outputs.version }}
+
+            # Pull new images
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+
+            # Rolling restart: api first, then mcp + admin
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+              up -d --no-deps --remove-orphans api
+
+            # Run migrations before bringing up other services
+            docker compose exec -T api \
+              node /app/node_modules/.bin/prisma migrate resolve \
+              --applied 0001_init --schema=src/db/schema.prisma || true
+            docker compose exec -T api \
+              node /app/node_modules/.bin/prisma migrate deploy --schema=src/db/schema.prisma
+
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+              up -d --no-deps --remove-orphans mcp admin
+
+            # Prune old images to save disk space
+            docker image prune -f
+
+      - name: Post-deploy health check
+        run: |
+          sleep 30
+          curl -f ${{ vars.PROD_API_URL }}/health || exit 1
+          curl -f ${{ vars.PROD_API_URL }}/health/ready || exit 1

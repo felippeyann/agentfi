@@ -1,101 +1,141 @@
 # AgentFi
 
-**AgentFi** is an AI-powered financial analysis agent that combines OpenAI's tool-calling with real-time and historical stock market data (via [yfinance](https://github.com/ranaroussi/yfinance)).
+Financial infrastructure for AI agents. AgentFi gives LLM agents a persistent, policy-constrained wallet they can use to execute DeFi transactions on EVM networks — without a human in the loop.
 
-## Features
+Built on Turnkey MPC wallets, Safe smart accounts, and the Model Context Protocol (MCP).
 
-- 💬 **Conversational agent** – ask natural-language questions about stocks and get data-driven answers
-- 📈 **Real-time quotes** – price, change, volume, market cap
-- 📊 **Historical OHLCV data** – flexible period and interval options
-- 🏢 **Company info** – sector, industry, country, description
-- 💰 **Financial metrics** – P/E ratio, EPS, dividend yield, beta, 52-week range, revenue, net income
-- 🖥️ **CLI** – standalone commands for quick lookups without the AI layer
+---
 
-## Installation
+## What it does
+
+An agent connects to AgentFi via MCP, gets a dedicated Safe wallet, and can:
+
+- Hold assets across Ethereum, Base, Arbitrum, and Polygon
+- Execute swaps via Uniswap V3
+- Deposit and withdraw on Aave V3
+- Transfer tokens
+- Query balances and DeFi rates
+
+Every transaction is simulated (Tenderly) before submission and validated against a policy module on-chain before signing.
+
+---
+
+## Architecture
+
+```
+Agent (LLM)
+    │  MCP (stdio or SSE)
+    ▼
+MCP Server  ──────────────────────────────────▶  Backend API (Fastify)
+(packages/mcp-server)                            (packages/backend)
+                                                      │
+                                          ┌───────────┼───────────────┐
+                                          ▼           ▼               ▼
+                                      Postgres     Redis          Turnkey MPC
+                                      (Prisma)   (BullMQ)       (key signing)
+                                                      │
+                                                      ▼
+                                              Smart Contracts
+                                          AgentPolicyModule + AgentExecutor
+                                              (packages/contracts)
+```
+
+Full details: [docs/architecture.md](docs/architecture.md)
+
+---
+
+## Packages
+
+| Package | Description |
+|---|---|
+| `packages/backend` | Fastify REST API — orchestration, wallet management, transaction pipeline |
+| `packages/mcp-server` | MCP server exposing 10 DeFi tools to LLM agents |
+| `packages/admin` | Next.js operator dashboard |
+| `packages/contracts` | Solidity — AgentPolicyModule + AgentExecutor |
+| `packages/adapters` | OpenAI/Anthropic tool definitions for the MCP tools |
+
+---
+
+## Staging endpoints
+
+| Service | URL |
+|---|---|
+| API | https://api.agentfi.cc |
+| Admin | https://admin.agentfi.cc |
+| MCP (SSE) | https://mcp.agentfi.cc |
+| Health | https://api.agentfi.cc/health |
+
+---
+
+## Running locally
+
+**Requirements:** Node.js 20+, Docker, Foundry
 
 ```bash
-pip install agentfi
+# Install dependencies
+npm install
+
+# Start Postgres and Redis
+docker compose up postgres redis -d
+
+# Run migrations
+cd packages/backend
+npm run db:migrate
+
+# Start the API
+npm run dev
+
+# In another terminal — start the MCP server
+cd packages/mcp-server
+npm run dev
+
+# In another terminal — start the admin
+cd packages/admin
+npm run dev
 ```
 
-Or from source:
+API → http://localhost:3000
+Admin → http://localhost:3001
+MCP → http://localhost:3002
+
+See [CHECKLIST.md](CHECKLIST.md) for the full setup (API keys, env vars, contracts).
+
+---
+
+## Smart contracts
 
 ```bash
-git clone https://github.com/felippeyann/agentfi.git
-cd agentfi
-pip install -e .
+cd packages/contracts
+forge test -vvv
 ```
 
-## Usage
-
-### Interactive chat
-
+Deploy to a network:
 ```bash
-export OPENAI_API_KEY=sk-...
-
-agentfi chat
-# AgentFi – type 'exit' or press Ctrl-C to quit.
-# You> What is Apple's current P/E ratio?
-# AgentFi> Apple (AAPL) currently has a trailing P/E ratio of approximately 28.5 ...
+forge script script/Deploy.s.sol --rpc-url base_sepolia --broadcast --verify
 ```
 
-### Quick quote
+---
 
-```bash
-agentfi quote AAPL
-# Symbol:     AAPL
-# Price:      180.0 USD
-# Change:     5.0 (2.857%)
-# ...
-```
+## CI / CD
 
-### Price history
+Every push to `develop` triggers:
+1. TypeScript typecheck across all packages
+2. Vitest unit tests (backend)
+3. Foundry contract tests
+4. Docker build for API, MCP, and Admin
+5. Push to GitHub Container Registry
+6. SSH deploy to staging VPS
+7. Prisma migrations
+8. Smoke tests against `https://api.agentfi.cc/health`
 
-```bash
-agentfi history AAPL --period 3mo --interval 1wk
-```
+Pipeline: [.github/workflows/](.github/workflows/)
 
-### Company info
+---
 
-```bash
-agentfi info MSFT
-```
+## Docs
 
-### Financial metrics
-
-```bash
-agentfi financials TSLA
-```
-
-## Python API
-
-```python
-from agentfi import Agent, get_stock_quote, get_stock_history
-
-# Single tool call
-quote = get_stock_quote("AAPL")
-print(quote["price"])
-
-# Conversational agent
-agent = Agent()  # uses OPENAI_API_KEY env var
-reply = agent.chat("Compare Apple and Microsoft's P/E ratios.")
-print(reply)
-```
-
-## Configuration
-
-| Variable | Description | Default |
-|---|---|---|
-| `OPENAI_API_KEY` | OpenAI API key | *(required for chat)* |
-
-The `--model` flag (or `model=` parameter) lets you choose any OpenAI chat model, e.g. `gpt-4o`, `gpt-4o-mini` (default).
-
-## Development
-
-```bash
-pip install -e ".[dev]"
-pytest
-```
-
-## License
-
-MIT
+- [Architecture](docs/architecture.md)
+- [Agent Quickstart](docs/agent-quickstart.md)
+- [Operator Checklist](CHECKLIST.md)
+- [Vision](VISION.md)
+- [Roadmap](ROADMAP.md)

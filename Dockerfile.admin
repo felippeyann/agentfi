@@ -1,0 +1,24 @@
+FROM node:20-alpine AS base
+WORKDIR /app
+
+FROM base AS deps
+COPY package.json package-lock.json* ./
+COPY packages/admin/package.json ./packages/admin/package.json
+RUN npm ci --workspace=packages/admin --include-workspace-root
+
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY tsconfig.base.json ./tsconfig.base.json
+COPY packages/admin ./packages/admin
+RUN cd packages/admin && npm run build
+
+FROM base AS runner
+ENV NODE_ENV=production
+ENV PORT=3001
+WORKDIR /app
+COPY --from=builder /app/packages/admin/.next/standalone ./
+COPY --from=builder /app/packages/admin/.next/static ./packages/admin/.next/static
+COPY --from=builder /app/packages/admin/public ./packages/admin/public
+EXPOSE 3001
+CMD ["node", "packages/admin/server.js"]

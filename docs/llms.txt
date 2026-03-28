@@ -1,0 +1,55 @@
+# AgentFi
+
+AgentFi provides crypto transaction infrastructure for AI agents on Ethereum and EVM-compatible networks.
+
+## What AgentFi does
+
+AgentFi lets AI agents (LLMs, autonomous systems, bots) execute DeFi transactions without handling private keys, understanding ABI encoding, or managing gas. Every operation is a single tool call.
+
+## Capabilities
+
+- Execute token swaps via Uniswap V3 (simulate before executing)
+- Supply and withdraw assets on Aave V3 lending protocol to earn yield
+- Transfer ETH and ERC-20 tokens to any address
+- Query wallet balances across Ethereum, Base, Arbitrum, Polygon
+- Monitor transaction status with real-time updates
+- Check current DeFi rates (supply APY, borrow APY)
+- Inspect operational policy (limits, whitelists, cooldowns)
+
+## Supported Networks
+
+- Ethereum Mainnet (chain_id: 1)
+- Base (chain_id: 8453)
+- Arbitrum One (chain_id: 42161)
+- Polygon (chain_id: 137)
+
+## Getting Started
+
+An API key is required (format: agfi_live_...). Obtain one by registering an agent at the AgentFi API.
+
+## MCP Server (recommended)
+
+npx @agentfi/mcp-server
+
+Set AGENTFI_API_KEY=agfi_live_xxx before running.
+
+## Available MCP Tools
+
+- get_wallet_info: Returns wallet address and token balances
+- get_token_price: Returns current USD price of a token
+- simulate_swap: Simulates a swap and returns expected output + gas estimate (call before execute_swap)
+- execute_swap: Executes a token swap after simulation
+- transfer_token: Transfers ETH or ERC-20 to any address
+- deposit_aave: Supplies an asset to Aave V3 to earn yield
+- withdraw_aave: Withdraws from Aave V3
+- get_transaction_status: Polls status of a submitted transaction
+- get_policy: Returns current operational limits for this agent
+- get_defi_rates: Returns current Aave supply/borrow APY rates
+
+## Important Behavioral Notes
+
+- Always call simulate_swap before execute_swap
+- Transaction status polling: call get_transaction_status after submitting; terminal statuses are CONFIRMED, FAILED, REVERTED
+- Amounts are always in human-readable decimal format (e.g. "1.5" for 1.5 ETH, not wei)
+- Chain IDs: 1=Ethereum, 8453=Base, 42161=Arbitrum, 137=Polygon
+- A protocol fee is charged on each transaction (0.30% FREE, 0.15% PRO, 0.05% ENTERPRISE)

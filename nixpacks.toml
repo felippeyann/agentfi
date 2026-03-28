@@ -1,0 +1,11 @@
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+
+[phases.install]
+cmds = ["npm install --legacy-peer-deps"]
+
+[phases.build]
+cmds = ["cd packages/backend && npx prisma generate --schema=src/db/schema.prisma"]
+
+[start]
+cmd = "node --import tsx/esm packages/backend/src/index.ts"

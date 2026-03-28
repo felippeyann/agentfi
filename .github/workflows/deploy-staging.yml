@@ -1,0 +1,116 @@
+name: Deploy Staging
+
+# Railway auto-deploys on push to develop — this workflow is a no-op.
+# Monitor at: https://railway.app/project/74e1a346-aeda-44a2-92b9-748c62e2872c
+
+on:
+  push:
+    branches: [develop]
+
+jobs:
+  deploy-info:
+    name: Railway Auto-Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Railway deploys automatically
+        run: echo "Railway handles deployment for the develop branch. Check Railway dashboard for status."
+
+  _disabled_deploy:
+    name: Build & Deploy to Staging (disabled)
+    if: false
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.backend
+          push: true
+          tags: ghcr.io/${{ github.repository }}/api:staging
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push MCP image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.mcp
+          push: true
+          tags: ghcr.io/${{ github.repository }}/mcp:staging
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push Admin image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.admin
+          push: true
+          tags: ghcr.io/${{ github.repository }}/admin:staging
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Copy compose files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          source: "docker-compose.yml,docker-compose.prod.yml"
+          target: /opt/agentfi
+
+      - name: Deploy to staging server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/agentfi
+
+            # Authenticate to GHCR on the server
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
+              -u ${{ github.actor }} --password-stdin
+
+            # Export vars needed by docker-compose.prod.yml
+            export GITHUB_REPOSITORY=${{ github.repository }}
+            export IMAGE_TAG=staging
+
+            # Pull new images and recreate containers
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+              up -d --remove-orphans
+
+            # Resolve any migration marked as failed (e.g. from a prior db push).
+            # This is idempotent — if the migration is already applied it's a no-op.
+            docker compose exec -T api \
+              node /app/node_modules/.bin/prisma migrate resolve \
+              --applied 0001_init --schema=src/db/schema.prisma || true
+
+            # Run DB migrations (idempotent — safe to run on every deploy)
+            docker compose exec -T api \
+              node /app/node_modules/.bin/prisma migrate deploy --schema=src/db/schema.prisma
+
+      - name: Smoke tests
+        run: |
+          sleep 15
+          curl -f ${{ vars.STAGING_API_URL }}/health || exit 1
+          curl -f ${{ vars.STAGING_API_URL }}/health/ready || exit 1
