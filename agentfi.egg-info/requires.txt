@@ -1,0 +1,7 @@
+openai>=1.0.0
+yfinance>=0.2.40
+click>=8.1.0
+
+[dev]
+pytest>=8.0
+pytest-mock>=3.12

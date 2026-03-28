@@ -1,0 +1,14 @@
+README.md
+pyproject.toml
+agentfi/__init__.py
+agentfi/agent.py
+agentfi/cli.py
+agentfi/tools.py
+agentfi.egg-info/PKG-INFO
+agentfi.egg-info/SOURCES.txt
+agentfi.egg-info/dependency_links.txt
+agentfi.egg-info/entry_points.txt
+agentfi.egg-info/requires.txt
+agentfi.egg-info/top_level.txt
+tests/test_agent.py
+tests/test_tools.py
