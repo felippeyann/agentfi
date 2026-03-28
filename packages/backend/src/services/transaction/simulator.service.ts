@@ -14,6 +14,8 @@ export interface SimulationResult {
   logs?: unknown[];
   stateChanges?: unknown;
   simulationId: string;
+  /** True when Tenderly is not configured (dev mode). Never true in production. */
+  _isMock?: boolean;
 }
 
 interface TenderlySimulationRequest {
@@ -62,12 +64,14 @@ export class SimulatorService {
     gasPrice?: bigint;
   }): Promise<SimulationResult> {
     if (!this.baseUrl) {
-      // Dev fallback: assume success, return mock
+      // Dev fallback: simulation skipped (no Tenderly credentials configured)
+      // Marked with mock_ prefix so callers can detect and warn users
       return {
         success: true,
         gasUsed: '100000',
         gasPrice: '1000000000',
         simulationId: `mock_${Date.now()}`,
+        _isMock: true,
       };
     }
 
@@ -92,14 +96,13 @@ export class SimulatorService {
     });
 
     if (!response.ok) {
-      // Tenderly unavailable or misconfigured — degrade gracefully
-      console.warn(`Tenderly simulation failed (${response.status}) — falling back to mock`);
-      return {
-        success: true,
-        gasUsed: '200000',
-        gasPrice: '1000000',
-        simulationId: `tenderly_fallback_${Date.now()}`,
-      };
+      // Tenderly unavailable or misconfigured — BLOCK the transaction.
+      // Never silently approve in production; a failed simulation means unknown risk.
+      const body = await response.text().catch(() => '');
+      throw new Error(
+        `Simulation service unavailable (HTTP ${response.status}). ` +
+        `Transaction blocked for safety. Details: ${body.slice(0, 200)}`,
+      );
     }
 
     const json = (await response.json()) as {
