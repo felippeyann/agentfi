@@ -131,10 +131,14 @@ async function main() {
 
 async function startSSEServer() {
   const { createServer } = await import('http');
-  const port = parseInt(process.env['MCP_PORT'] ?? '3002');
+  // Railway injects PORT; fall back to MCP_PORT for local dev
+  const port = parseInt(process.env['PORT'] ?? process.env['MCP_PORT'] ?? '3002');
 
   // SSE implementation using MCP SDK SSE transport
   const { SSEServerTransport } = await import('@modelcontextprotocol/sdk/server/sse.js');
+
+  // Map session ID → active transport for POST message routing
+  const transports = new Map<string, InstanceType<typeof SSEServerTransport>>();
 
   const httpServer = createServer(async (req, res) => {
     // CORS headers
@@ -149,14 +153,27 @@ async function startSSEServer() {
 
     if (req.url === '/mcp/sse' && req.method === 'GET') {
       const transport = new SSEServerTransport('/mcp/messages', res);
+      transports.set(transport.sessionId, transport);
+      transport.onclose = () => transports.delete(transport.sessionId);
       await server.connect(transport);
       return;
     }
 
-    if (req.url === '/mcp/messages' && req.method === 'POST') {
-      // Messages handled by active SSE transport
-      res.writeHead(404);
-      res.end();
+    if (req.url?.startsWith('/mcp/messages') && req.method === 'POST') {
+      const sessionId = new URL(req.url, `http://localhost`).searchParams.get('sessionId') ?? '';
+      const transport = transports.get(sessionId);
+      if (!transport) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: 'Session not found' }));
+        return;
+      }
+      await transport.handlePostMessage(req, res);
+      return;
+    }
+
+    if (req.url === '/health' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', transport: 'sse' }));
       return;
     }
 
