@@ -37,8 +37,15 @@ fastify.addContentTypeParser(
 
 async function start() {
   // Security middleware
+  // CORS_ORIGIN: comma-separated list of allowed origins in production.
+  // Default allows the admin frontend on the same Railway project.
+  const allowedOrigins = (process.env['CORS_ORIGIN'] ?? 'https://admin.agentfi.cc')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   await fastify.register(cors, {
-    origin: env.NODE_ENV === 'production' ? false : true,
+    origin: env.NODE_ENV === 'production' ? allowedOrigins : true,
+    credentials: true,
   });
   await fastify.register(helmet);
 
@@ -62,10 +69,10 @@ async function start() {
     capabilities: ['swap', 'transfer', 'lending', 'balance'],
     networks: [1, 8453, 42161, 137],
     authentication: 'api_key',
-    mcp_endpoint: process.env['MCP_SSE_URL'] ?? 'https://mcp.agentfi.xyz/sse',
+    mcp_endpoint: process.env['MCP_SSE_URL'] ?? 'https://mcp.agentfi.cc/sse',
     openapi: process.env['API_URL']
       ? `${process.env['API_URL']}/openapi.json`
-      : 'https://api.agentfi.xyz/openapi.json',
+      : 'https://api.agentfi.cc/openapi.json',
   }));
 
   // Start BullMQ worker

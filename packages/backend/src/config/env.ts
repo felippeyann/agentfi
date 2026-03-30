@@ -49,6 +49,10 @@ const envSchema = z.object({
   // Admin dashboard — required to protect /admin/* routes
   ADMIN_SECRET: z.string().min(1),
 
+  // CORS — comma-separated allowed origins for the admin frontend in production.
+  // Default: https://admin.agentfi.cc  Example: https://admin.agentfi.cc,https://app.agentfi.cc
+  CORS_ORIGIN: z.string().optional(),
+
   // Safe smart wallet deployer — optional (falls back to Turnkey EOA if not set)
   SAFE_DEPLOYER_PRIVATE_KEY: z.string().optional(),
 });
