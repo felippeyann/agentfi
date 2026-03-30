@@ -222,22 +222,19 @@ This checks all 8 required systems are online. Fix any red items before deployin
 
 ## STEP 14 — Production hosting
 
-The project ships with a complete CI/CD pipeline via GitHub Actions.
+The project is hosted on **Railway**. No VPS or manual server management needed.
 
-**Included in `.github/workflows/`:**
-- `ci.yml` — typecheck, tests, contract tests on every push
-- `deploy-staging.yml` — builds Docker images, pushes to GHCR, deploys via SSH
+**CI/CD via GitHub Actions (`.github/workflows/`):**
+- `ci.yml` — typecheck, unit tests, contract tests on every push
+- `deploy-staging.yml` — no-op; Railway auto-deploys on push to `develop`
+- `deploy-production.yml` — disabled; configure a Railway production environment when ready for v1
 
-**To use it:**
-1. Provision a Ubuntu 22.04 VPS (DigitalOcean, Hetzner, etc.)
-2. Run `sudo bash scripts/setup-server.sh` on the server — installs Docker, nginx, certbot
-3. Configure nginx for your domain and run certbot for SSL
-4. Copy your `.env` to `/opt/agentfi/.env` on the server
-5. Add GitHub secrets: `STAGING_HOST`, `STAGING_USER`, `STAGING_SSH_KEY`
-6. Add GitHub variable: `STAGING_API_URL=https://api.yourdomain.com`
-7. Push to `develop` — the pipeline handles the rest
+**Live services:**
+- API: https://api.agentfi.cc
+- Admin: https://admin.agentfi.cc
+- MCP Server: https://mcp.agentfi.cc
 
-See the full infra config in `infra/nginx.conf` and `scripts/setup-server.sh`.
+**To deploy:** push to `develop` — Railway handles the rest automatically.
 
 ---
 

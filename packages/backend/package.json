@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "echo 'no eslint configured'",
     "test": "vitest run",
+    "test:e2e": "vitest run --config vitest.config.e2e.ts",
     "db:generate": "dotenv -e ../../.env prisma generate",
     "db:migrate": "dotenv -e ../../.env prisma migrate dev",
     "db:push": "dotenv -e ../../.env prisma db push"

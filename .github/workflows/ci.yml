@@ -69,3 +69,52 @@ jobs:
         run: forge test -vvv
       - working-directory: packages/contracts
         run: forge coverage --report summary
+
+  e2e-test:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: agentfi
+          POSTGRES_PASSWORD: agentfi
+          POSTGRES_DB: agentfi_e2e
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+      - run: npm ci
+      # Apply DB migrations against the e2e database before starting tests
+      - working-directory: packages/backend
+        env:
+          DATABASE_URL: postgresql://agentfi:agentfi@localhost:5432/agentfi_e2e
+        run: npx prisma migrate deploy
+      - working-directory: packages/backend
+        env:
+          NODE_ENV: development
+          DATABASE_URL: postgresql://agentfi:agentfi@localhost:5432/agentfi_e2e
+          REDIS_URL: redis://localhost:6379
+          API_SECRET: e2e-test-secret-min-32-chars-long
+          ADMIN_SECRET: e2e-admin-secret
+          # Dummy values — Alchemy/Turnkey are bypassed by E2E mocks
+          ALCHEMY_API_KEY: e2e-dummy
+          TURNKEY_API_PUBLIC_KEY: e2e-dummy
+          TURNKEY_API_PRIVATE_KEY: e2e-dummy
+          TURNKEY_ORGANIZATION_ID: e2e-dummy
+          # OPERATOR_FEE_WALLET is overridden at runtime by globalSetup
+          OPERATOR_FEE_WALLET: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
+        run: npm run test:e2e
