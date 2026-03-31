@@ -29,7 +29,11 @@ export interface TransactionJobData {
   routedViaExecutor?: boolean;
 }
 
-const connection = { url: env.REDIS_URL };
+const connection = {
+  url: env.REDIS_URL,
+  maxRetriesPerRequest: null as unknown as number, // required by BullMQ
+  enableReadyCheck: false,
+};
 const db = new PrismaClient();
 const submitter = new SubmitterService();
 const monitor = new MonitorService(db);
@@ -133,6 +137,9 @@ export function startTransactionWorker(): Worker<TransactionJobData> {
       concurrency: 5,
       removeOnComplete: { count: 1000 },
       removeOnFail: { count: 500 },
+      // Reduce Redis polling when idle — critical for Upstash/metered Redis
+      drainDelay: 30,     // 30s between polls when queue is empty (default: 5s)
+      stalledInterval: 120_000, // check stalled jobs every 2min (default: 30s)
     } satisfies WorkerOptions,
   );
 

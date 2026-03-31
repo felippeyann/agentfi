@@ -75,16 +75,21 @@ async function start() {
       : 'https://api.agentfi.cc/openapi.json',
   }));
 
-  // Start BullMQ worker
-  const worker = startTransactionWorker();
-  worker.on('failed', (job, err) => {
-    logger.error({ jobId: job?.id, err }, 'Transaction job failed');
-  });
+  // Start BullMQ worker — non-fatal if Redis is temporarily unavailable
+  let worker: ReturnType<typeof startTransactionWorker> | undefined;
+  try {
+    worker = startTransactionWorker();
+    worker.on('failed', (job, err) => {
+      logger.error({ jobId: job?.id, err }, 'Transaction job failed');
+    });
+  } catch (err) {
+    logger.error({ err }, 'BullMQ worker failed to start — transactions will be queued when Redis recovers');
+  }
 
   // Graceful shutdown
   const shutdown = async () => {
     logger.info('Shutting down...');
-    await worker.close();
+    if (worker) await worker.close();
     await fastify.close();
     process.exit(0);
   };
