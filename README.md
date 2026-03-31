@@ -122,11 +122,8 @@ Every push to `develop` triggers:
 1. TypeScript typecheck across all packages
 2. Vitest unit tests (backend)
 3. Foundry contract tests
-4. Docker build for API, MCP, and Admin
-5. Push to GitHub Container Registry
-6. SSH deploy to staging VPS
-7. Prisma migrations
-8. Smoke tests against `https://api.agentfi.cc/health`
+4. E2E transaction pipeline tests
+5. Railway auto-deploy (staging)
 
 Pipeline: [.github/workflows/](.github/workflows/)
 

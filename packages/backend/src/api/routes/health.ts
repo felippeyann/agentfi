@@ -8,7 +8,11 @@ import { env } from '../../config/env.js';
 import { RPC_URLS } from '../../config/chains.js';
 
 const db = new PrismaClient();
-const redis = new Redis(env.REDIS_URL, { lazyConnect: true });
+const redis = new Redis(env.REDIS_URL, {
+  lazyConnect: true,
+  maxRetriesPerRequest: 1,
+  connectTimeout: 5000,
+});
 const turnkey = new TurnkeyService();
 
 async function checkDatabase(): Promise<boolean> {

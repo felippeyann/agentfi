@@ -64,4 +64,4 @@ All fee events are immutably logged in `FeeEvent` table.
 | Admin | https://admin.agentfi.cc | 3001 |
 | MCP (SSE) | https://mcp.agentfi.cc | 3002 |
 
-**Stack:** DigitalOcean Droplet (Ubuntu 22.04) · nginx reverse proxy · Let's Encrypt SSL · Docker Compose · GitHub Actions CI/CD · GHCR image registry
+**Stack:** Railway (Nixpacks) · GitHub Actions CI/CD · PostgreSQL · Redis · Turnkey MPC · Tenderly Simulation
