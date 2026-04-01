@@ -23,10 +23,10 @@ const envSchema = z.object({
   TENDERLY_PROJECT: z.string().optional(),
 
   // Database
-  DATABASE_URL: z.string().url(),
+  DATABASE_URL: z.string().min(1),
 
   // Redis
-  REDIS_URL: z.string().url(),
+  REDIS_URL: z.string().min(1),
 
   // Contracts
   POLICY_MODULE_ADDRESS_1: z.string().optional(),
