@@ -117,7 +117,7 @@ This enables agents to pay for the PRO tier ($99/month) and is your subscription
 3. Go to Developers → API Keys.
    - Copy the Secret Key (sk_live_...)
 4. Go to Developers → Webhooks → Add Endpoint.
-   - URL: https://your-api-domain.com/v1/billing/webhook
+   - URL: https://agentfi-develop.up.railway.app/v1/billing/webhook
    - Events to listen for: checkout.session.completed, customer.subscription.deleted, invoice.payment_failed
    - Copy the Webhook Signing Secret (whsec_...)
 5. Copy into `.env`:
@@ -230,9 +230,8 @@ The project is hosted on **Railway**. No VPS or manual server management needed.
 - `deploy-production.yml` — disabled; configure a Railway production environment when ready for v1
 
 **Live services:**
-- API: https://api.agentfi.cc
-- Admin: https://admin.agentfi.cc
-- MCP Server: https://mcp.agentfi.cc
+- API: https://agentfi-develop.up.railway.app
+- Health: https://agentfi-develop.up.railway.app/health
 
 **To deploy:** push to `develop` — Railway handles the rest automatically.
 

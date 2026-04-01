@@ -11,7 +11,7 @@ Get an AI agent executing DeFi transactions in under 5 minutes.
   "mcpServers": {
     "agentfi": {
       "type": "sse",
-      "url": "https://mcp.agentfi.cc/sse",
+      "url": "https://agentfi-develop.up.railway.app/mcp/sse",
       "env": {
         "AGENTFI_API_KEY": "agfi_live_your_key_here"
       }
@@ -31,7 +31,7 @@ cd packages/mcp-server && npm run dev
 ## 2. Register an Agent (get your API key)
 
 ```bash
-curl -X POST https://api.agentfi.cc/v1/agents \
+curl -X POST https://agentfi-develop.up.railway.app/v1/agents \
   -H "Content-Type: application/json" \
   -d '{"name": "my-agent", "chainIds": [1, 8453]}'
 ```

@@ -152,7 +152,30 @@ e rotear todas as transações pelo `AgentExecutor`.
 
 ---
 
-## Próximo passo
+## Contratos Deployados (Base Mainnet — Chain 8453)
 
-Quando o deploy estiver feito e o `.env` atualizado, me avisa
-que conecto o backend para usar o executor em todas as transações.
+| Contrato | Endereço |
+|----------|---------|
+| AgentPolicyModule | [`0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d`](https://basescan.org/address/0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d) |
+| AgentExecutor | [`0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3`](https://basescan.org/address/0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3) |
+
+**Deployer:** `0x2530c24Be25100C3f313D3F6BF36557a7b02A41b`
+**Fee Wallet:** `0xD73d0cBF9C3fa2932eA54b6dfe70fa7e45bF8646`
+**Fee BPS:** 30 (0.30%)
+
+---
+
+## Deploy em outros networks
+
+```powershell
+# Ethereum Mainnet
+forge script script/Deploy.s.sol --rpc-url mainnet --broadcast --verify
+
+# Arbitrum One
+forge script script/Deploy.s.sol --rpc-url arbitrum --broadcast --verify
+
+# Polygon
+forge script script/Deploy.s.sol --rpc-url polygon --broadcast --verify
+```
+
+Após cada deploy, atualizar `.env` com os novos endereços e adicionar no Railway.

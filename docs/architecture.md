@@ -56,12 +56,17 @@ All fee events are immutably logged in `FeeEvent` table.
 | Arbitrum One | 42161 | Uniswap V3, Aave V3 |
 | Polygon | 137 | Uniswap V3, Aave V3 |
 
-## Deployed Infrastructure (Staging)
+## Deployed Infrastructure
 
 | Service | URL | Port |
 |---------|-----|------|
-| API | https://api.agentfi.cc | 3000 |
-| Admin | https://admin.agentfi.cc | 3001 |
-| MCP (SSE) | https://mcp.agentfi.cc | 3002 |
+| API | https://agentfi-develop.up.railway.app | 3000 |
 
-**Stack:** Railway (Nixpacks) · GitHub Actions CI/CD · PostgreSQL · Redis · Turnkey MPC · Tenderly Simulation
+## Deployed Contracts (Base Mainnet — Chain 8453)
+
+| Contract | Address |
+|----------|---------|
+| AgentPolicyModule | `0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d` |
+| AgentExecutor | `0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3` |
+
+**Stack:** Railway (Nixpacks) · GitHub Actions CI/CD · PostgreSQL (Neon) · Redis (Upstash) · Turnkey MPC · Tenderly Simulation · Stripe Billing

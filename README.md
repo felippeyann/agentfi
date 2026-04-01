@@ -56,14 +56,29 @@ Full details: [docs/architecture.md](docs/architecture.md)
 
 ---
 
-## Staging endpoints
+## Live Endpoints
 
 | Service | URL |
 |---|---|
-| API | https://api.agentfi.cc |
-| Admin | https://admin.agentfi.cc |
-| MCP (SSE) | https://mcp.agentfi.cc |
-| Health | https://api.agentfi.cc/health |
+| API | https://agentfi-develop.up.railway.app |
+| Health | https://agentfi-develop.up.railway.app/health |
+
+## Deployed Contracts (Base Mainnet — Chain 8453)
+
+| Contract | Address |
+|----------|---------|
+| AgentPolicyModule | [`0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d`](https://basescan.org/address/0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d) |
+| AgentExecutor | [`0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3`](https://basescan.org/address/0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3) |
+
+Multi-chain deployment to Ethereum (1), Arbitrum (42161), and Polygon (137) is ready — run the Foundry deploy script per chain.
+
+## Billing Tiers
+
+| Tier | Price | Protocol Fee | Tx Limit |
+|------|-------|-------------|----------|
+| FREE | $0/mo | 0.30% (30 bps) | 100 tx/mo |
+| PRO | $99/mo (Stripe) | 0.15% (15 bps) | 10,000 tx/mo |
+| ENTERPRISE | Custom | 0.05% (5 bps) | Unlimited |
 
 ---
 
@@ -111,7 +126,13 @@ forge test -vvv
 
 Deploy to a network:
 ```bash
-forge script script/Deploy.s.sol --rpc-url base_sepolia --broadcast --verify
+# Base (already deployed)
+forge script script/Deploy.s.sol --rpc-url base --broadcast --verify
+
+# Other networks
+forge script script/Deploy.s.sol --rpc-url mainnet --broadcast --verify
+forge script script/Deploy.s.sol --rpc-url arbitrum --broadcast --verify
+forge script script/Deploy.s.sol --rpc-url polygon --broadcast --verify
 ```
 
 ---
