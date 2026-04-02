@@ -142,7 +142,7 @@ You can use: https://generate-secret.vercel.app/64
 
 ---
 
-## STEP 9 — Install dependencies
+## STEP 10 — Install dependencies
 
 You need Node.js 20+ and Docker installed.
 
@@ -155,7 +155,7 @@ Then in the agentfi/ folder:
 
 ---
 
-## STEP 10 — Run locally
+## STEP 11 — Run locally
 
    docker-compose up postgres redis
 
@@ -177,7 +177,7 @@ The MCP server will be at http://localhost:3002
 
 ---
 
-## STEP 11 — Install Foundry (for smart contracts)
+## STEP 12 — Install Foundry (for smart contracts)
 
    curl -L https://foundry.paradigm.xyz | bash
    foundryup
@@ -189,7 +189,7 @@ Run the contract tests:
 
 ---
 
-## STEP 12 — Deploy smart contracts
+## STEP 13 — Deploy smart contracts
 
 You need a funded wallet on each network you want to deploy to.
 ETH/MATIC for gas — a few dollars worth is enough.
@@ -212,7 +212,7 @@ Copy them into `.env`:
 
 ---
 
-## STEP 13 — Run preflight check before production
+## STEP 14 — Run preflight check before production
 
    npm run preflight
 
@@ -233,7 +233,7 @@ Fix any red items before deploying.
 
 ---
 
-## STEP 14 — Production hosting
+## STEP 15 — Production hosting
 
 The project is hosted on **Railway**. No VPS or manual server management needed.
 
