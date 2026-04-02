@@ -1,7 +1,7 @@
 # AgentFi
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![CI](https://github.com/your-org/agentfi/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/agentfi/actions/workflows/ci.yml)
+[![CI](https://github.com/felippeyann/agentfi/actions/workflows/ci.yml/badge.svg)](https://github.com/felippeyann/agentfi/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](package.json)
 
 **Financial infrastructure for AI agents.**
@@ -86,7 +86,7 @@ Multi-chain deployment scripts are included for Ethereum mainnet, Arbitrum One, 
 **Requirements:** Node.js 22+, Docker, [Foundry](https://book.getfoundry.sh/getting-started/installation)
 
 ```bash
-git clone https://github.com/your-org/agentfi
+git clone https://github.com/felippeyann/agentfi
 cd agentfi
 npm install
 

@@ -29,7 +29,7 @@ Things that are better as a discussion first (open an issue before coding):
 **Requirements:** Node.js 22+, Docker, [Foundry](https://book.getfoundry.sh/getting-started/installation)
 
 ```bash
-git clone https://github.com/your-org/agentfi
+git clone https://github.com/felippeyann/agentfi
 cd agentfi
 npm install
 
