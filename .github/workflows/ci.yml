@@ -50,6 +50,21 @@ jobs:
             exit 1
           fi
           echo "Placeholder-value preflight failure behaved as expected"
+      - name: Validate preflight failure path (duplicate service names)
+        run: |
+          set +e
+          RAILWAY_TOKEN=ci-token \
+          RAILWAY_PROJECT_ID=ci-project-id \
+          RAILWAY_PRODUCTION_ENVIRONMENT=ci-production-env \
+          RAILWAY_PRODUCTION_SERVICE=backend \
+          RAILWAY_PRODUCTION_WORKER_SERVICE=backend \
+          node scripts/check-production-deploy-env.mjs
+          status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "::error::Expected preflight to fail when worker and primary services are identical"
+            exit 1
+          fi
+          echo "Duplicate-service preflight failure behaved as expected"
 
   lint-typecheck:
     name: Lint & Type Check
