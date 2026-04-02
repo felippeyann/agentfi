@@ -27,7 +27,7 @@ function check(name: string, passed: boolean, detail?: string) {
 }
 
 async function checkEnvVars() {
-  console.log('\n[1/8] Environment Variables');
+  console.log('\n[1/9] Environment Variables');
   const required = [
     'ALCHEMY_API_KEY',
     'TURNKEY_API_PUBLIC_KEY',
@@ -46,7 +46,7 @@ async function checkEnvVars() {
 }
 
 async function checkDatabase() {
-  console.log('\n[2/8] Database Connection');
+  console.log('\n[2/9] Database Connection');
   try {
     const { PrismaClient } = await import('@prisma/client');
     const db = new PrismaClient({ datasources: { db: { url: process.env['DATABASE_URL'] } } });
@@ -62,7 +62,7 @@ async function checkDatabase() {
 }
 
 async function checkRedis() {
-  console.log('\n[3/8] Redis Connection');
+  console.log('\n[3/9] Redis Connection');
   try {
     const Redis = (await import('ioredis')).default;
     const redis = new Redis(process.env['REDIS_URL'] ?? '', { connectTimeout: 5000 });
@@ -75,7 +75,7 @@ async function checkRedis() {
 }
 
 async function checkRpc() {
-  console.log('\n[4/8] RPC Endpoints');
+  console.log('\n[5/9] RPC Endpoints');
   const chains: Record<number, string> = {
     1: `https://eth-mainnet.g.alchemy.com/v2/${process.env['ALCHEMY_API_KEY']}`,
     8453: `https://base-mainnet.g.alchemy.com/v2/${process.env['ALCHEMY_API_KEY']}`,
@@ -99,7 +99,7 @@ async function checkRpc() {
 }
 
 async function checkTurnkey() {
-  console.log('\n[5/8] Turnkey Connection');
+  console.log('\n[6/9] Turnkey Connection');
   try {
     const { Turnkey } = await import('@turnkey/sdk-server');
     const client = new Turnkey({
@@ -116,7 +116,7 @@ async function checkTurnkey() {
 }
 
 async function checkContracts() {
-  console.log('\n[6/8] Smart Contracts');
+  console.log('\n[7/9] Smart Contracts');
   const contractEnvs = [
     'POLICY_MODULE_ADDRESS_1',
     'EXECUTOR_ADDRESS_1',
@@ -132,7 +132,7 @@ async function checkContracts() {
 }
 
 async function checkSimulation() {
-  console.log('\n[7/8] Transaction Simulation');
+  console.log('\n[8/9] Transaction Simulation');
   const hasKey = !!(
     process.env['TENDERLY_ACCESS_KEY'] &&
     process.env['TENDERLY_ACCOUNT'] &&
@@ -158,10 +158,56 @@ async function checkSimulation() {
 }
 
 async function checkOperatorWallet() {
-  console.log('\n[8/8] Operator Fee Wallet');
+  console.log('\n[9/9] Operator Fee Wallet');
   const wallet = process.env['OPERATOR_FEE_WALLET'];
   const isValid = wallet?.startsWith('0x') && wallet.length === 42;
   check('OPERATOR_FEE_WALLET', !!isValid, wallet ?? 'not set');
+}
+
+async function checkWorkerRedisSafety() {
+  console.log('\n[4/9] Worker + Redis Safety');
+
+  const redisUrl = process.env['REDIS_URL'] ?? '';
+  const isUpstash = redisUrl.includes('upstash.io');
+
+  const workerEnabled = process.env['TRANSACTION_WORKER_ENABLED'];
+  check(
+    'TRANSACTION_WORKER_ENABLED is explicit',
+    workerEnabled === 'true' || workerEnabled === 'false',
+    workerEnabled ?? 'not set',
+  );
+
+  const stopOnQuota = process.env['TRANSACTION_WORKER_STOP_ON_REDIS_QUOTA'];
+  check(
+    'TRANSACTION_WORKER_STOP_ON_REDIS_QUOTA',
+    stopOnQuota === 'true' || stopOnQuota === undefined,
+    stopOnQuota ?? 'default(true)',
+  );
+
+  const drainDelay = Number(process.env['TRANSACTION_WORKER_DRAIN_DELAY_SEC'] ?? '30');
+  check(
+    'TRANSACTION_WORKER_DRAIN_DELAY_SEC >= 15',
+    Number.isFinite(drainDelay) && drainDelay >= 15,
+    String(drainDelay),
+  );
+
+  const stalledIntervalMs = Number(
+    process.env['TRANSACTION_WORKER_STALLED_INTERVAL_MS'] ?? '120000',
+  );
+  check(
+    'TRANSACTION_WORKER_STALLED_INTERVAL_MS >= 60000',
+    Number.isFinite(stalledIntervalMs) && stalledIntervalMs >= 60000,
+    String(stalledIntervalMs),
+  );
+
+  if (isUpstash) {
+    check('Metered Redis provider detected', true, 'Upstash');
+    check(
+      'Upstash guard enabled',
+      (stopOnQuota ?? 'true') === 'true',
+      stopOnQuota ?? 'default(true)',
+    );
+  }
 }
 
 async function main() {
@@ -171,6 +217,7 @@ async function main() {
   await checkEnvVars();
   await checkDatabase();
   await checkRedis();
+  await checkWorkerRedisSafety();
   await checkRpc();
   await checkTurnkey();
   await checkContracts();
