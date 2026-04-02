@@ -23,6 +23,19 @@ jobs:
           RAILWAY_PRODUCTION_SERVICE: backend
           RAILWAY_PRODUCTION_WORKER_SERVICE: worker
         run: node scripts/check-production-deploy-env.mjs
+      - name: Validate preflight failure path (missing env)
+        run: |
+          set +e
+          RAILWAY_TOKEN=ci-token \
+          RAILWAY_PROJECT_ID=ci-project-id \
+          RAILWAY_PRODUCTION_SERVICE=backend \
+          node scripts/check-production-deploy-env.mjs
+          status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "::error::Expected preflight to fail when RAILWAY_PRODUCTION_ENVIRONMENT is missing"
+            exit 1
+          fi
+          echo "Negative-path preflight check behaved as expected"
 
   lint-typecheck:
     name: Lint & Type Check
