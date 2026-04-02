@@ -191,6 +191,83 @@ Preflight rule coverage in CI (`.github/workflows/ci.yml`, job `Deploy Preflight
 | Placeholder values must fail | `Validate preflight failure path (placeholder value)` |
 | Duplicate primary/worker service names must fail | `Validate preflight failure path (duplicate service names)` |
 
+Local reproduction commands (from repository root):
+
+1. Pass path
+
+```bash
+RAILWAY_TOKEN=ci-token \
+RAILWAY_PROJECT_ID=ci-project-id \
+RAILWAY_PRODUCTION_ENVIRONMENT=ci-production-env \
+RAILWAY_PRODUCTION_SERVICE=backend \
+RAILWAY_PRODUCTION_WORKER_SERVICE=worker \
+node scripts/check-production-deploy-env.mjs
+```
+
+```powershell
+$env:RAILWAY_TOKEN='ci-token'
+$env:RAILWAY_PROJECT_ID='ci-project-id'
+$env:RAILWAY_PRODUCTION_ENVIRONMENT='ci-production-env'
+$env:RAILWAY_PRODUCTION_SERVICE='backend'
+$env:RAILWAY_PRODUCTION_WORKER_SERVICE='worker'
+node scripts/check-production-deploy-env.mjs
+```
+
+2. Missing required variable must fail (unset `RAILWAY_PRODUCTION_ENVIRONMENT`)
+
+```bash
+RAILWAY_TOKEN=ci-token \
+RAILWAY_PROJECT_ID=ci-project-id \
+RAILWAY_PRODUCTION_SERVICE=backend \
+node scripts/check-production-deploy-env.mjs
+```
+
+```powershell
+$env:RAILWAY_TOKEN='ci-token'
+$env:RAILWAY_PROJECT_ID='ci-project-id'
+$env:RAILWAY_PRODUCTION_SERVICE='backend'
+Remove-Item Env:RAILWAY_PRODUCTION_ENVIRONMENT -ErrorAction SilentlyContinue
+node scripts/check-production-deploy-env.mjs
+```
+
+3. Placeholder value must fail
+
+```bash
+RAILWAY_TOKEN=your-token \
+RAILWAY_PROJECT_ID=ci-project-id \
+RAILWAY_PRODUCTION_ENVIRONMENT=ci-production-env \
+RAILWAY_PRODUCTION_SERVICE=backend \
+node scripts/check-production-deploy-env.mjs
+```
+
+```powershell
+$env:RAILWAY_TOKEN='your-token'
+$env:RAILWAY_PROJECT_ID='ci-project-id'
+$env:RAILWAY_PRODUCTION_ENVIRONMENT='ci-production-env'
+$env:RAILWAY_PRODUCTION_SERVICE='backend'
+node scripts/check-production-deploy-env.mjs
+```
+
+4. Duplicate service names must fail
+
+```bash
+RAILWAY_TOKEN=ci-token \
+RAILWAY_PROJECT_ID=ci-project-id \
+RAILWAY_PRODUCTION_ENVIRONMENT=ci-production-env \
+RAILWAY_PRODUCTION_SERVICE=backend \
+RAILWAY_PRODUCTION_WORKER_SERVICE=backend \
+node scripts/check-production-deploy-env.mjs
+```
+
+```powershell
+$env:RAILWAY_TOKEN='ci-token'
+$env:RAILWAY_PROJECT_ID='ci-project-id'
+$env:RAILWAY_PRODUCTION_ENVIRONMENT='ci-production-env'
+$env:RAILWAY_PRODUCTION_SERVICE='backend'
+$env:RAILWAY_PRODUCTION_WORKER_SERVICE='backend'
+node scripts/check-production-deploy-env.mjs
+```
+
 ---
 
 ## STEP 4.3 — Verify admin auth audit logs
