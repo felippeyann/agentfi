@@ -253,6 +253,7 @@ The project is hosted on **Railway**. No VPS or manual server management needed.
 
 [ ] .env is fully filled
 [ ] ADMIN_USERNAME, ADMIN_PASSWORD and NEXTAUTH_SECRET are configured
+[ ] ADMIN_AUTH_* brute-force lockout settings are configured
 [ ] npm run preflight shows all green
 [ ] API /health/ready returns {"status":"ready"}
 [ ] At least one agent is registered via POST /v1/agents
