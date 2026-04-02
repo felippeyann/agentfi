@@ -10,20 +10,20 @@ const redis = new Redis(env.REDIS_URL, {
   enableOfflineQueue: true,
 });
 
-// Rate limits by tier (requests per minute)
-export const RATE_LIMITS = {
-  FREE: 30,
-  PRO: 300,
-  ENTERPRISE: 3000,
-} as const;
+// Rate limits by tier (requests per minute) — configurable via env vars
+export const RATE_LIMITS: Record<string, number> = {
+  FREE: env.RATE_LIMIT_FREE,
+  PRO: env.RATE_LIMIT_PRO,
+  ENTERPRISE: env.RATE_LIMIT_ENTERPRISE,
+};
 
 export async function registerRateLimit(fastify: FastifyInstance) {
   await fastify.register(rateLimit, {
     global: true,
     redis,
-    max: async (request) => {
+    max: (request, _key) => {
       const tier = request.agentTier ?? 'FREE';
-      return RATE_LIMITS[tier] ?? RATE_LIMITS.FREE;
+      return RATE_LIMITS[tier] ?? RATE_LIMITS['FREE']!;
     },
     keyGenerator: (request) => request.agentId || request.ip,
     allowList: (request) => {

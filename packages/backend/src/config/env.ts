@@ -62,6 +62,11 @@ const envSchema = z.object({
 
   // Safe smart wallet deployer — optional (falls back to Turnkey EOA if not set)
   SAFE_DEPLOYER_PRIVATE_KEY: z.string().optional(),
+
+  // Rate-limit overrides (requests/minute per tier)
+  RATE_LIMIT_FREE: z.coerce.number().int().positive().default(30),
+  RATE_LIMIT_PRO: z.coerce.number().int().positive().default(300),
+  RATE_LIMIT_ENTERPRISE: z.coerce.number().int().positive().default(3000),
 });
 
 const parsed = envSchema.safeParse(process.env);
