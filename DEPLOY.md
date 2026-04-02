@@ -182,6 +182,15 @@ The production workflow now runs a config preflight before deploying:
 
 It fails fast when required deploy variables are missing or malformed.
 
+Preflight rule coverage in CI (`.github/workflows/ci.yml`, job `Deploy Preflight Check`):
+
+| Rule | CI step |
+|---|---|
+| Valid config must pass | `Validate production deploy preflight script` |
+| Missing required variable must fail | `Validate preflight failure path (missing env)` |
+| Placeholder values must fail | `Validate preflight failure path (placeholder value)` |
+| Duplicate primary/worker service names must fail | `Validate preflight failure path (duplicate service names)` |
+
 ---
 
 ## STEP 4.3 — Verify admin auth audit logs
