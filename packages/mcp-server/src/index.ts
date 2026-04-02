@@ -119,6 +119,9 @@ async function main() {
   const transport = process.env['MCP_TRANSPORT'];
 
   if (transport === 'sse') {
+    if (!process.env['AGENTFI_API_KEY']) {
+      throw new Error('AGENTFI_API_KEY is required when MCP_TRANSPORT=sse');
+    }
     // SSE transport for hosted/remote use
     await startSSEServer();
   } else {
@@ -133,17 +136,36 @@ async function startSSEServer() {
   const { createServer } = await import('http');
   // Railway injects PORT; fall back to MCP_PORT for local dev
   const port = parseInt(process.env['PORT'] ?? process.env['MCP_PORT'] ?? '3002');
+  const configuredApiKey = process.env['AGENTFI_API_KEY'] ?? '';
+  const corsOrigin = process.env['MCP_CORS_ORIGIN'] ?? '';
 
   // SSE implementation using MCP SDK SSE transport
   const { SSEServerTransport } = await import('@modelcontextprotocol/sdk/server/sse.js');
 
   // Map session ID → active transport for POST message routing
-  const transports = new Map<string, InstanceType<typeof SSEServerTransport>>();
+  const transports = new Map<string, {
+    transport: InstanceType<typeof SSEServerTransport>;
+    apiKey: string;
+  }>();
+
+  const getHeaderApiKey = (req: { headers: Record<string, string | string[] | undefined> }): string => {
+    const raw = req.headers['x-api-key'];
+    if (Array.isArray(raw)) return raw[0] ?? '';
+    return raw ?? '';
+  };
+
+  const setCorsHeaders = (req: { headers: Record<string, string | string[] | undefined> }, res: { setHeader: (name: string, value: string) => void }) => {
+    const origin = Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin;
+    if (corsOrigin === '*') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    } else if (corsOrigin && origin === corsOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+    }
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
+  };
 
   const httpServer = createServer(async (req, res) => {
-    // CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
+    setCorsHeaders(req, res);
 
     if (req.method === 'OPTIONS') {
       res.writeHead(200);
@@ -152,8 +174,15 @@ async function startSSEServer() {
     }
 
     if (req.url === '/mcp/sse' && req.method === 'GET') {
+      const presentedApiKey = getHeaderApiKey(req);
+      if (!presentedApiKey || presentedApiKey !== configuredApiKey) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+
       const transport = new SSEServerTransport('/mcp/messages', res);
-      transports.set(transport.sessionId, transport);
+      transports.set(transport.sessionId, { transport, apiKey: presentedApiKey });
       transport.onclose = () => transports.delete(transport.sessionId);
       await server.connect(transport);
       return;
@@ -161,13 +190,21 @@ async function startSSEServer() {
 
     if (req.url?.startsWith('/mcp/messages') && req.method === 'POST') {
       const sessionId = new URL(req.url, `http://localhost`).searchParams.get('sessionId') ?? '';
-      const transport = transports.get(sessionId);
-      if (!transport) {
+      const session = transports.get(sessionId);
+      if (!session) {
         res.writeHead(404);
         res.end(JSON.stringify({ error: 'Session not found' }));
         return;
       }
-      await transport.handlePostMessage(req, res);
+
+      const presentedApiKey = getHeaderApiKey(req);
+      if (presentedApiKey && presentedApiKey !== session.apiKey) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized' }));
+        return;
+      }
+
+      await session.transport.handlePostMessage(req, res);
       return;
     }
 

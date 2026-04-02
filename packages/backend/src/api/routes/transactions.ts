@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { PrismaClient } from '@prisma/client';
 import { getAddress, parseUnits, maxUint256, createPublicClient, http } from 'viem';
@@ -7,7 +7,7 @@ import { SimulatorService } from '../../services/transaction/simulator.service.j
 import { ExecutorService } from '../../services/transaction/executor.service.js';
 import { PolicyService } from '../../services/policy/policy.service.js';
 import { FeeService } from '../../services/policy/fee.service.js';
-import { transactionQueue, type TransactionJobData } from '../../queues/transaction.queue.js';
+import { transactionQueue } from '../../queues/transaction.queue.js';
 import { weiToUsd } from '../../services/transaction/price.service.js';
 import { getContracts } from '../../config/contracts.js';
 import { logger } from '../middleware/logger.js';
@@ -19,6 +19,14 @@ const simulator = new SimulatorService();
 const executor = new ExecutorService();
 const policyService = new PolicyService(db);
 const feeService = new FeeService(db);
+
+const NATIVE_WETH_BY_CHAIN: Record<number, string> = {
+  1: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+  8453: '0x4200000000000000000000000000000000000006',
+  84532: '0x4200000000000000000000000000000000000006',
+  42161: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1',
+  137: '0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619',
+};
 
 // Well-known token decimals by checksummed address (multi-chain)
 const KNOWN_DECIMALS: Record<string, number> = {
@@ -134,12 +142,16 @@ async function getQuotedAmountOut(params: {
   }
 }
 
-const swapSchema = z.object({
+const simulateSwapSchema = z.object({
   fromToken: z.string(),
   toToken: z.string(),
   amountIn: z.string(),
   chainId: z.number().default(1),
   slippageTolerance: z.number().min(0.01).max(50).default(0.5),
+});
+
+const executeSwapSchema = simulateSwapSchema.extend({
+  simulationId: z.string().min(1),
   idempotencyKey: z.string().optional(),
 });
 
@@ -170,8 +182,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
    * POST /v1/transactions/simulate — simulate without submitting.
    */
   fastify.post('/v1/transactions/simulate', async (request, reply) => {
-    const body = swapSchema.parse(request.body);
+    const body = simulateSwapSchema.parse(request.body);
     const agent = await getAgent(request.agentId);
+    if (!ensureChainAllowed(agent, body.chainId, reply)) return;
+    const amountInDecimals = await getTokenDecimals(body.fromToken, body.chainId);
 
     const txData = builder.buildUniswapSwap({
       chainId: body.chainId,
@@ -179,7 +193,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       tokenOut: getAddress(body.toToken),
       fee: 3000,
       recipient: getAddress(agent.safeAddress),
-      amountIn: parseUnits(body.amountIn, 18),
+      amountIn: parseUnits(body.amountIn, amountInDecimals),
       amountOutMinimum: 0n,
     });
 
@@ -204,15 +218,17 @@ export async function transactionRoutes(fastify: FastifyInstance) {
    * POST /v1/transactions/swap — execute a token swap.
    */
   fastify.post('/v1/transactions/swap', async (request, reply) => {
-    const body = swapSchema.parse(request.body);
+    const body = executeSwapSchema.parse(request.body);
     const agent = await getAgent(request.agentId);
+    if (!ensureChainAllowed(agent, body.chainId, reply)) return;
 
     // Idempotency check
     if (body.idempotencyKey) {
-      const existing = await db.transaction.findUnique({
-        where: { idempotencyKey: body.idempotencyKey },
-      });
-      if (existing) return existing;
+      const idempotent = await getIdempotentTransaction(request.agentId, body.idempotencyKey);
+      if (idempotent.existing) return idempotent.existing;
+      if (idempotent.conflictWithAnotherAgent) {
+        return reply.code(409).send({ error: 'idempotencyKey is already in use by another agent' });
+      }
     }
 
     // Check tx limit for tier
@@ -223,17 +239,21 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       });
     }
 
-    const amountInWei = parseUnits(body.amountIn, 18);
+    const amountInDecimals = await getTokenDecimals(body.fromToken, body.chainId);
+    const amountInWei = parseUnits(body.amountIn, amountInDecimals);
+    const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    const isNativeInput = isNativeWeth(body.chainId, body.fromToken);
 
     // Policy check — target is the Uniswap router, not the token address
     const swapContracts = getContracts(body.chainId);
-    const valueUsd = await weiToUsd(amountInWei, body.chainId);
+    const valueUsd = isNativeInput ? await weiToUsd(amountInWei, body.chainId) : '0';
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: swapContracts.uniswapV3Router,
       tokenAddress: getAddress(body.fromToken),
-      valueEth: body.amountIn,
+      valueEth: isNativeInput ? body.amountIn : '0',
       valueUsd,
+      ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
     if (!policyResult.allowed) {
       return reply.code(403).send({ error: policyResult.reason });
@@ -313,6 +333,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         toToken: body.toToken,
         amountIn: body.amountIn,
         simulation: sim as any,
+        metadata: { simulationId: body.simulationId },
       },
     });
 
@@ -357,12 +378,14 @@ export async function transactionRoutes(fastify: FastifyInstance) {
   fastify.post('/v1/transactions/transfer', async (request, reply) => {
     const body = transferSchema.parse(request.body);
     const agent = await getAgent(request.agentId);
+    if (!ensureChainAllowed(agent, body.chainId, reply)) return;
 
     if (body.idempotencyKey) {
-      const existing = await db.transaction.findUnique({
-        where: { idempotencyKey: body.idempotencyKey },
-      });
-      if (existing) return existing;
+      const idempotent = await getIdempotentTransaction(request.agentId, body.idempotencyKey);
+      if (idempotent.existing) return idempotent.existing;
+      if (idempotent.conflictWithAnotherAgent) {
+        return reply.code(409).send({ error: 'idempotencyKey is already in use by another agent' });
+      }
     }
 
     const withinLimit = await feeService.checkTxLimit(request.agentId, request.agentTier);
@@ -370,8 +393,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       return reply.code(429).send({ error: 'Monthly transaction limit reached' });
     }
 
+    const isEthTransfer = body.token.toUpperCase() === 'ETH';
+
     let txData;
-    if (body.token.toUpperCase() === 'ETH') {
+    if (isEthTransfer) {
       txData = builder.buildEthTransfer({ to: getAddress(body.to), amountEth: body.amount });
     } else {
       txData = builder.buildTokenTransfer({
@@ -380,6 +405,19 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         amount: body.amount,
         decimals: await getTokenDecimals(body.token, body.chainId),
       });
+    }
+
+    const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    const policyResult = await policyService.validateTransaction({
+      agentId: request.agentId,
+      targetContract: isEthTransfer ? getAddress(body.to) : txData.to,
+      ...(!isEthTransfer ? { tokenAddress: getAddress(body.token) } : {}),
+      valueEth: isEthTransfer ? body.amount : '0',
+      valueUsd: isEthTransfer ? await weiToUsd(txData.value, body.chainId) : '0',
+      ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
+    });
+    if (!policyResult.allowed) {
+      return reply.code(403).send({ error: policyResult.reason });
     }
 
     const sim = await simulator.simulate({
@@ -426,6 +464,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       feeAmountWei: feeCalc.feeAmountWei.toString(),
       feeUsd: '0',
       feeBps: feeCalc.feeBps,
+      routedViaExecutor: false,
     });
 
     return reply.code(202).send({ transactionId: tx.id, status: 'QUEUED' });
@@ -437,6 +476,15 @@ export async function transactionRoutes(fastify: FastifyInstance) {
   fastify.post('/v1/transactions/deposit', async (request, reply) => {
     const body = depositSchema.parse(request.body);
     const agent = await getAgent(request.agentId);
+    if (!ensureChainAllowed(agent, body.chainId, reply)) return;
+
+    if (body.idempotencyKey) {
+      const idempotent = await getIdempotentTransaction(request.agentId, body.idempotencyKey);
+      if (idempotent.existing) return idempotent.existing;
+      if (idempotent.conflictWithAnotherAgent) {
+        return reply.code(409).send({ error: 'idempotencyKey is already in use by another agent' });
+      }
+    }
 
     const withinLimit = await feeService.checkTxLimit(request.agentId, request.agentTier);
     if (!withinLimit) {
@@ -449,11 +497,6 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     // First: approve Aave pool to spend tokens
     const decimals = await getTokenDecimals(body.asset, body.chainId);
     const amountWei = parseUnits(body.amount, decimals);
-    const approveTx = builder.buildApprove({
-      tokenAddress: getAddress(body.asset),
-      spender: contracts.aavePoolAddressProvider, // in practice, the pool address
-      amount: amountWei,
-    });
 
     const { createPublicClient, http } = await import('viem');
     const { getChain, RPC_URLS } = await import('../../config/chains.js');
@@ -484,6 +527,19 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       amount: amountWei,
       onBehalfOf: getAddress(agent.safeAddress),
     });
+
+    const depositLastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    const policyResult = await policyService.validateTransaction({
+      agentId: request.agentId,
+      targetContract: supplyTx.to,
+      tokenAddress: getAddress(body.asset),
+      valueEth: '0',
+      valueUsd: '0',
+      ...(depositLastTxTimestamp !== undefined ? { lastTxTimestamp: depositLastTxTimestamp } : {}),
+    });
+    if (!policyResult.allowed) {
+      return reply.code(403).send({ error: policyResult.reason });
+    }
 
     // Simulate supply tx
     const sim = await simulator.simulate({
@@ -526,6 +582,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       feeAmountWei: feeCalc.feeAmountWei.toString(),
       feeUsd: '0',
       feeBps: feeCalc.feeBps,
+      routedViaExecutor: false,
     });
 
     return reply.code(202).send({ transactionId: tx.id, status: 'QUEUED' });
@@ -537,12 +594,14 @@ export async function transactionRoutes(fastify: FastifyInstance) {
   fastify.post('/v1/transactions/withdraw', async (request, reply) => {
     const body = withdrawSchema.parse(request.body);
     const agent = await getAgent(request.agentId);
+    if (!ensureChainAllowed(agent, body.chainId, reply)) return;
 
     if (body.idempotencyKey) {
-      const existing = await db.transaction.findUnique({
-        where: { idempotencyKey: body.idempotencyKey },
-      });
-      if (existing) return existing;
+      const idempotent = await getIdempotentTransaction(request.agentId, body.idempotencyKey);
+      if (idempotent.existing) return idempotent.existing;
+      if (idempotent.conflictWithAnotherAgent) {
+        return reply.code(409).send({ error: 'idempotencyKey is already in use by another agent' });
+      }
     }
 
     const withinLimit = await feeService.checkTxLimit(request.agentId, request.agentTier);
@@ -584,6 +643,19 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       to: getAddress(agent.safeAddress),
     });
 
+    const withdrawLastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    const policyResult = await policyService.validateTransaction({
+      agentId: request.agentId,
+      targetContract: withdrawTx.to,
+      tokenAddress: getAddress(body.asset),
+      valueEth: '0',
+      valueUsd: '0',
+      ...(withdrawLastTxTimestamp !== undefined ? { lastTxTimestamp: withdrawLastTxTimestamp } : {}),
+    });
+    if (!policyResult.allowed) {
+      return reply.code(403).send({ error: policyResult.reason });
+    }
+
     const sim = await simulator.simulate({
       chainId: body.chainId,
       from: getAddress(agent.safeAddress),
@@ -624,6 +696,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       feeAmountWei: feeCalc.feeAmountWei.toString(),
       feeUsd: '0',
       feeBps: feeCalc.feeBps,
+      routedViaExecutor: false,
     });
 
     return reply.code(202).send({ transactionId: tx.id, status: 'QUEUED' });
@@ -654,12 +727,18 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const body = batchSchema.parse(request.body);
     const agent = await getAgent(request.agentId);
+    if (!ensureChainAllowed(agent, body.chainId, reply)) return;
 
     // Idempotency check
     if (body.idempotencyKey) {
-      const existing = await db.transaction.findUnique({ where: { idempotencyKey: body.idempotencyKey } });
-      if (existing) return existing;
+      const idempotent = await getIdempotentTransaction(request.agentId, body.idempotencyKey);
+      if (idempotent.existing) return idempotent.existing;
+      if (idempotent.conflictWithAnotherAgent) {
+        return reply.code(409).send({ error: 'idempotencyKey is already in use by another agent' });
+      }
     }
+
+    const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
 
     const withinLimit = await feeService.checkTxLimit(request.agentId, request.agentTier);
     if (!withinLimit) {
@@ -677,12 +756,11 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     for (let i = 0; i < body.actions.length; i++) {
       const action = body.actions[i]!;
       const valueWei = BigInt(action.value);
-      // Convert wei → ETH string for policy comparison (precision adequate for limits check)
-      const valueEth = valueWei === 0n ? '0' : (Number(valueWei) / 1e18).toFixed(9).replace(/\.?0+$/, '');
       const policyResult = await policyService.validateTransaction({
         agentId: request.agentId,
         targetContract: getAddress(action.to),
-        valueEth,
+        valueEth: weiToEthDecimalString(valueWei),
+        ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
       });
       if (!policyResult.allowed) {
         return reply.code(403).send({
@@ -770,6 +848,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       feeAmountWei: feeCalc.feeAmountWei.toString(),
       feeUsd: '0',
       feeBps: feeCalc.feeBps,
+      routedViaExecutor: true,
     });
 
     return reply.code(202).send({
@@ -825,8 +904,62 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 async function getAgent(agentId: string) {
   const agent = await db.agent.findUnique({
     where: { id: agentId },
-    select: { safeAddress: true, walletId: true },
+    select: { safeAddress: true, walletId: true, chainIds: true },
   });
   if (!agent) throw new Error('Agent not found');
   return agent;
+}
+
+function ensureChainAllowed(
+  agent: { chainIds: number[] },
+  chainId: number,
+  reply: FastifyReply,
+): boolean {
+  if (agent.chainIds.includes(chainId)) return true;
+  reply.code(403).send({ error: `Chain ${chainId} is not enabled for this agent` });
+  return false;
+}
+
+async function getIdempotentTransaction(agentId: string, idempotencyKey: string): Promise<{
+  existing: Awaited<ReturnType<typeof db.transaction.findFirst>>;
+  conflictWithAnotherAgent: boolean;
+}> {
+  const existingForAgent = await db.transaction.findFirst({
+    where: { agentId, idempotencyKey },
+  });
+  if (existingForAgent) return { existing: existingForAgent, conflictWithAnotherAgent: false };
+
+  const existingForOtherAgent = await db.transaction.findFirst({
+    where: { idempotencyKey },
+    select: { id: true },
+  });
+  return {
+    existing: null,
+    conflictWithAnotherAgent: !!existingForOtherAgent,
+  };
+}
+
+async function getLatestAgentTxTimestamp(agentId: string): Promise<number | undefined> {
+  const latest = await db.transaction.findFirst({
+    where: {
+      agentId,
+      status: { in: ['QUEUED', 'SUBMITTED', 'CONFIRMED'] },
+    },
+    orderBy: { createdAt: 'desc' },
+    select: { createdAt: true },
+  });
+
+  if (!latest) return undefined;
+  return Math.floor(latest.createdAt.getTime() / 1000);
+}
+
+function isNativeWeth(chainId: number, tokenAddress: string): boolean {
+  return (NATIVE_WETH_BY_CHAIN[chainId] ?? '').toLowerCase() === tokenAddress.toLowerCase();
+}
+
+function weiToEthDecimalString(valueWei: bigint): string {
+  if (valueWei === 0n) return '0';
+  const whole = valueWei / 1_000_000_000_000_000_000n;
+  const fraction = (valueWei % 1_000_000_000_000_000_000n).toString().padStart(18, '0').replace(/0+$/, '');
+  return fraction ? `${whole.toString()}.${fraction}` : whole.toString();
 }

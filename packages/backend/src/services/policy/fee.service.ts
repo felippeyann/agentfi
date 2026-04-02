@@ -85,10 +85,10 @@ export class FeeService {
       where: { agentId: params.agentId },
       create: {
         agentId: params.agentId,
-        txCountThisPeriod: 1,
+        txCountThisPeriod: 0,
+        totalFeesCollectedUsd: params.feeUsd,
       },
       update: {
-        txCountThisPeriod: { increment: 1 },
         totalFeesCollectedUsd: {
           // Prisma doesn't support decimal math natively — handled in app layer
           set: await this.accumulateFee(params.agentId, params.feeUsd),
@@ -103,6 +103,23 @@ export class FeeService {
         feeUsd: params.feeUsd,
         feeTokens: params.feeAmountWei.toString(),
         feeBps: params.feeBps,
+      },
+    });
+  }
+
+  /**
+   * Increments monthly transaction usage for quota enforcement.
+   * Called after confirmation for every successful transaction.
+   */
+  async incrementTxUsage(agentId: string): Promise<void> {
+    await this.db.agentBilling.upsert({
+      where: { agentId },
+      create: {
+        agentId,
+        txCountThisPeriod: 1,
+      },
+      update: {
+        txCountThisPeriod: { increment: 1 },
       },
     });
   }

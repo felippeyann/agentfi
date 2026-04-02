@@ -39,13 +39,13 @@
 
 ## Revenue Model
 
-Protocol fee deducted from each transaction's gross amount:
+Protocol fee policy per transaction:
 - FREE tier: 30 basis points (0.30%)
 - PRO tier: 15 basis points (0.15%)
 - ENTERPRISE tier: 5 basis points (0.05%)
 
-Fee is routed to `OPERATOR_FEE_WALLET` at transaction time.
-All fee events are immutably logged in `FeeEvent` table.
+When routed through `AgentExecutor`, fee is collected on-chain to `OPERATOR_FEE_WALLET` atomically in the same transaction.
+`FeeEvent` stores collected (on-chain) revenue events; transaction usage counters are tracked separately in billing.
 
 ## Networks
 

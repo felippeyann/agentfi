@@ -11,6 +11,12 @@ import { logger } from '../middleware/logger.js';
 
 const db = new PrismaClient();
 const ADMIN_SECRET = process.env['ADMIN_SECRET'] ?? '';
+const ADMIN_ALLOW_REMOTE = process.env['ADMIN_ALLOW_REMOTE'] === 'true';
+
+function isLoopbackIp(ipRaw: string): boolean {
+  const ip = ipRaw.replace(/^::ffff:/, '');
+  return ip === '127.0.0.1' || ip === '::1';
+}
 
 function requireAdmin(request: any, reply: any): boolean {
   const secret = request.headers['x-admin-secret'];
@@ -18,6 +24,12 @@ function requireAdmin(request: any, reply: any): boolean {
     reply.code(401).send({ error: 'Unauthorized' });
     return false;
   }
+
+  if (!ADMIN_ALLOW_REMOTE && !isLoopbackIp(request.ip ?? '')) {
+    reply.code(403).send({ error: 'Admin routes are local-only. Set ADMIN_ALLOW_REMOTE=true to enable remote access.' });
+    return false;
+  }
+
   return true;
 }
 

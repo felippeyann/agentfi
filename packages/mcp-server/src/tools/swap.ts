@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { api } from '../api-client.js';
+import { resolveSwapToken } from './token-map.js';
 
 export const swapTools = [
   {
@@ -31,6 +32,9 @@ export const swapTools = [
       chain_id: number;
       slippage_tolerance: number;
     }) => {
+      const fromToken = resolveSwapToken(input.from_token, input.chain_id);
+      const toToken = resolveSwapToken(input.to_token, input.chain_id);
+
       const result = await api.post<{
         success: boolean;
         gasEstimate: string;
@@ -38,8 +42,8 @@ export const swapTools = [
         error?: string;
         simulationId: string;
       }>('/v1/transactions/simulate', {
-        fromToken: input.from_token,
-        toToken: input.to_token,
+        fromToken,
+        toToken,
         amountIn: input.amount_in,
         chainId: input.chain_id,
         slippageTolerance: input.slippage_tolerance,
@@ -87,17 +91,21 @@ export const swapTools = [
       slippage_tolerance: number;
       simulation_id: string;
     }) => {
+      const fromToken = resolveSwapToken(input.from_token, input.chain_id);
+      const toToken = resolveSwapToken(input.to_token, input.chain_id);
+
       const result = await api.post<{
         transactionId: string;
         status: string;
         simulationId: string;
         fee: { bps: number; amountWei: string; feeWallet: string };
       }>('/v1/transactions/swap', {
-        fromToken: input.from_token,
-        toToken: input.to_token,
+        fromToken,
+        toToken,
         amountIn: input.amount_in,
         chainId: input.chain_id,
         slippageTolerance: input.slippage_tolerance,
+        simulationId: input.simulation_id,
       });
 
       return {

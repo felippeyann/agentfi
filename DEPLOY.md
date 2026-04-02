@@ -172,7 +172,7 @@ Add to your Claude/LLM config:
 {
   "mcpServers": {
     "agentfi": {
-      "url": "https://mcp.agentfi.cc/sse",
+      "url": "https://mcp.agentfi.cc/mcp/sse",
       "headers": {
         "x-api-key": "agfi_live_YOUR_AGENT_KEY"
       }

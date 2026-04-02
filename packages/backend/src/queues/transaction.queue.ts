@@ -104,12 +104,16 @@ export function startTransactionWorker(): Worker<TransactionJobData> {
           select: { status: true, amountIn: true },
         });
         if (tx?.status === 'CONFIRMED') {
+          await feeService.incrementTxUsage(data.agentId);
+
           // Resolve USD value at time of confirmation
           const feeUsd = BigInt(data.feeAmountWei) > 0n
             ? await weiToUsd(BigInt(data.feeAmountWei), data.chainId)
             : '0';
 
-          if (BigInt(data.feeAmountWei) > 0n) {
+          // FeeEvent means collected revenue. Only log when fee was collected
+          // atomically on-chain through AgentExecutor.
+          if (data.routedViaExecutor && BigInt(data.feeAmountWei) > 0n) {
             await feeService.recordFeeEvent({
               agentId: data.agentId,
               transactionId: data.transactionId,

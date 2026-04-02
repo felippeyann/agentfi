@@ -119,14 +119,14 @@ export class PolicyService {
    * Emergency kill switch — immediately disables the agent's policy.
    */
   async emergencyPause(agentId: string): Promise<void> {
-    await this.db.agentPolicy.update({
+    await this.db.agentPolicy.updateMany({
       where: { agentId },
       data: { active: false },
     });
   }
 
   async resume(agentId: string): Promise<void> {
-    await this.db.agentPolicy.update({
+    await this.db.agentPolicy.updateMany({
       where: { agentId },
       data: { active: true },
     });

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { api } from '../api-client.js';
+import { resolveAssetToken, resolveTransferToken } from './token-map.js';
 
 export const defiTools = [
   {
@@ -20,10 +21,12 @@ export const defiTools = [
       chain_id: z.number().default(1).describe('Chain ID. Default: 1 (Ethereum mainnet).'),
     }),
     handler: async (input: { token: string; to: string; amount: string; chain_id: number }) => {
+      const token = resolveTransferToken(input.token, input.chain_id);
+
       const result = await api.post<{ transactionId: string; status: string }>(
         '/v1/transactions/transfer',
         {
-          token: input.token,
+          token,
           to: input.to,
           amount: input.amount,
           chainId: input.chain_id,
@@ -52,10 +55,12 @@ export const defiTools = [
       chain_id: z.number().default(1).describe('Chain ID. Default: 1 (Ethereum mainnet).'),
     }),
     handler: async (input: { asset: string; amount: string; chain_id: number }) => {
+      const asset = resolveAssetToken(input.asset, input.chain_id);
+
       const result = await api.post<{ transactionId: string; status: string }>(
         '/v1/transactions/deposit',
         {
-          asset: input.asset,
+          asset,
           amount: input.amount,
           chainId: input.chain_id,
         },
@@ -82,10 +87,12 @@ export const defiTools = [
       chain_id: z.number().default(1).describe('Chain ID. Default: 1 (Ethereum mainnet).'),
     }),
     handler: async (input: { asset: string; amount: string; chain_id: number }) => {
+      const asset = resolveAssetToken(input.asset, input.chain_id);
+
       const result = await api.post<{ transactionId: string; status: string }>(
         '/v1/transactions/withdraw',
         {
-          asset: input.asset,
+          asset,
           amount: input.amount,
           chainId: input.chain_id,
         },
