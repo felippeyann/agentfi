@@ -48,10 +48,17 @@ Option A: Manual dispatch (recommended)
 
 Option B: Tag-triggered release
 
-1. Create and push release tag:
+1. Create and push release tag via the release helper:
+- npm run release:v1:tag -- X.Y.Z --push
+
+  Notes:
+- The helper runs typecheck/tests/preflight checks before tagging (unless `--skip-check` is provided)
+- It refuses to tag when uncommitted tracked changes exist (except local `.claude/` and `docs/railway_logs/` artifacts)
+
+2. Manual commands remain available if needed:
 - git tag vX.Y.Z
 - git push origin vX.Y.Z
-2. Confirm Deploy Production workflow executed successfully.
+3. Confirm Deploy Production workflow executed successfully.
 
 ---
 

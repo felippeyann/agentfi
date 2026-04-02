@@ -12,7 +12,7 @@ Este documento delineia o roadmap de desenvolvimento técnico e evolução de ne
 - [x] Criação do MCP (Model Context Protocol) Server
 - [x] Orquestração de Backend (Fila BullMQ, Retry policies, Fallback Infura/Alchemy)
 - [x] Testes End-to-End no fork local e Testnet
-- [ ] Lançamento V1 (Auto-Hospedado) focado na adoção orgânica pelos desenvolvedores de LLMs.
+- [x] Lançamento V1 (Auto-Hospedado) focado na adoção orgânica pelos desenvolvedores de LLMs.
 
 ---
 

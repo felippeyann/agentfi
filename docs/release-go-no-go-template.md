@@ -13,6 +13,7 @@ Copy this block into a PR comment, release issue, or deployment ticket before pr
 
 ### Pre-Dispatch Gates
 - [ ] CI green on release ref (`ci.yml`)
+- [ ] `npm run release:v1:check` passed
 - [ ] `npm run preflight` passed
 - [ ] `npm run preflight:deploy-scenarios` passed
 - [ ] Required Railway secrets present (`RAILWAY_*`)

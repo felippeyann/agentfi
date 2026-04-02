@@ -13,6 +13,8 @@
     "test": "npm run test --workspaces --if-present",
     "preflight": "tsx scripts/preflight.ts",
     "preflight:deploy-scenarios": "node scripts/run-deploy-preflight-scenarios.mjs",
+    "release:v1:check": "node scripts/release-v1.mjs check",
+    "release:v1:tag": "node scripts/release-v1.mjs tag",
     "release:note": "node scripts/gen-release-note.mjs"
   },
   "devDependencies": {
