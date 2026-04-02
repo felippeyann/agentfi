@@ -227,13 +227,18 @@ The project is hosted on **Railway**. No VPS or manual server management needed.
 **CI/CD via GitHub Actions (`.github/workflows/`):**
 - `ci.yml` — typecheck, unit tests, contract tests on every push
 - `deploy-staging.yml` — no-op; Railway auto-deploys on push to `develop`
-- `deploy-production.yml` — disabled; configure a Railway production environment when ready for v1
+- `deploy-production.yml` — deploys to Railway production on `v*.*.*` tags or manual dispatch (requires Railway secrets)
 
 **Live services:**
 - API: https://agentfi-develop.up.railway.app
 - Health: https://agentfi-develop.up.railway.app/health
 
-**To deploy:** push to `develop` — Railway handles the rest automatically.
+**To deploy staging:** push to `develop` — Railway handles deployment automatically.
+
+**To deploy production:**
+- Configure `RAILWAY_TOKEN`, `RAILWAY_PROJECT_ID`, and `RAILWAY_PRODUCTION_ENVIRONMENT` in repository secrets
+- Optional: set repository variable `RAILWAY_PRODUCTION_SERVICE` (default: `backend`)
+- Trigger `Deploy Production` manually (workflow_dispatch) or push a `v*.*.*` tag
 
 ---
 

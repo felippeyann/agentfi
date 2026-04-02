@@ -100,7 +100,7 @@ model X402Nonce {
 
 model Transaction {
   id             String    @id @default(cuid())
-  idempotencyKey String?   @unique
+  idempotencyKey String?
   agentId        String
   agent          Agent     @relation(fields: [agentId], references: [id])
   chainId        Int
@@ -123,6 +123,7 @@ model Transaction {
   feeEvents  FeeEvent[]
 
   @@index([agentId, createdAt(sort: Desc)])
+  @@unique([agentId, idempotencyKey])
   @@index([status])
   @@index([txHash])
 }

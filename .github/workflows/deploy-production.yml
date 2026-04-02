@@ -1,29 +1,75 @@
 name: Deploy Production
 
-# ⚠️  DISABLED — VPS-based deploy was replaced by Railway.
+# Manual/tag-triggered production deploy via Railway CLI.
 #
-# When ready for a production release:
-#   1. Set up a separate Railway environment (production)
-#   2. Configure auto-deploy from the `master` branch (or tag-based)
-#   3. Add PROD_DATABASE_URL, PROD_REDIS_URL and other secrets to Railway
-#   4. Replace this workflow with a Railway CLI deploy or remove entirely
-#      (Railway can handle it automatically without a workflow).
+# Required repository secrets:
+# - RAILWAY_TOKEN
+# - RAILWAY_PROJECT_ID
+# - RAILWAY_PRODUCTION_ENVIRONMENT
 #
-# Current state: all services run on Railway staging.
-# Trigger: push a v*.*.* tag — currently a no-op.
+# Optional repository variable:
+# - RAILWAY_PRODUCTION_SERVICE (defaults to `backend`)
 
 on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to deploy (branch, tag, or SHA). Default: current workflow ref'
+        required: false
+        type: string
   push:
     tags:
       - 'v*.*.*'
 
+permissions:
+  contents: read
+
 jobs:
-  pending-setup:
-    name: Production Deploy (not yet configured)
+  deploy:
+    name: Deploy to Railway Production
     runs-on: ubuntu-latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+      RAILWAY_PRODUCTION_ENVIRONMENT: ${{ secrets.RAILWAY_PRODUCTION_ENVIRONMENT }}
+      RAILWAY_PRODUCTION_SERVICE: ${{ vars.RAILWAY_PRODUCTION_SERVICE || 'backend' }}
+
     steps:
-      - name: Note
+      - name: Validate required secrets
         run: |
-          echo "Production deploy via Railway is not yet configured."
-          echo "See the workflow file for instructions."
-          exit 0
+          missing=0
+          for key in RAILWAY_TOKEN RAILWAY_PROJECT_ID RAILWAY_PRODUCTION_ENVIRONMENT; do
+            if [ -z "${!key}" ]; then
+              echo "::error::Missing required secret: $key"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout selected ref
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.ref != '' }}
+        run: git checkout "${{ inputs.ref }}"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+
+      - name: Deploy service to Railway production
+        run: |
+          railway up \
+            --ci \
+            --service "$RAILWAY_PRODUCTION_SERVICE" \
+            --environment "$RAILWAY_PRODUCTION_ENVIRONMENT" \
+            --detach

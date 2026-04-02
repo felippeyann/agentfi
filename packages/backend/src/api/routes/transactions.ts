@@ -924,8 +924,13 @@ async function getIdempotentTransaction(agentId: string, idempotencyKey: string)
   existing: Awaited<ReturnType<typeof db.transaction.findFirst>>;
   conflictWithAnotherAgent: boolean;
 }> {
-  const existingForAgent = await db.transaction.findFirst({
-    where: { agentId, idempotencyKey },
+  const existingForAgent = await db.transaction.findUnique({
+    where: {
+      agentId_idempotencyKey: {
+        agentId,
+        idempotencyKey,
+      },
+    },
   });
   if (existingForAgent) return { existing: existingForAgent, conflictWithAnotherAgent: false };
 
