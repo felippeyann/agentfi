@@ -42,6 +42,7 @@ Add every variable below. The values come from your third-party accounts.
 |---|---|---|
 | `CORS_ORIGIN` | `https://admin.agentfi.cc` | Allows admin frontend to call API |
 | `ADMIN_URL` | `https://admin.agentfi.cc` | Stripe redirect URLs |
+| `TRANSACTION_WORKER_ENABLED` | `true` on worker, `false` on API replicas | Prevents every API replica from polling Redis |
 | `TENDERLY_ACCESS_KEY` | Your key | dashboard.tenderly.co → API Access |
 | `TENDERLY_ACCOUNT` | Your slug | visible in Tenderly dashboard URL |
 | `TENDERLY_PROJECT` | Your project slug | visible in Tenderly dashboard URL |
@@ -143,6 +144,18 @@ curl https://api.agentfi.cc/health/ready
 ```
 
 If `health/ready` shows any `false`, check Railway logs for the failing service.
+
+---
+
+## STEP 4.1 — Recommended queue topology for metered Redis
+
+If you use Upstash or any metered Redis plan, run a dedicated worker service:
+
+1. API service: set `TRANSACTION_WORKER_ENABLED=false`
+2. Worker service (same repo/environment): start command `cd packages/backend && npm run worker`
+3. Worker service: set `TRANSACTION_WORKER_ENABLED=true`
+
+This avoids N API replicas polling BullMQ marker keys and helps prevent Redis request quota exhaustion.
 
 ---
 

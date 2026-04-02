@@ -65,6 +65,10 @@ async function addDailyVolumeAtomic(agentId: string, date: string, valueUsd: str
 }
 
 export function startTransactionWorker(): Worker<TransactionJobData> {
+  const workerConcurrency = env.TRANSACTION_WORKER_CONCURRENCY;
+  const workerDrainDelaySec = env.TRANSACTION_WORKER_DRAIN_DELAY_SEC;
+  const workerStalledIntervalMs = env.TRANSACTION_WORKER_STALLED_INTERVAL_MS;
+
   const worker = new Worker<TransactionJobData>(
     'transactions',
     async (job: Job<TransactionJobData>) => {
@@ -138,13 +142,22 @@ export function startTransactionWorker(): Worker<TransactionJobData> {
     },
     {
       connection,
-      concurrency: 5,
+      concurrency: workerConcurrency,
       removeOnComplete: { count: 1000 },
       removeOnFail: { count: 500 },
       // Reduce Redis polling when idle — critical for Upstash/metered Redis
-      drainDelay: 30,     // 30s between polls when queue is empty (default: 5s)
-      stalledInterval: 120_000, // check stalled jobs every 2min (default: 30s)
+      drainDelay: workerDrainDelaySec,
+      stalledInterval: workerStalledIntervalMs,
     } satisfies WorkerOptions,
+  );
+
+  logger.info(
+    {
+      concurrency: workerConcurrency,
+      drainDelaySec: workerDrainDelaySec,
+      stalledIntervalMs: workerStalledIntervalMs,
+    },
+    'Transaction worker started',
   );
 
   // On final failure (all retries exhausted), mark transaction as FAILED in the DB.

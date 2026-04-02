@@ -240,6 +240,11 @@ The project is hosted on **Railway**. No VPS or manual server management needed.
 - Optional: set repository variable `RAILWAY_PRODUCTION_SERVICE` (default: `backend`)
 - Trigger `Deploy Production` manually (workflow_dispatch) or push a `v*.*.*` tag
 
+**Recommended for metered Redis (Upstash):**
+- Run one dedicated backend worker process with `TRANSACTION_WORKER_ENABLED=true`
+- Set `TRANSACTION_WORKER_ENABLED=false` on API replicas
+- Worker start command: `cd packages/backend && npm run worker`
+
 ---
 
 ## You're live when:

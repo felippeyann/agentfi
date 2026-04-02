@@ -77,13 +77,17 @@ async function start() {
 
   // Start BullMQ worker — non-fatal if Redis is temporarily unavailable
   let worker: ReturnType<typeof startTransactionWorker> | undefined;
-  try {
-    worker = startTransactionWorker();
-    worker.on('failed', (job, err) => {
-      logger.error({ jobId: job?.id, err }, 'Transaction job failed');
-    });
-  } catch (err) {
-    logger.error({ err }, 'BullMQ worker failed to start — transactions will be queued when Redis recovers');
+  if (env.TRANSACTION_WORKER_ENABLED === 'true') {
+    try {
+      worker = startTransactionWorker();
+      worker.on('failed', (job, err) => {
+        logger.error({ jobId: job?.id, err }, 'Transaction job failed');
+      });
+    } catch (err) {
+      logger.error({ err }, 'BullMQ worker failed to start — transactions will be queued when Redis recovers');
+    }
+  } else {
+    logger.warn('Transaction worker disabled for this process (TRANSACTION_WORKER_ENABLED=false)');
   }
 
   // Graceful shutdown

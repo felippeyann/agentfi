@@ -28,6 +28,12 @@ const envSchema = z.object({
   // Redis
   REDIS_URL: z.string().url(),
 
+  // Queue worker controls
+  TRANSACTION_WORKER_ENABLED: z.enum(['true', 'false']).default('true'),
+  TRANSACTION_WORKER_CONCURRENCY: z.coerce.number().int().positive().default(5),
+  TRANSACTION_WORKER_DRAIN_DELAY_SEC: z.coerce.number().int().positive().default(30),
+  TRANSACTION_WORKER_STALLED_INTERVAL_MS: z.coerce.number().int().positive().default(120_000),
+
   // Contracts
   POLICY_MODULE_ADDRESS_1: z.string().optional(),
   POLICY_MODULE_ADDRESS_8453: z.string().optional(),
