@@ -155,11 +155,13 @@ async function startSSEServer() {
   };
 
   const setCorsHeaders = (req: { headers: Record<string, string | string[] | undefined> }, res: { setHeader: (name: string, value: string) => void }) => {
+    // Default: deny all cross-origin requests unless MCP_CORS_ORIGIN is explicitly set
+    if (!corsOrigin) return;
     const origin = Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin;
     if (corsOrigin === '*') {
       res.setHeader('Access-Control-Allow-Origin', '*');
-    } else if (corsOrigin && origin === corsOrigin) {
-      res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+    } else if (origin && corsOrigin.split(',').map(o => o.trim()).includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
     }
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
   };
@@ -197,8 +199,9 @@ async function startSSEServer() {
         return;
       }
 
+      // Always require API key on POST — must match the key used to open the session
       const presentedApiKey = getHeaderApiKey(req);
-      if (presentedApiKey && presentedApiKey !== session.apiKey) {
+      if (!presentedApiKey || presentedApiKey !== session.apiKey) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Unauthorized' }));
         return;
