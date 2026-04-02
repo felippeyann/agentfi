@@ -18,6 +18,22 @@ const LOCKOUT_MS = parsePositiveInt(process.env['ADMIN_AUTH_LOCKOUT_MS'], 30 * 6
 
 type HeaderMap = Record<string, string | string[] | undefined>;
 
+export interface LoginAttemptContext {
+  ip: string;
+  userAgent: string;
+}
+
+export interface LoginBlockState {
+  blocked: boolean;
+  retryAfterMs: number;
+}
+
+export interface LoginFailureState {
+  locked: boolean;
+  retryAfterMs: number;
+  remainingAttempts: number;
+}
+
 function readHeader(headers: HeaderMap | undefined, name: string): string {
   const raw = headers?.[name] ?? headers?.[name.toLowerCase()] ?? headers?.[name.toUpperCase()];
   if (Array.isArray(raw)) return raw[0] ?? '';
@@ -34,20 +50,28 @@ function getClientIp(headers: HeaderMap | undefined): string {
   return realIp || 'unknown';
 }
 
-function buildAttemptKey(username: string, headers: HeaderMap | undefined): string {
+export function getLoginAttemptContext(headers: HeaderMap | undefined): LoginAttemptContext {
+  return {
+    ip: getClientIp(headers),
+    userAgent: readHeader(headers, 'user-agent').slice(0, 200),
+  };
+}
+
+function buildAttemptKey(username: string, context: LoginAttemptContext): string {
   const identity = username.trim().toLowerCase() || 'unknown-user';
-  const ip = getClientIp(headers);
+  const ip = context.ip;
   return `${identity}|${ip}`;
 }
 
-export function isLoginBlocked(username: string, headers: HeaderMap | undefined): boolean {
-  const key = buildAttemptKey(username, headers);
+export function isLoginBlocked(username: string, headers: HeaderMap | undefined): LoginBlockState {
+  const context = getLoginAttemptContext(headers);
+  const key = buildAttemptKey(username, context);
   const now = Date.now();
   const state = attemptsByKey.get(key);
-  if (!state) return false;
+  if (!state) return { blocked: false, retryAfterMs: 0 };
 
   if (state.lockedUntilMs > now) {
-    return true;
+    return { blocked: true, retryAfterMs: state.lockedUntilMs - now };
   }
 
   if (state.lockedUntilMs <= now && state.lockedUntilMs !== 0) {
@@ -57,11 +81,12 @@ export function isLoginBlocked(username: string, headers: HeaderMap | undefined)
     attemptsByKey.set(key, state);
   }
 
-  return false;
+  return { blocked: false, retryAfterMs: 0 };
 }
 
-export function registerLoginFailure(username: string, headers: HeaderMap | undefined): void {
-  const key = buildAttemptKey(username, headers);
+export function registerLoginFailure(username: string, headers: HeaderMap | undefined): LoginFailureState {
+  const context = getLoginAttemptContext(headers);
+  const key = buildAttemptKey(username, context);
   const now = Date.now();
 
   const current = attemptsByKey.get(key);
@@ -71,20 +96,36 @@ export function registerLoginFailure(username: string, headers: HeaderMap | unde
       windowStartMs: now,
       lockedUntilMs: 0,
     });
-    return;
+    return {
+      locked: false,
+      retryAfterMs: 0,
+      remainingAttempts: Math.max(0, MAX_ATTEMPTS - 1),
+    };
   }
 
   const nextCount = current.count + 1;
   const shouldLock = nextCount >= MAX_ATTEMPTS;
+  const lockedUntilMs = shouldLock ? now + LOCKOUT_MS : current.lockedUntilMs;
 
   attemptsByKey.set(key, {
     count: shouldLock ? 0 : nextCount,
     windowStartMs: current.windowStartMs,
-    lockedUntilMs: shouldLock ? now + LOCKOUT_MS : current.lockedUntilMs,
+    lockedUntilMs,
   });
+
+  return {
+    locked: shouldLock,
+    retryAfterMs: shouldLock ? LOCKOUT_MS : 0,
+    remainingAttempts: shouldLock ? 0 : Math.max(0, MAX_ATTEMPTS - nextCount),
+  };
 }
 
 export function clearLoginFailures(username: string, headers: HeaderMap | undefined): void {
-  const key = buildAttemptKey(username, headers);
+  const context = getLoginAttemptContext(headers);
+  const key = buildAttemptKey(username, context);
   attemptsByKey.delete(key);
+}
+
+export function getMaxLoginAttempts(): number {
+  return MAX_ATTEMPTS;
 }

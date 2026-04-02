@@ -1,7 +1,10 @@
 import type { NextAuthOptions } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
+import { logAdminAuthEvent } from './admin-audit';
 import {
   clearLoginFailures,
+  getLoginAttemptContext,
+  getMaxLoginAttempts,
   isLoginBlocked,
   registerLoginFailure,
 } from './login-rate-limit';
@@ -45,22 +48,56 @@ export const authOptions: NextAuthOptions = {
         password: { label: 'Password', type: 'password' },
       },
       async authorize(credentials, req) {
-        if (!ADMIN_PASSWORD) return null;
-
         const username = credentials?.username?.trim() ?? '';
         const password = credentials?.password ?? '';
         const headers = req?.headers as Record<string, string | string[] | undefined> | undefined;
+        const context = getLoginAttemptContext(headers);
 
-        if (isLoginBlocked(username, headers)) {
+        if (!ADMIN_PASSWORD) {
+          logAdminAuthEvent({
+            event: 'admin_login_config_invalid',
+            username,
+            ip: context.ip,
+            userAgent: context.userAgent,
+          });
+          return null;
+        }
+
+        const blockState = isLoginBlocked(username, headers);
+        if (blockState.blocked) {
+          logAdminAuthEvent({
+            event: 'admin_login_blocked',
+            username,
+            ip: context.ip,
+            userAgent: context.userAgent,
+            retryAfterMs: blockState.retryAfterMs,
+            maxAttempts: getMaxLoginAttempts(),
+          });
           return null;
         }
 
         if (username !== ADMIN_USERNAME || password !== ADMIN_PASSWORD) {
-          registerLoginFailure(username, headers);
+          const failureState = registerLoginFailure(username, headers);
+          logAdminAuthEvent({
+            event: 'admin_login_invalid_credentials',
+            username,
+            ip: context.ip,
+            userAgent: context.userAgent,
+            remainingAttempts: failureState.remainingAttempts,
+            retryAfterMs: failureState.retryAfterMs,
+            maxAttempts: getMaxLoginAttempts(),
+          });
           return null;
         }
 
         clearLoginFailures(username, headers);
+        logAdminAuthEvent({
+          event: 'admin_login_success',
+          username,
+          ip: context.ip,
+          userAgent: context.userAgent,
+          maxAttempts: getMaxLoginAttempts(),
+        });
 
         return {
           id: 'operator',

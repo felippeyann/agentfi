@@ -178,6 +178,23 @@ production workflow deploys both services in one run:
 
 ---
 
+## STEP 4.3 — Verify admin auth audit logs
+
+Admin login events are written to application logs with the prefix:
+
+- `[admin-auth-audit]`
+
+Expected events:
+
+1. `admin_login_success`
+2. `admin_login_invalid_credentials`
+3. `admin_login_blocked`
+4. `admin_login_config_invalid`
+
+Use these events to investigate brute-force attempts and lockout behavior.
+
+---
+
 ## STEP 5 — Register your first agent
 
 ```bash
