@@ -1,5 +1,7 @@
 import type { NextAuthOptions } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
+import GitHubProvider from 'next-auth/providers/github';
+import GoogleProvider from 'next-auth/providers/google';
 import { logAdminAuthEvent } from './admin-audit';
 import {
   clearLoginFailures,
@@ -14,6 +16,36 @@ const ADMIN_PASSWORD = process.env['ADMIN_PASSWORD'] ?? '';
 const IS_PRODUCTION = process.env['NODE_ENV'] === 'production';
 
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 8;
+
+// Optional OIDC — comma-separated email allowlist (only these emails can sign in via OAuth)
+const ADMIN_OAUTH_ALLOWLIST = (process.env['ADMIN_OAUTH_ALLOWLIST'] ?? '')
+  .split(',')
+  .map(e => e.trim().toLowerCase())
+  .filter(Boolean);
+
+function buildOAuthProviders(): NextAuthOptions['providers'] {
+  const providers: NextAuthOptions['providers'] = [];
+
+  if (process.env['GITHUB_CLIENT_ID'] && process.env['GITHUB_CLIENT_SECRET']) {
+    providers.push(
+      GitHubProvider({
+        clientId: process.env['GITHUB_CLIENT_ID'],
+        clientSecret: process.env['GITHUB_CLIENT_SECRET'],
+      }),
+    );
+  }
+
+  if (process.env['GOOGLE_CLIENT_ID'] && process.env['GOOGLE_CLIENT_SECRET']) {
+    providers.push(
+      GoogleProvider({
+        clientId: process.env['GOOGLE_CLIENT_ID'],
+        clientSecret: process.env['GOOGLE_CLIENT_SECRET'],
+      }),
+    );
+  }
+
+  return providers;
+}
 
 export const authOptions: NextAuthOptions = {
   secret: process.env['NEXTAUTH_SECRET'],
@@ -41,6 +73,7 @@ export const authOptions: NextAuthOptions = {
     signIn: '/login',
   },
   providers: [
+    ...buildOAuthProviders(),
     CredentialsProvider({
       name: 'Operator Credentials',
       credentials: {
@@ -107,4 +140,24 @@ export const authOptions: NextAuthOptions = {
       },
     }),
   ],
+  callbacks: {
+    async signIn({ user, account }) {
+      // Credentials provider — already validated above
+      if (account?.provider === 'credentials') return true;
+
+      // OAuth providers — enforce email allowlist
+      const email = user.email?.toLowerCase();
+      if (!email) return false;
+      if (ADMIN_OAUTH_ALLOWLIST.length === 0) {
+        // No allowlist configured — reject all OAuth logins to prevent unauthorized access
+        console.warn(`[admin-auth] OAuth login rejected: no ADMIN_OAUTH_ALLOWLIST configured (email: ${email})`);
+        return false;
+      }
+      if (!ADMIN_OAUTH_ALLOWLIST.includes(email)) {
+        console.warn(`[admin-auth] OAuth login rejected: ${email} not in allowlist`);
+        return false;
+      }
+      return true;
+    },
+  },
 };
