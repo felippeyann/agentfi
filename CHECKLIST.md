@@ -218,6 +218,15 @@ Copy them into `.env`:
 
    npm run preflight:deploy-scenarios
 
+   Optional deeper E2E checks:
+   cd packages/backend
+   npm run test:e2e               # local Anvil + local DB/Redis
+   E2E_ANVIL_FORK_URL=<BASE_MAINNET_RPC_URL> npm run test:e2e:fork
+   E2E_TESTNET_RPC_URL=<BASE_SEPOLIA_RPC_URL> \
+   E2E_TESTNET_POLICY_MODULE_ADDRESS=0x... \
+   E2E_TESTNET_EXECUTOR_ADDRESS=0x... \
+   npm run test:e2e:testnet
+
 The first command checks runtime dependencies (database, redis, RPC, Turnkey, contracts).
 The second command validates deploy-config pass/fail scenarios used by CI.
 Fix any red items before deploying.

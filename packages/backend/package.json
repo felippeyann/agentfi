@@ -15,6 +15,8 @@
     "lint": "echo 'no eslint configured'",
     "test": "vitest run",
     "test:e2e": "vitest run --config vitest.config.e2e.ts",
+    "test:e2e:fork": "vitest run --config vitest.config.e2e.fork.ts",
+    "test:e2e:testnet": "vitest run --config vitest.config.e2e.testnet.ts",
     "db:generate": "dotenv -e ../../.env prisma generate",
     "db:migrate": "dotenv -e ../../.env prisma migrate dev",
     "db:push": "dotenv -e ../../.env prisma db push"

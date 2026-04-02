@@ -115,6 +115,17 @@ export async function setup(): Promise<void> {
   process.env['DATABASE_URL'] = LOCAL_DB;
   process.env['REDIS_URL'] = 'redis://localhost:6379';
 
+  const forkUrl = process.env['E2E_ANVIL_FORK_URL'];
+  const forkRequired = process.env['E2E_ANVIL_FORK_REQUIRED'] === 'true';
+  const forkBlockNumber = process.env['E2E_ANVIL_FORK_BLOCK_NUMBER'];
+
+  if (forkRequired && !forkUrl) {
+    throw new Error(
+      '[e2e] Fork mode required but E2E_ANVIL_FORK_URL is not set. ' +
+      'Set a Base RPC URL and rerun test:e2e:fork.',
+    );
+  }
+
   // CWD when vitest runs from packages/backend → contracts is a sibling dir
   const contractsDir = join(process.cwd(), '../contracts');
 
@@ -154,10 +165,29 @@ export async function setup(): Promise<void> {
   }
 
   // 2 ─ Start Anvil
-  console.log(`[e2e] Starting Anvil on port ${ANVIL_PORT} (chain-id ${ANVIL_CHAIN_ID})…`);
+  const anvilArgs = [
+    '--port', String(ANVIL_PORT),
+    '--chain-id', String(ANVIL_CHAIN_ID),
+    '--silent',
+  ];
+
+  if (forkUrl) {
+    anvilArgs.push('--fork-url', forkUrl);
+    if (forkBlockNumber) {
+      anvilArgs.push('--fork-block-number', forkBlockNumber);
+    }
+    process.env['E2E_ANVIL_MODE'] = 'fork';
+    console.log(
+      `[e2e] Starting Anvil fork on port ${ANVIL_PORT} (chain-id ${ANVIL_CHAIN_ID})…`,
+    );
+  } else {
+    process.env['E2E_ANVIL_MODE'] = 'local';
+    console.log(`[e2e] Starting Anvil on port ${ANVIL_PORT} (chain-id ${ANVIL_CHAIN_ID})…`);
+  }
+
   anvilProcess = spawn(
     ANVIL_BIN,
-    ['--port', String(ANVIL_PORT), '--chain-id', String(ANVIL_CHAIN_ID), '--silent'],
+    anvilArgs,
     { stdio: 'ignore', detached: false },
   );
   anvilProcess.on('error', (err) => {
