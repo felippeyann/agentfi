@@ -18,8 +18,9 @@
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { PrismaClient } from '@prisma/client';
-import { createPublicClient, http, parseUnits, decodeEventLog, type Address } from 'viem';
+import { parseUnits, decodeEventLog, type Address } from 'viem';
 import { randomUUID } from 'crypto';
+import { createChainPublicClient } from '../../config/chains.js';
 
 const db = new PrismaClient();
 
@@ -129,11 +130,7 @@ async function verifyPayment(
   }
 
   // 2. Fetch receipt
-  const { RPC_URLS, getChain } = await import('../../config/chains.js');
-  const client = createPublicClient({
-    chain:     getChain(proof.chainId),
-    transport: http(RPC_URLS[proof.chainId] ?? ''),
-  });
+  const client = createChainPublicClient(proof.chainId);
 
   let receipt: Awaited<ReturnType<typeof client.getTransactionReceipt>>;
   try {

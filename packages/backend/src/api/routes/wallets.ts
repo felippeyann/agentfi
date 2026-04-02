@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { PrismaClient } from '@prisma/client';
-import { createPublicClient, http, getAddress, formatEther, formatUnits } from 'viem';
-import { getChain, RPC_URLS } from '../../config/chains.js';
+import { getAddress, formatEther, formatUnits } from 'viem';
+import { createChainPublicClient } from '../../config/chains.js';
 
 const db = new PrismaClient();
 
@@ -90,10 +90,7 @@ export async function walletRoutes(fastify: FastifyInstance) {
 
     const balances = await Promise.all(
       chainIds.map(async (chainId) => {
-        const client = createPublicClient({
-          chain: getChain(chainId),
-          transport: http(RPC_URLS[chainId] ?? ''),
-        });
+        const client = createChainPublicClient(chainId);
         const address = getAddress(agent.safeAddress);
         const ethBalance = await client.getBalance({ address });
         const tokens = COMMON_TOKENS[chainId] ?? [];
@@ -142,10 +139,7 @@ export async function walletRoutes(fastify: FastifyInstance) {
     if (!agent) throw new Error('Agent not found');
 
     const chainId = parseInt(query.chainId ?? '1');
-    const client = createPublicClient({
-      chain: getChain(chainId),
-      transport: http(RPC_URLS[chainId] ?? ''),
-    });
+    const client = createChainPublicClient(chainId);
     const address = getAddress(agent.safeAddress);
     const tokens = COMMON_TOKENS[chainId] ?? [];
 

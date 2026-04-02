@@ -5,13 +5,16 @@
 
 import {
   createPublicClient,
-  createWalletClient,
   http,
   type Address,
   type Hex,
   type PublicClient,
 } from 'viem';
-import { getChain, RPC_URLS, FALLBACK_RPC_URLS } from '../../config/chains.js';
+import {
+  getChain,
+  getPrimaryRpcUrl,
+  getSecondaryRpcUrl,
+} from '../../config/chains.js';
 import { TurnkeyService } from '../wallet/turnkey.service.js';
 
 export interface SubmissionResult {
@@ -96,9 +99,9 @@ export class SubmitterService {
   }
 
   private getPublicClient(chainId: number, useFallback: boolean): PublicClient {
-    const url = useFallback
-      ? FALLBACK_RPC_URLS[chainId] ?? RPC_URLS[chainId]
-      : RPC_URLS[chainId];
+    const primary = getPrimaryRpcUrl(chainId);
+    const secondary = getSecondaryRpcUrl(chainId);
+    const url = useFallback ? secondary ?? primary : primary;
 
     if (!url) throw new Error(`No RPC URL for chain ${chainId}`);
 

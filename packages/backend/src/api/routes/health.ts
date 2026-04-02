@@ -1,11 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { PrismaClient } from '@prisma/client';
 import { Redis } from 'ioredis';
-import { createPublicClient, http } from 'viem';
-import { mainnet } from 'viem/chains';
 import { TurnkeyService } from '../../services/wallet/turnkey.service.js';
 import { env } from '../../config/env.js';
-import { RPC_URLS } from '../../config/chains.js';
+import { createChainPublicClient } from '../../config/chains.js';
 
 const db = new PrismaClient();
 const redis = new Redis(env.REDIS_URL, {
@@ -35,10 +33,7 @@ async function checkRedis(): Promise<boolean> {
 
 async function checkRpc(): Promise<boolean> {
   try {
-    const client = createPublicClient({
-      chain: mainnet,
-      transport: http(RPC_URLS[1] ?? ''),
-    });
+    const client = createChainPublicClient(1);
     await client.getBlockNumber();
     return true;
   } catch {

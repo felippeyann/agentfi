@@ -1,7 +1,7 @@
 import Safe, { SafeFactory } from '@safe-global/protocol-kit';
 import type { SafeAccountConfig } from '@safe-global/protocol-kit';
-import { createPublicClient, http, getAddress, type Address } from 'viem';
-import { getChain, RPC_URLS } from '../../config/chains.js';
+import { getAddress, type Address } from 'viem';
+import { createChainPublicClient, getPrimaryRpcUrl } from '../../config/chains.js';
 import { getContracts } from '../../config/contracts.js';
 
 export interface DeployedSafe {
@@ -21,8 +21,7 @@ export class SafeService {
   }): Promise<DeployedSafe> {
     const { ownerAddress, chainId, signerPrivateKey } = params;
     const contracts = getContracts(chainId);
-    const rpcUrl = RPC_URLS[chainId];
-    if (!rpcUrl) throw new Error(`No RPC URL for chain ${chainId}`);
+    const rpcUrl = getPrimaryRpcUrl(chainId);
 
     const safeFactory = await SafeFactory.init({
       provider: rpcUrl,
@@ -66,8 +65,7 @@ export class SafeService {
     chainId: number;
     signerPrivateKey: string;
   }): Promise<Awaited<ReturnType<InstanceType<typeof SafeFactory>['deploySafe']>>> {
-    const rpcUrl = RPC_URLS[params.chainId];
-    if (!rpcUrl) throw new Error(`No RPC URL for chain ${params.chainId}`);
+    const rpcUrl = getPrimaryRpcUrl(params.chainId);
 
     // Safe.init is a static method; cast needed due to CJS/ESM interop under NodeNext
     return (Safe as any).init({
@@ -85,13 +83,7 @@ export class SafeService {
     moduleAddress: Address;
     chainId: number;
   }): Promise<boolean> {
-    const rpcUrl = RPC_URLS[params.chainId];
-    if (!rpcUrl) return false;
-
-    const publicClient = createPublicClient({
-      chain: getChain(params.chainId),
-      transport: http(rpcUrl),
-    });
+    const publicClient = createChainPublicClient(params.chainId);
 
     // Safe ABI for isModuleEnabled
     const result = await publicClient.readContract({
@@ -116,13 +108,7 @@ export class SafeService {
    * Gets the ETH balance of a Safe.
    */
   async getSafeBalance(params: { safeAddress: Address; chainId: number }): Promise<bigint> {
-    const rpcUrl = RPC_URLS[params.chainId];
-    if (!rpcUrl) throw new Error(`No RPC URL for chain ${params.chainId}`);
-
-    const publicClient = createPublicClient({
-      chain: getChain(params.chainId),
-      transport: http(rpcUrl),
-    });
+    const publicClient = createChainPublicClient(params.chainId);
 
     return publicClient.getBalance({ address: params.safeAddress });
   }

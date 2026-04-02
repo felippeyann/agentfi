@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { PrismaClient } from '@prisma/client';
-import { getAddress, parseUnits, maxUint256, createPublicClient, http } from 'viem';
+import { getAddress, parseUnits, maxUint256 } from 'viem';
 import { TransactionBuilder } from '../../services/transaction/builder.service.js';
 import { SimulatorService } from '../../services/transaction/simulator.service.js';
 import { ExecutorService } from '../../services/transaction/executor.service.js';
@@ -10,6 +10,7 @@ import { FeeService } from '../../services/policy/fee.service.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
 import { weiToUsd } from '../../services/transaction/price.service.js';
 import { getContracts } from '../../config/contracts.js';
+import { createChainPublicClient } from '../../config/chains.js';
 import { logger } from '../middleware/logger.js';
 import type { Address } from 'viem';
 
@@ -54,9 +55,7 @@ async function getTokenDecimals(address: string, chainId: number): Promise<numbe
   const checksummed = getAddress(address);
   if (KNOWN_DECIMALS[checksummed] !== undefined) return KNOWN_DECIMALS[checksummed]!;
 
-  const { createPublicClient, http } = await import('viem');
-  const { getChain, RPC_URLS } = await import('../../config/chains.js');
-  const client = createPublicClient({ chain: getChain(chainId), transport: http(RPC_URLS[chainId] ?? '') });
+  const client = createChainPublicClient(chainId);
 
   const decimals = await client.readContract({
     address: checksummed as Address,
@@ -114,14 +113,10 @@ async function getQuotedAmountOut(params: {
   fee: number;
 }): Promise<bigint> {
   try {
-    const { getChain, RPC_URLS } = await import('../../config/chains.js');
     const quoterAddress = QUOTER_ADDRESSES[params.chainId];
     if (!quoterAddress) return 0n;
 
-    const client = createPublicClient({
-      chain: getChain(params.chainId),
-      transport: http(RPC_URLS[params.chainId] ?? ''),
-    });
+    const client = createChainPublicClient(params.chainId);
 
     const [amountOut] = await client.simulateContract({
       address: quoterAddress,
@@ -498,14 +493,8 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     const decimals = await getTokenDecimals(body.asset, body.chainId);
     const amountWei = parseUnits(body.amount, decimals);
 
-    const { createPublicClient, http } = await import('viem');
-    const { getChain, RPC_URLS } = await import('../../config/chains.js');
-
     // Get actual Aave pool address from address provider
-    const publicClient = createPublicClient({
-      chain: getChain(body.chainId),
-      transport: http(RPC_URLS[body.chainId] ?? ''),
-    });
+    const publicClient = createChainPublicClient(body.chainId);
 
     const poolAddress = await publicClient.readContract({
       address: contracts.aavePoolAddressProvider,
@@ -610,14 +599,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     }
 
     const { getContracts } = await import('../../config/contracts.js');
-    const { createPublicClient, http, maxUint256 } = await import('viem');
-    const { getChain, RPC_URLS } = await import('../../config/chains.js');
 
     const contracts = getContracts(body.chainId);
-    const publicClient = createPublicClient({
-      chain: getChain(body.chainId),
-      transport: http(RPC_URLS[body.chainId] ?? ''),
-    });
+    const publicClient = createChainPublicClient(body.chainId);
 
     const poolAddress = await publicClient.readContract({
       address: contracts.aavePoolAddressProvider,

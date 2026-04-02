@@ -1,25 +1,10 @@
 import { Pool } from '@aave/contract-helpers';
-import { createPublicClient, http } from 'viem';
-import { mainnet, base, arbitrum, polygon } from 'viem/chains';
 import { ethers } from 'ethers';
-
-const CHAINS: Record<number, any> = {
-  1: mainnet,
-  8453: base,
-  42161: arbitrum,
-  137: polygon
-};
+import { getPrimaryRpcUrl } from '../../config/chains.js';
 
 export class AaveService {
   private getProvider(chainId: number) {
-    const alchemyKey = process.env['ALCHEMY_API_KEY'];
-    const rpcUrls: Record<number, string> = {
-      1:     alchemyKey ? `https://eth-mainnet.g.alchemy.com/v2/${alchemyKey}` : 'https://cloudflare-eth.com',
-      8453:  alchemyKey ? `https://base-mainnet.g.alchemy.com/v2/${alchemyKey}` : 'https://mainnet.base.org',
-      42161: alchemyKey ? `https://arb-mainnet.g.alchemy.com/v2/${alchemyKey}` : 'https://arb1.arbitrum.io/rpc',
-      137:   alchemyKey ? `https://polygon-mainnet.g.alchemy.com/v2/${alchemyKey}` : 'https://polygon-rpc.com',
-    };
-    const url = rpcUrls[chainId] ?? rpcUrls[1]!;
+    const url = getPrimaryRpcUrl(chainId);
     return new ethers.providers.JsonRpcProvider(url);
   }
 
