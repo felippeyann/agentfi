@@ -268,6 +268,24 @@ $env:RAILWAY_PRODUCTION_WORKER_SERVICE='backend'
 node scripts/check-production-deploy-env.mjs
 ```
 
+Expected output patterns:
+
+1. Pass path
+- Contains: `[deploy-preflight] Production deploy config preflight passed`
+- Exit code: `0`
+
+2. Missing required variable
+- Contains: `::error::Missing required production deploy variable:`
+- Exit code: non-zero
+
+3. Placeholder value
+- Contains: `::error::<VAR_NAME> appears to use a placeholder value`
+- Exit code: non-zero
+
+4. Duplicate service names
+- Contains: `::error::RAILWAY_PRODUCTION_WORKER_SERVICE must not equal RAILWAY_PRODUCTION_SERVICE`
+- Exit code: non-zero
+
 ---
 
 ## STEP 4.3 — Verify admin auth audit logs
