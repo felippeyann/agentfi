@@ -159,6 +159,14 @@ This avoids N API replicas polling BullMQ marker keys and helps prevent Redis re
 
 ---
 
+## STEP 4.2 — Follow release and rollback runbook
+
+Use the operational runbook for every production deployment and incident rollback:
+
+- `docs/production-release-runbook.md`
+
+---
+
 ## STEP 5 — Register your first agent
 
 ```bash

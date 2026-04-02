@@ -9,6 +9,9 @@ name: Deploy Production
 #
 # Optional repository variable:
 # - RAILWAY_PRODUCTION_SERVICE (defaults to `backend`)
+#
+# Operations runbook:
+# - docs/production-release-runbook.md
 
 on:
   workflow_dispatch:

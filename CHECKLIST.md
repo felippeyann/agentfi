@@ -239,6 +239,7 @@ The project is hosted on **Railway**. No VPS or manual server management needed.
 - Configure `RAILWAY_TOKEN`, `RAILWAY_PROJECT_ID`, and `RAILWAY_PRODUCTION_ENVIRONMENT` in repository secrets
 - Optional: set repository variable `RAILWAY_PRODUCTION_SERVICE` (default: `backend`)
 - Trigger `Deploy Production` manually (workflow_dispatch) or push a `v*.*.*` tag
+- Follow `docs/production-release-runbook.md` for verification and rollback procedure
 
 **Recommended for metered Redis (Upstash):**
 - Run one dedicated backend worker process with `TRANSACTION_WORKER_ENABLED=true`
