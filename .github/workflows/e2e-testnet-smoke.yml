@@ -1,0 +1,30 @@
+name: E2E Testnet Smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * *'
+
+jobs:
+  testnet-smoke:
+    name: Base Sepolia Smoke
+    runs-on: ubuntu-latest
+    if: ${{ secrets.E2E_TESTNET_RPC_URL != '' && secrets.E2E_TESTNET_POLICY_MODULE_ADDRESS != '' && secrets.E2E_TESTNET_EXECUTOR_ADDRESS != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - run: npx prisma generate --schema=packages/backend/src/db/schema.prisma
+
+      - working-directory: packages/backend
+        env:
+          E2E_TESTNET_RPC_URL: ${{ secrets.E2E_TESTNET_RPC_URL }}
+          E2E_TESTNET_POLICY_MODULE_ADDRESS: ${{ secrets.E2E_TESTNET_POLICY_MODULE_ADDRESS }}
+          E2E_TESTNET_EXECUTOR_ADDRESS: ${{ secrets.E2E_TESTNET_EXECUTOR_ADDRESS }}
+        run: npm run test:e2e:testnet
