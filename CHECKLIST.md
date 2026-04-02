@@ -92,7 +92,7 @@ Option B — Hosted:
 
 ## STEP 7 — Your Operator Fee Wallet
 
-This is the Ethereum address where all protocol fees land.
+This is the Ethereum address where protocol fees land for executor-routed swaps.
 It can be any wallet you control (MetaMask, hardware wallet, anything).
 
 1. Open MetaMask (or any wallet) and copy your address.
@@ -100,8 +100,8 @@ It can be any wallet you control (MetaMask, hardware wallet, anything).
 
    OPERATOR_FEE_WALLET=0xYourAddressHere
 
-Every time an agent completes a transaction, a fee (0.30% FREE / 0.15% PRO / 0.05% ENTERPRISE)
-is routed here. This is your revenue.
+When a swap is routed through `AgentExecutor`, the protocol fee
+(0.30% FREE / 0.15% PRO / 0.05% ENTERPRISE) is routed here.
 
 ---
 

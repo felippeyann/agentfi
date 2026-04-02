@@ -121,7 +121,7 @@ forge script script/Deploy.s.sol --rpc-url arbitrum --broadcast --verify
 
 ## Self-hosting fee model
 
-When you self-host, protocol fees on swaps route to your `OPERATOR_FEE_WALLET`. You keep the revenue.
+When you self-host, protocol fees for executor-routed swaps flow to your `OPERATOR_FEE_WALLET`.
 
 | Tier | Monthly | Protocol Fee | Tx Limit |
 |------|---------|-------------|----------|
@@ -129,7 +129,8 @@ When you self-host, protocol fees on swaps route to your `OPERATOR_FEE_WALLET`. 
 | PRO | $99 (Stripe) | 0.15% | 10,000 tx/mo |
 | ENTERPRISE | Custom | 0.05% | Unlimited |
 
-Fee collection is atomic and on-chain via `AgentExecutor` — no accounts receivable.
+V1 collection is atomic and on-chain via `AgentExecutor` for wrapped swap paths.
+Other actions are usage-metered for limits, with no off-chain receivables.
 
 ---
 

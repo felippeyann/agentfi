@@ -9,7 +9,7 @@
  *
  * Fee model:
  *   - ETH-value transactions: fee = value * feeBps / 10000 (on-chain, real-time)
- *   - ERC-20 only txs (value=0): fee tracked in DB, collected via monthly settlement
+ *   - ERC-20 only txs (value=0): not wrapped, so no on-chain fee collection in this path
  *
  * Contract addresses are read from env:
  *   EXECUTOR_ADDRESS_<chainId>=0x...

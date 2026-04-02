@@ -1,10 +1,10 @@
 /**
  * Fee Service — AgentFi Revenue Engine
  *
- * Revenue model:
- *  - Protocol fee (basis points) charged on every swap/deposit/withdraw
- *  - Fee is collected by routing a small portion of the transaction to the
- *    OPERATOR_FEE_WALLET before executing the agent's intended action.
+ * Revenue model (current implementation):
+ *  - Tier fee schedule is computed for all transaction types.
+ *  - On-chain fee collection is recorded only when a transaction is routed
+ *    through AgentExecutor (routedViaExecutor=true), currently swap paths.
  *  - Subscription tiers reduce the fee rate:
  *      FREE:       30 bps (0.30%)
  *      PRO:        15 bps (0.15%) — $99/month
