@@ -193,6 +193,12 @@ Preflight rule coverage in CI (`.github/workflows/ci.yml`, job `Deploy Preflight
 
 Local reproduction commands (from repository root):
 
+Quick all-in-one runner:
+
+```bash
+npm run preflight:deploy-scenarios
+```
+
 1. Pass path
 
 ```bash
