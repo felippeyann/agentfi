@@ -73,10 +73,20 @@ async function addDailyVolumeAtomic(agentId: string, date: string, valueUsd: str
   `;
 }
 
+function isRedisQuotaExceededError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const message = err.message.toLowerCase();
+  return (
+    message.includes('max requests limit exceeded') ||
+    message.includes('upstash.com/docs/redis/troubleshooting/max_requests_limit')
+  );
+}
+
 export function startTransactionWorker(): Worker<TransactionJobData> {
   const workerConcurrency = env.TRANSACTION_WORKER_CONCURRENCY;
   const workerDrainDelaySec = env.TRANSACTION_WORKER_DRAIN_DELAY_SEC;
   const workerStalledIntervalMs = env.TRANSACTION_WORKER_STALLED_INTERVAL_MS;
+  const stopOnRedisQuota = env.TRANSACTION_WORKER_STOP_ON_REDIS_QUOTA === 'true';
 
   const worker = new Worker<TransactionJobData>(
     'transactions',
@@ -168,6 +178,32 @@ export function startTransactionWorker(): Worker<TransactionJobData> {
     },
     'Transaction worker started',
   );
+
+  let quotaShutdownTriggered = false;
+  worker.on('error', async (err) => {
+    logger.error({ err }, 'Transaction worker runtime error');
+
+    if (
+      !stopOnRedisQuota ||
+      quotaShutdownTriggered ||
+      !isRedisQuotaExceededError(err)
+    ) {
+      return;
+    }
+
+    quotaShutdownTriggered = true;
+    logger.error(
+      'Redis provider request quota exceeded; stopping worker to avoid request burn. ' +
+      'Increase Redis plan or reduce worker polling/replicas before re-enabling.',
+    );
+
+    try {
+      await worker.close();
+      logger.warn('Transaction worker stopped after Redis quota exhaustion');
+    } catch (closeErr) {
+      logger.error({ closeErr }, 'Failed to close transaction worker after Redis quota exhaustion');
+    }
+  });
 
   // On final failure (all retries exhausted), move to dead-letter queue and mark FAILED.
   worker.on('failed', async (job: Job<TransactionJobData> | undefined, err: Error) => {

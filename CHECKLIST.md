@@ -259,6 +259,7 @@ The project is hosted on **Railway**. No VPS or manual server management needed.
 **Recommended for metered Redis (Upstash):**
 - Run one dedicated backend worker process with `TRANSACTION_WORKER_ENABLED=true`
 - Set `TRANSACTION_WORKER_ENABLED=false` on API replicas
+- Keep `TRANSACTION_WORKER_STOP_ON_REDIS_QUOTA=true` to auto-stop on provider quota exhaustion
 - Worker start command: `cd packages/backend && npm run worker`
 
 ---

@@ -10,7 +10,7 @@ Este documento delineia o roadmap de desenvolvimento técnico e evolução de ne
 - [x] Definição de Arquitetura (Monorepo)
 - [x] Integração MPC (Turnkey) e Abstração de Contas (Safe & Smart Contracts base)
 - [x] Criação do MCP (Model Context Protocol) Server
-- [ ] Orquestração de Backend (Fila BullMQ, Retry policies, Fallback Infura/Alchemy)
+- [x] Orquestração de Backend (Fila BullMQ, Retry policies, Fallback Infura/Alchemy)
 - [x] Testes End-to-End no fork local e Testnet
 - [ ] Lançamento V1 (Auto-Hospedado) focado na adoção orgânica pelos desenvolvedores de LLMs.
 

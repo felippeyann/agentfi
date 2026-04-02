@@ -1,6 +1,14 @@
 import { z } from 'zod';
 import 'dotenv/config';
 
+const transactionWorkerEnabledDefault: 'true' | 'false' =
+  process.env['TRANSACTION_WORKER_ENABLED'] === 'true' ||
+  process.env['TRANSACTION_WORKER_ENABLED'] === 'false'
+    ? process.env['TRANSACTION_WORKER_ENABLED']
+    : (process.env['NODE_ENV'] ?? 'development') === 'production'
+      ? 'false'
+      : 'true';
+
 const envSchema = z.object({
   // Server
   // Railway injects PORT, fallback to API_PORT, then 3000
@@ -29,10 +37,14 @@ const envSchema = z.object({
   REDIS_URL: z.string().url(),
 
   // Queue worker controls
-  TRANSACTION_WORKER_ENABLED: z.enum(['true', 'false']).default('true'),
+  // Default behavior:
+  // - production: disabled unless explicitly enabled (to avoid multiple API replicas polling Redis)
+  // - non-production: enabled
+  TRANSACTION_WORKER_ENABLED: z.enum(['true', 'false']).default(transactionWorkerEnabledDefault),
   TRANSACTION_WORKER_CONCURRENCY: z.coerce.number().int().positive().default(5),
   TRANSACTION_WORKER_DRAIN_DELAY_SEC: z.coerce.number().int().positive().default(30),
   TRANSACTION_WORKER_STALLED_INTERVAL_MS: z.coerce.number().int().positive().default(120_000),
+  TRANSACTION_WORKER_STOP_ON_REDIS_QUOTA: z.enum(['true', 'false']).default('true'),
 
   // Contracts
   POLICY_MODULE_ADDRESS_1: z.string().optional(),
