@@ -28,18 +28,23 @@ It is designed for Railway deployment via GitHub Actions workflow Deploy Product
 - Backend tests green
 - Contract tests green
 
+5. Local deploy config checks are green:
+- Run `npm run preflight:deploy-scenarios`
+- Confirm all scenarios report PASS
+
 ---
 
 ## 2. Standard Production Release
 
 Option A: Manual dispatch (recommended)
 
-1. Open GitHub Actions and run workflow Deploy Production.
-2. Provide input ref:
+1. Run `npm run preflight:deploy-scenarios` from repository root.
+2. Open GitHub Actions and run workflow Deploy Production.
+3. Provide input ref:
 - Release tag (preferred): vX.Y.Z
 - Or exact commit SHA for a controlled hotfix deploy.
-3. Wait for workflow completion and verify Railway deployment state.
-4. If worker service is configured, confirm worker deployment completed too.
+4. Wait for workflow completion and verify Railway deployment state.
+5. If worker service is configured, confirm worker deployment completed too.
 
 Option B: Tag-triggered release
 

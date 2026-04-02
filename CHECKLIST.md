@@ -216,7 +216,11 @@ Copy them into `.env`:
 
    npm run preflight
 
-This checks all 8 required systems are online. Fix any red items before deploying.
+   npm run preflight:deploy-scenarios
+
+The first command checks runtime dependencies (database, redis, RPC, Turnkey, contracts).
+The second command validates deploy-config pass/fail scenarios used by CI.
+Fix any red items before deploying.
 
 ---
 
