@@ -146,3 +146,28 @@ For each production release, capture:
 4. Verification results
 5. Rollback performed? (yes/no)
 6. Incident link (if any)
+
+---
+
+## 8. Alert Thresholds (Auth and Access)
+
+Track these signals from app logs and gateway metrics:
+
+1. Admin lockout events (`admin_login_blocked`)
+- Warning: >= 3 events in 10 minutes from the same IP/user fingerprint
+- Critical: >= 10 events in 10 minutes across multiple fingerprints
+
+2. Invalid admin credential events (`admin_login_invalid_credentials`)
+- Warning: >= 10 events in 5 minutes
+- Critical: >= 30 events in 5 minutes
+
+3. Unauthorized admin proxy responses (HTTP 401 from admin API routes)
+- Warning: >= 20 responses in 5 minutes
+- Critical: >= 100 responses in 5 minutes
+
+Response playbook for warning or critical thresholds:
+
+1. Verify whether the source is expected operator activity.
+2. If suspicious, rotate `ADMIN_PASSWORD` immediately.
+3. Review ingress controls and block abusive source IPs at edge/WAF.
+4. Escalate incident and capture forensic timeline in the audit trail.
