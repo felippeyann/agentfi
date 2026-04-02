@@ -9,6 +9,7 @@ name: Deploy Production
 #
 # Optional repository variable:
 # - RAILWAY_PRODUCTION_SERVICE (defaults to `backend`)
+# - RAILWAY_PRODUCTION_WORKER_SERVICE (optional dedicated worker service)
 #
 # Operations runbook:
 # - docs/production-release-runbook.md
@@ -36,6 +37,7 @@ jobs:
       RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
       RAILWAY_PRODUCTION_ENVIRONMENT: ${{ secrets.RAILWAY_PRODUCTION_ENVIRONMENT }}
       RAILWAY_PRODUCTION_SERVICE: ${{ vars.RAILWAY_PRODUCTION_SERVICE || 'backend' }}
+      RAILWAY_PRODUCTION_WORKER_SERVICE: ${{ vars.RAILWAY_PRODUCTION_WORKER_SERVICE || '' }}
 
     steps:
       - name: Validate required secrets
@@ -74,5 +76,14 @@ jobs:
           railway up \
             --ci \
             --service "$RAILWAY_PRODUCTION_SERVICE" \
+            --environment "$RAILWAY_PRODUCTION_ENVIRONMENT" \
+            --detach
+
+      - name: Deploy worker service to Railway production
+        if: ${{ env.RAILWAY_PRODUCTION_WORKER_SERVICE != '' }}
+        run: |
+          railway up \
+            --ci \
+            --service "$RAILWAY_PRODUCTION_WORKER_SERVICE" \
             --environment "$RAILWAY_PRODUCTION_ENVIRONMENT" \
             --detach

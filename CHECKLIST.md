@@ -238,6 +238,7 @@ The project is hosted on **Railway**. No VPS or manual server management needed.
 **To deploy production:**
 - Configure `RAILWAY_TOKEN`, `RAILWAY_PROJECT_ID`, and `RAILWAY_PRODUCTION_ENVIRONMENT` in repository secrets
 - Optional: set repository variable `RAILWAY_PRODUCTION_SERVICE` (default: `backend`)
+- Optional: set repository variable `RAILWAY_PRODUCTION_WORKER_SERVICE` (for dedicated worker deploy)
 - Trigger `Deploy Production` manually (workflow_dispatch) or push a `v*.*.*` tag
 - Follow `docs/production-release-runbook.md` for verification and rollback procedure
 

@@ -17,6 +17,7 @@ It is designed for Railway deployment via GitHub Actions workflow Deploy Product
 
 2. Service variable is configured (optional):
 - RAILWAY_PRODUCTION_SERVICE (default: backend)
+- RAILWAY_PRODUCTION_WORKER_SERVICE (for dedicated worker deploy)
 
 3. Production health baseline is green:
 - API health endpoint responds
@@ -38,6 +39,7 @@ Option A: Manual dispatch (recommended)
 - Release tag (preferred): vX.Y.Z
 - Or exact commit SHA for a controlled hotfix deploy.
 3. Wait for workflow completion and verify Railway deployment state.
+4. If worker service is configured, confirm worker deployment completed too.
 
 Option B: Tag-triggered release
 

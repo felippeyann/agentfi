@@ -168,6 +168,11 @@ Use the operational runbook for every production deployment and incident rollbac
 
 - `docs/production-release-runbook.md`
 
+If you run a dedicated worker service, set this repository variable so the
+production workflow deploys both services in one run:
+
+- `RAILWAY_PRODUCTION_WORKER_SERVICE`
+
 ---
 
 ## STEP 5 — Register your first agent
