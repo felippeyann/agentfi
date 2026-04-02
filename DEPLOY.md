@@ -176,6 +176,12 @@ production workflow deploys both services in one run:
 
 - `RAILWAY_PRODUCTION_WORKER_SERVICE`
 
+The production workflow now runs a config preflight before deploying:
+
+- `node scripts/check-production-deploy-env.mjs`
+
+It fails fast when required deploy variables are missing or malformed.
+
 ---
 
 ## STEP 4.3 — Verify admin auth audit logs

@@ -68,6 +68,9 @@ jobs:
         with:
           node-version: 20
 
+      - name: Production deploy config preflight
+        run: node scripts/check-production-deploy-env.mjs
+
       - name: Install Railway CLI
         run: npm install --global @railway/cli
 
