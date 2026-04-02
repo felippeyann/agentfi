@@ -176,3 +176,11 @@ Response playbook for warning or critical thresholds:
 2. If suspicious, rotate `ADMIN_PASSWORD` immediately.
 3. Review ingress controls and block abusive source IPs at edge/WAF.
 4. Escalate incident and capture forensic timeline in the audit trail.
+
+---
+
+## 9. Go/No-Go Release Template
+
+Use this paste-ready template before dispatching production deploys:
+
+- `docs/release-go-no-go-template.md`

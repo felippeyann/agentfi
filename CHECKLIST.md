@@ -245,6 +245,7 @@ The project is hosted on **Railway**. No VPS or manual server management needed.
 - Optional: set repository variable `RAILWAY_PRODUCTION_WORKER_SERVICE` (for dedicated worker deploy)
 - Trigger `Deploy Production` manually (workflow_dispatch) or push a `v*.*.*` tag
 - Follow `docs/production-release-runbook.md` for verification and rollback procedure
+- Use `docs/release-go-no-go-template.md` to record go/no-go before dispatch
 
 **Recommended for metered Redis (Upstash):**
 - Run one dedicated backend worker process with `TRANSACTION_WORKER_ENABLED=true`
