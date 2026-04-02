@@ -19,12 +19,16 @@ async function fetchPrice(coingeckoId: string): Promise<number> {
     const res = await fetch(
       `${COINGECKO_BASE}/simple/price?ids=${coingeckoId}&vs_currencies=usd`,
     );
-    if (!res.ok) return 0;
+    if (!res.ok) {
+      console.warn(`[price-service] CoinGecko returned ${res.status} for ${coingeckoId}`);
+      return 0;
+    }
     const data = (await res.json()) as Record<string, { usd: number }>;
     const price = data[coingeckoId]?.usd ?? 0;
     priceCache.set(coingeckoId, { price, ts: Date.now() });
     return price;
-  } catch {
+  } catch (err) {
+    console.warn(`[price-service] CoinGecko fetch failed for ${coingeckoId}:`, err instanceof Error ? err.message : err);
     return 0;
   }
 }
