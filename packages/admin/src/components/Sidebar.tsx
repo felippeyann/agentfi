@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { signOut } from "next-auth/react";
 import { motion } from "framer-motion";
 import { LayoutDashboard, Users, Activity, ShieldCheck, Settings } from "lucide-react";
 import { cn } from "../lib/utils";
@@ -16,6 +17,7 @@ const navItems = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  if (pathname === "/login") return null;
 
   return (
     <aside className="w-64 h-screen border-r border-brand-border bg-brand-black flex flex-col pt-6 px-4 shrink-0 transition-all duration-300">
@@ -66,6 +68,14 @@ export function Sidebar() {
             <p className="text-sm text-white font-medium">Enterprise</p>
           </div>
         </div>
+
+        <button
+          type="button"
+          onClick={() => signOut({ callbackUrl: "/login" })}
+          className="mt-3 w-full rounded-lg border border-brand-border bg-white/5 px-3 py-2 text-sm text-gray-200 transition hover:bg-white/10"
+        >
+          Sign out
+        </button>
       </div>
     </aside>
   );

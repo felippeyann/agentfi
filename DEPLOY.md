@@ -28,6 +28,9 @@ Add every variable below. The values come from your third-party accounts.
 | `NODE_ENV` | `production` | — |
 | `API_SECRET` | 64-char random string | `openssl rand -hex 32` |
 | `ADMIN_SECRET` | 64-char random string | `openssl rand -hex 32` |
+| `ADMIN_USERNAME` | Admin login username | Operator-defined |
+| `ADMIN_PASSWORD` | Strong admin login password | Operator-defined |
+| `NEXTAUTH_SECRET` | Session signing secret | `openssl rand -base64 32` |
 | `OPERATOR_FEE_WALLET` | Your ETH address | Any wallet you control |
 | `DATABASE_URL` | Neon connection string | Railway Postgres plugin or neon.tech |
 | `REDIS_URL` | Redis connection string | Railway Redis plugin or upstash.com |
