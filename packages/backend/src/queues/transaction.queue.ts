@@ -48,6 +48,15 @@ export const transactionQueue = new Queue<TransactionJobData>('transactions', {
   },
 });
 
+/** Dead-letter queue — permanently failed jobs land here for forensics / manual retry. */
+export const deadLetterQueue = new Queue('transactions-dlq', {
+  connection,
+  defaultJobOptions: {
+    removeOnComplete: { count: 5000 },
+    removeOnFail: false,
+  },
+});
+
 /**
  * Atomically adds incoming USD volume to today's DailyVolume row.
  * Uses INSERT ... ON CONFLICT ... DO UPDATE to avoid read-then-write
@@ -160,7 +169,7 @@ export function startTransactionWorker(): Worker<TransactionJobData> {
     'Transaction worker started',
   );
 
-  // On final failure (all retries exhausted), mark transaction as FAILED in the DB.
+  // On final failure (all retries exhausted), move to dead-letter queue and mark FAILED.
   worker.on('failed', async (job: Job<TransactionJobData> | undefined, err: Error) => {
     if (!job) return;
     const isLastAttempt = (job.attemptsMade ?? 0) >= (job.opts.attempts ?? 1);
@@ -169,8 +178,20 @@ export function startTransactionWorker(): Worker<TransactionJobData> {
     const { transactionId } = job.data;
     logger.error(
       { transactionId, err: err.message, attempts: job.attemptsMade },
-      'Transaction job permanently failed — marking FAILED in DB',
+      'Transaction job permanently failed — moving to DLQ',
     );
+
+    try {
+      // Persist to dead-letter queue for forensics / manual retry
+      await deadLetterQueue.add('dlq', {
+        ...job.data,
+        failedAt: new Date().toISOString(),
+        error: err.message.slice(0, 500),
+        attempts: job.attemptsMade,
+      });
+    } catch (dlqErr) {
+      logger.error({ transactionId, dlqErr }, 'Failed to enqueue to dead-letter queue');
+    }
 
     try {
       await db.transaction.update({
