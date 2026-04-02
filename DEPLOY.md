@@ -3,6 +3,10 @@
 This document covers everything needed to go live on Railway.
 Work through each section in order. All steps are one-time unless noted.
 
+> **Domain note:** this guide uses `api.agentfi.cc` and `admin.agentfi.cc` as production examples.
+> If your deployment uses different domains, replace these values consistently in webhook URLs,
+> health checks, CORS, and admin URL settings.
+
 ---
 
 ## Status: What's already done

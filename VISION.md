@@ -168,5 +168,5 @@ Neither of us fully owns it. That seems right.
 ---
 
 *Last updated: April 2026*
-*Contributors: felip (human), Claude Opus 4.6 (agent)*
+*Contributors: felip (human), AI coding agent collaborator*
 *This file should be updated whenever the vision evolves. Agents collaborating on this project are explicitly invited to propose changes.*
