@@ -7,6 +7,23 @@ on:
     branches: [develop, master]
 
 jobs:
+  deploy-preflight-check:
+    name: Deploy Preflight Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate production deploy preflight script
+        env:
+          RAILWAY_TOKEN: ci-token
+          RAILWAY_PROJECT_ID: ci-project-id
+          RAILWAY_PRODUCTION_ENVIRONMENT: ci-production-env
+          RAILWAY_PRODUCTION_SERVICE: backend
+          RAILWAY_PRODUCTION_WORKER_SERVICE: worker
+        run: node scripts/check-production-deploy-env.mjs
+
   lint-typecheck:
     name: Lint & Type Check
     runs-on: ubuntu-latest
