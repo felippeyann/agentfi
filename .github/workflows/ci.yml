@@ -36,6 +36,20 @@ jobs:
             exit 1
           fi
           echo "Negative-path preflight check behaved as expected"
+      - name: Validate preflight failure path (placeholder value)
+        run: |
+          set +e
+          RAILWAY_TOKEN=your-token \
+          RAILWAY_PROJECT_ID=ci-project-id \
+          RAILWAY_PRODUCTION_ENVIRONMENT=ci-production-env \
+          RAILWAY_PRODUCTION_SERVICE=backend \
+          node scripts/check-production-deploy-env.mjs
+          status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "::error::Expected preflight to fail when placeholder values are used"
+            exit 1
+          fi
+          echo "Placeholder-value preflight failure behaved as expected"
 
   lint-typecheck:
     name: Lint & Type Check
