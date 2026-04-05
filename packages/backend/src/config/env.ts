@@ -30,11 +30,11 @@ const envSchema = z.object({
   TENDERLY_ACCOUNT: z.string().optional(),
   TENDERLY_PROJECT: z.string().optional(),
 
-  // Database
-  DATABASE_URL: z.string().url(),
+  // Database (postgresql:// not accepted by z.url(), use .min(1))
+  DATABASE_URL: z.string().min(1),
 
-  // Redis
-  REDIS_URL: z.string().url(),
+  // Redis (redis:// / rediss:// not accepted by z.url(), use .min(1))
+  REDIS_URL: z.string().min(1),
 
   // Queue worker controls
   // Default behavior:
