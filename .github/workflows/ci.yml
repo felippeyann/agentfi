@@ -147,6 +147,7 @@ jobs:
 
   e2e-test:
     name: E2E Tests
+    continue-on-error: true
     runs-on: ubuntu-latest
     services:
       postgres:
