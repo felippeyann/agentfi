@@ -322,8 +322,10 @@ export async function mcpRoutes(fastify: FastifyInstance) {
       return;
     }
 
-    // Hijack and forward the raw request/response to the SSE transport
+    // Hijack and forward the raw request/response to the SSE transport.
+    // Pass request.body as parsedBody so the SDK doesn't try to re-read
+    // the raw stream (Fastify already consumed it via the content-type parser).
     reply.hijack();
-    await session.transport.handlePostMessage(request.raw, reply.raw);
+    await session.transport.handlePostMessage(request.raw, reply.raw, request.body);
   });
 }
