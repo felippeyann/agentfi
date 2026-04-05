@@ -31,11 +31,10 @@ interface ToolDef {
  * Builds a thin MCP tool list that proxies every call to the backend REST API.
  * The API key is forwarded so agent-level auth still applies.
  */
-function buildProxyTools(apiBaseUrl: string): ToolDef[] {
+function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
   const call = async (
     method: string,
     path: string,
-    apiKey: string,
     body?: unknown,
   ) => {
     const url = `${apiBaseUrl}${path}`;
@@ -55,8 +54,7 @@ function buildProxyTools(apiBaseUrl: string): ToolDef[] {
       name: 'get_wallet',
       description: 'Get the agent wallet address and balances',
       inputSchema: z.object({}),
-      handler: async (_args: Record<string, unknown>) =>
-        call('GET', '/v1/wallets/me', (globalThis as any).__mcpApiKey ?? ''),
+      handler: async () => call('GET', '/v1/wallets/me'),
     },
     {
       name: 'get_balance',
@@ -65,11 +63,7 @@ function buildProxyTools(apiBaseUrl: string): ToolDef[] {
         token: z.string().describe('Token contract address or "native" for ETH'),
       }),
       handler: async (args: Record<string, unknown>) =>
-        call(
-          'GET',
-          `/v1/wallets/balance?token=${args.token}`,
-          (globalThis as any).__mcpApiKey ?? '',
-        ),
+        call('GET', `/v1/wallets/balance?token=${args.token}`),
     },
     {
       name: 'get_token_price',
@@ -80,11 +74,7 @@ function buildProxyTools(apiBaseUrl: string): ToolDef[] {
       }),
       handler: async (args: Record<string, unknown>) => {
         const chainId = args.chainId ?? 8453;
-        return call(
-          'GET',
-          `/v1/wallets/price?token=${args.token}&chainId=${chainId}`,
-          (globalThis as any).__mcpApiKey ?? '',
-        );
+        return call('GET', `/v1/wallets/price?token=${args.token}&chainId=${chainId}`);
       },
     },
     {
@@ -97,12 +87,7 @@ function buildProxyTools(apiBaseUrl: string): ToolDef[] {
         amount: z.string().describe('Amount in wei'),
       }),
       handler: async (args: Record<string, unknown>) =>
-        call(
-          'POST',
-          '/v1/transactions/simulate',
-          (globalThis as any).__mcpApiKey ?? '',
-          { type: 'swap', params: args },
-        ),
+        call('POST', '/v1/transactions/simulate', { type: 'swap', params: args }),
     },
     {
       name: 'execute_swap',
@@ -114,12 +99,7 @@ function buildProxyTools(apiBaseUrl: string): ToolDef[] {
         slippage: z.number().optional().describe('Slippage tolerance in bps (default 50 = 0.5%)'),
       }),
       handler: async (args: Record<string, unknown>) =>
-        call(
-          'POST',
-          '/v1/transactions',
-          (globalThis as any).__mcpApiKey ?? '',
-          { type: 'swap', params: args },
-        ),
+        call('POST', '/v1/transactions', { type: 'swap', params: args }),
     },
     {
       name: 'execute_transfer',
@@ -130,12 +110,7 @@ function buildProxyTools(apiBaseUrl: string): ToolDef[] {
         amount: z.string().describe('Amount in wei'),
       }),
       handler: async (args: Record<string, unknown>) =>
-        call(
-          'POST',
-          '/v1/transactions',
-          (globalThis as any).__mcpApiKey ?? '',
-          { type: 'transfer', params: args },
-        ),
+        call('POST', '/v1/transactions', { type: 'transfer', params: args }),
     },
     {
       name: 'supply_aave',
@@ -145,12 +120,7 @@ function buildProxyTools(apiBaseUrl: string): ToolDef[] {
         amount: z.string().describe('Amount in wei'),
       }),
       handler: async (args: Record<string, unknown>) =>
-        call(
-          'POST',
-          '/v1/transactions',
-          (globalThis as any).__mcpApiKey ?? '',
-          { type: 'aave_supply', params: args },
-        ),
+        call('POST', '/v1/transactions', { type: 'aave_supply', params: args }),
     },
     {
       name: 'withdraw_aave',
@@ -160,12 +130,7 @@ function buildProxyTools(apiBaseUrl: string): ToolDef[] {
         amount: z.string().describe('Amount in wei'),
       }),
       handler: async (args: Record<string, unknown>) =>
-        call(
-          'POST',
-          '/v1/transactions',
-          (globalThis as any).__mcpApiKey ?? '',
-          { type: 'aave_withdraw', params: args },
-        ),
+        call('POST', '/v1/transactions', { type: 'aave_withdraw', params: args }),
     },
     {
       name: 'get_transaction_status',
@@ -174,18 +139,13 @@ function buildProxyTools(apiBaseUrl: string): ToolDef[] {
         transactionId: z.string().describe('Transaction ID returned by execute_*'),
       }),
       handler: async (args: Record<string, unknown>) =>
-        call(
-          'GET',
-          `/v1/transactions/${args.transactionId}`,
-          (globalThis as any).__mcpApiKey ?? '',
-        ),
+        call('GET', `/v1/transactions/${args.transactionId}`),
     },
     {
       name: 'get_agent_policy',
       description: 'Get the current agent policy constraints (spending limits, allowed tokens, etc.)',
       inputSchema: z.object({}),
-      handler: async (_args: Record<string, unknown>) =>
-        call('GET', '/v1/agents/me', (globalThis as any).__mcpApiKey ?? ''),
+      handler: async () => call('GET', '/v1/agents/me'),
     },
   ];
 }
@@ -226,7 +186,7 @@ function createMcpServer(apiKey: string): Server {
     process.env['API_BASE_URL'] ??
     `http://localhost:${process.env['API_PORT'] ?? '3000'}`;
 
-  const tools = buildProxyTools(apiBaseUrl);
+  const tools = buildProxyTools(apiBaseUrl, apiKey);
   const toolRegistry = new Map(tools.map((t) => [t.name, t]));
 
   const server = new Server(
@@ -263,9 +223,6 @@ function createMcpServer(apiKey: string): Server {
         isError: true,
       };
     }
-
-    // Set per-request API key for proxy calls
-    (globalThis as any).__mcpApiKey = apiKey;
 
     try {
       const validated = tool.inputSchema.parse(args);
