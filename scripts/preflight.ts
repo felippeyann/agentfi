@@ -16,7 +16,41 @@ interface CheckResult {
   detail?: string;
 }
 
+interface ChainContractConfig {
+  chainId: number;
+  policyEnv: string;
+  executorEnv: string;
+  rpcUrl: string;
+}
+
 const results: CheckResult[] = [];
+
+const CHAIN_CONFIGS: ChainContractConfig[] = [
+  {
+    chainId: 1,
+    policyEnv: 'POLICY_MODULE_ADDRESS_1',
+    executorEnv: 'EXECUTOR_ADDRESS_1',
+    rpcUrl: `https://eth-mainnet.g.alchemy.com/v2/${process.env['ALCHEMY_API_KEY']}`,
+  },
+  {
+    chainId: 8453,
+    policyEnv: 'POLICY_MODULE_ADDRESS_8453',
+    executorEnv: 'EXECUTOR_ADDRESS_8453',
+    rpcUrl: `https://base-mainnet.g.alchemy.com/v2/${process.env['ALCHEMY_API_KEY']}`,
+  },
+  {
+    chainId: 42161,
+    policyEnv: 'POLICY_MODULE_ADDRESS_42161',
+    executorEnv: 'EXECUTOR_ADDRESS_42161',
+    rpcUrl: `https://arb-mainnet.g.alchemy.com/v2/${process.env['ALCHEMY_API_KEY']}`,
+  },
+  {
+    chainId: 137,
+    policyEnv: 'POLICY_MODULE_ADDRESS_137',
+    executorEnv: 'EXECUTOR_ADDRESS_137',
+    rpcUrl: `https://polygon-mainnet.g.alchemy.com/v2/${process.env['ALCHEMY_API_KEY']}`,
+  },
+];
 
 function check(name: string, passed: boolean, detail?: string) {
   results.push({ name, passed, detail });
@@ -24,6 +58,30 @@ function check(name: string, passed: boolean, detail?: string) {
   const color = passed ? '\x1b[32m' : '\x1b[31m';
   const reset = '\x1b[0m';
   console.log(`  ${color}${icon}${reset} ${name}${detail ? ` — ${detail}` : ''}`);
+}
+
+function resolvePreflightChainIds(): number[] {
+  const override = process.env['PREFLIGHT_CHAIN_IDS'];
+  if (override && override.trim().length > 0) {
+    const parsed = override
+      .split(',')
+      .map((v) => Number(v.trim()))
+      .filter((v) => Number.isInteger(v));
+    if (parsed.length > 0) {
+      return Array.from(new Set(parsed));
+    }
+  }
+
+  const configured = CHAIN_CONFIGS
+    .filter(({ policyEnv, executorEnv }) => !!process.env[policyEnv] || !!process.env[executorEnv])
+    .map(({ chainId }) => chainId);
+
+  if (configured.length > 0) {
+    return configured;
+  }
+
+  // Conservative default for current V1 scope.
+  return [8453];
 }
 
 async function checkEnvVars() {
@@ -76,14 +134,18 @@ async function checkRedis() {
 
 async function checkRpc() {
   console.log('\n[5/9] RPC Endpoints');
-  const chains: Record<number, string> = {
-    1: `https://eth-mainnet.g.alchemy.com/v2/${process.env['ALCHEMY_API_KEY']}`,
-    8453: `https://base-mainnet.g.alchemy.com/v2/${process.env['ALCHEMY_API_KEY']}`,
-  };
+  const targetChainIds = resolvePreflightChainIds();
+  const chainConfigById = new Map(CHAIN_CONFIGS.map((cfg) => [cfg.chainId, cfg]));
 
-  for (const [chainId, url] of Object.entries(chains)) {
+  for (const chainId of targetChainIds) {
+    const cfg = chainConfigById.get(chainId);
+    if (!cfg) {
+      check(`RPC chain ${chainId}`, false, 'unsupported chain id in PREFLIGHT_CHAIN_IDS');
+      continue;
+    }
+
     try {
-      const res = await fetch(url, {
+      const res = await fetch(cfg.rpcUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }),
@@ -117,17 +179,25 @@ async function checkTurnkey() {
 
 async function checkContracts() {
   console.log('\n[7/9] Smart Contracts');
-  const contractEnvs = [
-    'POLICY_MODULE_ADDRESS_1',
-    'EXECUTOR_ADDRESS_1',
-    'POLICY_MODULE_ADDRESS_8453',
-    'EXECUTOR_ADDRESS_8453',
-  ];
+  const targetChainIds = resolvePreflightChainIds();
+  const chainConfigById = new Map(CHAIN_CONFIGS.map((cfg) => [cfg.chainId, cfg]));
 
-  for (const env of contractEnvs) {
-    const addr = process.env[env];
-    const isValid = addr?.startsWith('0x') && addr.length === 42;
-    check(env, !!isValid, addr ?? 'not set');
+  for (const chainId of targetChainIds) {
+    const cfg = chainConfigById.get(chainId);
+    if (!cfg) {
+      check(`Contracts chain ${chainId}`, false, 'unsupported chain id in PREFLIGHT_CHAIN_IDS');
+      continue;
+    }
+
+    for (const env of [cfg.policyEnv, cfg.executorEnv]) {
+      const addr = process.env[env];
+      const isValid = addr?.startsWith('0x') && addr.length === 42;
+      check(env, !!isValid, addr ?? 'not set');
+    }
+  }
+
+  if (targetChainIds.length === 0) {
+    check('At least one chain configured', false, 'set PREFLIGHT_CHAIN_IDS or contract env vars');
   }
 }
 
