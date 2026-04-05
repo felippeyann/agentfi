@@ -11,6 +11,7 @@ import { walletRoutes } from './api/routes/wallets.js';
 import { healthRoutes } from './api/routes/health.js';
 import { billingRoutes } from './api/routes/billing.js';
 import { adminRoutes } from './api/routes/admin.js';
+import { mcpRoutes } from './api/routes/mcp.js';
 import { startTransactionWorker } from './queues/transaction.queue.js';
 
 const fastify = Fastify({ logger: logger as any });
@@ -60,6 +61,7 @@ async function start() {
   await fastify.register(walletRoutes);
   await fastify.register(billingRoutes);
   await fastify.register(adminRoutes);
+  await fastify.register(mcpRoutes);
 
   // Well-known agent capability advertisement
   fastify.get('/.well-known/agent.json', async () => ({
