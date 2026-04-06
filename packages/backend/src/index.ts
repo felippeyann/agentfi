@@ -12,6 +12,7 @@ import { healthRoutes } from './api/routes/health.js';
 import { billingRoutes } from './api/routes/billing.js';
 import { adminRoutes } from './api/routes/admin.js';
 import { mcpRoutes } from './api/routes/mcp.js';
+import { jobRoutes } from './api/routes/jobs.js';
 import { startTransactionWorker } from './queues/transaction.queue.js';
 
 const fastify = Fastify({ logger: logger as any });
@@ -111,6 +112,4 @@ async function start() {
 start().catch((err) => {
   logger.error(err);
   process.exit(1);
-});
-it(1);
 });

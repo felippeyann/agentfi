@@ -705,6 +705,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       actions: z.array(z.object({
         to:    z.string(),
         value: z.string().default('0'),
+        token: z.string().default('0x0000000000000000000000000000000000000000'),
         data:  z.string().regex(/^0x[0-9a-fA-F]*$/).default('0x'),
       })).min(1).max(20),
     });

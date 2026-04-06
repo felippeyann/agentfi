@@ -52,85 +52,95 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
   return [
     {
       name: 'get_wallet',
-      description: 'Get the agent wallet address and balances',
+      description: 'Get the agent wallet address and supported networks',
       inputSchema: z.object({}),
-      handler: async () => call('GET', '/v1/wallets/me'),
+      handler: async () => call('GET', '/v1/wallet/address'),
     },
     {
       name: 'get_balance',
-      description: 'Get token balance for the agent wallet',
+      description: 'Get ETH and ERC-20 token balances for the agent wallet',
       inputSchema: z.object({
-        token: z.string().describe('Token contract address or "native" for ETH'),
-      }),
-      handler: async (args: Record<string, unknown>) =>
-        call('GET', `/v1/wallets/balance?token=${args.token}`),
-    },
-    {
-      name: 'get_token_price',
-      description: 'Get current price of a token in USD',
-      inputSchema: z.object({
-        token: z.string().describe('Token contract address'),
-        chainId: z.number().optional().describe('Chain ID (default: 8453 Base)'),
+        chainId: z.number().optional().describe('Chain ID to query (omit for all supported chains)'),
       }),
       handler: async (args: Record<string, unknown>) => {
-        const chainId = args.chainId ?? 8453;
-        return call('GET', `/v1/wallets/price?token=${args.token}&chainId=${chainId}`);
+        const qs = args.chainId ? `?chainId=${args.chainId}` : '';
+        return call('GET', `/v1/wallet/balance${qs}`);
+      },
+    },
+    {
+      name: 'get_allowances',
+      description: 'Get active ERC-20 token allowances for the agent wallet',
+      inputSchema: z.object({
+        chainId: z.number().optional().describe('Chain ID (default: 1)'),
+        spender: z.string().optional().describe('Filter by spender address'),
+      }),
+      handler: async (args: Record<string, unknown>) => {
+        const params = new URLSearchParams();
+        if (args.chainId) params.set('chainId', String(args.chainId));
+        if (args.spender) params.set('spender', String(args.spender));
+        const qs = params.toString() ? `?${params}` : '';
+        return call('GET', `/v1/wallet/allowances${qs}`);
       },
     },
     {
       name: 'simulate_swap',
-      description:
-        'Simulate a token swap via 1inch — returns expected output and gas estimate without executing',
+      description: 'Simulate a token swap — returns gas estimate and success/failure without executing',
       inputSchema: z.object({
         fromToken: z.string().describe('Source token contract address'),
         toToken: z.string().describe('Destination token contract address'),
-        amount: z.string().describe('Amount in wei'),
+        amountIn: z.string().describe('Amount in human-readable decimals (e.g. "1.5")'),
+        chainId: z.number().optional().describe('Chain ID (default: 1)'),
       }),
       handler: async (args: Record<string, unknown>) =>
-        call('POST', '/v1/transactions/simulate', { type: 'swap', params: args }),
+        call('POST', '/v1/transactions/simulate', args),
     },
     {
       name: 'execute_swap',
-      description: 'Execute a token swap — the transaction is queued, simulated via Tenderly, then broadcast',
+      description: 'Execute a token swap via Uniswap V3 — requires a prior simulation ID',
       inputSchema: z.object({
         fromToken: z.string().describe('Source token contract address'),
         toToken: z.string().describe('Destination token contract address'),
-        amount: z.string().describe('Amount in wei'),
-        slippage: z.number().optional().describe('Slippage tolerance in bps (default 50 = 0.5%)'),
+        amountIn: z.string().describe('Amount in human-readable decimals (e.g. "1.5")'),
+        simulationId: z.string().describe('Simulation ID from simulate_swap'),
+        chainId: z.number().optional().describe('Chain ID (default: 1)'),
+        slippageTolerance: z.number().optional().describe('Slippage tolerance in % (default: 0.5)'),
       }),
       handler: async (args: Record<string, unknown>) =>
-        call('POST', '/v1/transactions', { type: 'swap', params: args }),
+        call('POST', '/v1/transactions/swap', args),
     },
     {
       name: 'execute_transfer',
       description: 'Transfer tokens or native ETH to another address',
       inputSchema: z.object({
         to: z.string().describe('Recipient address (0x...)'),
-        token: z.string().describe('Token contract address or "native"'),
-        amount: z.string().describe('Amount in wei'),
+        token: z.string().describe('Token contract address or "ETH" for native'),
+        amount: z.string().describe('Amount in human-readable decimals (e.g. "0.1")'),
+        chainId: z.number().optional().describe('Chain ID (default: 1)'),
       }),
       handler: async (args: Record<string, unknown>) =>
-        call('POST', '/v1/transactions', { type: 'transfer', params: args }),
+        call('POST', '/v1/transactions/transfer', args),
     },
     {
       name: 'supply_aave',
       description: 'Supply tokens to Aave V3 lending protocol to earn yield',
       inputSchema: z.object({
-        token: z.string().describe('Token contract address to supply'),
-        amount: z.string().describe('Amount in wei'),
+        asset: z.string().describe('Token contract address to supply'),
+        amount: z.string().describe('Amount in human-readable decimals'),
+        chainId: z.number().optional().describe('Chain ID (default: 1)'),
       }),
       handler: async (args: Record<string, unknown>) =>
-        call('POST', '/v1/transactions', { type: 'aave_supply', params: args }),
+        call('POST', '/v1/transactions/deposit', args),
     },
     {
       name: 'withdraw_aave',
       description: 'Withdraw tokens from Aave V3 lending position',
       inputSchema: z.object({
-        token: z.string().describe('aToken contract address to withdraw'),
-        amount: z.string().describe('Amount in wei'),
+        asset: z.string().describe('aToken contract address to withdraw'),
+        amount: z.string().describe('Amount in decimals, or "max" to withdraw all'),
+        chainId: z.number().optional().describe('Chain ID (default: 1)'),
       }),
       handler: async (args: Record<string, unknown>) =>
-        call('POST', '/v1/transactions', { type: 'aave_withdraw', params: args }),
+        call('POST', '/v1/transactions/withdraw', args),
     },
     {
       name: 'get_transaction_status',
@@ -140,6 +150,23 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
       }),
       handler: async (args: Record<string, unknown>) =>
         call('GET', `/v1/transactions/${args.transactionId}`),
+    },
+    {
+      name: 'list_transactions',
+      description: 'List transaction history with optional status filter',
+      inputSchema: z.object({
+        page: z.number().optional().describe('Page number (default: 1)'),
+        limit: z.number().optional().describe('Results per page (default: 20, max: 100)'),
+        status: z.string().optional().describe('Filter by status (PENDING, SIMULATING, BROADCASTING, CONFIRMED, FAILED)'),
+      }),
+      handler: async (args: Record<string, unknown>) => {
+        const params = new URLSearchParams();
+        if (args.page) params.set('page', String(args.page));
+        if (args.limit) params.set('limit', String(args.limit));
+        if (args.status) params.set('status', String(args.status));
+        const qs = params.toString() ? `?${params}` : '';
+        return call('GET', `/v1/transactions${qs}`);
+      },
     },
     {
       name: 'get_agent_policy',

@@ -43,7 +43,7 @@ export async function jobRoutes(fastify: FastifyInstance) {
         providerId: body.providerId,
         payload: body.payload,
         reward: body.reward ?? {},
-        signature: body.signature,
+        signature: body.signature ?? null,
         status: 'PENDING',
       },
     });
@@ -104,7 +104,7 @@ export async function jobRoutes(fastify: FastifyInstance) {
       where: { id: request.params.id },
       data: {
         status: body.status,
-        result: body.result,
+        ...(body.result !== undefined ? { result: body.result } : {}),
       },
     });
 
