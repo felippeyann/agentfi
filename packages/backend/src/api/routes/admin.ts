@@ -6,6 +6,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { getAddress } from 'viem';
 import { logger } from '../middleware/logger.js';
@@ -126,6 +127,11 @@ export async function adminRoutes(fastify: FastifyInstance) {
 
     return { transactionId: tx.id, status: 'QUEUED' };
   });
+
+  /**
+   * GET /admin/stats — dashboard overview.
+   */
+  fastify.get('/admin/stats', async (request, reply) => {
     if (!requireAdmin(request, reply)) return;
 
     const todayDate = new Date();
