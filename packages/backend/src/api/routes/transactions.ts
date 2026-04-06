@@ -9,6 +9,7 @@ import { PolicyService } from '../../services/policy/policy.service.js';
 import { FeeService } from '../../services/policy/fee.service.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
 import { weiToUsd, tokenAmountToUsd } from '../../services/transaction/price.service.js';
+import { cacheSimulation, getSimulation } from '../../services/transaction/simulation-cache.js';
 import { getContracts } from '../../config/contracts.js';
 import { createChainPublicClient } from '../../config/chains.js';
 import { logger } from '../middleware/logger.js';
@@ -199,6 +200,15 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       value: txData.value,
     });
 
+    // Cache server-side so /swap can verify the simulationId was issued here
+    if (sim.simulationId) {
+      await cacheSimulation(sim.simulationId, {
+        agentId: request.agentId,
+        success: sim.success,
+        chainId: body.chainId,
+      }).catch(() => {}); // non-fatal — /swap will reject unknown IDs
+    }
+
     return {
       success: sim.success,
       gasEstimate: sim.gasUsed,
@@ -223,6 +233,20 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       if (idempotent.conflictWithAnotherAgent) {
         return reply.code(409).send({ error: 'idempotencyKey is already in use by another agent' });
       }
+    }
+
+    // Verify simulationId was issued by this server for this agent
+    const cachedSim = await getSimulation(body.simulationId).catch(() => null);
+    if (!cachedSim) {
+      return reply.code(422).send({
+        error: 'Simulation ID not found or expired. Run simulate_swap first, then execute within 10 minutes.',
+      });
+    }
+    if (cachedSim.agentId !== request.agentId) {
+      return reply.code(403).send({ error: 'Simulation ID does not belong to this agent.' });
+    }
+    if (!cachedSim.success) {
+      return reply.code(422).send({ error: 'Cannot execute a swap whose simulation failed. Run simulate_swap first.' });
     }
 
     // Check tx limit for tier

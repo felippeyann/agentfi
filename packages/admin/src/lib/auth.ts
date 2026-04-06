@@ -15,6 +15,20 @@ const ADMIN_USERNAME = process.env['ADMIN_USERNAME'] ?? 'admin';
 const ADMIN_PASSWORD = process.env['ADMIN_PASSWORD'] ?? '';
 const IS_PRODUCTION = process.env['NODE_ENV'] === 'production';
 
+// Known placeholder values from .env.example that must not be used in production
+const KNOWN_CREDENTIAL_PLACEHOLDERS = new Set([
+  'change-this-before-production',
+  'your-admin-password-here',
+]);
+
+/**
+ * Returns true if the password is a known .env.example placeholder or empty.
+ * Prevents accidental production deployments with default credentials.
+ */
+function isWeakAdminPassword(password: string): boolean {
+  return !password || KNOWN_CREDENTIAL_PLACEHOLDERS.has(password);
+}
+
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 8;
 
 // Optional OIDC — comma-separated email allowlist (only these emails can sign in via OAuth)
@@ -96,6 +110,15 @@ export const authOptions: NextAuthOptions = {
           return null;
         }
 
+        if (IS_PRODUCTION && isWeakAdminPassword(ADMIN_PASSWORD)) {
+          logAdminAuthEvent({
+            event: 'admin_login_config_invalid',
+            username,
+            ip: context.ip,
+            userAgent: context.userAgent,
+          });
+          return null;
+        }
         const blockState = isLoginBlocked(username, headers);
         if (blockState.blocked) {
           logAdminAuthEvent({

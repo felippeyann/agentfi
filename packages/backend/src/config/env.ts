@@ -88,4 +88,17 @@ if (!parsed.success) {
   process.exit(1);
 }
 
+// Reject known placeholder values in production to prevent accidental deploys
+// with default .env.example credentials.
+if (parsed.data.NODE_ENV === 'production') {
+  const ADMIN_SECRET_PLACEHOLDER = 'your-admin-secret-min-32-chars-here';
+  if (parsed.data.ADMIN_SECRET === ADMIN_SECRET_PLACEHOLDER) {
+    console.error(
+      'FATAL: ADMIN_SECRET is set to the .env.example placeholder value. ' +
+      'Set a strong random secret before deploying to production.',
+    );
+    process.exit(1);
+  }
+}
+
 export const env = parsed.data;
