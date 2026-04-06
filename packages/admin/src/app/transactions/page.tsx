@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { adminFetch } from '../../lib/api';
 import { Activity, ArrowRightLeft, CheckCircle2, XCircle, Clock, AlertTriangle } from 'lucide-react';
 
