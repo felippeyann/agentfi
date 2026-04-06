@@ -119,14 +119,11 @@ contract AgentExecutorTest is Test {
         });
     }
 
-    function _defaultPolicy() internal pure returns (AgentPolicyModule.AgentPolicy memory) {
-        return AgentPolicyModule.AgentPolicy({
+    function _defaultPolicy() internal pure returns (AgentPolicyModule.PolicyParams memory) {
+        return AgentPolicyModule.PolicyParams({
             maxValuePerTx:     10 ether,
             cooldownBetweenTx: 0,
-            allowedContracts:  new address[](0),
-            allowedTokens:     new address[](0),
-            active:            true,
-            policyExpiresAt:   0
+            active:            true
         });
     }
 
@@ -472,7 +469,7 @@ contract AgentExecutorTest is Test {
 
     function test_ExecuteBatch_PolicyPaused_Reverts() public {
         vm.prank(operator);
-        policyModule.setPolicy(safe, _defaultPolicy());
+        policyModule.setPolicy(safe, _defaultPolicy(), 0);
 
         vm.prank(operator);
         policyModule.emergencyPause(safe);
@@ -486,16 +483,13 @@ contract AgentExecutorTest is Test {
 
     function test_ExecuteBatch_PolicyValueExceeded_Reverts() public {
         // Policy allows max 0.5 ETH, action sends 1 ETH
-        AgentPolicyModule.AgentPolicy memory p = AgentPolicyModule.AgentPolicy({
+        AgentPolicyModule.PolicyParams memory p = AgentPolicyModule.PolicyParams({
             maxValuePerTx:     0.5 ether,
             cooldownBetweenTx: 0,
-            allowedContracts:  new address[](0),
-            allowedTokens:     new address[](0),
-            active:            true,
-            policyExpiresAt:   0
+            active:            true
         });
         vm.prank(operator);
-        policyModule.setPolicy(safe, p);
+        policyModule.setPolicy(safe, p, 0);
 
         AgentExecutor.Action[] memory actions = _incrementAction(1 ether);
         uint256 fee   = _feeFor(1 ether);
@@ -513,19 +507,21 @@ contract AgentExecutorTest is Test {
     }
 
     function test_ExecuteBatch_PolicyContractNotWhitelisted_Reverts() public {
-        address[] memory allowed = new address[](1);
-        allowed[0] = address(0x9999); // some other contract
-
-        AgentPolicyModule.AgentPolicy memory p = AgentPolicyModule.AgentPolicy({
+        AgentPolicyModule.PolicyParams memory p = AgentPolicyModule.PolicyParams({
             maxValuePerTx:     10 ether,
             cooldownBetweenTx: 0,
-            allowedContracts:  allowed,
-            allowedTokens:     new address[](0),
-            active:            true,
-            policyExpiresAt:   0
+            active:            true
         });
         vm.prank(operator);
-        policyModule.setPolicy(safe, p);
+        policyModule.setPolicy(safe, p, 0);
+
+        // 2. Seed whitelist with some other address to activate it
+        address[] memory allowed = new address[](1);
+        allowed[0] = address(0x9999);
+        bool[] memory status = new bool[](1);
+        status[0] = true;
+        vm.prank(operator);
+        policyModule.updateContractWhitelist(safe, allowed, status);
 
         AgentExecutor.Action[] memory actions = _incrementAction(0);
 
@@ -543,16 +539,13 @@ contract AgentExecutorTest is Test {
         address[] memory allowed = new address[](1);
         allowed[0] = address(mockTarget);
 
-        AgentPolicyModule.AgentPolicy memory p = AgentPolicyModule.AgentPolicy({
+        AgentPolicyModule.PolicyParams memory p = AgentPolicyModule.PolicyParams({
             maxValuePerTx:     10 ether,
             cooldownBetweenTx: 0,
-            allowedContracts:  allowed,
-            allowedTokens:     new address[](0),
-            active:            true,
-            policyExpiresAt:   0
+            active:            true
         });
         vm.prank(operator);
-        policyModule.setPolicy(safe, p);
+        policyModule.setPolicy(safe, p, 0);
 
         AgentExecutor.Action[] memory actions = _incrementAction(0);
 
@@ -563,16 +556,13 @@ contract AgentExecutorTest is Test {
     }
 
     function test_ExecuteBatch_PolicyCooldown_Reverts() public {
-        AgentPolicyModule.AgentPolicy memory p = AgentPolicyModule.AgentPolicy({
+        AgentPolicyModule.PolicyParams memory p = AgentPolicyModule.PolicyParams({
             maxValuePerTx:     10 ether,
             cooldownBetweenTx: 60,
-            allowedContracts:  new address[](0),
-            allowedTokens:     new address[](0),
-            active:            true,
-            policyExpiresAt:   0
+            active:            true
         });
         vm.prank(operator);
-        policyModule.setPolicy(safe, p);
+        policyModule.setPolicy(safe, p, 0);
 
         AgentExecutor.Action[] memory actions = _incrementAction(0);
 
@@ -590,16 +580,13 @@ contract AgentExecutorTest is Test {
     }
 
     function test_ExecuteBatch_PolicyCooldown_AfterExpiry_Passes() public {
-        AgentPolicyModule.AgentPolicy memory p = AgentPolicyModule.AgentPolicy({
+        AgentPolicyModule.PolicyParams memory p = AgentPolicyModule.PolicyParams({
             maxValuePerTx:     10 ether,
             cooldownBetweenTx: 60,
-            allowedContracts:  new address[](0),
-            allowedTokens:     new address[](0),
-            active:            true,
-            policyExpiresAt:   0
+            active:            true
         });
         vm.prank(operator);
-        policyModule.setPolicy(safe, p);
+        policyModule.setPolicy(safe, p, 0);
 
         AgentExecutor.Action[] memory actions = _incrementAction(0);
 
@@ -617,7 +604,7 @@ contract AgentExecutorTest is Test {
     /// @dev After a policy is resumed, execution succeeds again.
     function test_ExecuteBatch_PolicyResumed_Passes() public {
         vm.prank(operator);
-        policyModule.setPolicy(safe, _defaultPolicy());
+        policyModule.setPolicy(safe, _defaultPolicy(), 0);
 
         vm.prank(operator);
         policyModule.emergencyPause(safe);
@@ -770,7 +757,7 @@ contract AgentExecutorTest is Test {
 
     function test_ExecuteSingle_PolicyPaused_Reverts() public {
         vm.prank(operator);
-        policyModule.setPolicy(safe, _defaultPolicy());
+        policyModule.setPolicy(safe, _defaultPolicy(), 0);
 
         vm.prank(operator);
         policyModule.emergencyPause(safe);
@@ -787,16 +774,13 @@ contract AgentExecutorTest is Test {
     }
 
     function test_ExecuteSingle_PolicyValueExceeded_Reverts() public {
-        AgentPolicyModule.AgentPolicy memory p = AgentPolicyModule.AgentPolicy({
+        AgentPolicyModule.PolicyParams memory p = AgentPolicyModule.PolicyParams({
             maxValuePerTx:     0.5 ether,
             cooldownBetweenTx: 0,
-            allowedContracts:  new address[](0),
-            allowedTokens:     new address[](0),
-            active:            true,
-            policyExpiresAt:   0
+            active:            true
         });
         vm.prank(operator);
-        policyModule.setPolicy(safe, p);
+        policyModule.setPolicy(safe, p, 0);
 
         uint256 actionValue = 1 ether;
         uint256 fee   = _feeFor(actionValue);
@@ -831,16 +815,6 @@ contract AgentExecutorTest is Test {
         executor.executeSingle(action);
 
         assertEq(mockTarget.counter(), 1);
-    }
-
-    // =========================================================================
-    // receive() — ETH acceptance
-    // =========================================================================
-
-    function test_Receive_AcceptsETH() public {
-        (bool ok, ) = address(executor).call{value: 1 ether}("");
-        assertTrue(ok);
-        assertEq(address(executor).balance, 1 ether);
     }
 
     // =========================================================================

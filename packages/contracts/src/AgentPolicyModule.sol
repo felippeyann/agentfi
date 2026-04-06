@@ -295,18 +295,3 @@ contract AgentPolicyModule {
         return _lastTxTimestamp[safe];
     }
 }
-
-    /**
-     * @notice Returns whether a policy exists for a Safe.
-     */
-    function hasPolicy(address safe) external view returns (bool) {
-        return _hasPolicy[safe];
-    }
-
-    /**
-     * @notice Returns the timestamp of the last transaction for a Safe.
-     */
-    function getLastTxTimestamp(address safe) external view returns (uint256) {
-        return _lastTxTimestamp[safe];
-    }
-}

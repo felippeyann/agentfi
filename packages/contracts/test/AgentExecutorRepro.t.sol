@@ -27,23 +27,26 @@ contract AgentExecutorReproTest is Test {
      * address to the policy module, causing a revert if the token is not whitelisted.
      */
     function test_VerifyFix_TokenWhitelistEnforcement() public {
-        // 1. Set a policy that ONLY allows 'mockToken'
-        address[] memory allowedTokens = new address[](1);
-        allowedTokens[0] = mockToken;
-
-        AgentPolicyModule.AgentPolicy memory p = AgentPolicyModule.AgentPolicy({
+        // 1. Set a basic policy
+        AgentPolicyModule.PolicyParams memory p = AgentPolicyModule.PolicyParams({
             maxValuePerTx:     10 ether,
             cooldownBetweenTx: 0,
-            allowedContracts:  new address[](0),
-            allowedTokens:     allowedTokens,
-            active:            true,
-            policyExpiresAt:   0
+            active:            true
         });
         
         vm.prank(operator);
-        policyModule.setPolicy(safe, p);
+        policyModule.setPolicy(safe, p, 0);
 
-        // 2. Prepare an action interacting with a non-whitelisted token (0xBAD)
+        // 2. Update token whitelist
+        address[] memory tokens = new address[](1);
+        tokens[0] = mockToken;
+        bool[] memory allowed = new bool[](1);
+        allowed[0] = true;
+
+        vm.prank(operator);
+        policyModule.updateTokenWhitelist(safe, tokens, allowed);
+
+        // 3. Prepare an action interacting with a non-whitelisted token (0xBAD)
         address badToken = address(0xBAD);
         AgentExecutor.Action[] memory actions = new AgentExecutor.Action[](1);
         actions[0] = AgentExecutor.Action({
@@ -53,7 +56,7 @@ contract AgentExecutorReproTest is Test {
             data:   ""
         });
 
-        // 3. Execute. 
+        // 4. Execute. 
         // LOGICAL EXPECTATION: It should REVERT because 0xBAD is not whitelisted.
         vm.prank(safe);
         vm.expectRevert(

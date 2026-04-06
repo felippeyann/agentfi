@@ -185,6 +185,4 @@ contract AgentExecutor {
 
         emit ActionExecuted(action.target, action.value, true);
     }
-
-    receive() external payable {}
 }
