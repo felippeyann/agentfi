@@ -1,9 +1,7 @@
 import type { FastifyInstance } from 'fastify';
-import { PrismaClient } from '@prisma/client';
+import { db } from '../../db/client.js';
 import { getAddress, formatEther, formatUnits } from 'viem';
 import { createChainPublicClient } from '../../config/chains.js';
-
-const db = new PrismaClient();
 
 // ERC-20 ABI for balance + allowance queries
 const ERC20_READ_ABI = [

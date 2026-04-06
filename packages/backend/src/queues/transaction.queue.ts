@@ -3,7 +3,7 @@
  */
 
 import { Queue, Worker, type Job, type WorkerOptions } from 'bullmq';
-import { PrismaClient } from '@prisma/client';
+import { db } from '../db/client.js';
 import { env } from '../config/env.js';
 import { SubmitterService } from '../services/transaction/submitter.service.js';
 import { MonitorService } from '../services/transaction/monitor.service.js';
@@ -34,7 +34,6 @@ const connection = {
   maxRetriesPerRequest: null as unknown as number, // required by BullMQ
   enableReadyCheck: false,
 };
-const db = new PrismaClient();
 const submitter = new SubmitterService();
 const monitor = new MonitorService(db);
 const feeService = new FeeService(db);

@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { PrismaClient } from '@prisma/client';
 import { getAddress, parseUnits, maxUint256 } from 'viem';
+import { db } from '../../db/client.js';
 import { TransactionBuilder } from '../../services/transaction/builder.service.js';
 import { SimulatorService } from '../../services/transaction/simulator.service.js';
 import { ExecutorService } from '../../services/transaction/executor.service.js';
@@ -13,8 +13,6 @@ import { getContracts } from '../../config/contracts.js';
 import { createChainPublicClient } from '../../config/chains.js';
 import { logger } from '../middleware/logger.js';
 import type { Address } from 'viem';
-
-const db = new PrismaClient();
 const builder = new TransactionBuilder();
 const simulator = new SimulatorService();
 const executor = new ExecutorService();

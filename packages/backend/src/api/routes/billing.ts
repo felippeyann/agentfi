@@ -8,10 +8,8 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { PrismaClient } from '@prisma/client';
+import { db } from '../../db/client.js';
 import { StripeService } from '../../services/billing/stripe.service.js';
-
-const db = new PrismaClient();
 const stripeService = new StripeService(db);
 
 const ADMIN_URL = process.env['ADMIN_URL'] ?? 'http://localhost:3001';

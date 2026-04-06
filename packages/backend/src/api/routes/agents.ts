@@ -1,14 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { PrismaClient } from '@prisma/client';
+import { db } from '../../db/client.js';
 import { TurnkeyService } from '../../services/wallet/turnkey.service.js';
 import { SafeService } from '../../services/wallet/safe.service.js';
 import { generateApiKey } from '../middleware/auth.js';
 import { PolicyService } from '../../services/policy/policy.service.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
 import { logger } from '../middleware/logger.js';
-
-const db = new PrismaClient();
 const turnkey = new TurnkeyService();
 const safeService = new SafeService();
 const policyService = new PolicyService(db);

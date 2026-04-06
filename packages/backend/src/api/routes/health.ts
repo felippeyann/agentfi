@@ -1,11 +1,9 @@
 import type { FastifyInstance } from 'fastify';
-import { PrismaClient } from '@prisma/client';
+import { db } from '../../db/client.js';
 import { Redis } from 'ioredis';
 import { TurnkeyService } from '../../services/wallet/turnkey.service.js';
 import { env } from '../../config/env.js';
 import { createChainPublicClient } from '../../config/chains.js';
-
-const db = new PrismaClient();
 const redis = new Redis(env.REDIS_URL, {
   lazyConnect: true,
   maxRetriesPerRequest: 1,

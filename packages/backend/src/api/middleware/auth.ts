@@ -7,7 +7,7 @@
 import type { FastifyRequest, FastifyReply, FastifyPluginCallback } from 'fastify';
 import fp from 'fastify-plugin';
 import { createHash, randomBytes } from 'crypto';
-import { PrismaClient } from '@prisma/client';
+import { db } from '../../db/client.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -15,8 +15,6 @@ declare module 'fastify' {
     agentTier: 'FREE' | 'PRO' | 'ENTERPRISE';
   }
 }
-
-const db = new PrismaClient();
 
 function hashApiKey(key: string): string {
   return createHash('sha256').update(key).digest('hex');

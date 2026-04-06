@@ -1,7 +1,5 @@
-import { PrismaClient } from '@prisma/client';
+import { db } from '../../db/client.js';
 import { logger } from '../../api/middleware/logger.js';
-
-const db = new PrismaClient();
 
 export class ReputationService {
   /**
@@ -9,7 +7,7 @@ export class ReputationService {
    */
   async recordJobOutcome(agentId: string, success: boolean): Promise<void> {
     const scoreChange = success ? 10 : -5;
-    
+
     await db.agent.update({
       where: { id: agentId },
       data: {
@@ -18,6 +16,17 @@ export class ReputationService {
         lastActiveAt: new Date(),
       },
     });
+
+    // Clamp reputation score to a floor of 0
+    if (!success) {
+      const agent = await db.agent.findUnique({ where: { id: agentId }, select: { reputationScore: true } });
+      if (agent && agent.reputationScore < 0) {
+        await db.agent.update({
+          where: { id: agentId },
+          data: { reputationScore: 0 },
+        });
+      }
+    }
 
     logger.info({ agentId, success, scoreChange }, 'Reputation Updated via Job Outcome');
   }

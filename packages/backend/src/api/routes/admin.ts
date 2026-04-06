@@ -6,10 +6,8 @@
  */
 
 import type { FastifyInstance } from 'fastify';
-import { PrismaClient } from '@prisma/client';
+import { db } from '../../db/client.js';
 import { logger } from '../middleware/logger.js';
-
-const db = new PrismaClient();
 const ADMIN_SECRET = process.env['ADMIN_SECRET'] ?? '';
 const ADMIN_ALLOW_REMOTE = process.env['ADMIN_ALLOW_REMOTE'] === 'true';
 

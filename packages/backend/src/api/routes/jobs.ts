@@ -1,10 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { PrismaClient } from '@prisma/client';
+import { db } from '../../db/client.js';
 import { logger } from '../middleware/logger.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
-
-const db = new PrismaClient();
 const reputationService = new ReputationService();
 
 const createJobSchema = z.object({
@@ -23,6 +21,12 @@ const updateJobSchema = z.object({
   result: z.record(z.any()).optional(),
   error: z.string().optional(),
 });
+
+/** Valid status transitions for jobs */
+const VALID_TRANSITIONS: Record<string, string[]> = {
+  PENDING:  ['ACCEPTED', 'CANCELLED'],
+  ACCEPTED: ['COMPLETED', 'FAILED', 'CANCELLED'],
+};
 
 export async function jobRoutes(fastify: FastifyInstance) {
   /**
@@ -98,6 +102,14 @@ export async function jobRoutes(fastify: FastifyInstance) {
 
     if (body.status === 'ACCEPTED' || body.status === 'COMPLETED' || body.status === 'FAILED') {
       if (!isProvider) return reply.code(403).send({ error: 'Only provider can update this status' });
+    }
+
+    // Logic Sentinel: Validate status transition
+    const allowed = VALID_TRANSITIONS[job.status as string];
+    if (!allowed || !allowed.includes(body.status)) {
+      return reply.code(400).send({
+        error: `Invalid status transition from ${job.status} to ${body.status}`,
+      });
     }
 
     const updatedJob = await db.job.update({

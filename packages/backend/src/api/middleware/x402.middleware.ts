@@ -17,12 +17,10 @@
  */
 
 import type { FastifyRequest, FastifyReply } from 'fastify';
-import { PrismaClient } from '@prisma/client';
+import { db } from '../../db/client.js';
 import { parseUnits, decodeEventLog, type Address } from 'viem';
 import { randomUUID } from 'crypto';
 import { createChainPublicClient } from '../../config/chains.js';
-
-const db = new PrismaClient();
 
 // Fee wallet that receives x402 micro-payments (reuses the protocol fee wallet)
 const FEE_WALLET = (process.env['FEE_WALLET_ADDRESS'] ?? '0x0000000000000000000000000000000000000000') as Address;
