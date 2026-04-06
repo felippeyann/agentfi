@@ -36,6 +36,8 @@ const updatePolicySchema = z.object({
   active: z.boolean().optional(),
   /// ISO 8601 timestamp — sets a temporary policy that expires automatically (null clears expiry)
   expiresAt: z.string().datetime().nullish(),
+  /// If true, returns calldata to sync this policy to the on-chain module
+  syncOnChain: z.boolean().default(false),
 });
 
 export async function agentRoutes(fastify: FastifyInstance) {
@@ -222,7 +224,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
       return reply.code(403).send({ error: 'Access denied' });
     }
 
-    const { expiresAt, ...policyFields } = updatePolicySchema.parse(request.body);
+    const { expiresAt, syncOnChain, ...policyFields } = updatePolicySchema.parse(request.body);
 
     // Convert ISO 8601 → Date for Prisma; undefined means field not touched
     const policyData: Record<string, unknown> = { ...policyFields };
@@ -230,8 +232,62 @@ export async function agentRoutes(fastify: FastifyInstance) {
       policyData['expiresAt'] = expiresAt ? new Date(expiresAt) : null;
     }
 
-    const agent = await policyService.setPolicy(request.params.id, policyData as any);
-    return agent;
+    const policy = await policyService.setPolicy(request.params.id, policyData as any);
+    
+    let onChainSync = null;
+    if (syncOnChain) {
+      const agent = await db.agent.findUniqueOrThrow({
+        where: { id: request.params.id },
+        select: { safeAddress: true, chainIds: true },
+      });
+      const chainId = agent.chainIds[0] ?? 1;
+      const { getContracts } = await import('../../config/contracts.js');
+      const contracts = getContracts(chainId);
+
+      if (contracts.policyModule) {
+        const actions: { to: string; value: string; data: string }[] = [];
+        
+        // 1. Sync core policy
+        const coreCalldata = await policyService.onChain.buildSyncPolicyCalldata({
+          safeAddress: agent.safeAddress as `0x${string}`,
+          maxValuePerTxEth: policy.maxValuePerTxEth,
+          cooldownSeconds: policy.cooldownSeconds,
+          active: policy.active,
+          expiresAt: policy.expiresAt,
+        });
+        actions.push({ to: contracts.policyModule, value: '0', data: coreCalldata });
+
+        // 2. Sync whitelists if they were updated
+        if (policyFields.allowedContracts) {
+          const contractCalldata = await policyService.onChain.buildUpdateWhitelistCalldata({
+            type: 'contract',
+            safeAddress: agent.safeAddress as `0x${string}`,
+            addresses: policyFields.allowedContracts,
+            allowed: new Array(policyFields.allowedContracts.length).fill(true),
+          });
+          actions.push({ to: contracts.policyModule, value: '0', data: contractCalldata });
+        }
+
+        if (policyFields.allowedTokens) {
+          const tokenCalldata = await policyService.onChain.buildUpdateWhitelistCalldata({
+            type: 'token',
+            safeAddress: agent.safeAddress as `0x${string}`,
+            addresses: policyFields.allowedTokens,
+            allowed: new Array(policyFields.allowedTokens.length).fill(true),
+          });
+          actions.push({ to: contracts.policyModule, value: '0', data: tokenCalldata });
+        }
+
+        onChainSync = {
+          to: contracts.policyModule,
+          chainId,
+          actions,
+          notice: "Execute these actions via 'execute_batch' to sync your policy on-chain."
+        };
+      }
+    }
+
+    return { ...policy, onChainSync };
   });
 
   /**

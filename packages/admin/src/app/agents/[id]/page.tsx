@@ -1,5 +1,6 @@
 import { adminFetch } from '../../../lib/api';
 import { PauseButton } from '../../../components/PauseButton';
+import { SyncPolicyButton } from '../../../components/SyncPolicyButton';
 
 interface AgentDetail {
   id: string;
@@ -110,8 +111,11 @@ export default async function AgentDetailPage({ params }: { params: { id: string
           )}
         </div>
 
-        <div className="border border-gray-800 rounded-lg p-4 bg-gray-900 space-y-2">
-          <h2 className="text-gray-400 text-xs uppercase">Policy</h2>
+        <div className="border border-gray-800 rounded-lg p-4 bg-gray-900 space-y-2 relative">
+          <div className="flex items-center justify-between mb-1">
+            <h2 className="text-gray-400 text-xs uppercase">Policy</h2>
+            <SyncPolicyButton agentId={agent.id} />
+          </div>
           {agent.policy ? (
             <>
               <p className="text-xs text-gray-300">

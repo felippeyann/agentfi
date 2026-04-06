@@ -1,5 +1,6 @@
 import type { PrismaClient, AgentPolicy } from '@prisma/client';
 import { getAddress, type Address } from 'viem';
+import { OnChainPolicyService } from './onchain-policy.service.js';
 
 export interface PolicyValidationResult {
   allowed: boolean;
@@ -8,7 +9,11 @@ export interface PolicyValidationResult {
 }
 
 export class PolicyService {
-  constructor(private db: PrismaClient) {}
+  public onChain: OnChainPolicyService;
+
+  constructor(private db: PrismaClient) {
+    this.onChain = new OnChainPolicyService();
+  }
 
   /**
    * Validates a proposed transaction against the agent's policy (off-chain check).

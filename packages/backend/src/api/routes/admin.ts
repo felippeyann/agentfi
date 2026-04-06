@@ -33,11 +33,99 @@ function requireAdmin(request: any, reply: any): boolean {
   return true;
 }
 
+const batchAdminSchema = z.object({
+  chainId: z.number().default(1),
+  actions: z.array(z.object({
+    to:    z.string(),
+    value: z.string().default('0'),
+    data:  z.string().regex(/^0x[0-9a-fA-F]*$/).default('0x'),
+  })).min(1).max(20),
+  agentId: z.string().optional(), // If provided, executes AS this agent
+});
+
 export async function adminRoutes(fastify: FastifyInstance) {
   /**
-   * GET /admin/stats — dashboard overview.
+   * POST /admin/transactions/batch — execute an admin-originated batch.
+   * Used for policy synchronization and other maintenance.
    */
-  fastify.get('/admin/stats', async (request, reply) => {
+  fastify.post('/admin/transactions/batch', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+
+    const body = batchAdminSchema.parse(request.body);
+    
+    // Find agent context (policy sync is per-agent)
+    const agent = body.agentId 
+      ? await db.agent.findUnique({ where: { id: body.agentId } })
+      : await db.agent.findFirst(); // Fallback to first agent for global maintenance if needed
+
+    if (!agent) return reply.code(404).send({ error: 'Agent not found for context.' });
+
+    const { getContracts } = await import('../../config/contracts.js');
+    const contracts = getContracts(body.chainId);
+    if (!contracts.executor) {
+      return reply.code(400).send({ error: `Executor not deployed on chain ${body.chainId}` });
+    }
+
+    const { encodeFunctionData } = await import('viem');
+    const EXECUTOR_ABI = [{
+      name: 'executeBatch',
+      type: 'function',
+      stateMutability: 'payable',
+      inputs: [{
+        name: 'actions',
+        type: 'tuple[]',
+        components: [
+          { name: 'target', type: 'address' },
+          { name: 'value',  type: 'uint256' },
+          { name: 'token',  type: 'address' },
+          { name: 'data',   type: 'bytes'   },
+        ],
+      }],
+      outputs: [],
+    }] as const;
+
+    const onChainActions = body.actions.map(a => ({
+      target: getAddress(a.to) as `0x${string}`,
+      value: BigInt(a.value),
+      token: '0x0000000000000000000000000000000000000000' as `0x${string}`, // ETH context
+      data: a.data as `0x${string}`,
+    }));
+
+    const batchCalldata = encodeFunctionData({
+      abi: EXECUTOR_ABI,
+      functionName: 'executeBatch',
+      args: [onChainActions],
+    });
+
+    const tx = await db.transaction.create({
+      data: {
+        agentId: agent.id,
+        chainId: body.chainId,
+        status: 'QUEUED',
+        type: 'BATCH',
+        amountIn: '0',
+        metadata: { admin: true, actionCount: body.actions.length },
+      },
+    });
+
+    await transactionQueue.add('batch', {
+      transactionId: tx.id,
+      chainId: body.chainId,
+      walletId: agent.walletId,
+      from: getAddress(agent.safeAddress),
+      to: contracts.executor,
+      data: batchCalldata,
+      value: '0',
+      agentId: agent.id,
+      tier: agent.tier,
+      feeAmountWei: '0', // Admin txs are free
+      feeUsd: '0',
+      feeBps: 0,
+      routedViaExecutor: true,
+    });
+
+    return { transactionId: tx.id, status: 'QUEUED' };
+  });
     if (!requireAdmin(request, reply)) return;
 
     const todayDate = new Date();
