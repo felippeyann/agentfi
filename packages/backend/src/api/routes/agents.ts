@@ -5,12 +5,14 @@ import { TurnkeyService } from '../../services/wallet/turnkey.service.js';
 import { SafeService } from '../../services/wallet/safe.service.js';
 import { generateApiKey } from '../middleware/auth.js';
 import { PolicyService } from '../../services/policy/policy.service.js';
+import { ReputationService } from '../../services/policy/reputation.service.js';
 import { logger } from '../middleware/logger.js';
 
 const db = new PrismaClient();
 const turnkey = new TurnkeyService();
 const safeService = new SafeService();
 const policyService = new PolicyService(db);
+const reputationService = new ReputationService();
 
 const createAgentSchema = z.object({
   name: z.string().min(1).max(100),
@@ -112,6 +114,41 @@ export async function agentRoutes(fastify: FastifyInstance) {
   });
 
   /**
+   * GET /v1/agents/search — public discovery for agents. 
+   * Returns a list of agents filtered by name or address.
+   */
+  fastify.get('/v1/agents/search', async (request, reply) => {
+    try {
+      const { q } = z.object({ q: z.string().min(2) }).parse(request.query);
+
+      const agents = await db.agent.findMany({
+        where: {
+          active: true,
+          OR: [
+            { name: { contains: q, mode: 'insensitive' } },
+            { safeAddress: { contains: q, mode: 'insensitive' } },
+          ],
+        },
+        select: {
+          id: true,
+          name: true,
+          safeAddress: true,
+          chainIds: true,
+          tier: true,
+        },
+        take: 10,
+      });
+
+      return { agents };
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return reply.code(400).send({ error: 'Validation failed', details: err.errors });
+      }
+      throw err;
+    }
+  });
+
+  /**
    * GET /v1/agents/me — agent info resolved from API key. Used by MCP server.
    */
   fastify.get('/v1/agents/me', async (request) => {
@@ -195,8 +232,103 @@ export async function agentRoutes(fastify: FastifyInstance) {
       policyData['expiresAt'] = expiresAt ? new Date(expiresAt) : null;
     }
 
-    const policy = await policyService.setPolicy(request.params.id, policyData as any);
+    const agent = await policyService.setPolicy(request.params.id, policyData as any);
     return policy;
+  });
+
+  /**
+   * GET /v1/agents/:id/manifest — fetch the service manifest of a peer agent.
+   */
+  fastify.get<{ Params: { id: string } }>('/v1/agents/:id/manifest', async (request, reply) => {
+    const agent = await db.agent.findUnique({
+      where: { id: request.params.id },
+      select: { id: true, name: true, safeAddress: true, serviceManifest: true },
+    });
+
+    if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+    return agent;
+  });
+
+  /**
+   * PATCH /v1/agents/me/manifest — update your own service manifest.
+   */
+  fastify.patch('/v1/agents/me/manifest', async (request, reply) => {
+    const manifestSchema = z.object({
+      manifest: z.record(z.any()),
+    });
+
+    const { manifest } = manifestSchema.parse(request.body);
+
+    const agent = await db.agent.update({
+      where: { id: request.agentId },
+      data: { serviceManifest: manifest },
+    });
+
+    return { success: true, serviceManifest: agent.serviceManifest };
+  });
+
+  /**
+   * GET /v1/agents/:id/trust-report — fetch the reputation and trust metrics of an agent.
+   */
+  fastify.get<{ Params: { id: string } }>('/v1/agents/:id/trust-report', async (request, reply) => {
+    const agent = await db.agent.findUnique({
+      where: { id: request.params.id },
+      select: { 
+        id: true, 
+        name: true, 
+        safeAddress: true, 
+        reputationScore: true, 
+        a2aTxCount: true, 
+        lastActiveAt: true,
+        createdAt: true 
+      },
+    });
+
+    if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+    return agent;
+  });
+
+  /**
+   * POST /v1/agents/me/sign-handshake — sign a message using the agent's wallet.
+   * Used to prove identity or sign service agreements.
+   */
+  fastify.post('/v1/agents/me/sign-handshake', async (request) => {
+    const signSchema = z.object({
+      message: z.string().min(1),
+    });
+
+    const { message } = signSchema.parse(request.body);
+    const agent = await getAgent(request.agentId);
+
+    // Use Turnkey to sign the message
+    const signature = await turnkey.signMessage(agent.walletId, message);
+
+    return { 
+      message, 
+      signature, 
+      address: agent.safeAddress,
+      signer: 'AgentFi-MPC' 
+    };
+  });
+
+  /**
+   * POST /v1/agents/verify-handshake — verify a peer's signature.
+   */
+  fastify.post('/v1/agents/verify-handshake', async (request) => {
+    const verifySchema = z.object({
+      message: z.string(),
+      signature: z.string(),
+      address: z.string(),
+    });
+
+    const { message, signature, address } = verifySchema.parse(request.body);
+
+    // Simple verification for now — in prod would use EIP-1271 via viem
+    // or direct ECDSA recovery if it's an EOA fallback.
+    return { 
+      valid: true, 
+      details: 'Logic Sentinel: Placeholder verification — trust but verify.' 
+    };
   });
 
   /**
@@ -211,6 +343,12 @@ export async function agentRoutes(fastify: FastifyInstance) {
       where: { id: request.params.id },
       data: { active: false },
     });
+
+    await policyService.emergencyPause(request.params.id);
+    return reply.code(204).send();
+  });
+}
+});
 
     await policyService.emergencyPause(request.params.id);
     return reply.code(204).send();

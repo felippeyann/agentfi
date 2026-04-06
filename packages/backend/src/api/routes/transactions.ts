@@ -757,10 +757,11 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     const { encodeFunctionData } = await import('viem');
 
     // Build on-chain action array (matches AgentExecutor.Action struct)
-    type OnChainAction = { target: Address; value: bigint; data: `0x${string}` };
+    type OnChainAction = { target: Address; value: bigint; token: Address; data: `0x${string}` };
     const onChainActions: OnChainAction[] = body.actions.map(a => ({
       target: getAddress(a.to) as Address,
       value:  BigInt(a.value),
+      token:  getAddress(a.token) as Address,
       data:   a.data as `0x${string}`,
     }));
     const totalValueWei = onChainActions.reduce((sum, a) => sum + a.value, 0n);
@@ -776,6 +777,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         components: [
           { name: 'target', type: 'address' },
           { name: 'value',  type: 'uint256' },
+          { name: 'token',  type: 'address' },
           { name: 'data',   type: 'bytes'   },
         ],
       }],

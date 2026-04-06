@@ -45,6 +45,7 @@ contract AgentExecutor {
     struct Action {
         address target;
         uint256 value;
+        address token; // Optional: token involved in the operation (address(0) for ETH/none)
         bytes   data;
     }
 
@@ -121,7 +122,7 @@ contract AgentExecutor {
 
             // Validate against policy if one exists
             if (policyModule.hasPolicy(msg.sender)) {
-                policyModule.validateTransaction(msg.sender, action.target, action.value, address(0));
+                policyModule.validateTransaction(msg.sender, action.target, action.value, action.token);
             }
 
             (bool success, bytes memory returnData) = action.target.call{value: action.value}(
@@ -162,7 +163,7 @@ contract AgentExecutor {
         }
 
         if (policyModule.hasPolicy(msg.sender)) {
-            policyModule.validateTransaction(msg.sender, action.target, action.value, address(0));
+            policyModule.validateTransaction(msg.sender, action.target, action.value, action.token);
         }
 
         (bool success, bytes memory returnData) = action.target.call{value: action.value}(

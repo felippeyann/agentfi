@@ -51,6 +51,7 @@ contract ReentrantTarget {
         actions[0] = AgentExecutor.Action({
             target: address(this),
             value:  0,
+            token:  address(0),
             data:   abi.encodeWithSelector(ReentrantTarget.noop.selector)
         });
 
@@ -113,6 +114,7 @@ contract AgentExecutorTest is Test {
         actions[0] = AgentExecutor.Action({
             target: address(mockTarget),
             value:  value,
+            token:  address(0),
             data:   abi.encodeWithSelector(MockTarget.increment.selector)
         });
     }
@@ -187,7 +189,7 @@ contract AgentExecutorTest is Test {
 
     function test_ExecuteBatch_ZeroAddressTarget_Reverts() public {
         AgentExecutor.Action[] memory actions = new AgentExecutor.Action[](1);
-        actions[0] = AgentExecutor.Action({target: address(0), value: 0, data: ""});
+        actions[0] = AgentExecutor.Action({target: address(0), value: 0, token: address(0), data: ""});
 
         vm.prank(safe);
         vm.expectRevert(AgentExecutor.ZeroAddress.selector);
@@ -198,9 +200,10 @@ contract AgentExecutorTest is Test {
         AgentExecutor.Action[] memory actions = new AgentExecutor.Action[](2);
         actions[0] = AgentExecutor.Action({
             target: address(mockTarget), value: 0,
+            token: address(0),
             data: abi.encodeWithSelector(MockTarget.increment.selector)
         });
-        actions[1] = AgentExecutor.Action({target: address(0), value: 0, data: ""});
+        actions[1] = AgentExecutor.Action({target: address(0), value: 0, token: address(0), data: ""});
 
         vm.prank(safe);
         vm.expectRevert(AgentExecutor.ZeroAddress.selector);
@@ -255,6 +258,7 @@ contract AgentExecutorTest is Test {
         AgentExecutor.Action[] memory actions = new AgentExecutor.Action[](1);
         actions[0] = AgentExecutor.Action({
             target: address(mockTarget), value: 0,
+            token: address(0),
             data: abi.encodeWithSelector(MockTarget.increment.selector)
         });
 
@@ -302,6 +306,7 @@ contract AgentExecutorTest is Test {
         for (uint256 i = 0; i < 3; i++) {
             actions[i] = AgentExecutor.Action({
                 target: address(mockTarget), value: 0,
+                token: address(0),
                 data: abi.encodeWithSelector(MockTarget.increment.selector)
             });
         }
@@ -317,10 +322,12 @@ contract AgentExecutorTest is Test {
         AgentExecutor.Action[] memory actions = new AgentExecutor.Action[](2);
         actions[0] = AgentExecutor.Action({
             target: address(mockTarget), value: 1 ether,
+            token: address(0),
             data: abi.encodeWithSelector(MockTarget.increment.selector)
         });
         actions[1] = AgentExecutor.Action({
             target: address(mockTarget), value: 1 ether,
+            token: address(0),
             data: abi.encodeWithSelector(MockTarget.increment.selector)
         });
 
@@ -346,10 +353,12 @@ contract AgentExecutorTest is Test {
         AgentExecutor.Action[] memory actions = new AgentExecutor.Action[](2);
         actions[0] = AgentExecutor.Action({
             target: address(mockTarget), value: 0,
+            token: address(0),
             data: abi.encodeWithSelector(MockTarget.increment.selector)
         });
         actions[1] = AgentExecutor.Action({
             target: address(mockTarget), value: 0,
+            token: address(0),
             data: abi.encodeWithSelector(MockTarget.increment.selector)
         });
 
@@ -632,6 +641,7 @@ contract AgentExecutorTest is Test {
         AgentExecutor.Action memory action = AgentExecutor.Action({
             target: address(mockTarget),
             value:  0,
+            token:  address(0),
             data:   abi.encodeWithSelector(MockTarget.increment.selector)
         });
 
@@ -643,7 +653,7 @@ contract AgentExecutorTest is Test {
 
     function test_ExecuteSingle_ZeroAddressTarget_Reverts() public {
         AgentExecutor.Action memory action = AgentExecutor.Action({
-            target: address(0), value: 0, data: ""
+            target: address(0), value: 0, token: address(0), data: ""
         });
 
         vm.prank(safe);
@@ -658,6 +668,7 @@ contract AgentExecutorTest is Test {
         AgentExecutor.Action memory action = AgentExecutor.Action({
             target: address(mockTarget),
             value:  actionValue,
+            token:  address(0),
             data:   abi.encodeWithSelector(MockTarget.increment.selector)
         });
 
@@ -680,6 +691,7 @@ contract AgentExecutorTest is Test {
         AgentExecutor.Action memory action = AgentExecutor.Action({
             target: address(mockTarget),
             value:  actionValue,
+            token:  address(0),
             data:   abi.encodeWithSelector(MockTarget.increment.selector)
         });
 
@@ -698,6 +710,7 @@ contract AgentExecutorTest is Test {
         AgentExecutor.Action memory action = AgentExecutor.Action({
             target: address(mockTarget),
             value:  actionValue,
+            token:  address(0),
             data:   abi.encodeWithSelector(MockTarget.increment.selector)
         });
 
@@ -712,6 +725,7 @@ contract AgentExecutorTest is Test {
         // Action: 0 value, fee = 0. Sending 1 ETH → entire 1 ETH is excess.
         AgentExecutor.Action memory action = AgentExecutor.Action({
             target: address(mockTarget), value: 0,
+            token: address(0),
             data: abi.encodeWithSelector(MockTarget.increment.selector)
         });
 
@@ -728,6 +742,7 @@ contract AgentExecutorTest is Test {
 
         AgentExecutor.Action memory action = AgentExecutor.Action({
             target: address(mockTarget), value: 0,
+            token: address(0),
             data: abi.encodeWithSelector(MockTarget.increment.selector)
         });
 
@@ -739,6 +754,7 @@ contract AgentExecutorTest is Test {
     function test_ExecuteSingle_EmitsEvents() public {
         AgentExecutor.Action memory action = AgentExecutor.Action({
             target: address(mockTarget), value: 0,
+            token: address(0),
             data: abi.encodeWithSelector(MockTarget.increment.selector)
         });
 
@@ -761,6 +777,7 @@ contract AgentExecutorTest is Test {
 
         AgentExecutor.Action memory action = AgentExecutor.Action({
             target: address(mockTarget), value: 0,
+            token: address(0),
             data: abi.encodeWithSelector(MockTarget.increment.selector)
         });
 
@@ -788,6 +805,7 @@ contract AgentExecutorTest is Test {
         AgentExecutor.Action memory action = AgentExecutor.Action({
             target: address(mockTarget),
             value:  actionValue,
+            token:  address(0),
             data:   abi.encodeWithSelector(MockTarget.increment.selector)
         });
 
@@ -805,6 +823,7 @@ contract AgentExecutorTest is Test {
     function test_ExecuteSingle_NoPolicyForSafe_NoRestrictions() public {
         AgentExecutor.Action memory action = AgentExecutor.Action({
             target: address(mockTarget), value: 0,
+            token: address(0),
             data: abi.encodeWithSelector(MockTarget.increment.selector)
         });
 
@@ -843,6 +862,7 @@ contract AgentExecutorTest is Test {
         actions[0] = AgentExecutor.Action({
             target: address(mockTarget),
             value:  0,
+            token:  address(0),
             data:   abi.encodeWithSelector(MockTarget.increment.selector)
         });
 
@@ -863,6 +883,7 @@ contract AgentExecutorTest is Test {
         AgentExecutor.Action memory action = AgentExecutor.Action({
             target: address(mockTarget),
             value:  actionValue,
+            token:  address(0),
             data:   abi.encodeWithSelector(MockTarget.increment.selector)
         });
 

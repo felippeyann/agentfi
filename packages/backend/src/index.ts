@@ -62,6 +62,7 @@ async function start() {
   await fastify.register(billingRoutes);
   await fastify.register(adminRoutes);
   await fastify.register(mcpRoutes);
+  await fastify.register(jobRoutes);
 
   // Well-known agent capability advertisement
   fastify.get('/.well-known/agent.json', async () => ({
@@ -110,4 +111,6 @@ async function start() {
 start().catch((err) => {
   logger.error(err);
   process.exit(1);
+});
+it(1);
 });

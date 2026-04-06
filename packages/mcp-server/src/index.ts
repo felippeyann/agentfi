@@ -23,9 +23,10 @@ import { walletTools } from './tools/wallet.js';
 import { swapTools } from './tools/swap.js';
 import { defiTools } from './tools/defi.js';
 import { statusTools } from './tools/status.js';
+import { agentTools } from './tools/agent.js';
 
 // Combine all tools
-const ALL_TOOLS = [...walletTools, ...swapTools, ...defiTools, ...statusTools];
+const ALL_TOOLS = [...walletTools, ...swapTools, ...defiTools, ...statusTools, ...agentTools];
 
 // Build tool registry
 const toolRegistry = new Map(ALL_TOOLS.map((t) => [t.name, t]));

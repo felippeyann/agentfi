@@ -20,12 +20,52 @@ model Agent {
   updatedAt    DateTime    @updatedAt
   active       Boolean     @default(true)
   tier         AgentTier   @default(FREE)
+  /// JSON manifest of services/tools this agent provides to other agents
+  serviceManifest Json?
+
+  // Reputation & Trust Metrics
+  reputationScore Int      @default(0)
+  a2aTxCount      Int      @default(0)
+  lastActiveAt    DateTime @default(now())
 
   transactions Transaction[]
+  requestedJobs Job[]      @relation("RequestedJobs")
+  providedJobs  Job[]      @relation("ProvidedJobs")
   policy       AgentPolicy?
   billing      AgentBilling?
 
   @@index([apiKeyHash])
+}
+
+// A2A Service Request / Job Queue
+model Job {
+  id           String    @id @default(cuid())
+  requesterId  String
+  requester    Agent     @relation("RequestedJobs", fields: [requesterId], references: [id])
+  providerId   String
+  provider     Agent     @relation("ProvidedJobs", fields: [providerId], references: [id])
+  
+  status       JobStatus @default(PENDING)
+  payload      Json      // The task details (e.g., { "action": "analyze", "target": "0x..." })
+  reward       Json?     // Payment terms (e.g., { "amount": "0.01", "token": "ETH" })
+  
+  signature    String?   // Requester's signature of the payload
+  result       Json?     // The output/proof of work from the provider
+  
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([requesterId])
+  @@index([providerId])
+  @@index([status])
+}
+
+enum JobStatus {
+  PENDING
+  ACCEPTED
+  COMPLETED
+  FAILED
+  CANCELLED
 }
 
 // Subscription tiers — drives rate limits and fee rates
