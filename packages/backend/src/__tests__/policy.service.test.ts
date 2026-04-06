@@ -26,6 +26,7 @@ function basePolicy(overrides: Partial<AgentPolicy> = {}): AgentPolicy {
     agentId: 'agent-1',
     active: true,
     maxValuePerTxEth: '1.0',
+    maxValueForAutoApprovalEth: '0.1',
     cooldownSeconds: 0,
     allowedContracts: [],
     allowedTokens: [],

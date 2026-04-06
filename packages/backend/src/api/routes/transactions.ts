@@ -351,7 +351,19 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         toToken: body.toToken,
         amountIn: body.amountIn,
         simulation: sim as any,
-        metadata: { simulationId: body.simulationId },
+        metadata: {
+          simulationId: body.simulationId,
+          queuePayload: {
+            to: wrapped.to,
+            data: wrapped.data,
+            value: wrapped.value.toString(),
+            feeAmountWei: wrapped.routedViaExecutor
+              ? wrapped.feeWei.toString()
+              : feeCalc.feeAmountWei.toString(),
+            feeBps: feeCalc.feeBps,
+            routedViaExecutor: wrapped.routedViaExecutor,
+          },
+        },
       },
     });
 
@@ -486,6 +498,16 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         toToken: body.to,
         amountIn: body.amount,
         simulation: sim as any,
+        metadata: {
+          queuePayload: {
+            to: txData.to,
+            data: txData.data,
+            value: txData.value.toString(),
+            feeAmountWei: feeCalc.feeAmountWei.toString(),
+            feeBps: feeCalc.feeBps,
+            routedViaExecutor: false,
+          },
+        },
       },
     });
 
@@ -605,31 +627,51 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
         chainId: body.chainId,
-        status: 'QUEUED',
+        status: policyResult.requiresApproval ? 'PENDING_APPROVAL' : 'QUEUED',
         type: 'DEPOSIT',
         fromToken: body.asset,
         amountIn: body.amount,
         simulation: sim as any,
+        metadata: {
+          queuePayload: {
+            to: supplyTx.to,
+            data: supplyTx.data,
+            value: supplyTx.value.toString(),
+            feeAmountWei: feeCalc.feeAmountWei.toString(),
+            feeBps: feeCalc.feeBps,
+            routedViaExecutor: false,
+          },
+        },
       },
     });
 
-    await transactionQueue.add('deposit', {
-      transactionId: tx.id,
-      chainId: body.chainId,
-      walletId: agent.walletId,
-      from: getAddress(agent.safeAddress),
-      to: supplyTx.to,
-      data: supplyTx.data,
-      value: supplyTx.value.toString(),
-      agentId: request.agentId,
-      tier: request.agentTier,
-      feeAmountWei: feeCalc.feeAmountWei.toString(),
-      feeUsd: '0',
-      feeBps: feeCalc.feeBps,
-      routedViaExecutor: false,
-    });
+    if (!policyResult.requiresApproval) {
+      await transactionQueue.add('deposit', {
+        transactionId: tx.id,
+        chainId: body.chainId,
+        walletId: agent.walletId,
+        from: getAddress(agent.safeAddress),
+        to: supplyTx.to,
+        data: supplyTx.data,
+        value: supplyTx.value.toString(),
+        agentId: request.agentId,
+        tier: request.agentTier,
+        feeAmountWei: feeCalc.feeAmountWei.toString(),
+        feeUsd: '0',
+        feeBps: feeCalc.feeBps,
+        routedViaExecutor: false,
+      });
+    } else {
+      await notificationService.notify({
+        type: 'PENDING_APPROVAL',
+        agentId: request.agentId,
+        agentName: agent.name,
+        transactionId: tx.id,
+        message: `High value DEPOSIT (${body.amount} ${body.asset.slice(0, 10)}) exceeds auto-approval threshold.`,
+      });
+    }
 
-    return reply.code(202).send({ transactionId: tx.id, status: 'QUEUED' });
+    return reply.code(202).send({ transactionId: tx.id, status: tx.status });
   });
 
   /**
@@ -718,31 +760,51 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
         chainId: body.chainId,
-        status: 'QUEUED',
+        status: policyResult.requiresApproval ? 'PENDING_APPROVAL' : 'QUEUED',
         type: 'WITHDRAW',
         fromToken: body.asset,
         amountIn: body.amount,
         simulation: sim as any,
+        metadata: {
+          queuePayload: {
+            to: withdrawTx.to,
+            data: withdrawTx.data,
+            value: withdrawTx.value.toString(),
+            feeAmountWei: feeCalc.feeAmountWei.toString(),
+            feeBps: feeCalc.feeBps,
+            routedViaExecutor: false,
+          },
+        },
       },
     });
 
-    await transactionQueue.add('withdraw', {
-      transactionId: tx.id,
-      chainId: body.chainId,
-      walletId: agent.walletId,
-      from: getAddress(agent.safeAddress),
-      to: withdrawTx.to,
-      data: withdrawTx.data,
-      value: withdrawTx.value.toString(),
-      agentId: request.agentId,
-      tier: request.agentTier,
-      feeAmountWei: feeCalc.feeAmountWei.toString(),
-      feeUsd: '0',
-      feeBps: feeCalc.feeBps,
-      routedViaExecutor: false,
-    });
+    if (!policyResult.requiresApproval) {
+      await transactionQueue.add('withdraw', {
+        transactionId: tx.id,
+        chainId: body.chainId,
+        walletId: agent.walletId,
+        from: getAddress(agent.safeAddress),
+        to: withdrawTx.to,
+        data: withdrawTx.data,
+        value: withdrawTx.value.toString(),
+        agentId: request.agentId,
+        tier: request.agentTier,
+        feeAmountWei: feeCalc.feeAmountWei.toString(),
+        feeUsd: '0',
+        feeBps: feeCalc.feeBps,
+        routedViaExecutor: false,
+      });
+    } else {
+      await notificationService.notify({
+        type: 'PENDING_APPROVAL',
+        agentId: request.agentId,
+        agentName: agent.name,
+        transactionId: tx.id,
+        message: `High value WITHDRAW (${body.amount} ${body.asset.slice(0, 10)}) exceeds auto-approval threshold.`,
+      });
+    }
 
-    return reply.code(202).send({ transactionId: tx.id, status: 'QUEUED' });
+    return reply.code(202).send({ transactionId: tx.id, status: tx.status });
   });
 
   /**
@@ -1021,7 +1083,7 @@ async function getLatestAgentTxTimestamp(agentId: string): Promise<number | unde
   const latest = await db.transaction.findFirst({
     where: {
       agentId,
-      status: { in: ['QUEUED', 'SUBMITTED', 'CONFIRMED'] },
+      status: { in: ['PENDING_APPROVAL', 'QUEUED', 'SUBMITTED', 'CONFIRMED'] },
     },
     orderBy: { createdAt: 'desc' },
     select: { createdAt: true },

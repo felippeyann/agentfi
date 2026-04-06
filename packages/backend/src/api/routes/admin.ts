@@ -7,16 +7,9 @@
 
 import type { FastifyInstance } from 'fastify';
 import { db } from '../../db/client.js';
-import { getAddress, parseUnits } from 'viem';
+import { getAddress } from 'viem';
 import { logger } from '../middleware/logger.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
-import { ExecutorService } from '../../services/transaction/executor.service.js';
-import { FeeService } from '../../services/policy/fee.service.js';
-import { TransactionBuilder } from '../../services/transaction/builder.service.js';
-
-const executor = new ExecutorService();
-const feeService = new FeeService(db);
-const builder = new TransactionBuilder();
 const ADMIN_SECRET = process.env['ADMIN_SECRET'] ?? '';
 const ADMIN_ALLOW_REMOTE = process.env['ADMIN_ALLOW_REMOTE'] === 'true';
 
@@ -210,50 +203,29 @@ export async function adminRoutes(fastify: FastifyInstance) {
         return reply.code(400).send({ error: `Transaction is in ${tx.status} status, cannot approve.` });
       }
 
-      // Reconstruct transaction data to enqueue
-      let to: `0x${string}`;
-      let data: `0x${string}`;
-      let value: bigint;
-      let routedViaExecutor = false;
-      let feeAmountWei = 0n;
+      // Read the pre-built queue payload stored at transaction creation time.
+      // Avoids unsafe reconstruction (wrong decimals, stale quotes, etc.).
+      const queuePayload = (tx.metadata as any)?.queuePayload as {
+        to: string;
+        data: string;
+        value: string;
+        feeAmountWei: string;
+        feeBps: number;
+        routedViaExecutor: boolean;
+      } | undefined;
 
-      if (tx.type === 'SWAP') {
-        // Simple SWAP reconstruction (re-calculating quote is safer but more complex,
-        // using the simulation data from the record for now as a baseline)
-        const simData = tx.simulation as any;
-        if (!simData || !simData.to || !simData.data) {
-           return reply.code(400).send({ error: 'Simulation data missing, cannot reconstruct transaction.' });
-        }
-        to = getAddress(simData.to);
-        data = simData.data;
-        value = BigInt(simData.value || '0');
-        routedViaExecutor = true; // Swaps are always routed via executor if deployed
-        
-        // Use the simulation's value (which includes fee if routed)
-        const feeCalc = feeService.calculateFee({
-          grossAmountWei: parseUnits(tx.amountIn || '0', 18), // fallback, should be precise
-          tier: tx.agent.tier,
+      if (!queuePayload?.to || !queuePayload?.data) {
+        return reply.code(400).send({
+          error: 'Transaction payload missing — this record was created before approval support was added and cannot be re-enacted.',
         });
-        feeAmountWei = feeCalc.feeAmountWei;
-      } else if (tx.type === 'TRANSFER') {
-        const isEth = tx.fromToken?.toUpperCase() === 'ETH';
-        const txData = isEth 
-          ? builder.buildEthTransfer({ to: getAddress(tx.toToken!), amountEth: tx.amountIn! })
-          : builder.buildTokenTransfer({
-              tokenAddress: getAddress(tx.fromToken!),
-              to: getAddress(tx.toToken!),
-              amount: tx.amountIn!,
-              decimals: 18, // should resolve decimals but using 18 for now
-            });
-        
-        to = txData.to;
-        data = txData.data;
-        value = txData.value;
-        const feeCalc = feeService.calculateFee({ grossAmountWei: value, tier: tx.agent.tier });
-        feeAmountWei = feeCalc.feeAmountWei;
-      } else {
-        return reply.code(400).send({ error: `Approval for ${tx.type} not yet implemented.` });
       }
+
+      const to = getAddress(queuePayload.to) as `0x${string}`;
+      const data = queuePayload.data as `0x${string}`;
+      const value = BigInt(queuePayload.value || '0');
+      const routedViaExecutor = queuePayload.routedViaExecutor ?? false;
+      const feeAmountWei = BigInt(queuePayload.feeAmountWei || '0');
+      const feeBps = queuePayload.feeBps ?? 30;
 
       await db.transaction.update({
         where: { id: tx.id },
@@ -272,7 +244,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
         tier: tx.agent.tier,
         feeAmountWei: feeAmountWei.toString(),
         feeUsd: '0',
-        feeBps: 30, // baseline
+        feeBps,
         routedViaExecutor,
       });
 
@@ -304,6 +276,11 @@ export async function adminRoutes(fastify: FastifyInstance) {
       return { status: 'FAILED' };
     },
   );
+
+  /**
+   * GET /admin/volume — daily volume chart data (last 7 days).
+   */
+  fastify.get('/admin/volume', async (request, reply) => {
     if (!requireAdmin(request, reply)) return;
 
     const days = 7;
