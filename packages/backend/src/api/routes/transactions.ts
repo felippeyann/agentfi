@@ -8,7 +8,7 @@ import { ExecutorService } from '../../services/transaction/executor.service.js'
 import { PolicyService } from '../../services/policy/policy.service.js';
 import { FeeService } from '../../services/policy/fee.service.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
-import { weiToUsd } from '../../services/transaction/price.service.js';
+import { weiToUsd, tokenAmountToUsd } from '../../services/transaction/price.service.js';
 import { getContracts } from '../../config/contracts.js';
 import { createChainPublicClient } from '../../config/chains.js';
 import { logger } from '../middleware/logger.js';
@@ -387,6 +387,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     }
 
     const isEthTransfer = body.token.toUpperCase() === 'ETH';
+    const transferDecimals = isEthTransfer ? 18 : await getTokenDecimals(body.token, body.chainId);
 
     let txData;
     if (isEthTransfer) {
@@ -396,17 +397,25 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         tokenAddress: getAddress(body.token),
         to: getAddress(body.to),
         amount: body.amount,
-        decimals: await getTokenDecimals(body.token, body.chainId),
+        decimals: transferDecimals,
       });
     }
 
     const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    const transferValueUsd = isEthTransfer
+      ? await weiToUsd(txData.value, body.chainId)
+      : await tokenAmountToUsd(
+          parseUnits(body.amount, transferDecimals),
+          body.token,
+          transferDecimals,
+          body.chainId,
+        );
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: isEthTransfer ? getAddress(body.to) : txData.to,
       ...(!isEthTransfer ? { tokenAddress: getAddress(body.token) } : {}),
       valueEth: isEthTransfer ? body.amount : '0',
-      valueUsd: isEthTransfer ? await weiToUsd(txData.value, body.chainId) : '0',
+      valueUsd: transferValueUsd,
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
     if (!policyResult.allowed) {
@@ -516,12 +525,13 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     });
 
     const depositLastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    const depositValueUsd = await tokenAmountToUsd(amountWei, body.asset, decimals, body.chainId);
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: supplyTx.to,
       tokenAddress: getAddress(body.asset),
       valueEth: '0',
-      valueUsd: '0',
+      valueUsd: depositValueUsd,
       ...(depositLastTxTimestamp !== undefined ? { lastTxTimestamp: depositLastTxTimestamp } : {}),
     });
     if (!policyResult.allowed) {
@@ -626,12 +636,16 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     });
 
     const withdrawLastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    // For max-withdraw, we can't know the exact amount until on-chain; pass '0' to avoid blocking on unknown value
+    const withdrawValueUsd = amountWei === maxUint256
+      ? '0'
+      : await tokenAmountToUsd(amountWei, body.asset, decimals, body.chainId);
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: withdrawTx.to,
       tokenAddress: getAddress(body.asset),
       valueEth: '0',
-      valueUsd: '0',
+      valueUsd: withdrawValueUsd,
       ...(withdrawLastTxTimestamp !== undefined ? { lastTxTimestamp: withdrawLastTxTimestamp } : {}),
     });
     if (!policyResult.allowed) {
