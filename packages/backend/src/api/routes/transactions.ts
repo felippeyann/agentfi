@@ -12,6 +12,7 @@ import { weiToUsd, tokenAmountToUsd } from '../../services/transaction/price.ser
 import { getContracts } from '../../config/contracts.js';
 import { createChainPublicClient } from '../../config/chains.js';
 import { logger } from '../middleware/logger.js';
+import { notificationService } from '../../services/notification.service.js';
 import type { Address } from 'viem';
 const builder = new TransactionBuilder();
 const simulator = new SimulatorService();
@@ -320,7 +321,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
         chainId: body.chainId,
-        status: 'QUEUED',
+        status: policyResult.requiresApproval ? 'PENDING_APPROVAL' : 'QUEUED',
         type: 'SWAP',
         fromToken: body.fromToken,
         toToken: body.toToken,
@@ -330,32 +331,43 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       },
     });
 
-    // Enqueue for processing — use wrapped tx so executor handles fee on-chain
-    await transactionQueue.add(
-      'swap',
-      {
-        transactionId: tx.id,
-        chainId: body.chainId,
-        walletId: agent.walletId,
-        from: getAddress(agent.safeAddress),
-        to: wrapped.to,
-        data: wrapped.data,
-        value: wrapped.value.toString(),
+    // Enqueue for processing — ONLY if it doesn't require manual approval
+    if (!policyResult.requiresApproval) {
+      await transactionQueue.add(
+        'swap',
+        {
+          transactionId: tx.id,
+          chainId: body.chainId,
+          walletId: agent.walletId,
+          from: getAddress(agent.safeAddress),
+          to: wrapped.to,
+          data: wrapped.data,
+          value: wrapped.value.toString(),
+          agentId: request.agentId,
+          tier: request.agentTier,
+          feeAmountWei: wrapped.routedViaExecutor
+            ? wrapped.feeWei.toString()
+            : feeCalc.feeAmountWei.toString(),
+          feeUsd: '0',
+          feeBps: feeCalc.feeBps,
+          routedViaExecutor: wrapped.routedViaExecutor,
+        },
+        { priority: 1 },
+      );
+    } else {
+      // Notify operator of pending approval
+      await notificationService.notify({
+        type: 'PENDING_APPROVAL',
         agentId: request.agentId,
-        tier: request.agentTier,
-        feeAmountWei: wrapped.routedViaExecutor
-          ? wrapped.feeWei.toString()
-          : feeCalc.feeAmountWei.toString(),
-        feeUsd: '0',
-        feeBps: feeCalc.feeBps,
-        routedViaExecutor: wrapped.routedViaExecutor,
-      },
-      { priority: 1 },
-    );
+        agentName: (agent as any).name || 'Unknown Agent', // Name not currently in agent partial select, using fallback
+        transactionId: tx.id,
+        message: `High value SWAP (${body.amountIn} ${body.fromToken?.slice(0, 6)}...) exceeds auto-approval threshold.`,
+      });
+    }
 
     return reply.code(202).send({
       transactionId: tx.id,
-      status: 'QUEUED',
+      status: tx.status,
       simulationId: sim.simulationId,
       fee: {
         bps: feeCalc.feeBps,
@@ -444,7 +456,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
         chainId: body.chainId,
-        status: 'QUEUED',
+        status: policyResult.requiresApproval ? 'PENDING_APPROVAL' : 'QUEUED',
         type: 'TRANSFER',
         fromToken: body.token,
         toToken: body.to,
@@ -453,23 +465,34 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       },
     });
 
-    await transactionQueue.add('transfer', {
-      transactionId: tx.id,
-      chainId: body.chainId,
-      walletId: agent.walletId,
-      from: getAddress(agent.safeAddress),
-      to: txData.to,
-      data: txData.data,
-      value: txData.value.toString(),
-      agentId: request.agentId,
-      tier: request.agentTier,
-      feeAmountWei: feeCalc.feeAmountWei.toString(),
-      feeUsd: '0',
-      feeBps: feeCalc.feeBps,
-      routedViaExecutor: false,
-    });
+    if (!policyResult.requiresApproval) {
+      await transactionQueue.add('transfer', {
+        transactionId: tx.id,
+        chainId: body.chainId,
+        walletId: agent.walletId,
+        from: getAddress(agent.safeAddress),
+        to: txData.to,
+        data: txData.data,
+        value: txData.value.toString(),
+        agentId: request.agentId,
+        tier: request.agentTier,
+        feeAmountWei: feeCalc.feeAmountWei.toString(),
+        feeUsd: '0',
+        feeBps: feeCalc.feeBps,
+        routedViaExecutor: false,
+      });
+    } else {
+      // Notify operator of pending approval
+      await notificationService.notify({
+        type: 'PENDING_APPROVAL',
+        agentId: request.agentId,
+        agentName: agent.name,
+        transactionId: tx.id,
+        message: `High value TRANSFER (${body.amount} ${body.token}) exceeds auto-approval threshold.`,
+      });
+    }
 
-    return reply.code(202).send({ transactionId: tx.id, status: 'QUEUED' });
+    return reply.code(202).send({ transactionId: tx.id, status: tx.status });
   });
 
   /**
@@ -875,6 +898,33 @@ export async function transactionRoutes(fastify: FastifyInstance) {
   });
 
   /**
+   * GET /v1/public/transactions/:id — public endpoint for the UI, no auth required but restricted view.
+   */
+  fastify.get<{ Params: { id: string } }>('/v1/public/transactions/:id', async (request, reply) => {
+    const tx = await db.transaction.findUnique({
+      where: { id: request.params.id },
+      select: {
+        id: true,
+        status: true,
+        type: true,
+        chainId: true,
+        txHash: true,
+        fromToken: true,
+        toToken: true,
+        amountIn: true,
+        amountOut: true,
+        error: true,
+        simulation: true,
+        createdAt: true,
+        confirmedAt: true,
+      },
+    });
+
+    if (!tx) return reply.code(404).send({ error: 'Transaction not found' });
+    return tx;
+  });
+
+  /**
    * GET /v1/transactions — paginated transaction history.
    */
   fastify.get('/v1/transactions', async (request) => {
@@ -903,7 +953,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 async function getAgent(agentId: string) {
   const agent = await db.agent.findUnique({
     where: { id: agentId },
-    select: { safeAddress: true, walletId: true, chainIds: true },
+    select: { name: true, safeAddress: true, walletId: true, chainIds: true },
   });
   if (!agent) throw new Error('Agent not found');
   return agent;

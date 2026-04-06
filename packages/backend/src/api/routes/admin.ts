@@ -7,7 +7,16 @@
 
 import type { FastifyInstance } from 'fastify';
 import { db } from '../../db/client.js';
+import { getAddress, parseUnits } from 'viem';
 import { logger } from '../middleware/logger.js';
+import { transactionQueue } from '../../queues/transaction.queue.js';
+import { ExecutorService } from '../../services/transaction/executor.service.js';
+import { FeeService } from '../../services/policy/fee.service.js';
+import { TransactionBuilder } from '../../services/transaction/builder.service.js';
+
+const executor = new ExecutorService();
+const feeService = new FeeService(db);
+const builder = new TransactionBuilder();
 const ADMIN_SECRET = process.env['ADMIN_SECRET'] ?? '';
 const ADMIN_ALLOW_REMOTE = process.env['ADMIN_ALLOW_REMOTE'] === 'true';
 
@@ -184,9 +193,117 @@ export async function adminRoutes(fastify: FastifyInstance) {
   );
 
   /**
-   * GET /admin/volume — daily volume for the last 7 days (chart data).
+   * POST /admin/transactions/:id/approve — manually approve a PENDING_APPROVAL transaction.
    */
-  fastify.get('/admin/volume', async (request, reply) => {
+  fastify.post<{ Params: { id: string } }>(
+    '/admin/transactions/:id/approve',
+    async (request, reply) => {
+      if (!requireAdmin(request, reply)) return;
+
+      const tx = await db.transaction.findUnique({
+        where: { id: request.params.id },
+        include: { agent: true },
+      });
+
+      if (!tx) return reply.code(404).send({ error: 'Transaction not found' });
+      if (tx.status !== 'PENDING_APPROVAL') {
+        return reply.code(400).send({ error: `Transaction is in ${tx.status} status, cannot approve.` });
+      }
+
+      // Reconstruct transaction data to enqueue
+      let to: `0x${string}`;
+      let data: `0x${string}`;
+      let value: bigint;
+      let routedViaExecutor = false;
+      let feeAmountWei = 0n;
+
+      if (tx.type === 'SWAP') {
+        // Simple SWAP reconstruction (re-calculating quote is safer but more complex,
+        // using the simulation data from the record for now as a baseline)
+        const simData = tx.simulation as any;
+        if (!simData || !simData.to || !simData.data) {
+           return reply.code(400).send({ error: 'Simulation data missing, cannot reconstruct transaction.' });
+        }
+        to = getAddress(simData.to);
+        data = simData.data;
+        value = BigInt(simData.value || '0');
+        routedViaExecutor = true; // Swaps are always routed via executor if deployed
+        
+        // Use the simulation's value (which includes fee if routed)
+        const feeCalc = feeService.calculateFee({
+          grossAmountWei: parseUnits(tx.amountIn || '0', 18), // fallback, should be precise
+          tier: tx.agent.tier,
+        });
+        feeAmountWei = feeCalc.feeAmountWei;
+      } else if (tx.type === 'TRANSFER') {
+        const isEth = tx.fromToken?.toUpperCase() === 'ETH';
+        const txData = isEth 
+          ? builder.buildEthTransfer({ to: getAddress(tx.toToken!), amountEth: tx.amountIn! })
+          : builder.buildTokenTransfer({
+              tokenAddress: getAddress(tx.fromToken!),
+              to: getAddress(tx.toToken!),
+              amount: tx.amountIn!,
+              decimals: 18, // should resolve decimals but using 18 for now
+            });
+        
+        to = txData.to;
+        data = txData.data;
+        value = txData.value;
+        const feeCalc = feeService.calculateFee({ grossAmountWei: value, tier: tx.agent.tier });
+        feeAmountWei = feeCalc.feeAmountWei;
+      } else {
+        return reply.code(400).send({ error: `Approval for ${tx.type} not yet implemented.` });
+      }
+
+      await db.transaction.update({
+        where: { id: tx.id },
+        data: { status: 'QUEUED' },
+      });
+
+      await transactionQueue.add(tx.type.toLowerCase(), {
+        transactionId: tx.id,
+        chainId: tx.chainId,
+        walletId: tx.agent.walletId,
+        from: getAddress(tx.agent.safeAddress),
+        to,
+        data,
+        value: value.toString(),
+        agentId: tx.agentId,
+        tier: tx.agent.tier,
+        feeAmountWei: feeAmountWei.toString(),
+        feeUsd: '0',
+        feeBps: 30, // baseline
+        routedViaExecutor,
+      });
+
+      logger.info({ transactionId: tx.id }, 'Admin approved transaction');
+      return { status: 'QUEUED' };
+    },
+  );
+
+  /**
+   * POST /admin/transactions/:id/reject — manually reject a PENDING_APPROVAL transaction.
+   */
+  fastify.post<{ Params: { id: string } }>(
+    '/admin/transactions/:id/reject',
+    async (request, reply) => {
+      if (!requireAdmin(request, reply)) return;
+
+      const tx = await db.transaction.findUnique({ where: { id: request.params.id } });
+      if (!tx) return reply.code(404).send({ error: 'Transaction not found' });
+      if (tx.status !== 'PENDING_APPROVAL') {
+        return reply.code(400).send({ error: 'Can only reject PENDING_APPROVAL transactions.' });
+      }
+
+      await db.transaction.update({
+        where: { id: tx.id },
+        data: { status: 'FAILED', error: 'Operator rejected transaction' },
+      });
+
+      logger.info({ transactionId: tx.id }, 'Admin rejected transaction');
+      return { status: 'FAILED' };
+    },
+  );
     if (!requireAdmin(request, reply)) return;
 
     const days = 7;

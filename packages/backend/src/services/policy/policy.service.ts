@@ -3,6 +3,7 @@ import { getAddress, type Address } from 'viem';
 
 export interface PolicyValidationResult {
   allowed: boolean;
+  requiresApproval?: boolean;
   reason?: string;
 }
 
@@ -25,7 +26,7 @@ export class PolicyService {
       where: { agentId: params.agentId },
     });
 
-    if (!policy) return { allowed: true }; // no policy = no restrictions
+    if (!policy) return { allowed: true, requiresApproval: false }; // no policy = no restrictions
     if (!policy.active) return { allowed: false, reason: 'Agent policy is paused (kill switch active)' };
 
     // Check temporary policy expiration
@@ -44,6 +45,13 @@ export class PolicyService {
         allowed: false,
         reason: `Transaction value ${params.valueEth} ETH exceeds policy limit of ${policy.maxValuePerTxEth} ETH`,
       };
+    }
+
+    // Check human-in-the-loop approval threshold
+    let requiresApproval = false;
+    const approvalThreshold = parseFloat(policy.maxValueForAutoApprovalEth);
+    if (value > approvalThreshold) {
+      requiresApproval = true;
     }
 
     // Check contract whitelist
@@ -100,7 +108,7 @@ export class PolicyService {
       }
     }
 
-    return { allowed: true };
+    return { allowed: true, requiresApproval };
   }
 
   async setPolicy(agentId: string, policy: Omit<AgentPolicy, 'id' | 'agentId' | 'updatedAt'>): Promise<AgentPolicy> {

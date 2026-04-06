@@ -25,3 +25,23 @@ export async function adminFetch<T>(
 
   return res.json() as Promise<T>;
 }
+
+export async function publicFetch<T>(
+  path: string,
+  options: RequestInit = {},
+): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  });
+
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({ error: res.statusText }))) as { error: string };
+    throw new Error(err.error);
+  }
+
+  return res.json() as Promise<T>;
+}

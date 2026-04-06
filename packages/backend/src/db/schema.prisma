@@ -112,11 +112,12 @@ model FeeEvent {
 }
 
 model AgentPolicy {
-  id                String    @id @default(cuid())
-  agentId           String    @unique
-  agent             Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  maxValuePerTxEth  String    @default("1.0")
-  maxDailyVolumeUsd String    @default("10000")
+  id                        String    @id @default(cuid())
+  agentId                   String    @unique
+  agent                     Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  maxValuePerTxEth          String    @default("1.0")
+  maxValueForAutoApprovalEth String    @default("0.1")
+  maxDailyVolumeUsd         String    @default("10000")
   allowedContracts  String[]
   allowedTokens     String[]
   cooldownSeconds   Int       @default(60)
@@ -181,6 +182,7 @@ model DailyVolume {
 
 enum TxStatus {
   PENDING
+  PENDING_APPROVAL
   SIMULATING
   QUEUED
   SUBMITTED

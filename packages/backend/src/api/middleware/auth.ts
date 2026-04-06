@@ -29,6 +29,7 @@ const authPlugin: FastifyPluginCallback = (fastify, _opts, done) => {
     if (request.routeOptions?.url?.startsWith('/health')) return;
     if (request.routeOptions?.url?.startsWith('/admin')) return;
     if (request.routeOptions?.url?.startsWith('/.well-known')) return;
+    if (request.routeOptions?.url?.startsWith('/v1/public/')) return;
     if (request.routeOptions?.url === '/v1/billing/webhook') return;
     if (request.routeOptions?.url?.startsWith('/mcp')) return;
 

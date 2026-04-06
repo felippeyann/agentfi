@@ -10,13 +10,15 @@ interface AgentDetail {
   tier: 'FREE' | 'PRO' | 'ENTERPRISE';
   chainIds: number[];
   policy: {
-    maxValuePerTxEth: string;
-    maxDailyVolumeUsd: string;
-    allowedContracts: string[];
-    allowedTokens: string[];
-    cooldownSeconds: number;
-    active: boolean;
+  maxValuePerTxEth: string;
+  maxValueForAutoApprovalEth: string;
+  maxDailyVolumeUsd: string;
+  allowedContracts: string[];
+  allowedTokens: string[];
+  cooldownSeconds: number;
+  active: boolean;
   } | null;
+
   billing: {
     txCountThisPeriod: number;
     totalFeesCollectedUsd: string;
@@ -114,6 +116,9 @@ export default async function AgentDetailPage({ params }: { params: { id: string
             <>
               <p className="text-xs text-gray-300">
                 Max value/tx: <span className="text-white">{agent.policy.maxValuePerTxEth} ETH</span>
+              </p>
+              <p className="text-xs text-brand-purple">
+                Auto-approve limit: <span className="font-bold">{agent.policy.maxValueForAutoApprovalEth} ETH</span>
               </p>
               <p className="text-xs text-gray-300">
                 Daily limit: <span className="text-white">${agent.policy.maxDailyVolumeUsd}</span>

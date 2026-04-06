@@ -18,6 +18,12 @@ const navItems = [
 export function Sidebar() {
   const pathname = usePathname();
   if (pathname === "/login") return null;
+  if (pathname?.startsWith("/transactions/")) {
+    // Check if it is the public transaction page (e.g., /transactions/cuid)
+    // but NOT the admin list (/transactions)
+    const segments = pathname.split("/").filter(Boolean);
+    if (segments.length === 2) return null;
+  }
 
   return (
     <aside className="w-64 h-screen border-r border-brand-border bg-brand-black flex flex-col pt-6 px-4 shrink-0 transition-all duration-300">

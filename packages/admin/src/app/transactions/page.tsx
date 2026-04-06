@@ -35,6 +35,7 @@ const STATUS_CONFIG: Record<string, { color: string; icon: React.ReactNode }> = 
   FAILED: { color: 'text-brand-red bg-brand-red/10 ring-brand-red/30', icon: <XCircle className="size-3" /> },
   REVERTED: { color: 'text-brand-red bg-brand-red/10 ring-brand-red/30', icon: <XCircle className="size-3" /> },
   SIMULATING: { color: 'text-gray-400 bg-gray-500/10 ring-gray-500/30', icon: <Activity className="size-3" /> },
+  PENDING_APPROVAL: { color: 'text-yellow-400 bg-yellow-400/10 ring-yellow-400/30', icon: <Clock className="size-3" /> },
 };
 
 const CHAIN_NAMES: Record<number, string> = {
@@ -69,7 +70,7 @@ export default async function TransactionsPage() {
               <th className="px-6 py-4 font-semibold">Agent</th>
               <th className="px-6 py-4 font-semibold">Amount</th>
               <th className="px-6 py-4 font-semibold">Tx Hash & Errs</th>
-              <th className="px-6 py-4 font-semibold text-right">Time</th>
+              <th className="px-6 py-4 font-semibold text-right">Action</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-brand-border/50">
@@ -125,8 +126,12 @@ export default async function TransactionsPage() {
                     {!tx.txHash && !tx.error && <span className="text-gray-600">—</span>}
                   </td>
                   <td className="px-6 py-4 text-right">
-                    <p className="text-gray-300 text-sm">{new Date(tx.createdAt).toLocaleDateString()}</p>
-                    <p className="text-gray-500 text-xs">{new Date(tx.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
+                    <Link 
+                      href={`/transactions/${tx.id}`}
+                      className="inline-flex items-center gap-1.5 text-xs font-bold text-gray-400 hover:text-brand-accent transition-colors bg-white/5 hover:bg-brand-accent/10 px-3 py-1.5 rounded-lg border border-white/5 hover:border-brand-accent/30"
+                    >
+                      View
+                    </Link>
                   </td>
                 </tr>
               );
