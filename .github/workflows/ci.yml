@@ -2,9 +2,9 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, master, develop]
+    branches: [main, develop]
   push:
-    branches: [develop, master]
+    branches: [develop, main]
 
 jobs:
   deploy-preflight-check:

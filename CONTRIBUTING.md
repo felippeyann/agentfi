@@ -82,7 +82,7 @@ The backend is the source of truth. The MCP server is a thin adapter over the ba
    cd packages/contracts && forge test -vvv
    ```
 
-4. **Open a PR** against `develop`, not `main`/`master`. Fill in the PR template.
+4. **Open a PR** against `develop`, not `main`. Fill in the PR template.
 
 ---
 
