@@ -41,9 +41,9 @@ model Agent {
 model Job {
   id           String    @id @default(cuid())
   requesterId  String
-  requester    Agent     @relation("RequestedJobs", fields: [requesterId], references: [id])
+  requester    Agent     @relation("RequestedJobs", fields: [requesterId], references: [id], onDelete: Cascade)
   providerId   String
-  provider     Agent     @relation("ProvidedJobs", fields: [providerId], references: [id])
+  provider     Agent     @relation("ProvidedJobs", fields: [providerId], references: [id], onDelete: Cascade)
   
   status       JobStatus @default(PENDING)
   payload      Json      // The task details (e.g., { "action": "analyze", "target": "0x..." })

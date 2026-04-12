@@ -346,49 +346,27 @@ export async function agentRoutes(fastify: FastifyInstance) {
    * POST /v1/agents/me/sign-handshake — sign a message using the agent's wallet.
    * Used to prove identity or sign service agreements.
    */
-  fastify.post('/v1/agents/me/sign-handshake', async (request) => {
-    const signSchema = z.object({
-      message: z.string().min(1),
+  fastify.post('/v1/agents/me/sign-handshake', async (_request, reply) => {
+    // A2A handshake signing requires Turnkey MPC integration.
+    // Returning placeholder signatures is a security risk — disabled until
+    // proper Turnkey message signing is implemented.
+    return reply.code(501).send({
+      error: 'Not implemented',
+      details: 'A2A handshake signing requires Turnkey MPC integration. See: https://docs.turnkey.com/features/signatures',
     });
-
-    const { message } = signSchema.parse(request.body);
-    const agent = await db.agent.findUniqueOrThrow({
-      where: { id: request.agentId },
-      select: { walletId: true, safeAddress: true },
-    });
-
-    // TODO: implement Turnkey message signing for A2A handshakes
-    // const signature = await turnkey.signMessage(agent.walletId!, message);
-    const signature = `placeholder-${Date.now()}`;
-
-    return {
-      message,
-      signature,
-      address: agent.safeAddress,
-      signer: 'AgentFi-MPC'
-    };
   });
 
   /**
    * POST /v1/agents/verify-handshake — verify a peer's signature.
    */
-  fastify.post('/v1/agents/verify-handshake', async (request) => {
-    const verifySchema = z.object({
-      message: z.string(),
-      signature: z.string(),
-      address: z.string(),
+  fastify.post('/v1/agents/verify-handshake', async (_request, reply) => {
+    // A2A handshake verification requires EIP-1271 (Safe) or ECDSA recovery (EOA).
+    // Returning valid: true without actual verification is a security risk.
+    return reply.code(501).send({
+      error: 'Not implemented',
+      details: 'A2A handshake verification requires EIP-1271 or ECDSA recovery. See: https://eips.ethereum.org/EIPS/eip-1271',
     });
-
-    const { message, signature, address } = verifySchema.parse(request.body);
-
-    // Simple verification for now — in prod would use EIP-1271 via viem
-    // or direct ECDSA recovery if it's an EOA fallback.
-    return { 
-      valid: true, 
-      details: 'Logic Sentinel: Placeholder verification — trust but verify.' 
-    };
   });
-
   /**
    * DELETE /v1/agents/:id — deactivate agent (soft delete).
    */

@@ -259,7 +259,14 @@ describe('Transaction Pipeline E2E', () => {
 
   afterAll(async () => {
     await worker?.close();
-    // Clean up test data (cascade deletes related records).
+    // Clean up test data in FK dependency order.
+    await db.feeEvent.deleteMany();
+    await db.job.deleteMany();
+    await db.x402Nonce.deleteMany();
+    await db.transaction.deleteMany();
+    await db.dailyVolume.deleteMany();
+    await db.agentPolicy.deleteMany();
+    await db.agentBilling.deleteMany();
     if (testAgentId) {
       await db.agent.delete({ where: { id: testAgentId } }).catch(() => {});
     }

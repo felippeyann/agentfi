@@ -27,6 +27,7 @@ describe('Agent Search Integration', () => {
   beforeEach(async () => {
     // Clear the database in order to avoid FK violations
     await db.feeEvent.deleteMany();
+    await db.job.deleteMany();
     await db.transaction.deleteMany();
     await db.dailyVolume.deleteMany();
     await db.agentPolicy.deleteMany();
