@@ -16,18 +16,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub pull request template
 - Dependabot configuration for automated dependency updates
 - `prisma migrate deploy` step in CI Backend Tests job
+- E2E polling helpers: `waitForFeeEvent()` and `waitForDailyVolume()`
 
 ### Changed
 - A2A handshake endpoints now return 501 until proper Turnkey/EIP-1271 integration
 - Branch consolidation: all development unified on `main` (default), `master` deleted
 - CI workflow triggers updated from `master` to `main`
+- Next.js upgraded from v14 to v16 (admin dashboard)
+- Dockerfiles now run as non-root user (`appuser:1001`)
 
 ### Fixed
 - FK constraint violation in test cleanup (Job records blocking Agent deletion)
 - Test cleanup order in agent.search.test.ts and transaction.e2e.ts
 - NODE_ENV validation: added 'test' to accepted enum values
 - CI Backend Tests: database migrations now applied before running unit tests
-- npm dependency vulnerabilities (path-to-regexp, picomatch HIGH severity)
+- E2E flaky test: FeeEvent assertion now uses polling instead of 2s setTimeout
+- npm dependency vulnerabilities (path-to-regexp, picomatch, Next.js HIGH severity)
 
 ### Removed
 - `desktop.ini` from repository (added to .gitignore)

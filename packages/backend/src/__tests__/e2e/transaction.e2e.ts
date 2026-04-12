@@ -215,6 +215,39 @@ async function waitForTxStatus(
   );
 }
 
+async function waitForFeeEvent(
+  db: PrismaClient,
+  transactionId: string,
+  timeoutMs = 15_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const fee = await db.feeEvent.findFirst({ where: { transactionId } });
+    if (fee) return fee;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(
+    `FeeEvent for tx ${transactionId} not found within ${timeoutMs}ms`,
+  );
+}
+
+async function waitForDailyVolume(
+  db: PrismaClient,
+  agentId: string,
+  date: string,
+  timeoutMs = 15_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const vol = await db.dailyVolume.findFirst({ where: { agentId, date } });
+    if (vol && parseFloat(vol.volumeUsd) > 0) return vol;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(
+    `DailyVolume for agent ${agentId} on ${date} not found within ${timeoutMs}ms`,
+  );
+}
+
 // ── Test suite ───────────────────────────────────────────────────────────────
 
 describe('Transaction Pipeline E2E', () => {
@@ -376,24 +409,15 @@ describe('Transaction Pipeline E2E', () => {
 
     await waitForTxStatus(db, tx.id, ['CONFIRMED', 'FAILED', 'REVERTED'], 60_000);
 
-    // Wait briefly for the async post-confirmation accounting to finish.
-    await new Promise((r) => setTimeout(r, 2_000));
+    // Poll for async post-confirmation accounting (FeeEvent + DailyVolume)
+    // instead of a hardcoded setTimeout which causes flaky failures on slow CI.
+    const feeEvent = await waitForFeeEvent(db, tx.id, 15_000);
+    expect(feeEvent.feeBps).toBe(feeBps);
+    expect(BigInt(feeEvent.feeTokens)).toBe(feeAmount);
 
-    // Assert FeeEvent was created.
-    const feeEvent = await db.feeEvent.findFirst({
-      where: { transactionId: tx.id },
-    });
-    expect(feeEvent).not.toBeNull();
-    expect(feeEvent!.feeBps).toBe(feeBps);
-    expect(BigInt(feeEvent!.feeTokens)).toBe(feeAmount);
-
-    // Assert DailyVolume was updated.
     const today = new Date().toISOString().slice(0, 10);
-    const volume = await db.dailyVolume.findFirst({
-      where: { agentId: testAgentId, date: today },
-    });
-    expect(volume).not.toBeNull();
-    expect(parseFloat(volume!.volumeUsd)).toBeGreaterThan(0);
+    const volume = await waitForDailyVolume(db, testAgentId, today, 15_000);
+    expect(parseFloat(volume.volumeUsd)).toBeGreaterThan(0);
   });
 
   // ── Test 3: Failed transaction ──────────────────────────────────────────
