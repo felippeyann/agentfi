@@ -49,8 +49,18 @@ AgentFi is built for security-first autonomy.
 - **Guardrails**: On-chain policies prevent agents from exceeding predefined limits.
 - **Kill Switch**: Operators can pause any agent's transaction ability instantly.
 
+Found a vulnerability? See **[SECURITY.md](SECURITY.md)** for our disclosure policy.
+
+---
+
+## 🤝 Community
+
+- **[Code of Conduct](CODE_OF_CONDUCT.md)**: Our community standards.
+- **[Contributing](CONTRIBUTING.md)**: How to contribute to AgentFi.
+- **[Changelog](CHANGELOG.md)**: Release history and notable changes.
+
 ---
 
 ## 📄 License
 
-AgentFi is open-source and licensed under the **Apache 2.0 License**.
+AgentFi is open-source and licensed under the **[Apache 2.0 License](LICENSE)**.

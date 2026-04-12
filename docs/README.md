@@ -9,6 +9,9 @@ Welcome to the AgentFi documentation. This hub is designed for both human operat
 - **[Roadmap](project/roadmap.md)**: Our technical and business evolution plan.
 - **[Release Notes (HITL)](project/release-notes-hitl.md)**: Details on the new Human-in-the-Loop and Transparency features.
 - **[Contributing](../CONTRIBUTING.md)**: How to help build the future of agentic DeFi.
+- **[Changelog](../CHANGELOG.md)**: Release history and notable changes.
+- **[Security Policy](../SECURITY.md)**: Vulnerability disclosure process.
+- **[Code of Conduct](../CODE_OF_CONDUCT.md)**: Community standards.
 
 ### 🏗️ Architecture
 - **[System Overview](architecture/overview.md)**: The 4-layer stack from MPC wallets to MCP tools.
