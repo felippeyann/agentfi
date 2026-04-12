@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `prisma migrate deploy` step in CI Backend Tests job
 - E2E polling helpers: `waitForFeeEvent()` and `waitForDailyVolume()`
 - API reference documentation (`docs/api-reference.md`)
+- Package READMEs for backend, admin, and contracts
+- GitHub CI and license badges in main README
+- `.github/CODEOWNERS` for code review routing
+- Apache 2.0 license and repository fields in all package.json files
 
 ### Changed
 - A2A handshake endpoints now return 501 until proper Turnkey/EIP-1271 integration

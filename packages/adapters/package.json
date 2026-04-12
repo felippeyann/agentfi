@@ -1,6 +1,8 @@
 {
   "name": "@agentfi/adapters",
   "version": "0.1.0",
+  "license": "Apache-2.0",
+  "repository": { "type": "git", "url": "https://github.com/felippeyann/agentfi.git", "directory": "packages/adapters" },
   "description": "AgentFi adapters for LangChain, LlamaIndex, and Eliza agent frameworks",
   "type": "module",
   "exports": {

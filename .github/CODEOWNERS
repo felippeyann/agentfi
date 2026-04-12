@@ -1,0 +1,10 @@
+# Default owner for all files
+* @felippeyann
+
+# Smart contracts require explicit review
+/packages/contracts/ @felippeyann
+
+# Infrastructure and CI changes
+/.github/ @felippeyann
+/Dockerfile* @felippeyann
+/docker-compose.yml @felippeyann

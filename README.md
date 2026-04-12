@@ -1,5 +1,8 @@
 # AgentFi
 
+[![CI](https://github.com/felippeyann/agentfi/actions/workflows/ci.yml/badge.svg)](https://github.com/felippeyann/agentfi/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 **The economic layer for non-human intelligence.**
 
 AgentFi provides crypto transaction infrastructure for AI agents on Ethereum and EVM-compatible networks. It allows agents to execute DeFi transactions (swaps, yield farming, transfers) without handling private keys or managing gas, all within a secure on-chain policy framework.

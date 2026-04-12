@@ -158,4 +158,4 @@ mcp, defi, ethereum, base, arbitrum, polygon, ai-agents, uniswap, aave, turnkey,
 
 ## License
 
-Private. All rights reserved.
+Apache 2.0 — see [LICENSE](../../LICENSE).
