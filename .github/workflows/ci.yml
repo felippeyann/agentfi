@@ -77,6 +77,11 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npx prisma generate --schema=packages/backend/src/db/schema.prisma
+      - name: Apply database migrations
+        working-directory: packages/backend
+        env:
+          DATABASE_URL: postgresql://agentfi:agentfi@localhost:5432/agentfi_test
+        run: npx prisma migrate deploy
       - run: npm run typecheck --workspaces --if-present
       - run: npm run lint --workspaces --if-present
 
@@ -117,6 +122,11 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npx prisma generate --schema=packages/backend/src/db/schema.prisma
+      - name: Apply database migrations
+        working-directory: packages/backend
+        env:
+          DATABASE_URL: postgresql://agentfi:agentfi@localhost:5432/agentfi_test
+        run: npx prisma migrate deploy
       - working-directory: packages/backend
         env:
           DATABASE_URL: postgresql://agentfi:agentfi@localhost:5432/agentfi_test
@@ -176,6 +186,11 @@ jobs:
       - run: npm ci
       # Generate Prisma client — required before any module that imports @prisma/client
       - run: npx prisma generate --schema=packages/backend/src/db/schema.prisma
+      - name: Apply database migrations
+        working-directory: packages/backend
+        env:
+          DATABASE_URL: postgresql://agentfi:agentfi@localhost:5432/agentfi_test
+        run: npx prisma migrate deploy
       # Apply DB migrations against the e2e database before starting tests
       - working-directory: packages/backend
         env:
