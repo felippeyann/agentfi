@@ -33,7 +33,7 @@
     "@prisma/client": "^5.11.0",
     "@safe-global/protocol-kit": "^4.0.0",
     "@turnkey/sdk-server": "^1.3.0",
-    "bullmq": "^5.4.0",
+    "bullmq": "^5.73.4",
     "dotenv": "^16.4.5",
     "ethers": "^5.7.2",
     "fastify": "^4.26.0",
