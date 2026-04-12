@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ secrets.E2E_TESTNET_RPC_URL != '' && secrets.E2E_TESTNET_POLICY_MODULE_ADDRESS != '' && secrets.E2E_TESTNET_EXECUTOR_ADDRESS != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-node@v4
         with:
