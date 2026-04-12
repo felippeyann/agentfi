@@ -14,7 +14,7 @@ const envSchema = z.object({
   // Railway injects PORT, fallback to API_PORT, then 3000
   API_PORT: z.coerce.number().default(parseInt(process.env['PORT'] ?? process.env['API_PORT'] ?? '3000')),
   API_SECRET: z.string().min(32),
-  NODE_ENV: z.enum(['development', 'staging', 'production']).default('development'),
+  NODE_ENV: z.enum(['development', 'staging', 'production', 'test']).default('development'),
 
   // RPC
   ALCHEMY_API_KEY: z.string().min(1),
