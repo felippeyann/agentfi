@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependabot configuration for automated dependency updates
 - `prisma migrate deploy` step in CI Backend Tests job
 - E2E polling helpers: `waitForFeeEvent()` and `waitForDailyVolume()`
+- API reference documentation (`docs/api-reference.md`)
 
 ### Changed
 - A2A handshake endpoints now return 501 until proper Turnkey/EIP-1271 integration
@@ -31,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - NODE_ENV validation: added 'test' to accepted enum values
 - CI Backend Tests: database migrations now applied before running unit tests
 - E2E flaky test: FeeEvent assertion now uses polling instead of 2s setTimeout
+- E2E FeeEvent test: set `routedViaExecutor: true` (was `false`, preventing FeeEvent creation)
 - npm dependency vulnerabilities (path-to-regexp, picomatch, Next.js HIGH severity)
 
 ### Removed

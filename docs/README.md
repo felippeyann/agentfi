@@ -15,6 +15,7 @@ Welcome to the AgentFi documentation. This hub is designed for both human operat
 
 ### 🏗️ Architecture
 - **[System Overview](architecture/overview.md)**: The 4-layer stack from MPC wallets to MCP tools.
+- **[API Reference](api-reference.md)**: Complete REST API endpoint documentation.
 - **[Core Contracts](architecture/overview.md#deployed-contracts-base-mainnet--chain-8453)**: Information on AgentPolicyModule and AgentExecutor.
 
 ### ⚙️ Operations

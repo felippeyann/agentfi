@@ -402,7 +402,7 @@ describe('Transaction Pipeline E2E', () => {
         feeAmountWei: feeAmount.toString(),
         feeUsd: '100.00',
         feeBps,
-        routedViaExecutor: false,
+        routedViaExecutor: true,
       },
       { jobId: `e2e-fee-${tx.id}` },
     );
