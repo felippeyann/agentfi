@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Apache 2.0 license and repository fields in all package.json files
 - VISION.md referenced as required reading in README, CONTRIBUTING, docs hub, and claude-instructions
 - Roadmap updated with Phase 2.5 (hardening), Phase 3 (A2A primitives), Phase 4 (self-sustaining)
+- Published `@agent_fi/mcp-server@0.1.0` to npm
+- Branch protection ruleset on `main` (require PR + status checks)
+- npm scope changed from `@agentfi` to `@agent_fi`
 
 ### Changed
 - A2A handshake endpoints now return 501 until proper Turnkey/EIP-1271 integration
