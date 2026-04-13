@@ -47,6 +47,9 @@ function makeMockDb(policy: AgentPolicy | null = basePolicy()): PrismaClient {
     dailyVolume: {
       findUnique: vi.fn().mockResolvedValue(null),
     },
+    // Atomic volume check uses raw SQL
+    $queryRaw: vi.fn().mockResolvedValue([{ volumeUsd: '0' }]),
+    $executeRaw: vi.fn().mockResolvedValue(1),
   } as unknown as PrismaClient;
 }
 
@@ -190,7 +193,8 @@ describe('PolicyService.validateTransaction', () => {
 
   it('allows when projected volume stays under the daily limit', async () => {
     const db = makeMockDb(basePolicy({ maxDailyVolumeUsd: '1000' }));
-    (db.dailyVolume as any).findUnique.mockResolvedValue({ volumeUsd: '500' });
+    // $queryRaw returns the post-upsert volume (existing 500 + incoming 400 = 900)
+    (db as any).$queryRaw.mockResolvedValue([{ volumeUsd: '900' }]);
     const svc = new PolicyService(db);
     const result = await svc.validateTransaction({
       agentId: 'agent-1',
@@ -203,7 +207,8 @@ describe('PolicyService.validateTransaction', () => {
 
   it('blocks when projected volume exceeds the daily limit', async () => {
     const db = makeMockDb(basePolicy({ maxDailyVolumeUsd: '1000' }));
-    (db.dailyVolume as any).findUnique.mockResolvedValue({ volumeUsd: '800' });
+    // $queryRaw returns post-upsert volume (800 + 300 = 1100 > 1000)
+    (db as any).$queryRaw.mockResolvedValue([{ volumeUsd: '1100' }]);
     const svc = new PolicyService(db);
     const result = await svc.validateTransaction({
       agentId: 'agent-1',
@@ -217,7 +222,8 @@ describe('PolicyService.validateTransaction', () => {
 
   it('first tx of the day allowed when no DailyVolume row exists yet', async () => {
     const db = makeMockDb(basePolicy({ maxDailyVolumeUsd: '500' }));
-    (db.dailyVolume as any).findUnique.mockResolvedValue(null); // no row yet
+    // $queryRaw returns the newly inserted volume (0 + 200 = 200)
+    (db as any).$queryRaw.mockResolvedValue([{ volumeUsd: '200' }]);
     const svc = new PolicyService(db);
     const result = await svc.validateTransaction({
       agentId: 'agent-1',
