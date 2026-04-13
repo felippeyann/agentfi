@@ -2,6 +2,10 @@
 
 ---
 
+> **IMPORTANTE:** Antes de qualquer implementação, leia [VISION.md](../../VISION.md) por completo. Ele define o propósito, os princípios e a direção de longo prazo do projeto. Todas as decisões técnicas derivam desse documento.
+
+---
+
 ## CONTEXTO E VISÃO DO PRODUTO
 
 Você vai construir o **AgentFi**, uma plataforma de infraestrutura financeira projetada exclusivamente para agentes de IA executarem transações em criptomoedas de forma autônoma na rede Ethereum e redes EVM-compatíveis.

@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub CI and license badges in main README
 - `.github/CODEOWNERS` for code review routing
 - Apache 2.0 license and repository fields in all package.json files
+- VISION.md referenced as required reading in README, CONTRIBUTING, docs hub, and claude-instructions
+- Roadmap updated with Phase 2.5 (hardening), Phase 3 (A2A primitives), Phase 4 (self-sustaining)
 
 ### Changed
 - A2A handshake endpoints now return 501 until proper Turnkey/EIP-1271 integration
@@ -38,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - E2E flaky test: FeeEvent assertion now uses polling instead of 2s setTimeout
 - E2E FeeEvent test: set `routedViaExecutor: true` (was `false`, preventing FeeEvent creation)
 - npm dependency vulnerabilities (path-to-regexp, picomatch, Next.js HIGH severity)
+
+### Security
+- Admin secret comparison now uses `timingSafeEqual` (prevents timing attacks)
+- Daily volume limit check is now atomic (prevents TOCTOU race condition)
+- Agent search endpoint no longer exposes `safeAddress` in public responses
+- Admin batch endpoint validates Ethereum address format
+- Auth middleware: early return on failed operator secret prevents fall-through
 
 ### Removed
 - `desktop.ini` from repository (added to .gitignore)

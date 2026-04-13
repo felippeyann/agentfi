@@ -2,6 +2,8 @@
 
 Thanks for your interest in contributing. AgentFi is open-source infrastructure for AI agents to participate in DeFi — contributions that push that mission forward are welcome.
 
+> **Before contributing, read [VISION.md](VISION.md).** It explains the project's purpose, principles, and long-term direction. Every contribution should align with that vision.
+
 ---
 
 ## What we're looking for
