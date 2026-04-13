@@ -113,7 +113,7 @@ export class PolicyService {
         `;
         return {
           allowed: false,
-          reason: \`Daily volume limit of $\${policy.maxDailyVolumeUsd} USD would be exceeded. Current: $\${(projectedVolumeUsd - incomingVolumeUsd).toFixed(2)}, requested: $\${incomingVolumeUsd.toFixed(2)}\`,
+          reason: `Daily volume limit of ${policy.maxDailyVolumeUsd} USD would be exceeded. Current: ${(projectedVolumeUsd - incomingVolumeUsd).toFixed(2)}, requested: ${incomingVolumeUsd.toFixed(2)}`,
         };
       }
     }
