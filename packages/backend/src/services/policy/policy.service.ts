@@ -87,16 +87,33 @@ export class PolicyService {
     const dailyLimitUsd = parseFloat(policy.maxDailyVolumeUsd);
     if (dailyLimitUsd > 0) {
       const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-      const dailyVolume = await this.db.dailyVolume.findUnique({
-        where: { agentId_date: { agentId: params.agentId, date: today } },
-      });
-      const existingVolumeUsd = parseFloat(dailyVolume?.volumeUsd ?? '0');
       const incomingVolumeUsd = parseFloat(params.valueUsd ?? '0');
-      const projectedVolumeUsd = existingVolumeUsd + incomingVolumeUsd;
+
+      // Atomic reserve: upsert adds the incoming volume first, then we check.
+      // This prevents TOCTOU race conditions where concurrent requests both
+      // read the same pre-update value and both pass the limit check.
+      const reserved = await this.db.$queryRaw<[{ volumeUsd: string }]>`
+        INSERT INTO "DailyVolume" ("id", "agentId", "date", "volumeUsd", "updatedAt")
+        VALUES (gen_random_uuid()::text, ${params.agentId}, ${today}, ${incomingVolumeUsd.toFixed(6)}, NOW())
+        ON CONFLICT ("agentId", "date")
+        DO UPDATE SET
+          "volumeUsd" = (("DailyVolume"."volumeUsd"::numeric) + (${incomingVolumeUsd}::numeric))::text,
+          "updatedAt" = NOW()
+        RETURNING "volumeUsd"
+      `;
+      const projectedVolumeUsd = parseFloat(reserved[0]?.volumeUsd ?? '0');
+
       if (projectedVolumeUsd > dailyLimitUsd) {
+        // Rollback the reservation — subtract back
+        await this.db.$executeRaw`
+          UPDATE "DailyVolume"
+          SET "volumeUsd" = (("volumeUsd"::numeric) - (${incomingVolumeUsd}::numeric))::text,
+              "updatedAt" = NOW()
+          WHERE "agentId" = ${params.agentId} AND "date" = ${today}
+        `;
         return {
           allowed: false,
-          reason: `Daily volume limit of $${policy.maxDailyVolumeUsd} USD would be exceeded. Current: $${existingVolumeUsd.toFixed(2)}, requested: $${incomingVolumeUsd.toFixed(2)}`,
+          reason: \`Daily volume limit of $\${policy.maxDailyVolumeUsd} USD would be exceeded. Current: $\${(projectedVolumeUsd - incomingVolumeUsd).toFixed(2)}, requested: $\${incomingVolumeUsd.toFixed(2)}\`,
         };
       }
     }

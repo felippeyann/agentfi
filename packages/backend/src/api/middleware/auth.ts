@@ -39,6 +39,7 @@ const authPlugin: FastifyPluginCallback = (fastify, _opts, done) => {
       const expectedSecret = process.env['API_SECRET'] ?? '';
       if (!operatorSecret || operatorSecret !== expectedSecret) {
         reply.code(401).send({ error: 'Agent registration requires operator API_SECRET' });
+        return;
       }
       return;
     }

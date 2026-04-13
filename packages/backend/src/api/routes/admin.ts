@@ -6,6 +6,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
+import { timingSafeEqual } from 'crypto';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { getAddress } from 'viem';
@@ -21,7 +22,7 @@ function isLoopbackIp(ipRaw: string): boolean {
 
 function requireAdmin(request: any, reply: any): boolean {
   const secret = request.headers['x-admin-secret'];
-  if (!secret || secret !== ADMIN_SECRET) {
+  if (!secret || !ADMIN_SECRET || Buffer.byteLength(secret) !== Buffer.byteLength(ADMIN_SECRET) || !timingSafeEqual(Buffer.from(secret), Buffer.from(ADMIN_SECRET))) {
     reply.code(401).send({ error: 'Unauthorized' });
     return false;
   }
@@ -37,7 +38,7 @@ function requireAdmin(request: any, reply: any): boolean {
 const batchAdminSchema = z.object({
   chainId: z.number().default(1),
   actions: z.array(z.object({
-    to:    z.string(),
+    to:    z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid Ethereum address'),
     value: z.string().default('0'),
     data:  z.string().regex(/^0x[0-9a-fA-F]*$/).default('0x'),
   })).min(1).max(20),

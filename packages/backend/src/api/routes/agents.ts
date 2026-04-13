@@ -132,7 +132,6 @@ export async function agentRoutes(fastify: FastifyInstance) {
         select: {
           id: true,
           name: true,
-          safeAddress: true,
           chainIds: true,
           tier: true,
         },
@@ -330,7 +329,6 @@ export async function agentRoutes(fastify: FastifyInstance) {
       select: { 
         id: true, 
         name: true, 
-        safeAddress: true, 
         reputationScore: true, 
         a2aTxCount: true, 
         lastActiveAt: true,
