@@ -79,7 +79,7 @@ const AAVE_POOL_ABI = [
   },
 ] as const;
 
-// Compound V3 (Comet) ABI — single-asset market contracts.
+// Compound V3 (Comet) ABI ï¿½ single-asset market contracts.
 // supply(asset, amount): supplies collateral OR base asset to the Comet market.
 // withdraw(asset, amount): withdraws base asset (or collateral) back to msg.sender.
 const COMPOUND_COMET_ABI = [
@@ -102,6 +102,50 @@ const COMPOUND_COMET_ABI = [
       { name: 'amount', type: 'uint256' },
     ],
     outputs: [],
+  },
+] as const;
+
+// ERC-4626 Tokenized Vault Standard ABI â€” any compliant vault (Yearn, Morpho,
+// Beefy, ERC4626-wrapped strategies). Four functions cover the full lifecycle.
+const ERC4626_VAULT_ABI = [
+  {
+    name: 'deposit',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'assets', type: 'uint256' },
+      { name: 'receiver', type: 'address' },
+    ],
+    outputs: [{ name: 'shares', type: 'uint256' }],
+  },
+  {
+    name: 'withdraw',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'assets', type: 'uint256' },
+      { name: 'receiver', type: 'address' },
+      { name: 'owner', type: 'address' },
+    ],
+    outputs: [{ name: 'shares', type: 'uint256' }],
+  },
+  {
+    name: 'redeem',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'shares', type: 'uint256' },
+      { name: 'receiver', type: 'address' },
+      { name: 'owner', type: 'address' },
+    ],
+    outputs: [{ name: 'assets', type: 'uint256' }],
+  },
+  {
+    name: 'asset',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'address' }],
   },
 ] as const;
 
@@ -275,6 +319,47 @@ export class TransactionBuilder {
         abi: COMPOUND_COMET_ABI,
         functionName: 'withdraw',
         args: [params.asset, params.amount],
+      }),
+      value: 0n,
+    };
+  }
+
+  /**
+   * Builds an ERC-4626 vault deposit.
+   * The vault internally converts assets to shares; receiver gets the shares.
+   */
+  buildErc4626Deposit(params: {
+    vaultAddress: Address;
+    assetAmount: bigint;
+    receiver: Address;
+  }): TransactionData {
+    return {
+      to: params.vaultAddress,
+      data: encodeFunctionData({
+        abi: ERC4626_VAULT_ABI,
+        functionName: 'deposit',
+        args: [params.assetAmount, params.receiver],
+      }),
+      value: 0n,
+    };
+  }
+
+  /**
+   * Builds an ERC-4626 vault withdraw (assets-denominated).
+   * Use `redeem` if you want to burn a specific share amount instead.
+   */
+  buildErc4626Withdraw(params: {
+    vaultAddress: Address;
+    assetAmount: bigint;
+    receiver: Address;
+    owner: Address;
+  }): TransactionData {
+    return {
+      to: params.vaultAddress,
+      data: encodeFunctionData({
+        abi: ERC4626_VAULT_ABI,
+        functionName: 'withdraw',
+        args: [params.assetAmount, params.receiver, params.owner],
       }),
       value: 0n,
     };

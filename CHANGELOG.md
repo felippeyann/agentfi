@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **ERC-4626 vault adapter**: generic tokenized vault support — any compliant vault (Yearn, Morpho, Beefy, Gearbox, etc.) works without pre-registration
+- `POST /v1/transactions/deposit-erc4626` and `POST /v1/transactions/withdraw-erc4626`
+- `TransactionBuilder.buildErc4626Deposit()` and `buildErc4626Withdraw()` methods
+- `ERC4626_VAULT_ABI` constant (deposit, withdraw, redeem, asset)
+- MCP tools `deposit_erc4626` and `withdraw_erc4626` in mcp-server + backend proxy (15 total tools)
 - **Reputation Scoring v2.1 (time-decay)**: recent 30-day transactions and job outcomes now carry 2x weight vs historical events
 - **Daily Reputation Cron**: BullMQ repeatable job recomputes all active agents' scores daily at 02:00 UTC (override via `REPUTATION_CRON_PATTERN`)
 - `packages/backend/src/queues/reputation.queue.ts` — new queue, worker, and `scheduleReputationUpdate()`

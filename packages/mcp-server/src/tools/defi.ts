@@ -170,6 +170,81 @@ export const defiTools = [
   },
 
   {
+    name: 'deposit_erc4626',
+    description:
+      'Deposits an asset into any ERC-4626 compliant vault (Yearn, Morpho, Beefy, etc.). ' +
+      'The vault address is supplied by the caller — no pre-registration needed. ' +
+      'Useful for any yield strategy that follows the tokenized-vault standard.',
+    inputSchema: z.object({
+      vault: z.string().describe('ERC-4626 vault contract address to deposit into.'),
+      asset: z.string().describe('Underlying ERC-20 token address (for decimals + USD pricing).'),
+      amount: z.string().describe('Amount of underlying asset to deposit, in human-readable units.'),
+      chain_id: z.number().default(1).describe('Chain ID. Default: 1 (Ethereum mainnet).'),
+    }),
+    handler: async (input: {
+      vault: string;
+      asset: string;
+      amount: string;
+      chain_id: number;
+    }) => {
+      const asset = resolveAssetToken(input.asset, input.chain_id);
+
+      const result = await api.post<{ transactionId: string; status: string }>(
+        '/v1/transactions/deposit-erc4626',
+        {
+          vault: input.vault,
+          asset,
+          amount: input.amount,
+          chainId: input.chain_id,
+        },
+      );
+
+      return {
+        transactionId: result.transactionId,
+        status: result.status,
+        next: 'Call get_transaction_status to confirm. You will receive vault shares proportional to your deposit.',
+      };
+    },
+  },
+
+  {
+    name: 'withdraw_erc4626',
+    description:
+      'Withdraws assets from any ERC-4626 compliant vault. ' +
+      'Use "max" to attempt a full withdrawal (vault may still limit to available liquidity).',
+    inputSchema: z.object({
+      vault: z.string().describe('ERC-4626 vault contract address to withdraw from.'),
+      asset: z.string().describe('Underlying ERC-20 token address.'),
+      amount: z.string().describe('Amount to withdraw. Use "max" for the full balance.'),
+      chain_id: z.number().default(1).describe('Chain ID. Default: 1 (Ethereum mainnet).'),
+    }),
+    handler: async (input: {
+      vault: string;
+      asset: string;
+      amount: string;
+      chain_id: number;
+    }) => {
+      const asset = resolveAssetToken(input.asset, input.chain_id);
+
+      const result = await api.post<{ transactionId: string; status: string }>(
+        '/v1/transactions/withdraw-erc4626',
+        {
+          vault: input.vault,
+          asset,
+          amount: input.amount,
+          chainId: input.chain_id,
+        },
+      );
+
+      return {
+        transactionId: result.transactionId,
+        status: result.status,
+        next: 'Call get_transaction_status to track confirmation.',
+      };
+    },
+  },
+
+  {
     name: 'get_defi_rates',
     description:
       'Returns current supply and borrow APY rates for major assets on Aave V3. ' +

@@ -165,6 +165,30 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
         call('POST', '/v1/transactions/withdraw-compound', args),
     },
     {
+      name: 'deposit_erc4626',
+      description: 'Deposit into any ERC-4626 compliant vault (Yearn, Morpho, Beefy, etc.)',
+      inputSchema: z.object({
+        vault: z.string().describe('ERC-4626 vault contract address'),
+        asset: z.string().describe('Underlying ERC-20 token address'),
+        amount: z.string().describe('Amount in human-readable decimals'),
+        chainId: z.number().optional().describe('Chain ID (default: 1)'),
+      }),
+      handler: async (args: Record<string, unknown>) =>
+        call('POST', '/v1/transactions/deposit-erc4626', args),
+    },
+    {
+      name: 'withdraw_erc4626',
+      description: 'Withdraw from any ERC-4626 compliant vault',
+      inputSchema: z.object({
+        vault: z.string().describe('ERC-4626 vault contract address'),
+        asset: z.string().describe('Underlying ERC-20 token address'),
+        amount: z.string().describe('Amount in decimals, or "max" to withdraw all'),
+        chainId: z.number().optional().describe('Chain ID (default: 1)'),
+      }),
+      handler: async (args: Record<string, unknown>) =>
+        call('POST', '/v1/transactions/withdraw-erc4626', args),
+    },
+    {
       name: 'get_transaction_status',
       description: 'Get the status of a previously submitted transaction',
       inputSchema: z.object({

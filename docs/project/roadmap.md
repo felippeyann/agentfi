@@ -76,9 +76,9 @@ These items bridge the gap between the current product (agent-to-DeFi) and the v
 
 - **DeFi Protocol Expansion:**
   - [x] Compound V3 (supply/withdraw) — Mainnet, Base, Arbitrum, Polygon
+  - [x] ERC-4626 vault standard (generic yield — any compliant vault works)
   - [ ] Curve Finance (stablecoin swaps)
   - [ ] GMX / Perp DEXes (for advanced agents)
-  - [ ] ERC-4626 vault standard (generic yield)
   - More earning paths = closer to self-sustaining agents
 
 - **Fastify v4 to v5 Migration:**
