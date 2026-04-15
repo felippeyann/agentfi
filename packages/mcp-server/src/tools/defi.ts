@@ -107,6 +107,69 @@ export const defiTools = [
   },
 
   {
+    name: 'supply_compound',
+    description:
+      'Supplies an asset to Compound V3 (Comet USDC market) to earn yield. ' +
+      'Each Compound V3 market is single-asset; the USDC market accepts USDC as the base asset ' +
+      'plus whitelisted collateral (e.g. WETH, WBTC). Available on Mainnet, Base, Arbitrum, Polygon.',
+    inputSchema: z.object({
+      asset: z
+        .string()
+        .describe('ERC-20 token address to supply. Use USDC for the base asset, or a supported collateral.'),
+      amount: z.string().describe('Amount to supply in human-readable units.'),
+      chain_id: z.number().default(1).describe('Chain ID. Default: 1 (Ethereum mainnet).'),
+    }),
+    handler: async (input: { asset: string; amount: string; chain_id: number }) => {
+      const asset = resolveAssetToken(input.asset, input.chain_id);
+
+      const result = await api.post<{ transactionId: string; status: string }>(
+        '/v1/transactions/supply-compound',
+        {
+          asset,
+          amount: input.amount,
+          chainId: input.chain_id,
+        },
+      );
+
+      return {
+        transactionId: result.transactionId,
+        status: result.status,
+        next: 'Call get_transaction_status to confirm. Your supplied balance accrues interest in the Comet market.',
+      };
+    },
+  },
+
+  {
+    name: 'withdraw_compound',
+    description:
+      'Withdraws a previously supplied asset from Compound V3 (Comet USDC market). ' +
+      'Pass "max" as the amount to withdraw your entire balance.',
+    inputSchema: z.object({
+      asset: z.string().describe('ERC-20 token address to withdraw.'),
+      amount: z.string().describe('Amount to withdraw. Use "max" to withdraw entire balance.'),
+      chain_id: z.number().default(1).describe('Chain ID. Default: 1 (Ethereum mainnet).'),
+    }),
+    handler: async (input: { asset: string; amount: string; chain_id: number }) => {
+      const asset = resolveAssetToken(input.asset, input.chain_id);
+
+      const result = await api.post<{ transactionId: string; status: string }>(
+        '/v1/transactions/withdraw-compound',
+        {
+          asset,
+          amount: input.amount,
+          chainId: input.chain_id,
+        },
+      );
+
+      return {
+        transactionId: result.transactionId,
+        status: result.status,
+        next: 'Call get_transaction_status to track confirmation.',
+      };
+    },
+  },
+
+  {
     name: 'get_defi_rates',
     description:
       'Returns current supply and borrow APY rates for major assets on Aave V3. ' +

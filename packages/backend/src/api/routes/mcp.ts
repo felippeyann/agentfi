@@ -143,6 +143,28 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
         call('POST', '/v1/transactions/withdraw', args),
     },
     {
+      name: 'supply_compound',
+      description: 'Supply tokens to Compound V3 (Comet USDC market) to earn yield',
+      inputSchema: z.object({
+        asset: z.string().describe('ERC-20 token address to supply'),
+        amount: z.string().describe('Amount in human-readable decimals'),
+        chainId: z.number().optional().describe('Chain ID (default: 1)'),
+      }),
+      handler: async (args: Record<string, unknown>) =>
+        call('POST', '/v1/transactions/supply-compound', args),
+    },
+    {
+      name: 'withdraw_compound',
+      description: 'Withdraw tokens from Compound V3 position',
+      inputSchema: z.object({
+        asset: z.string().describe('ERC-20 token address to withdraw'),
+        amount: z.string().describe('Amount in decimals, or "max" to withdraw all'),
+        chainId: z.number().optional().describe('Chain ID (default: 1)'),
+      }),
+      handler: async (args: Record<string, unknown>) =>
+        call('POST', '/v1/transactions/withdraw-compound', args),
+    },
+    {
       name: 'get_transaction_status',
       description: 'Get the status of a previously submitted transaction',
       inputSchema: z.object({

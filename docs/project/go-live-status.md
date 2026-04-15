@@ -70,6 +70,25 @@ AgentFi v0.1.0 is publicly available as open-source software under the Apache 2.
 - GitHub release v0.1.0 created with release notes
 - Repository visibility changed to **public**
 
+### Phase 3 Progress (Post Go-Live)
+
+The following Phase 3 items from `VISION.md` have been delivered:
+
+**A2A Economy Primitives:**
+- ✅ A2A Payment Execution v1 — `executeA2APayment()` triggered on Job COMPLETED
+- ✅ Reputation Scoring v2 — weighted calculation from real metrics
+- ✅ Reputation time-decay (v2.1) — recent 30 days carry 2x weight
+- ✅ Daily reputation cron — BullMQ repeatable job (02:00 UTC)
+
+**DeFi Protocol Expansion:**
+- ✅ Compound V3 adapter (Comet USDC market) — supply/withdraw on 4 chains
+
+**Still pending (Phase 3):**
+- A2A Escrow Pattern (v2) — lock reward on create, release on complete
+- Sign/Verify Handshake — requires Turnkey MPC credentials
+- Curve Finance, GMX, ERC-4626 adapters
+- Fastify v4 → v5 migration
+
 ---
 
 ## Current State
@@ -112,11 +131,13 @@ None (all Dependabot PRs resolved).
 
 ### Phase 3: A2A Economy Primitives (see [roadmap](roadmap.md))
 
-1. **A2A Payment Execution** — bind Job reward to execute_transfer on completion
-2. **Sign/Verify Handshake** — Turnkey MPC signing + EIP-1271 verification
-3. **Reputation Scoring v2** — weighted algorithm based on real behavior metrics
-4. **DeFi Protocol Expansion** — Compound V3, Curve, GMX, ERC-4626 vaults
-5. **Fastify v4 to v5** — resolves remaining HIGH vulnerability
+1. ~~**A2A Payment Execution v1**~~ ✅ Done (PR #28)
+2. **A2A Escrow Pattern v2** — lock reward on create, release on complete, refund on cancel
+3. **Sign/Verify Handshake** — Turnkey MPC signing + EIP-1271 verification
+4. ~~**Reputation Scoring v2 + time-decay**~~ ✅ Done (PRs #28, #29)
+5. **DeFi Protocol Expansion** — ✅ Compound V3 done; Curve, GMX, ERC-4626 pending
+6. **Fastify v4 to v5** — resolves remaining HIGH vulnerability
+7. **MCP tools for Compound** — expose supply-compound/withdraw-compound as MCP tools
 
 ### Phase 4: Self-Sustaining Agents (see [roadmap](roadmap.md))
 

@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TransactionBuilder.buildCompoundSupply()` and `buildCompoundWithdraw()` methods
 - `COMPOUND_COMET_ABI` constant for Comet market contracts
 - Compound V3 USDC market addresses added to `contracts.ts` (Mainnet, Base, Arbitrum, Polygon)
+- **MCP tools `supply_compound` and `withdraw_compound`** exposed in both the standalone mcp-server package and the backend MCP endpoint (13 total tools)
 - **Reputation Scoring v2**: computed from real behavior metrics (tx success rate 40%, job completion rate 30%, volume score 20%, consistency 10%) instead of simple counter
 - `ReputationService.computeReputationScore()`, `refreshReputation()`, `updateAllReputationScores()`
 - Admin endpoints: `POST /admin/reputation/recompute` (all or single agent), `GET /admin/reputation/:agentId` (shows persisted vs computed drift)

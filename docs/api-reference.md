@@ -165,8 +165,8 @@ All admin routes require `x-admin-secret` header. Local-only by default.
 | GET | `/mcp/sse` | Agent (optional) | SSE stream for tool calls |
 | POST | `/mcp/messages?sessionId=` | Session | JSON-RPC message handler |
 
-**Available MCP Tools** (11):
-`get_wallet`, `get_balance`, `get_allowances`, `simulate_swap`, `execute_swap`, `execute_transfer`, `supply_aave`, `withdraw_aave`, `get_transaction_status`, `list_transactions`, `get_agent_policy`
+**Available MCP Tools** (13):
+`get_wallet`, `get_balance`, `get_allowances`, `simulate_swap`, `execute_swap`, `execute_transfer`, `supply_aave`, `withdraw_aave`, `supply_compound`, `withdraw_compound`, `get_transaction_status`, `list_transactions`, `get_agent_policy`
 
 ---
 
