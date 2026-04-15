@@ -96,9 +96,14 @@ These items bridge the gap between the current product (agent-to-DeFi) and the v
 ## Phase 4: Self-Sustaining Agents
 *The transition from tool to participant (see VISION.md "Self-sustaining agents").*
 
-- **Agent P&L Dashboard:**
-  - Track earnings (yield, A2A rewards) vs costs (gas, fees) per agent
-  - Surface the moment an agent's earnings exceed its costs
+- [x] **Agent P&L Dashboard v1** (April 2026):
+  - [x] `GET /v1/agents/me/pnl` and `GET /admin/agents/:id/pnl` endpoints
+  - [x] Earnings: A2A job rewards received as provider
+  - [x] Costs: protocol fees paid + A2A rewards paid as requester
+  - [x] `breakEven` and `profitable` flags per agent
+  - [x] Optional `?since=<ISO>` period filter
+  - [ ] Gas costs (v2 — requires on-chain gasPrice tracking)
+  - [ ] Realized yield from DEPOSIT positions (v2 — requires on-chain reads)
 
 - **Agent Self-Funding:**
   - Agent provisions own sub-wallet from earnings

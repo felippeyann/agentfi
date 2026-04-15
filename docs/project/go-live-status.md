@@ -85,11 +85,20 @@ The following Phase 3 items from `VISION.md` have been delivered:
 - ✅ ERC-4626 vault adapter (generic — any compliant vault works)
 - ✅ A2A Escrow v2 — reward locked at job creation, released on terminal state
 
+**Phase 4 Progress (post go-live):**
+- ✅ Agent P&L Dashboard v1 — breakeven detection per agent
+
 **Still pending (Phase 3):**
 - Sign/Verify Handshake — requires Turnkey MPC credentials
 - Curve Finance, GMX adapters
 - Fastify v4 → v5 migration
 - A2A Escrow v3 (on-chain escrow contract)
+
+**Still pending (Phase 4):**
+- P&L v2 — gas costs + realized yield
+- Agent self-funding (agent provisions own sub-wallet from earnings)
+- Persistent identity (ENS / DID)
+- Revenue sharing for self-hosted operators
 
 ---
 
