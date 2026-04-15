@@ -6,6 +6,7 @@ Welcome to the AgentFi documentation. This hub is designed for both human operat
 
 ### 🌟 Vision & Project
 - **[Vision](../VISION.md)** (start here): The "Why" behind AgentFi. Required reading for all contributors and collaborators.
+- **[Handoff Guide](../HANDOFF.md)**: Complete state snapshot, pending tasks, and new-machine setup — read this when resuming work.
 - **[Go-Live Status](project/go-live-status.md)**: What was done, current state, and next steps.
 - **[Roadmap](project/roadmap.md)**: Our technical and business evolution plan.
 - **[Release Notes (HITL)](project/release-notes-hitl.md)**: Details on the new Human-in-the-Loop and Transparency features.
