@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Fastify upgraded to v5** — resolves the last HIGH npm vulnerability (DoS via sendWebStream, content-type tab bypass, X-Forwarded-Proto spoofing). All plugins were already v5-compatible from prior Dependabot updates — zero code changes needed.
+- `packages/mcp-server/RELEASE.md` — complete publish guide for bumping the mcp-server npm package (versioning, keywords, npm publish, git tags, MCP directory submissions)
 - **Curve Finance StableSwap adapter**: `POST /v1/transactions/swap-curve` — token-to-token swaps on any Curve classic pool (3pool, tri-pool, etc.)
 - `TransactionBuilder.buildCurveSwap()` method with `CURVE_STABLESWAP_ABI`
 - MCP tool `swap_curve` in standalone mcp-server package and backend MCP proxy (16 total tools)

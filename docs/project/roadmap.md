@@ -87,9 +87,10 @@ These items bridge the gap between the current product (agent-to-DeFi) and the v
   - [ ] GMX / Perp DEXes (for advanced agents)
   - More earning paths = closer to self-sustaining agents
 
-- **Fastify v4 to v5 Migration:**
-  - Resolves remaining 1 HIGH npm vulnerability
-  - Breaking change — requires plugin compatibility audit
+- [x] **Fastify v4 to v5 Migration** (April 2026):
+  - [x] Upgraded to fastify `^5.8.5`
+  - [x] Resolved last HIGH npm vulnerability (0 high, 0 critical)
+  - [x] Zero code changes required — plugins already on v5-compatible versions (dependabot bumped them first)
 
 ---
 

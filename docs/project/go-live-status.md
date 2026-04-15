@@ -109,7 +109,7 @@ All 6 jobs green on `main` and `develop`.
 
 ### npm Vulnerabilities
 - Critical: 0
-- High: 1 (fastify v4 — requires breaking change to v5, deferred)
+- High: 0 (fastify upgraded to v5 in April 2026)
 - Moderate: 4
 - Low: 20
 
@@ -119,7 +119,6 @@ None (all Dependabot PRs resolved).
 ### Known Limitations
 - A2A handshake endpoints return 501 (requires Turnkey MPC + EIP-1271 implementation)
 - Zod 3 in use (v4 requires MCP server refactor)
-- Fastify v4 (v5 upgrade is breaking change)
 - E2E testnet smoke tests require external secrets (skip in CI when absent)
 
 ---
