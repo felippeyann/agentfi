@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Reputation Scoring v2**: computed from real behavior metrics (tx success rate 40%, job completion rate 30%, volume score 20%, consistency 10%) instead of simple counter
+- `ReputationService.computeReputationScore()`, `refreshReputation()`, `updateAllReputationScores()`
+- Admin endpoints: `POST /admin/reputation/recompute` (all or single agent), `GET /admin/reputation/:agentId` (shows persisted vs computed drift)
+- **A2A Payment Execution**: `executeA2APayment()` function in transactions.ts
+- Jobs PATCH handler now auto-triggers atomic payment when status transitions to COMPLETED (if `reward` is specified)
+- Payment runs async with full policy + simulation + fee calculation, same as public transfer endpoint
 - Migration 0004: ON DELETE CASCADE for Job to Agent foreign keys
 - SECURITY.md vulnerability disclosure policy
 - CHANGELOG.md release history

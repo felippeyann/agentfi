@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { logger } from '../middleware/logger.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
+import { executeA2APayment } from './transactions.js';
 const reputationService = new ReputationService();
 
 const createJobSchema = z.object({
@@ -123,6 +124,39 @@ export async function jobRoutes(fastify: FastifyInstance) {
     // Logic Sentinel: Automatically update reputation on outcome
     if (body.status === 'COMPLETED') {
       await reputationService.recordJobOutcome(job.providerId, true);
+
+      // A2A Payment: if reward was specified, trigger atomic payment from
+      // requester to provider. Runs async — payment failures don't block
+      // the job status update, but are logged for operator review.
+      const reward = job.reward as { amount?: string; token?: string; chainId?: number } | null;
+      if (reward && reward.amount) {
+        const provider = await db.agent.findUnique({
+          where: { id: job.providerId },
+          select: { safeAddress: true },
+        });
+        if (provider) {
+          executeA2APayment({
+            requesterId: job.requesterId,
+            providerSafeAddress: provider.safeAddress,
+            amount: reward.amount,
+            token: reward.token ?? 'ETH',
+            chainId: reward.chainId ?? 1,
+            jobId: job.id,
+          })
+            .then((result) => {
+              logger.info(
+                { jobId: job.id, paymentTxId: result.transactionId },
+                'A2A payment triggered',
+              );
+            })
+            .catch((err) => {
+              logger.error(
+                { jobId: job.id, err: err?.message ?? String(err) },
+                'A2A payment failed — manual resolution required',
+              );
+            });
+        }
+      }
     } else if (body.status === 'FAILED') {
       await reputationService.recordJobOutcome(job.providerId, false);
     }

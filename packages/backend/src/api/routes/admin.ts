@@ -12,6 +12,9 @@ import { db } from '../../db/client.js';
 import { getAddress } from 'viem';
 import { logger } from '../middleware/logger.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
+import { ReputationService } from '../../services/policy/reputation.service.js';
+
+const reputationService = new ReputationService();
 const ADMIN_SECRET = process.env['ADMIN_SECRET'] ?? '';
 const ADMIN_ALLOW_REMOTE = process.env['ADMIN_ALLOW_REMOTE'] === 'true';
 
@@ -429,4 +432,63 @@ export async function adminRoutes(fastify: FastifyInstance) {
       recentEvents: feeEvents.slice(0, 20),
     };
   });
+
+  /**
+   * POST /admin/reputation/recompute
+   * Recomputes reputation scores for all active agents (or a single agent).
+   * Intended for daily cron or manual admin triggers.
+   */
+  fastify.post('/admin/reputation/recompute', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+
+    const schema = z.object({ agentId: z.string().cuid().optional() });
+    const { agentId } = schema.parse(request.body ?? {});
+
+    try {
+      if (agentId) {
+        const score = await reputationService.refreshReputation(agentId);
+        return { agentId, reputationScore: score };
+      }
+      const result = await reputationService.updateAllReputationScores();
+      return result;
+    } catch (err) {
+      logger.error({ err }, 'Reputation recompute failed');
+      return reply.code(500).send({ error: 'Failed to recompute reputation' });
+    }
+  });
+
+  /**
+   * GET /admin/reputation/:agentId
+   * Returns the current reputation score and the raw metrics used to compute it.
+   */
+  fastify.get<{ Params: { agentId: string } }>(
+    '/admin/reputation/:agentId',
+    async (request, reply) => {
+      if (!requireAdmin(request, reply)) return;
+
+      const agent = await db.agent.findUnique({
+        where: { id: request.params.agentId },
+        select: {
+          id: true,
+          name: true,
+          reputationScore: true,
+          a2aTxCount: true,
+          lastActiveAt: true,
+        },
+      });
+
+      if (!agent) {
+        return reply.code(404).send({ error: 'Agent not found' });
+      }
+
+      const freshScore = await reputationService.computeReputationScore(agent.id);
+
+      return {
+        ...agent,
+        computedScore: freshScore,
+        persistedScore: agent.reputationScore,
+        drift: freshScore - agent.reputationScore,
+      };
+    },
+  );
 }
