@@ -149,6 +149,24 @@ const ERC4626_VAULT_ABI = [
   },
 ] as const;
 
+// Curve StableSwap (classic) ABI — single function for token-to-token swaps
+// within a pool. Works for 3pool, tricrypto, and all classic stable pools.
+// The `i` and `j` params are int128 by Curve convention (always non-negative).
+const CURVE_STABLESWAP_ABI = [
+  {
+    name: 'exchange',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'i', type: 'int128' },
+      { name: 'j', type: 'int128' },
+      { name: 'dx', type: 'uint256' },
+      { name: 'min_dy', type: 'uint256' },
+    ],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+] as const;
+
 // Uniswap V3 SwapRouter02 ABI — exactInputSingle WITHOUT deadline.
 // SwapRouter02 moves deadline to the multicall wrapper level.
 // Deployed at 0x2626664c2603336E57B271c5C0b26F421741e481 on Base/Arbitrum/Polygon.
@@ -362,6 +380,32 @@ export class TransactionBuilder {
         args: [params.assetAmount, params.receiver, params.owner],
       }),
       value: 0n,
+    };
+  }
+
+  /**
+   * Builds a Curve StableSwap exchange transaction.
+   * Works with classic StableSwap pools (3pool, DAI/USDC/USDT, etc.).
+   * The pool address is caller-supplied, allowing any Curve pool to be used.
+   *
+   * Caller must approve the pool to spend `amountIn` of the input token before
+   * calling this. Simulation will fail clearly if approval is missing.
+   */
+  buildCurveSwap(params: {
+    poolAddress: Address;
+    i: bigint; // from token index (int128, non-negative)
+    j: bigint; // to token index
+    amountIn: bigint;
+    minAmountOut: bigint;
+  }): TransactionData {
+    return {
+      to: params.poolAddress,
+      data: encodeFunctionData({
+        abi: CURVE_STABLESWAP_ABI,
+        functionName: 'exchange',
+        args: [params.i, params.j, params.amountIn, params.minAmountOut],
+      }),
+      value: 0n, // Curve pools never receive ETH
     };
   }
 

@@ -245,6 +245,66 @@ export const defiTools = [
   },
 
   {
+    name: 'swap_curve',
+    description:
+      'Swaps between two assets on a Curve StableSwap pool. Ideal for stablecoin-to-stablecoin ' +
+      'conversions (USDC↔USDT↔DAI) with minimal slippage. The caller must supply the pool address ' +
+      'and the indices of the input/output tokens within that pool. Assumes fromToken has already ' +
+      'been approved to the pool; simulation will fail clearly if approval is missing.',
+    inputSchema: z.object({
+      pool: z.string().describe('Curve pool contract address.'),
+      from_token_index: z
+        .number()
+        .int()
+        .describe('Index (0, 1, 2, ...) of the input token within the pool.'),
+      to_token_index: z
+        .number()
+        .int()
+        .describe('Index of the output token within the pool.'),
+      from_token_address: z.string().describe('ERC-20 address of the input token.'),
+      to_token_address: z.string().describe('ERC-20 address of the output token.'),
+      amount_in: z.string().describe('Amount of input token in human-readable units.'),
+      min_amount_out: z
+        .string()
+        .describe('Minimum acceptable amount of output token (slippage protection).'),
+      chain_id: z.number().default(1).describe('Chain ID. Default: 1 (Ethereum mainnet).'),
+    }),
+    handler: async (input: {
+      pool: string;
+      from_token_index: number;
+      to_token_index: number;
+      from_token_address: string;
+      to_token_address: string;
+      amount_in: string;
+      min_amount_out: string;
+      chain_id: number;
+    }) => {
+      const fromToken = resolveAssetToken(input.from_token_address, input.chain_id);
+      const toToken = resolveAssetToken(input.to_token_address, input.chain_id);
+
+      const result = await api.post<{ transactionId: string; status: string }>(
+        '/v1/transactions/swap-curve',
+        {
+          pool: input.pool,
+          fromTokenIndex: input.from_token_index,
+          toTokenIndex: input.to_token_index,
+          fromTokenAddress: fromToken,
+          toTokenAddress: toToken,
+          amountIn: input.amount_in,
+          minAmountOut: input.min_amount_out,
+          chainId: input.chain_id,
+        },
+      );
+
+      return {
+        transactionId: result.transactionId,
+        status: result.status,
+        next: 'Call get_transaction_status to track confirmation.',
+      };
+    },
+  },
+
+  {
     name: 'get_defi_rates',
     description:
       'Returns current supply and borrow APY rates for major assets on Aave V3. ' +

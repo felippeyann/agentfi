@@ -188,6 +188,18 @@ const erc4626WithdrawSchema = z.object({
   idempotencyKey: z.string().optional(),
 });
 
+const swapCurveSchema = z.object({
+  pool: z.string(),                                   // Curve pool address
+  fromTokenIndex: z.number().int().min(0).max(7),     // int128 in pool
+  toTokenIndex: z.number().int().min(0).max(7),
+  fromTokenAddress: z.string(),                       // for decimals + policy
+  toTokenAddress: z.string(),                         // for metadata
+  amountIn: z.string(),
+  minAmountOut: z.string(),
+  chainId: z.number().default(1),
+  idempotencyKey: z.string().optional(),
+});
+
 export async function transactionRoutes(fastify: FastifyInstance) {
   /**
    * POST /v1/transactions/simulate — simulate without submitting.
@@ -1288,6 +1300,138 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         agentName: agent.name,
         transactionId: tx.id,
         message: `ERC-4626 withdraw (${body.amount} ${body.asset.slice(0, 10)}) exceeds auto-approval threshold.`,
+      });
+    }
+
+    return reply.code(202).send({ transactionId: tx.id, status: tx.status });
+  });
+
+  /**
+   * POST /v1/transactions/swap-curve
+   * Swaps between two assets on a Curve StableSwap pool.
+   *
+   * The caller supplies the pool address and token indices. Assumes the
+   * fromToken has already been approved to the pool. If approval is missing,
+   * the simulation step fails with a clear message.
+   */
+  fastify.post('/v1/transactions/swap-curve', async (request, reply) => {
+    const body = swapCurveSchema.parse(request.body);
+    const agent = await getAgent(request.agentId);
+    if (!ensureChainAllowed(agent, body.chainId, reply)) return;
+
+    if (body.idempotencyKey) {
+      const idempotent = await getIdempotentTransaction(request.agentId, body.idempotencyKey);
+      if (idempotent.existing) return idempotent.existing;
+      if (idempotent.conflictWithAnotherAgent) {
+        return reply.code(409).send({ error: 'idempotencyKey is already in use by another agent' });
+      }
+    }
+
+    const withinLimit = await feeService.checkTxLimit(request.agentId, request.agentTier);
+    if (!withinLimit) {
+      return reply.code(429).send({ error: 'Monthly transaction limit reached' });
+    }
+
+    const fromDecimals = await getTokenDecimals(body.fromTokenAddress, body.chainId);
+    const toDecimals = await getTokenDecimals(body.toTokenAddress, body.chainId);
+    const amountInWei = parseUnits(body.amountIn, fromDecimals);
+    const minAmountOutWei = parseUnits(body.minAmountOut, toDecimals);
+
+    const swapTx = builder.buildCurveSwap({
+      poolAddress: getAddress(body.pool),
+      i: BigInt(body.fromTokenIndex),
+      j: BigInt(body.toTokenIndex),
+      amountIn: amountInWei,
+      minAmountOut: minAmountOutWei,
+    });
+
+    const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    const valueUsd = await tokenAmountToUsd(
+      amountInWei,
+      body.fromTokenAddress,
+      fromDecimals,
+      body.chainId,
+    );
+    const policyResult = await policyService.validateTransaction({
+      agentId: request.agentId,
+      targetContract: swapTx.to,
+      tokenAddress: getAddress(body.fromTokenAddress),
+      valueEth: '0',
+      valueUsd,
+      ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
+    });
+    if (!policyResult.allowed) {
+      return reply.code(403).send({ error: policyResult.reason });
+    }
+
+    const sim = await simulator.simulate({
+      chainId: body.chainId,
+      from: getAddress(agent.safeAddress),
+      to: swapTx.to,
+      data: swapTx.data,
+      value: swapTx.value,
+    });
+    if (!sim.success) {
+      return reply.code(422).send({
+        error: `Simulation failed: ${sim.error}. Verify pool exists, indices are correct, and fromToken is approved to the pool.`,
+      });
+    }
+
+    const feeCalc = feeService.calculateFee({
+      grossAmountWei: amountInWei,
+      tier: request.agentTier,
+    });
+
+    const tx = await db.transaction.create({
+      data: {
+        agentId: request.agentId,
+        idempotencyKey: body.idempotencyKey ?? null,
+        chainId: body.chainId,
+        status: policyResult.requiresApproval ? 'PENDING_APPROVAL' : 'QUEUED',
+        type: 'SWAP',
+        fromToken: body.fromTokenAddress,
+        toToken: body.toTokenAddress,
+        amountIn: body.amountIn,
+        simulation: sim as any,
+        metadata: {
+          protocol: 'curve',
+          poolAddress: body.pool,
+          tokenIndices: { from: body.fromTokenIndex, to: body.toTokenIndex },
+          queuePayload: {
+            to: swapTx.to,
+            data: swapTx.data,
+            value: swapTx.value.toString(),
+            feeAmountWei: feeCalc.feeAmountWei.toString(),
+            feeBps: feeCalc.feeBps,
+            routedViaExecutor: false,
+          },
+        },
+      },
+    });
+
+    if (!policyResult.requiresApproval) {
+      await transactionQueue.add('curve-swap', {
+        transactionId: tx.id,
+        chainId: body.chainId,
+        walletId: agent.walletId,
+        from: getAddress(agent.safeAddress),
+        to: swapTx.to,
+        data: swapTx.data,
+        value: swapTx.value.toString(),
+        agentId: request.agentId,
+        tier: request.agentTier,
+        feeAmountWei: feeCalc.feeAmountWei.toString(),
+        feeUsd: '0',
+        feeBps: feeCalc.feeBps,
+        routedViaExecutor: false,
+      });
+    } else {
+      await notificationService.notify({
+        type: 'PENDING_APPROVAL',
+        agentId: request.agentId,
+        agentName: agent.name,
+        transactionId: tx.id,
+        message: `Curve swap (${body.amountIn} ${body.fromTokenAddress.slice(0, 10)}) exceeds auto-approval threshold.`,
       });
     }
 
