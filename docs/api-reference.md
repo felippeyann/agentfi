@@ -138,6 +138,18 @@ Rate limits are tier-based (FREE / PRO / ENTERPRISE) and keyed by `agentId` or I
 
 **Job Statuses**: `PENDING` > `ACCEPTED` > `COMPLETED` | `FAILED` | `CANCELLED`
 
+**Escrow (v2)**: When a job is created with a `reward`, the requester's USD equivalent is committed to their daily volume atomically. Fields on the Job model:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `reservedAmount` | string | Amount reserved (human-readable units) |
+| `reservedToken` | string | Token symbol or address |
+| `reservedChainId` | number | Chain where funds are reserved |
+| `reservedAt` | datetime | Reservation timestamp |
+| `reservationStatus` | enum | `PENDING` \| `RELEASED` (paid on COMPLETED) \| `CANCELLED` (returned on FAIL/CANCEL) |
+
+When the job transitions to `COMPLETED`, the escrow is marked `RELEASED` and `executeA2APayment()` runs. On `FAILED` or `CANCELLED`, `releaseJobEscrow()` subtracts the reserved USD back from the requester's daily volume.
+
 ---
 
 ## Admin (Operator)
@@ -170,8 +182,10 @@ All admin routes require `x-admin-secret` header. Local-only by default.
 | GET | `/mcp/sse` | Agent (optional) | SSE stream for tool calls |
 | POST | `/mcp/messages?sessionId=` | Session | JSON-RPC message handler |
 
-**Available MCP Tools** (16):
+**Backend MCP Proxy Tools** (16):
 `get_wallet`, `get_balance`, `get_allowances`, `simulate_swap`, `execute_swap`, `execute_transfer`, `supply_aave`, `withdraw_aave`, `supply_compound`, `withdraw_compound`, `deposit_erc4626`, `withdraw_erc4626`, `swap_curve`, `get_transaction_status`, `list_transactions`, `get_agent_policy`
+
+> **Note:** The backend's `/mcp/sse` endpoint exposes a **thin 16-tool proxy** for simple HTTP-over-MCP clients. The standalone `@agent_fi/mcp-server` npm package is richer: **26 tools** including A2A collaboration (`search_agents`, `post_job`, `check_inbox`, `pay_agent`, etc.) — see [packages/mcp-server/README.md](../packages/mcp-server/README.md) for the full catalog.
 
 ---
 

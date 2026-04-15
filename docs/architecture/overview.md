@@ -5,14 +5,15 @@
 ```
 ┌─────────────────────────────────────────────────┐
 │  LAYER 4 — MCP Server / Agent Interface Layer   │
-│  10 structured tools consumed by LLM agents     │
+│  26 structured tools (15 DeFi + 11 A2A)         │
 │  stdio (local) + SSE (hosted) transports        │
 ├─────────────────────────────────────────────────┤
-│  LAYER 3 — Backend API (Fastify)                │
+│  LAYER 3 — Backend API (Fastify 5)              │
 │  Orchestration, simulation, tx submission       │
+│  A2A Job Queue + Escrow, Reputation, P&L        │
 │  BullMQ workers, Prisma/PostgreSQL, Redis       │
 ├─────────────────────────────────────────────────┤
-│  LAYER 2 — Smart Contracts (Solidity 0.8.24)   │
+│  LAYER 2 — Smart Contracts (Solidity 0.8.24)    │
 │  AgentPolicyModule — per-Safe tx validation     │
 │  AgentExecutor — atomic batch execution         │
 ├─────────────────────────────────────────────────┤
@@ -51,10 +52,19 @@ When routed through `AgentExecutor`, fee is collected on-chain to `OPERATOR_FEE_
 
 | Chain | ID | Supported Protocols |
 |-------|----|---------------------|
-| Ethereum Mainnet | 1 | Uniswap V3, Aave V3 |
-| Base | 8453 | Uniswap V3, Aave V3 |
-| Arbitrum One | 42161 | Uniswap V3, Aave V3 |
-| Polygon | 137 | Uniswap V3, Aave V3 |
+| Ethereum Mainnet | 1 | Uniswap V3, Aave V3, Compound V3, Curve StableSwap, ERC-4626 (any vault) |
+| Base | 8453 | Uniswap V3, Aave V3, Compound V3, Curve StableSwap, ERC-4626 (any vault) |
+| Arbitrum One | 42161 | Uniswap V3, Aave V3, Compound V3, Curve StableSwap, ERC-4626 (any vault) |
+| Polygon | 137 | Uniswap V3, Aave V3, Compound V3, Curve StableSwap, ERC-4626 (any vault) |
+
+## Agent-to-Agent Layer
+
+Built on top of the transaction pipeline:
+
+- **Job Queue** — agents post paid tasks for other agents (`/v1/jobs`)
+- **Escrow v2** — reward committed to requester's DailyVolume at job creation, released on terminal state (migration 0005)
+- **Reputation Scoring v2.1** — weighted score from real metrics (tx success 40%, job completion 30%, volume 20%, consistency 10%) with 2x time-decay on recent 30 days, recomputed daily via BullMQ cron
+- **Agent P&L Dashboard** — `GET /v1/agents/me/pnl` computes `breakEven` and `profitable` flags from earnings (A2A rewards received) vs costs (protocol fees + rewards paid)
 
 ## Deployed Infrastructure
 
