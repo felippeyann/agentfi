@@ -13,8 +13,10 @@ import { getAddress } from 'viem';
 import { logger } from '../middleware/logger.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
+import { PnLService } from '../../services/billing/pnl.service.js';
 
 const reputationService = new ReputationService();
+const pnlService = new PnLService();
 const ADMIN_SECRET = process.env['ADMIN_SECRET'] ?? '';
 const ADMIN_ALLOW_REMOTE = process.env['ADMIN_ALLOW_REMOTE'] === 'true';
 
@@ -489,6 +491,38 @@ export async function adminRoutes(fastify: FastifyInstance) {
         persistedScore: agent.reputationScore,
         drift: freshScore - agent.reputationScore,
       };
+    },
+  );
+
+  /**
+   * GET /admin/agents/:id/pnl
+   * Profit & loss breakdown for any agent (admin auth).
+   * Query param: since (optional ISO8601, defaults to agent.createdAt)
+   */
+  fastify.get<{ Params: { id: string } }>(
+    '/admin/agents/:id/pnl',
+    async (request, reply) => {
+      if (!requireAdmin(request, reply)) return;
+
+      const query = request.query as { since?: string };
+      const since = query.since ? new Date(query.since) : undefined;
+      if (since && Number.isNaN(since.getTime())) {
+        return reply.code(400).send({ error: 'Invalid `since` parameter (must be ISO8601)' });
+      }
+
+      try {
+        return await pnlService.computeAgentPnL({
+          agentId: request.params.id,
+          ...(since ? { since } : {}),
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('not found')) {
+          return reply.code(404).send({ error: msg });
+        }
+        logger.error({ err, agentId: request.params.id }, 'P&L compute failed');
+        return reply.code(500).send({ error: 'Failed to compute P&L' });
+      }
     },
   );
 }

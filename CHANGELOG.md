@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Agent P&L Dashboard (Phase 4)**: per-agent profit & loss computed from real DB data
+- New `PnLService` in `packages/backend/src/services/billing/pnl.service.ts`
+- `GET /v1/agents/me/pnl` — agent-facing P&L with earnings, costs, breakeven status
+- `GET /admin/agents/:id/pnl` — admin version for any agent
+- Both accept optional `?since=<ISO8601>` query param
+- Earnings: A2A job rewards received as provider (COMPLETED jobs)
+- Costs: protocol fees paid + A2A rewards paid as requester
+- Directly serves VISION.md thesis: "the moment an agent's earnings exceed its costs..."
 - **A2A Escrow v2**: reward funds are reserved at job creation time and released on terminal state
 - New `EscrowService`: `reserveJobEscrow()`, `releaseJobEscrow()`, `markEscrowReleased()`
 - Migration 0005: adds `reservedAmount`, `reservedToken`, `reservedChainId`, `reservedAt`, `reservationStatus` to Job

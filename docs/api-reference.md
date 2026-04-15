@@ -35,6 +35,7 @@ Rate limits are tier-based (FREE / PRO / ENTERPRISE) and keyed by `agentId` or I
 | GET | `/v1/agents/:id/manifest` | Public | Service manifest for A2A discovery |
 | PATCH | `/v1/agents/me/manifest` | Agent | Update own service manifest |
 | GET | `/v1/agents/:id/trust-report` | Public | Reputation score, A2A tx count |
+| GET | `/v1/agents/me/pnl` | Agent | Profit & loss breakdown (earnings, costs, breakeven) |
 | POST | `/v1/agents/me/sign-handshake` | Agent | **501** - Not implemented |
 | POST | `/v1/agents/verify-handshake` | Public | **501** - Not implemented |
 | DELETE | `/v1/agents/:id` | Agent (owner) | Soft deactivate + emergency pause |
@@ -157,6 +158,7 @@ All admin routes require `x-admin-secret` header. Local-only by default.
 | GET | `/admin/revenue` | Revenue breakdown by tier |
 | POST | `/admin/reputation/recompute` | Recompute reputation (all or single agent via body) |
 | GET | `/admin/reputation/:agentId` | Reputation detail with persisted vs computed drift |
+| GET | `/admin/agents/:id/pnl` | Profit & loss breakdown for any agent |
 
 ---
 

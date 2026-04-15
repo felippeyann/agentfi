@@ -6,11 +6,13 @@ import { SafeService } from '../../services/wallet/safe.service.js';
 import { generateApiKey } from '../middleware/auth.js';
 import { PolicyService } from '../../services/policy/policy.service.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
+import { PnLService } from '../../services/billing/pnl.service.js';
 import { logger } from '../middleware/logger.js';
 const turnkey = new TurnkeyService();
 const safeService = new SafeService();
 const policyService = new PolicyService(db);
 const reputationService = new ReputationService();
+const pnlService = new PnLService();
 
 const createAgentSchema = z.object({
   name: z.string().min(1).max(100),
@@ -365,6 +367,28 @@ export async function agentRoutes(fastify: FastifyInstance) {
       details: 'A2A handshake verification requires EIP-1271 or ECDSA recovery. See: https://eips.ethereum.org/EIPS/eip-1271',
     });
   });
+
+  /**
+   * GET /v1/agents/me/pnl — profit & loss breakdown for the current agent.
+   *
+   * Directly serves the VISION.md thesis: "the moment an agent's earnings
+   * exceed its costs, it has crossed a line that no AI system has crossed before."
+   *
+   * Query param:
+   *   - since: optional ISO8601 period start (defaults to agent.createdAt)
+   */
+  fastify.get('/v1/agents/me/pnl', async (request, reply) => {
+    const query = request.query as { since?: string };
+    const since = query.since ? new Date(query.since) : undefined;
+    if (since && Number.isNaN(since.getTime())) {
+      return reply.code(400).send({ error: 'Invalid `since` parameter (must be ISO8601)' });
+    }
+    return pnlService.computeAgentPnL({
+      agentId: request.agentId,
+      ...(since ? { since } : {}),
+    });
+  });
+
   /**
    * DELETE /v1/agents/:id — deactivate agent (soft delete).
    */
