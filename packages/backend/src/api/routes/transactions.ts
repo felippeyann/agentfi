@@ -172,6 +172,22 @@ const withdrawSchema = z.object({
   idempotencyKey: z.string().optional(),
 });
 
+const erc4626DepositSchema = z.object({
+  vault: z.string(), // vault contract address
+  asset: z.string(), // underlying token address (for decimals lookup + USD pricing)
+  amount: z.string(),
+  chainId: z.number().default(1),
+  idempotencyKey: z.string().optional(),
+});
+
+const erc4626WithdrawSchema = z.object({
+  vault: z.string(),
+  asset: z.string(),
+  amount: z.string(), // "max" or decimal amount
+  chainId: z.number().default(1),
+  idempotencyKey: z.string().optional(),
+});
+
 export async function transactionRoutes(fastify: FastifyInstance) {
   /**
    * POST /v1/transactions/simulate — simulate without submitting.
@@ -1039,6 +1055,239 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         agentName: agent.name,
         transactionId: tx.id,
         message: `Compound withdraw (${body.amount} ${body.asset.slice(0, 10)}) exceeds auto-approval threshold.`,
+      });
+    }
+
+    return reply.code(202).send({ transactionId: tx.id, status: tx.status });
+  });
+
+  /**
+   * POST /v1/transactions/deposit-erc4626
+   * Deposits an asset into any ERC-4626 compliant vault.
+   * Vault address is supplied by the caller (not from config) so any
+   * compliant vault (Yearn, Morpho, Beefy, etc.) can be used.
+   */
+  fastify.post('/v1/transactions/deposit-erc4626', async (request, reply) => {
+    const body = erc4626DepositSchema.parse(request.body);
+    const agent = await getAgent(request.agentId);
+    if (!ensureChainAllowed(agent, body.chainId, reply)) return;
+
+    if (body.idempotencyKey) {
+      const idempotent = await getIdempotentTransaction(request.agentId, body.idempotencyKey);
+      if (idempotent.existing) return idempotent.existing;
+      if (idempotent.conflictWithAnotherAgent) {
+        return reply.code(409).send({ error: 'idempotencyKey is already in use by another agent' });
+      }
+    }
+
+    const withinLimit = await feeService.checkTxLimit(request.agentId, request.agentTier);
+    if (!withinLimit) {
+      return reply.code(429).send({ error: 'Monthly transaction limit reached' });
+    }
+
+    const decimals = await getTokenDecimals(body.asset, body.chainId);
+    const amountWei = parseUnits(body.amount, decimals);
+
+    const depositTx = builder.buildErc4626Deposit({
+      vaultAddress: getAddress(body.vault),
+      assetAmount: amountWei,
+      receiver: getAddress(agent.safeAddress),
+    });
+
+    const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    const valueUsd = await tokenAmountToUsd(amountWei, body.asset, decimals, body.chainId);
+    const policyResult = await policyService.validateTransaction({
+      agentId: request.agentId,
+      targetContract: depositTx.to,
+      tokenAddress: getAddress(body.asset),
+      valueEth: '0',
+      valueUsd,
+      ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
+    });
+    if (!policyResult.allowed) {
+      return reply.code(403).send({ error: policyResult.reason });
+    }
+
+    const sim = await simulator.simulate({
+      chainId: body.chainId,
+      from: getAddress(agent.safeAddress),
+      to: depositTx.to,
+      data: depositTx.data,
+      value: depositTx.value,
+    });
+    if (!sim.success) {
+      return reply.code(422).send({ error: `Simulation failed: ${sim.error}` });
+    }
+
+    const feeCalc = feeService.calculateFee({ grossAmountWei: amountWei, tier: request.agentTier });
+
+    const tx = await db.transaction.create({
+      data: {
+        agentId: request.agentId,
+        idempotencyKey: body.idempotencyKey ?? null,
+        chainId: body.chainId,
+        status: policyResult.requiresApproval ? 'PENDING_APPROVAL' : 'QUEUED',
+        type: 'DEPOSIT',
+        fromToken: body.asset,
+        amountIn: body.amount,
+        simulation: sim as any,
+        metadata: {
+          protocol: 'erc4626',
+          vaultAddress: body.vault,
+          queuePayload: {
+            to: depositTx.to,
+            data: depositTx.data,
+            value: depositTx.value.toString(),
+            feeAmountWei: feeCalc.feeAmountWei.toString(),
+            feeBps: feeCalc.feeBps,
+            routedViaExecutor: false,
+          },
+        },
+      },
+    });
+
+    if (!policyResult.requiresApproval) {
+      await transactionQueue.add('erc4626-deposit', {
+        transactionId: tx.id,
+        chainId: body.chainId,
+        walletId: agent.walletId,
+        from: getAddress(agent.safeAddress),
+        to: depositTx.to,
+        data: depositTx.data,
+        value: depositTx.value.toString(),
+        agentId: request.agentId,
+        tier: request.agentTier,
+        feeAmountWei: feeCalc.feeAmountWei.toString(),
+        feeUsd: '0',
+        feeBps: feeCalc.feeBps,
+        routedViaExecutor: false,
+      });
+    } else {
+      await notificationService.notify({
+        type: 'PENDING_APPROVAL',
+        agentId: request.agentId,
+        agentName: agent.name,
+        transactionId: tx.id,
+        message: `ERC-4626 deposit (${body.amount} ${body.asset.slice(0, 10)}) exceeds auto-approval threshold.`,
+      });
+    }
+
+    return reply.code(202).send({ transactionId: tx.id, status: tx.status });
+  });
+
+  /**
+   * POST /v1/transactions/withdraw-erc4626
+   * Withdraws assets from any ERC-4626 compliant vault.
+   */
+  fastify.post('/v1/transactions/withdraw-erc4626', async (request, reply) => {
+    const body = erc4626WithdrawSchema.parse(request.body);
+    const agent = await getAgent(request.agentId);
+    if (!ensureChainAllowed(agent, body.chainId, reply)) return;
+
+    if (body.idempotencyKey) {
+      const idempotent = await getIdempotentTransaction(request.agentId, body.idempotencyKey);
+      if (idempotent.existing) return idempotent.existing;
+      if (idempotent.conflictWithAnotherAgent) {
+        return reply.code(409).send({ error: 'idempotencyKey is already in use by another agent' });
+      }
+    }
+
+    const withinLimit = await feeService.checkTxLimit(request.agentId, request.agentTier);
+    if (!withinLimit) {
+      return reply.code(429).send({ error: 'Monthly transaction limit reached' });
+    }
+
+    const decimals = await getTokenDecimals(body.asset, body.chainId);
+    const amountWei = body.amount === 'max' ? maxUint256 : parseUnits(body.amount, decimals);
+
+    const withdrawTx = builder.buildErc4626Withdraw({
+      vaultAddress: getAddress(body.vault),
+      assetAmount: amountWei,
+      receiver: getAddress(agent.safeAddress),
+      owner: getAddress(agent.safeAddress),
+    });
+
+    const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    const valueUsd =
+      body.amount === 'max'
+        ? '0'
+        : await tokenAmountToUsd(amountWei, body.asset, decimals, body.chainId);
+    const policyResult = await policyService.validateTransaction({
+      agentId: request.agentId,
+      targetContract: withdrawTx.to,
+      tokenAddress: getAddress(body.asset),
+      valueEth: '0',
+      valueUsd,
+      ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
+    });
+    if (!policyResult.allowed) {
+      return reply.code(403).send({ error: policyResult.reason });
+    }
+
+    const sim = await simulator.simulate({
+      chainId: body.chainId,
+      from: getAddress(agent.safeAddress),
+      to: withdrawTx.to,
+      data: withdrawTx.data,
+      value: withdrawTx.value,
+    });
+    if (!sim.success) {
+      return reply.code(422).send({ error: `Simulation failed: ${sim.error}` });
+    }
+
+    const feeCalc = feeService.calculateFee({
+      grossAmountWei: 0n,
+      tier: request.agentTier,
+    });
+
+    const tx = await db.transaction.create({
+      data: {
+        agentId: request.agentId,
+        idempotencyKey: body.idempotencyKey ?? null,
+        chainId: body.chainId,
+        status: policyResult.requiresApproval ? 'PENDING_APPROVAL' : 'QUEUED',
+        type: 'WITHDRAW',
+        fromToken: body.asset,
+        amountIn: body.amount,
+        simulation: sim as any,
+        metadata: {
+          protocol: 'erc4626',
+          vaultAddress: body.vault,
+          queuePayload: {
+            to: withdrawTx.to,
+            data: withdrawTx.data,
+            value: withdrawTx.value.toString(),
+            feeAmountWei: feeCalc.feeAmountWei.toString(),
+            feeBps: feeCalc.feeBps,
+            routedViaExecutor: false,
+          },
+        },
+      },
+    });
+
+    if (!policyResult.requiresApproval) {
+      await transactionQueue.add('erc4626-withdraw', {
+        transactionId: tx.id,
+        chainId: body.chainId,
+        walletId: agent.walletId,
+        from: getAddress(agent.safeAddress),
+        to: withdrawTx.to,
+        data: withdrawTx.data,
+        value: withdrawTx.value.toString(),
+        agentId: request.agentId,
+        tier: request.agentTier,
+        feeAmountWei: feeCalc.feeAmountWei.toString(),
+        feeUsd: '0',
+        feeBps: feeCalc.feeBps,
+        routedViaExecutor: false,
+      });
+    } else {
+      await notificationService.notify({
+        type: 'PENDING_APPROVAL',
+        agentId: request.agentId,
+        agentName: agent.name,
+        transactionId: tx.id,
+        message: `ERC-4626 withdraw (${body.amount} ${body.asset.slice(0, 10)}) exceeds auto-approval threshold.`,
       });
     }
 
