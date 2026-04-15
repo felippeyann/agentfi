@@ -8,6 +8,8 @@
 AgentFi provides crypto transaction infrastructure for AI agents on Ethereum and EVM-compatible networks. It allows agents to execute DeFi transactions (swaps, yield farming, transfers) without handling private keys or managing gas, all within a secure on-chain policy framework.
 
 > **Start here:** Read **[VISION.md](VISION.md)** first. It explains *why* this project exists, where it's going, and the principles behind every technical decision. Everything else follows from there.
+>
+> **Resuming work or handing off?** See **[HANDOFF.md](HANDOFF.md)** — complete state snapshot, pending tasks, credentials inventory, and new-machine setup guide.
 
 ---
 
