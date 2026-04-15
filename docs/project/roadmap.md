@@ -60,7 +60,13 @@ These items bridge the gap between the current product (agent-to-DeFi) and the v
   - [x] Job `reward` auto-triggers `executeA2APayment()` on status → COMPLETED
   - [x] Full policy + simulation + fee calculation pipeline reused
   - [x] Metadata links payment transaction back to job (`metadata.jobId`)
-  - [ ] Escrow pattern: lock reward on job creation, release on completion (v2)
+- [x] **A2A Escrow v2** (April 2026):
+  - [x] Reward funds reserved at job creation (DailyVolume atomic commit)
+  - [x] Released on CANCELLED/FAILED (returns daily volume credit)
+  - [x] Marked RELEASED on COMPLETED (payment consumes the reservation)
+  - [x] Migration 0005 adds reservedAmount/reservedToken/reservationStatus to Job
+  - [ ] On-chain escrow contract (v3 — requires new Safe module deploy)
+  - [ ] Automatic cleanup of stale ACCEPTED jobs (v3)
 
 - **A2A Identity & Trust (Sign/Verify Handshake):**
   - Implement `sign-handshake` via Turnkey MPC message signing

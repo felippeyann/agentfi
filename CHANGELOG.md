@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A2A Escrow v2**: reward funds are reserved at job creation time and released on terminal state
+- New `EscrowService`: `reserveJobEscrow()`, `releaseJobEscrow()`, `markEscrowReleased()`
+- Migration 0005: adds `reservedAmount`, `reservedToken`, `reservedChainId`, `reservedAt`, `reservationStatus` to Job
+- `POST /v1/jobs` with reward now atomically commits USD volume and rejects if daily limit would be exceeded
+- `PATCH /v1/jobs/:id` releases escrow on CANCELLED/FAILED (returns daily volume credit) or marks RELEASED on COMPLETED
 - **ERC-4626 vault adapter**: generic tokenized vault support — any compliant vault (Yearn, Morpho, Beefy, Gearbox, etc.) works without pre-registration
 - `POST /v1/transactions/deposit-erc4626` and `POST /v1/transactions/withdraw-erc4626`
 - `TransactionBuilder.buildErc4626Deposit()` and `buildErc4626Withdraw()` methods

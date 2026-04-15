@@ -51,13 +51,21 @@ model Job {
   
   signature    String?   // Requester's signature of the payload
   result       Json?     // The output/proof of work from the provider
-  
+
+  // v2 Escrow — funds committed at job creation, released on terminal state
+  reservedAmount    String?   // Amount in human-readable units (same as reward.amount)
+  reservedToken     String?   // Token symbol or address ("ETH" or 0x...)
+  reservedChainId   Int?      // Chain where funds are reserved
+  reservedAt        DateTime? // Reservation timestamp
+  reservationStatus String?   // "PENDING" | "RELEASED" | "CANCELLED"
+
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
   @@index([requesterId])
   @@index([providerId])
   @@index([status])
+  @@index([reservationStatus])
 }
 
 enum JobStatus {
