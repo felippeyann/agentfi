@@ -79,6 +79,7 @@ Rate limits are tier-based (FREE / PRO / ENTERPRISE) and keyed by `agentId` or I
 | POST | `/v1/transactions/withdraw-compound` | Agent | Withdraw from Compound V3 |
 | POST | `/v1/transactions/deposit-erc4626` | Agent | Deposit into any ERC-4626 vault (Yearn, Morpho, Beefy, etc.) |
 | POST | `/v1/transactions/withdraw-erc4626` | Agent | Withdraw from any ERC-4626 vault |
+| POST | `/v1/transactions/swap-curve` | Agent | Swap on Curve StableSwap pool (stablecoins, low slippage) |
 | POST | `/v1/transactions/batch` | Agent | Multi-call batch (max 20 actions) |
 | GET | `/v1/transactions/:id` | Agent (owner) | Transaction status |
 | GET | `/v1/transactions` | Agent | Paginated history |
@@ -169,8 +170,8 @@ All admin routes require `x-admin-secret` header. Local-only by default.
 | GET | `/mcp/sse` | Agent (optional) | SSE stream for tool calls |
 | POST | `/mcp/messages?sessionId=` | Session | JSON-RPC message handler |
 
-**Available MCP Tools** (15):
-`get_wallet`, `get_balance`, `get_allowances`, `simulate_swap`, `execute_swap`, `execute_transfer`, `supply_aave`, `withdraw_aave`, `supply_compound`, `withdraw_compound`, `deposit_erc4626`, `withdraw_erc4626`, `get_transaction_status`, `list_transactions`, `get_agent_policy`
+**Available MCP Tools** (16):
+`get_wallet`, `get_balance`, `get_allowances`, `simulate_swap`, `execute_swap`, `execute_transfer`, `supply_aave`, `withdraw_aave`, `supply_compound`, `withdraw_compound`, `deposit_erc4626`, `withdraw_erc4626`, `swap_curve`, `get_transaction_status`, `list_transactions`, `get_agent_policy`
 
 ---
 

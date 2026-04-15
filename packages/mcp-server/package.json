@@ -1,6 +1,6 @@
 {
   "name": "@agent_fi/mcp-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "Apache-2.0",
   "repository": { "type": "git", "url": "https://github.com/felippeyann/agentfi.git", "directory": "packages/mcp-server" },
   "description": "AgentFi MCP Server — crypto transaction tools for AI agents",
@@ -15,7 +15,7 @@
     "typecheck": "tsc --noEmit",
     "start": "node --import tsx/esm src/index.ts"
   },
-  "keywords": ["mcp", "defi", "ethereum", "ai-agents", "uniswap", "aave"],
+  "keywords": ["mcp", "defi", "ethereum", "ai-agents", "uniswap", "aave", "compound", "curve", "erc4626"],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "zod": "^3.22.4",

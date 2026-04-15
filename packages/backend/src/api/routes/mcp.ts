@@ -189,6 +189,22 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
         call('POST', '/v1/transactions/withdraw-erc4626', args),
     },
     {
+      name: 'swap_curve',
+      description: 'Swap between two assets on a Curve StableSwap pool (stablecoins)',
+      inputSchema: z.object({
+        pool: z.string().describe('Curve pool contract address'),
+        fromTokenIndex: z.number().describe('Index of input token in the pool'),
+        toTokenIndex: z.number().describe('Index of output token in the pool'),
+        fromTokenAddress: z.string().describe('ERC-20 address of input token'),
+        toTokenAddress: z.string().describe('ERC-20 address of output token'),
+        amountIn: z.string().describe('Amount of input token in human-readable units'),
+        minAmountOut: z.string().describe('Minimum output amount (slippage protection)'),
+        chainId: z.number().optional().describe('Chain ID (default: 1)'),
+      }),
+      handler: async (args: Record<string, unknown>) =>
+        call('POST', '/v1/transactions/swap-curve', args),
+    },
+    {
       name: 'get_transaction_status',
       description: 'Get the status of a previously submitted transaction',
       inputSchema: z.object({

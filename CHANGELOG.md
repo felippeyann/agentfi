@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Curve Finance StableSwap adapter**: `POST /v1/transactions/swap-curve` — token-to-token swaps on any Curve classic pool (3pool, tri-pool, etc.)
+- `TransactionBuilder.buildCurveSwap()` method with `CURVE_STABLESWAP_ABI`
+- MCP tool `swap_curve` in standalone mcp-server package and backend MCP proxy (16 total tools)
+- mcp-server version bumped to `0.2.0` (adds Compound, ERC-4626, and Curve tools since `0.1.0`)
 - **Agent P&L Dashboard (Phase 4)**: per-agent profit & loss computed from real DB data
 - New `PnLService` in `packages/backend/src/services/billing/pnl.service.ts`
 - `GET /v1/agents/me/pnl` — agent-facing P&L with earnings, costs, breakeven status
