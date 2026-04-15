@@ -82,12 +82,14 @@ The following Phase 3 items from `VISION.md` have been delivered:
 
 **DeFi Protocol Expansion:**
 - ✅ Compound V3 adapter (Comet USDC market) — supply/withdraw on 4 chains
+- ✅ ERC-4626 vault adapter (generic — any compliant vault works)
+- ✅ A2A Escrow v2 — reward locked at job creation, released on terminal state
 
 **Still pending (Phase 3):**
-- A2A Escrow Pattern (v2) — lock reward on create, release on complete
 - Sign/Verify Handshake — requires Turnkey MPC credentials
-- Curve Finance, GMX, ERC-4626 adapters
+- Curve Finance, GMX adapters
 - Fastify v4 → v5 migration
+- A2A Escrow v3 (on-chain escrow contract)
 
 ---
 
@@ -135,7 +137,7 @@ None (all Dependabot PRs resolved).
 2. **A2A Escrow Pattern v2** — lock reward on create, release on complete, refund on cancel
 3. **Sign/Verify Handshake** — Turnkey MPC signing + EIP-1271 verification
 4. ~~**Reputation Scoring v2 + time-decay**~~ ✅ Done (PRs #28, #29)
-5. **DeFi Protocol Expansion** — ✅ Compound V3 done; Curve, GMX, ERC-4626 pending
+5. **DeFi Protocol Expansion** — ✅ Compound V3 + ERC-4626 done; Curve, GMX pending
 6. **Fastify v4 to v5** — resolves remaining HIGH vulnerability
 7. **MCP tools for Compound** — expose supply-compound/withdraw-compound as MCP tools
 
