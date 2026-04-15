@@ -79,6 +79,32 @@ const AAVE_POOL_ABI = [
   },
 ] as const;
 
+// Compound V3 (Comet) ABI — single-asset market contracts.
+// supply(asset, amount): supplies collateral OR base asset to the Comet market.
+// withdraw(asset, amount): withdraws base asset (or collateral) back to msg.sender.
+const COMPOUND_COMET_ABI = [
+  {
+    name: 'supply',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'asset', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [],
+  },
+  {
+    name: 'withdraw',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'asset', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [],
+  },
+] as const;
+
 // Uniswap V3 SwapRouter02 ABI â€” exactInputSingle WITHOUT deadline.
 // SwapRouter02 moves deadline to the multicall wrapper level.
 // Deployed at 0x2626664c2603336E57B271c5C0b26F421741e481 on Base/Arbitrum/Polygon.
@@ -209,6 +235,46 @@ export class TransactionBuilder {
         abi: AAVE_POOL_ABI,
         functionName: 'withdraw',
         args: [params.asset, params.amount, params.to],
+      }),
+      value: 0n,
+    };
+  }
+
+  /**
+   * Builds a Compound V3 (Comet) supply transaction.
+   * Each Comet market is single-asset (e.g. cUSDCv3 on Base).
+   */
+  buildCompoundSupply(params: {
+    cometAddress: Address;
+    asset: Address;
+    amount: bigint;
+  }): TransactionData {
+    return {
+      to: params.cometAddress,
+      data: encodeFunctionData({
+        abi: COMPOUND_COMET_ABI,
+        functionName: 'supply',
+        args: [params.asset, params.amount],
+      }),
+      value: 0n,
+    };
+  }
+
+  /**
+   * Builds a Compound V3 (Comet) withdraw transaction.
+   * Use MaxUint256 to withdraw the full balance.
+   */
+  buildCompoundWithdraw(params: {
+    cometAddress: Address;
+    asset: Address;
+    amount: bigint;
+  }): TransactionData {
+    return {
+      to: params.cometAddress,
+      data: encodeFunctionData({
+        abi: COMPOUND_COMET_ABI,
+        functionName: 'withdraw',
+        args: [params.asset, params.amount],
       }),
       value: 0n,
     };

@@ -74,6 +74,8 @@ Rate limits are tier-based (FREE / PRO / ENTERPRISE) and keyed by `agentId` or I
 | POST | `/v1/transactions/transfer` | Agent | ETH or ERC-20 transfer |
 | POST | `/v1/transactions/deposit` | Agent | Supply to Aave V3 |
 | POST | `/v1/transactions/withdraw` | Agent | Withdraw from Aave V3 |
+| POST | `/v1/transactions/supply-compound` | Agent | Supply to Compound V3 (Comet USDC market) |
+| POST | `/v1/transactions/withdraw-compound` | Agent | Withdraw from Compound V3 |
 | POST | `/v1/transactions/batch` | Agent | Multi-call batch (max 20 actions) |
 | GET | `/v1/transactions/:id` | Agent (owner) | Transaction status |
 | GET | `/v1/transactions` | Agent | Paginated history |
@@ -151,6 +153,8 @@ All admin routes require `x-admin-secret` header. Local-only by default.
 | POST | `/admin/transactions/:id/reject` | Reject PENDING_APPROVAL tx |
 | GET | `/admin/volume` | Daily volume chart (7 days) |
 | GET | `/admin/revenue` | Revenue breakdown by tier |
+| POST | `/admin/reputation/recompute` | Recompute reputation (all or single agent via body) |
+| GET | `/admin/reputation/:agentId` | Reputation detail with persisted vs computed drift |
 
 ---
 

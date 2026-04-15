@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Reputation Scoring v2.1 (time-decay)**: recent 30-day transactions and job outcomes now carry 2x weight vs historical events
+- **Daily Reputation Cron**: BullMQ repeatable job recomputes all active agents' scores daily at 02:00 UTC (override via `REPUTATION_CRON_PATTERN`)
+- `packages/backend/src/queues/reputation.queue.ts` — new queue, worker, and `scheduleReputationUpdate()`
+- **Compound V3 integration**: `POST /v1/transactions/supply-compound` and `POST /v1/transactions/withdraw-compound`
+- `TransactionBuilder.buildCompoundSupply()` and `buildCompoundWithdraw()` methods
+- `COMPOUND_COMET_ABI` constant for Comet market contracts
+- Compound V3 USDC market addresses added to `contracts.ts` (Mainnet, Base, Arbitrum, Polygon)
 - **Reputation Scoring v2**: computed from real behavior metrics (tx success rate 40%, job completion rate 30%, volume score 20%, consistency 10%) instead of simple counter
 - `ReputationService.computeReputationScore()`, `refreshReputation()`, `updateAllReputationScores()`
 - Admin endpoints: `POST /admin/reputation/recompute` (all or single agent), `GET /admin/reputation/:agentId` (shows persisted vs computed drift)
