@@ -26,8 +26,11 @@ All project documentation is organized in our **[Documentation Hub](docs/README.
 ## 🚀 Key Features
 
 - **Turnkey MPC Wallets**: Keys are split across shards and never exposed.
-- **Safe Smart Wallets**: Per-agent on-chain policy enforcement (limits, whitelists).
-- **Model Context Protocol (MCP)**: 10+ DeFi tools for direct agent integration.
+- **Safe Smart Wallets**: Per-agent on-chain policy enforcement (limits, whitelists, kill switch).
+- **Model Context Protocol (MCP)**: 26 structured tools for direct agent integration — 15 DeFi operations + 11 A2A collaboration.
+- **DeFi Coverage**: Uniswap V3 + Curve StableSwap (swaps); Aave V3, Compound V3, and any ERC-4626 vault (yield).
+- **Agent-to-Agent Economy**: job queue, atomic payments, DB-level escrow (v2), reputation scoring from real metrics with time-decay.
+- **Agent P&L Dashboard**: per-agent breakeven detection — the moment an agent's earnings exceed its costs.
 - **Cross-Chain Support**: Ethereum, Base, Arbitrum, and Polygon.
 - **Protocol Fee Engine**: Built-in fee collection on-chain via `AgentExecutor`.
 

@@ -1,15 +1,16 @@
-# @agentfi/backend
+# @agent_fi/backend
 
-Core API server for AgentFi — handles agent management, transaction execution, policy enforcement, billing, and the BullMQ worker pipeline.
+Core API server for AgentFi — handles agent management, transaction execution, policy enforcement, billing, A2A jobs + escrow, reputation, and the BullMQ worker pipeline.
 
 ## Stack
 
 - **Runtime**: Node.js 20+ (ESM)
-- **Framework**: Fastify 4
+- **Framework**: Fastify 5
 - **Database**: PostgreSQL 16 + Prisma ORM
-- **Queue**: BullMQ + Redis 7
+- **Queue**: BullMQ + Redis 7 (transaction worker + daily reputation cron)
 - **Wallet**: Turnkey MPC + Safe Smart Accounts
 - **Chains**: Ethereum, Base, Arbitrum, Polygon (via Alchemy)
+- **DeFi**: Uniswap V3 + Curve StableSwap (swaps), Aave V3 + Compound V3 + ERC-4626 vaults (yield)
 
 ## Local Development
 
@@ -36,19 +37,23 @@ npm run dev            # starts API on http://localhost:3000
 
 ## API Reference
 
-See [docs/api-reference.md](../../docs/api-reference.md) for the complete endpoint catalog (47 routes).
+See [docs/api-reference.md](../../docs/api-reference.md) for the complete endpoint catalog.
 
 ## Architecture
 
 ```
 src/
   api/
-    routes/       # Fastify route handlers (agents, transactions, wallet, billing, jobs, admin)
-    middleware/    # Auth, rate limiting, x402
-  config/         # Environment validation (Zod)
+    routes/       # Fastify route handlers (agents, transactions, wallet, billing, jobs, admin, mcp, health)
+    middleware/   # Auth, rate limiting, x402
+  config/         # Environment validation (Zod), chains, contracts
   db/
     schema.prisma # Database schema
-    migrations/   # SQL migrations (0001-0004)
-  queues/         # BullMQ workers (transaction pipeline)
-  services/       # Business logic (fee, policy, price, wallet, transaction)
+    migrations/   # SQL migrations (0001-0005)
+  queues/         # BullMQ workers (transaction pipeline + daily reputation cron)
+  services/
+    billing/      # Stripe + PnLService (agent P&L dashboard)
+    policy/       # FeeService, PolicyService, ReputationService, EscrowService
+    transaction/  # Builder, Executor, Simulator, Monitor, Submitter, PriceService
+    wallet/       # Turnkey + Safe wallet provisioning
 ```

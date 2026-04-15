@@ -76,28 +76,33 @@ The following Phase 3 items from `VISION.md` have been delivered:
 
 **A2A Economy Primitives:**
 - ✅ A2A Payment Execution v1 — `executeA2APayment()` triggered on Job COMPLETED
+- ✅ A2A Escrow v2 — reward committed to DailyVolume at job creation, released on terminal state (migration 0005)
 - ✅ Reputation Scoring v2 — weighted calculation from real metrics
 - ✅ Reputation time-decay (v2.1) — recent 30 days carry 2x weight
 - ✅ Daily reputation cron — BullMQ repeatable job (02:00 UTC)
 
 **DeFi Protocol Expansion:**
 - ✅ Compound V3 adapter (Comet USDC market) — supply/withdraw on 4 chains
-- ✅ ERC-4626 vault adapter (generic — any compliant vault works)
-- ✅ A2A Escrow v2 — reward locked at job creation, released on terminal state
+- ✅ ERC-4626 vault adapter (generic — any compliant vault works: Yearn, Morpho, Beefy, Gearbox)
+- ✅ Curve StableSwap adapter — stablecoin swaps on any classic Curve pool
+
+**Infrastructure:**
+- ✅ Fastify v4 → v5 migration (last HIGH npm vulnerability eliminated)
+- ✅ mcp-server v0.2.0 bump (adds Compound, ERC-4626, Curve tools; 26 total MCP tools)
+- ✅ `packages/mcp-server/RELEASE.md` — publish guide
 
 **Phase 4 Progress (post go-live):**
-- ✅ Agent P&L Dashboard v1 — breakeven detection per agent
+- ✅ Agent P&L Dashboard v1 — breakeven detection per agent (`GET /v1/agents/me/pnl`)
 
 **Still pending (Phase 3):**
 - Sign/Verify Handshake — requires Turnkey MPC credentials
-- Curve Finance, GMX adapters
-- Fastify v4 → v5 migration
-- A2A Escrow v3 (on-chain escrow contract)
+- GMX / Perp DEXes adapter — complex ABI, leverage risk management
+- A2A Escrow v3 — on-chain escrow contract (requires new Safe module deploy)
 
 **Still pending (Phase 4):**
-- P&L v2 — gas costs + realized yield
-- Agent self-funding (agent provisions own sub-wallet from earnings)
-- Persistent identity (ENS / DID)
+- P&L v2 — gas costs + realized yield from DEPOSIT positions
+- Agent self-funding — agent provisions own sub-wallet from earnings
+- Persistent identity — ENS / DID
 - Revenue sharing for self-hosted operators
 
 ---
