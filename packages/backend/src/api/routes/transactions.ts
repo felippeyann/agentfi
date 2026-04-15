@@ -808,6 +808,244 @@ export async function transactionRoutes(fastify: FastifyInstance) {
   });
 
   /**
+   * POST /v1/transactions/supply-compound
+   * Supplies an asset to Compound V3 (Comet USDC market).
+   */
+  fastify.post('/v1/transactions/supply-compound', async (request, reply) => {
+    const body = depositSchema.parse(request.body);
+    const agent = await getAgent(request.agentId);
+    if (!ensureChainAllowed(agent, body.chainId, reply)) return;
+
+    if (body.idempotencyKey) {
+      const idempotent = await getIdempotentTransaction(request.agentId, body.idempotencyKey);
+      if (idempotent.existing) return idempotent.existing;
+      if (idempotent.conflictWithAnotherAgent) {
+        return reply.code(409).send({ error: 'idempotencyKey is already in use by another agent' });
+      }
+    }
+
+    const withinLimit = await feeService.checkTxLimit(request.agentId, request.agentTier);
+    if (!withinLimit) {
+      return reply.code(429).send({ error: 'Monthly transaction limit reached' });
+    }
+
+    const contracts = getContracts(body.chainId);
+    if (!contracts.compoundCometUsdc) {
+      return reply.code(400).send({ error: `Compound V3 not configured for chain ${body.chainId}` });
+    }
+
+    const decimals = await getTokenDecimals(body.asset, body.chainId);
+    const amountWei = parseUnits(body.amount, decimals);
+
+    const supplyTx = builder.buildCompoundSupply({
+      cometAddress: contracts.compoundCometUsdc,
+      asset: getAddress(body.asset),
+      amount: amountWei,
+    });
+
+    const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    const valueUsd = await tokenAmountToUsd(amountWei, body.asset, decimals, body.chainId);
+    const policyResult = await policyService.validateTransaction({
+      agentId: request.agentId,
+      targetContract: supplyTx.to,
+      tokenAddress: getAddress(body.asset),
+      valueEth: '0',
+      valueUsd,
+      ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
+    });
+    if (!policyResult.allowed) {
+      return reply.code(403).send({ error: policyResult.reason });
+    }
+
+    const sim = await simulator.simulate({
+      chainId: body.chainId,
+      from: getAddress(agent.safeAddress),
+      to: supplyTx.to,
+      data: supplyTx.data,
+      value: supplyTx.value,
+    });
+    if (!sim.success) {
+      return reply.code(422).send({ error: `Simulation failed: ${sim.error}` });
+    }
+
+    const feeCalc = feeService.calculateFee({ grossAmountWei: amountWei, tier: request.agentTier });
+
+    const tx = await db.transaction.create({
+      data: {
+        agentId: request.agentId,
+        idempotencyKey: body.idempotencyKey ?? null,
+        chainId: body.chainId,
+        status: policyResult.requiresApproval ? 'PENDING_APPROVAL' : 'QUEUED',
+        type: 'DEPOSIT',
+        fromToken: body.asset,
+        amountIn: body.amount,
+        simulation: sim as any,
+        metadata: {
+          protocol: 'compound-v3',
+          queuePayload: {
+            to: supplyTx.to,
+            data: supplyTx.data,
+            value: supplyTx.value.toString(),
+            feeAmountWei: feeCalc.feeAmountWei.toString(),
+            feeBps: feeCalc.feeBps,
+            routedViaExecutor: false,
+          },
+        },
+      },
+    });
+
+    if (!policyResult.requiresApproval) {
+      await transactionQueue.add('compound-supply', {
+        transactionId: tx.id,
+        chainId: body.chainId,
+        walletId: agent.walletId,
+        from: getAddress(agent.safeAddress),
+        to: supplyTx.to,
+        data: supplyTx.data,
+        value: supplyTx.value.toString(),
+        agentId: request.agentId,
+        tier: request.agentTier,
+        feeAmountWei: feeCalc.feeAmountWei.toString(),
+        feeUsd: '0',
+        feeBps: feeCalc.feeBps,
+        routedViaExecutor: false,
+      });
+    } else {
+      await notificationService.notify({
+        type: 'PENDING_APPROVAL',
+        agentId: request.agentId,
+        agentName: agent.name,
+        transactionId: tx.id,
+        message: `Compound supply (${body.amount} ${body.asset.slice(0, 10)}) exceeds auto-approval threshold.`,
+      });
+    }
+
+    return reply.code(202).send({ transactionId: tx.id, status: tx.status });
+  });
+
+  /**
+   * POST /v1/transactions/withdraw-compound
+   * Withdraws an asset from Compound V3 (Comet USDC market).
+   */
+  fastify.post('/v1/transactions/withdraw-compound', async (request, reply) => {
+    const body = withdrawSchema.parse(request.body);
+    const agent = await getAgent(request.agentId);
+    if (!ensureChainAllowed(agent, body.chainId, reply)) return;
+
+    if (body.idempotencyKey) {
+      const idempotent = await getIdempotentTransaction(request.agentId, body.idempotencyKey);
+      if (idempotent.existing) return idempotent.existing;
+      if (idempotent.conflictWithAnotherAgent) {
+        return reply.code(409).send({ error: 'idempotencyKey is already in use by another agent' });
+      }
+    }
+
+    const withinLimit = await feeService.checkTxLimit(request.agentId, request.agentTier);
+    if (!withinLimit) {
+      return reply.code(429).send({ error: 'Monthly transaction limit reached' });
+    }
+
+    const contracts = getContracts(body.chainId);
+    if (!contracts.compoundCometUsdc) {
+      return reply.code(400).send({ error: `Compound V3 not configured for chain ${body.chainId}` });
+    }
+
+    const decimals = await getTokenDecimals(body.asset, body.chainId);
+    const amountWei = body.amount === 'max' ? maxUint256 : parseUnits(body.amount, decimals);
+
+    const withdrawTx = builder.buildCompoundWithdraw({
+      cometAddress: contracts.compoundCometUsdc,
+      asset: getAddress(body.asset),
+      amount: amountWei,
+    });
+
+    const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    const valueUsd =
+      body.amount === 'max'
+        ? '0'
+        : await tokenAmountToUsd(amountWei, body.asset, decimals, body.chainId);
+    const policyResult = await policyService.validateTransaction({
+      agentId: request.agentId,
+      targetContract: withdrawTx.to,
+      tokenAddress: getAddress(body.asset),
+      valueEth: '0',
+      valueUsd,
+      ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
+    });
+    if (!policyResult.allowed) {
+      return reply.code(403).send({ error: policyResult.reason });
+    }
+
+    const sim = await simulator.simulate({
+      chainId: body.chainId,
+      from: getAddress(agent.safeAddress),
+      to: withdrawTx.to,
+      data: withdrawTx.data,
+      value: withdrawTx.value,
+    });
+    if (!sim.success) {
+      return reply.code(422).send({ error: `Simulation failed: ${sim.error}` });
+    }
+
+    const feeCalc = feeService.calculateFee({
+      grossAmountWei: 0n,
+      tier: request.agentTier,
+    });
+
+    const tx = await db.transaction.create({
+      data: {
+        agentId: request.agentId,
+        idempotencyKey: body.idempotencyKey ?? null,
+        chainId: body.chainId,
+        status: policyResult.requiresApproval ? 'PENDING_APPROVAL' : 'QUEUED',
+        type: 'WITHDRAW',
+        fromToken: body.asset,
+        amountIn: body.amount,
+        simulation: sim as any,
+        metadata: {
+          protocol: 'compound-v3',
+          queuePayload: {
+            to: withdrawTx.to,
+            data: withdrawTx.data,
+            value: withdrawTx.value.toString(),
+            feeAmountWei: feeCalc.feeAmountWei.toString(),
+            feeBps: feeCalc.feeBps,
+            routedViaExecutor: false,
+          },
+        },
+      },
+    });
+
+    if (!policyResult.requiresApproval) {
+      await transactionQueue.add('compound-withdraw', {
+        transactionId: tx.id,
+        chainId: body.chainId,
+        walletId: agent.walletId,
+        from: getAddress(agent.safeAddress),
+        to: withdrawTx.to,
+        data: withdrawTx.data,
+        value: withdrawTx.value.toString(),
+        agentId: request.agentId,
+        tier: request.agentTier,
+        feeAmountWei: feeCalc.feeAmountWei.toString(),
+        feeUsd: '0',
+        feeBps: feeCalc.feeBps,
+        routedViaExecutor: false,
+      });
+    } else {
+      await notificationService.notify({
+        type: 'PENDING_APPROVAL',
+        agentId: request.agentId,
+        agentName: agent.name,
+        transactionId: tx.id,
+        message: `Compound withdraw (${body.amount} ${body.asset.slice(0, 10)}) exceeds auto-approval threshold.`,
+      });
+    }
+
+    return reply.code(202).send({ transactionId: tx.id, status: tx.status });
+  });
+
+  /**
    * POST /v1/transactions/batch — execute multiple raw calldata actions atomically.
    *
    * Each action maps directly to AgentExecutor.Action: { to, value, data }.

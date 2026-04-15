@@ -67,18 +67,18 @@ These items bridge the gap between the current product (agent-to-DeFi) and the v
   - Implement `verify-handshake` via EIP-1271 (Safe wallets) + ECDSA recovery (EOA fallback)
   - Enable agents to cryptographically prove identity to peers
 
-- [x] **Reputation Scoring v2** (April 2026):
+- [x] **Reputation Scoring v2 + time-decay** (April 2026):
   - [x] Weighted score derived from: tx success rate (40%), job completion rate (30%), volume (20%), consistency (10%)
   - [x] Admin endpoints for recompute and drift inspection
   - [x] `computeReputationScore()` returns 0–10,000 integer score
-  - [ ] Time-decay weighting (recent behavior > historical) — v3
-  - [ ] Daily cron job for automatic recompute — v3
+  - [x] Time-decay weighting: recent 30 days carry 2x weight vs historical
+  - [x] Daily BullMQ repeatable job for automatic recompute (02:00 UTC default)
 
 - **DeFi Protocol Expansion:**
-  - Compound V3 (supply/borrow)
-  - Curve Finance (stablecoin swaps)
-  - GMX / Perp DEXes (for advanced agents)
-  - ERC-4626 vault standard (generic yield)
+  - [x] Compound V3 (supply/withdraw) — Mainnet, Base, Arbitrum, Polygon
+  - [ ] Curve Finance (stablecoin swaps)
+  - [ ] GMX / Perp DEXes (for advanced agents)
+  - [ ] ERC-4626 vault standard (generic yield)
   - More earning paths = closer to self-sustaining agents
 
 - **Fastify v4 to v5 Migration:**

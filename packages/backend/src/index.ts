@@ -14,6 +14,7 @@ import { adminRoutes } from './api/routes/admin.js';
 import { mcpRoutes } from './api/routes/mcp.js';
 import { jobRoutes } from './api/routes/jobs.js';
 import { startTransactionWorker } from './queues/transaction.queue.js';
+import { startReputationWorker, scheduleReputationUpdate } from './queues/reputation.queue.js';
 
 const fastify = Fastify({ logger: logger as any });
 
@@ -94,10 +95,21 @@ async function start() {
     logger.warn('Transaction worker disabled for this process (TRANSACTION_WORKER_ENABLED=false)');
   }
 
+  // Reputation daily cron worker (BullMQ repeatable job).
+  // Non-fatal if Redis is temporarily unavailable — retries on reconnect.
+  let reputationWorker: ReturnType<typeof startReputationWorker> | undefined;
+  try {
+    reputationWorker = startReputationWorker();
+    await scheduleReputationUpdate();
+  } catch (err) {
+    logger.error({ err }, 'Reputation worker failed to start');
+  }
+
   // Graceful shutdown
   const shutdown = async () => {
     logger.info('Shutting down...');
     if (worker) await worker.close();
+    if (reputationWorker) await reputationWorker.close();
     await fastify.close();
     process.exit(0);
   };

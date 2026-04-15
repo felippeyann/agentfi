@@ -59,23 +59,54 @@ export class ReputationService {
     });
     if (!agent) return 0;
 
-    // 1. Transaction success rate (40%)
-    const [confirmed, failed, reverted] = await Promise.all([
-      db.transaction.count({ where: { agentId, status: 'CONFIRMED' } }),
-      db.transaction.count({ where: { agentId, status: 'FAILED' } }),
-      db.transaction.count({ where: { agentId, status: 'REVERTED' } }),
-    ]);
-    const totalTx = confirmed + failed + reverted;
-    const txSuccessRate = totalTx > 0 ? confirmed / totalTx : 0;
+    // 1. Transaction success rate (40%) — time-decayed: last 30 days weighted 2x
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const [confirmed, failed, reverted, recentConfirmed, recentFailed, recentReverted] =
+      await Promise.all([
+        db.transaction.count({ where: { agentId, status: 'CONFIRMED' } }),
+        db.transaction.count({ where: { agentId, status: 'FAILED' } }),
+        db.transaction.count({ where: { agentId, status: 'REVERTED' } }),
+        db.transaction.count({
+          where: { agentId, status: 'CONFIRMED', createdAt: { gte: thirtyDaysAgo } },
+        }),
+        db.transaction.count({
+          where: { agentId, status: 'FAILED', createdAt: { gte: thirtyDaysAgo } },
+        }),
+        db.transaction.count({
+          where: { agentId, status: 'REVERTED', createdAt: { gte: thirtyDaysAgo } },
+        }),
+      ]);
+    const olderConfirmed = confirmed - recentConfirmed;
+    const olderFailed = failed - recentFailed;
+    const olderReverted = reverted - recentReverted;
+    // Recent events get 2x weight, older get 1x.
+    const weightedSuccess = recentConfirmed * 2 + olderConfirmed;
+    const weightedTotal =
+      (recentConfirmed + recentFailed + recentReverted) * 2 +
+      olderConfirmed +
+      olderFailed +
+      olderReverted;
+    const txSuccessRate = weightedTotal > 0 ? weightedSuccess / weightedTotal : 0;
 
-    // 2. Job completion rate as provider (30%)
-    const [completedJobs, failedJobs] = await Promise.all([
-      db.job.count({ where: { providerId: agentId, status: 'COMPLETED' } }),
-      db.job.count({ where: { providerId: agentId, status: 'FAILED' } }),
-    ]);
-    const totalJobs = completedJobs + failedJobs;
+    // 2. Job completion rate as provider (30%) — also time-decayed (2x recent)
+    const [completedJobs, failedJobs, recentCompletedJobs, recentFailedJobs] =
+      await Promise.all([
+        db.job.count({ where: { providerId: agentId, status: 'COMPLETED' } }),
+        db.job.count({ where: { providerId: agentId, status: 'FAILED' } }),
+        db.job.count({
+          where: { providerId: agentId, status: 'COMPLETED', updatedAt: { gte: thirtyDaysAgo } },
+        }),
+        db.job.count({
+          where: { providerId: agentId, status: 'FAILED', updatedAt: { gte: thirtyDaysAgo } },
+        }),
+      ]);
+    const olderCompletedJobs = completedJobs - recentCompletedJobs;
+    const olderFailedJobs = failedJobs - recentFailedJobs;
+    const weightedJobSuccess = recentCompletedJobs * 2 + olderCompletedJobs;
+    const weightedJobTotal =
+      (recentCompletedJobs + recentFailedJobs) * 2 + olderCompletedJobs + olderFailedJobs;
     // Neutral score (0.5) if no jobs yet — don't penalize new agents
-    const jobCompletionRate = totalJobs > 0 ? completedJobs / totalJobs : 0.5;
+    const jobCompletionRate = weightedJobTotal > 0 ? weightedJobSuccess / weightedJobTotal : 0.5;
 
     // 3. Volume score (20%) — derived from collected fees
     const billing = await db.agentBilling.findUnique({
@@ -91,9 +122,7 @@ export class ReputationService {
       1,
     );
 
-    // 4. Activity consistency (10%) — unique active days in last 30 days
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    // 4. Activity consistency (10%) — unique active days in last 30 days (reuses thirtyDaysAgo)
     const recentTxs = await db.transaction.findMany({
       where: { agentId, createdAt: { gte: thirtyDaysAgo } },
       select: { createdAt: true },
