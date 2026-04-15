@@ -1103,3 +1103,172 @@ function weiToEthDecimalString(valueWei: bigint): string {
   const fraction = (valueWei % 1_000_000_000_000_000_000n).toString().padStart(18, '0').replace(/0+$/, '');
   return fraction ? `${whole.toString()}.${fraction}` : whole.toString();
 }
+
+
+/**
+ * Executes an internal transfer for A2A job payment.
+ *
+ * Called programmatically from jobs.ts when a Job transitions to COMPLETED.
+ * Bypasses HTTP auth (requester's API key is not available in this context) but
+ * still runs policy, simulation, fee calculation, and queueing exactly like
+ * the public /v1/transactions/transfer endpoint.
+ *
+ * @param params.requesterId - Agent paying for the job
+ * @param params.providerSafeAddress - Recipient address (provider's Safe)
+ * @param params.amount - Amount in human units (e.g. "0.01")
+ * @param params.token - "ETH" or a token contract address
+ * @param params.chainId - Chain to execute on
+ * @param params.jobId - Job ID for metadata tracking
+ * @returns transactionId and final status
+ */
+export async function executeA2APayment(params: {
+  requesterId: string;
+  providerSafeAddress: string;
+  amount: string;
+  token: string;
+  chainId: number;
+  jobId: string;
+}): Promise<{ transactionId: string; status: string }> {
+  const requester = await db.agent.findUnique({
+    where: { id: params.requesterId },
+    select: {
+      id: true,
+      name: true,
+      safeAddress: true,
+      walletId: true,
+      chainIds: true,
+      active: true,
+      tier: true,
+    },
+  });
+  if (!requester) {
+    throw new Error(`Requester agent ${params.requesterId} not found`);
+  }
+  if (!requester.active) {
+    throw new Error(`Requester agent ${params.requesterId} is deactivated`);
+  }
+  if (!requester.chainIds.includes(params.chainId)) {
+    throw new Error(`Requester does not support chainId ${params.chainId}`);
+  }
+
+  const tier = requester.tier;
+  const withinLimit = await feeService.checkTxLimit(requester.id, tier);
+  if (!withinLimit) {
+    throw new Error('Requester has reached monthly transaction limit');
+  }
+
+  const isEthTransfer = params.token.toUpperCase() === 'ETH';
+  const transferDecimals = isEthTransfer
+    ? 18
+    : await getTokenDecimals(params.token, params.chainId);
+
+  const txData = isEthTransfer
+    ? builder.buildEthTransfer({
+        to: getAddress(params.providerSafeAddress),
+        amountEth: params.amount,
+      })
+    : builder.buildTokenTransfer({
+        tokenAddress: getAddress(params.token),
+        to: getAddress(params.providerSafeAddress),
+        amount: params.amount,
+        decimals: transferDecimals,
+      });
+
+  const lastTxTimestamp = await getLatestAgentTxTimestamp(requester.id);
+  const transferValueUsd = isEthTransfer
+    ? await weiToUsd(txData.value, params.chainId)
+    : await tokenAmountToUsd(
+        parseUnits(params.amount, transferDecimals),
+        params.token,
+        transferDecimals,
+        params.chainId,
+      );
+
+  const policyResult = await policyService.validateTransaction({
+    agentId: requester.id,
+    targetContract: isEthTransfer
+      ? getAddress(params.providerSafeAddress)
+      : txData.to,
+    ...(!isEthTransfer ? { tokenAddress: getAddress(params.token) } : {}),
+    valueEth: isEthTransfer ? params.amount : '0',
+    valueUsd: transferValueUsd,
+    ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
+  });
+  if (!policyResult.allowed) {
+    throw new Error(`Policy check failed: ${policyResult.reason}`);
+  }
+
+  const sim = await simulator.simulate({
+    chainId: params.chainId,
+    from: getAddress(requester.safeAddress),
+    to: txData.to,
+    data: txData.data,
+    value: txData.value,
+  });
+  if (!sim.success) {
+    throw new Error(`Simulation failed: ${sim.error}`);
+  }
+
+  const feeCalc = feeService.calculateFee({
+    grossAmountWei: txData.value > 0n ? txData.value : 0n,
+    tier,
+  });
+
+  const tx = await db.transaction.create({
+    data: {
+      agentId: requester.id,
+      chainId: params.chainId,
+      status: policyResult.requiresApproval ? 'PENDING_APPROVAL' : 'QUEUED',
+      type: 'TRANSFER',
+      fromToken: params.token,
+      toToken: params.providerSafeAddress,
+      amountIn: params.amount,
+      simulation: sim as any,
+      metadata: {
+        jobId: params.jobId,
+        a2aPayment: true,
+        queuePayload: {
+          to: txData.to,
+          data: txData.data,
+          value: txData.value.toString(),
+          feeAmountWei: feeCalc.feeAmountWei.toString(),
+          feeBps: feeCalc.feeBps,
+          routedViaExecutor: false,
+        },
+      },
+    },
+  });
+
+  if (!policyResult.requiresApproval) {
+    await transactionQueue.add('a2a-payment', {
+      transactionId: tx.id,
+      chainId: params.chainId,
+      walletId: requester.walletId,
+      from: getAddress(requester.safeAddress),
+      to: txData.to,
+      data: txData.data,
+      value: txData.value.toString(),
+      agentId: requester.id,
+      tier,
+      feeAmountWei: feeCalc.feeAmountWei.toString(),
+      feeUsd: '0',
+      feeBps: feeCalc.feeBps,
+      routedViaExecutor: false,
+    });
+  } else {
+    await notificationService.notify({
+      type: 'PENDING_APPROVAL',
+      agentId: requester.id,
+      agentName: requester.name,
+      transactionId: tx.id,
+      message: `A2A payment for job ${params.jobId} (${params.amount} ${params.token}) requires approval.`,
+    });
+  }
+
+  logger.info(
+    { jobId: params.jobId, transactionId: tx.id, status: tx.status },
+    'A2A payment queued',
+  );
+
+  return { transactionId: tx.id, status: tx.status };
+}

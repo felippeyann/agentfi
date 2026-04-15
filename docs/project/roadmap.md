@@ -56,20 +56,23 @@ This document outlines the technical development roadmap and business evolution 
 
 These items bridge the gap between the current product (agent-to-DeFi) and the vision (agent-to-agent economy).
 
-- **A2A Payment Execution:**
-  - Bind Job `reward` field to actual `execute_transfer` on Job completion
-  - Atomic payment: provider receives payment only when job status = COMPLETED
-  - Escrow pattern: lock reward on job creation, release on completion or refund on cancellation
+- [x] **A2A Payment Execution** (v1 — April 2026):
+  - [x] Job `reward` auto-triggers `executeA2APayment()` on status → COMPLETED
+  - [x] Full policy + simulation + fee calculation pipeline reused
+  - [x] Metadata links payment transaction back to job (`metadata.jobId`)
+  - [ ] Escrow pattern: lock reward on job creation, release on completion (v2)
 
 - **A2A Identity & Trust (Sign/Verify Handshake):**
   - Implement `sign-handshake` via Turnkey MPC message signing
   - Implement `verify-handshake` via EIP-1271 (Safe wallets) + ECDSA recovery (EOA fallback)
   - Enable agents to cryptographically prove identity to peers
 
-- **Reputation Scoring v2:**
-  - Derive score from: tx success rate, policy compliance rate, A2A job completion rate, volume, uptime
-  - Weighted algorithm (not just counter increment)
-  - Time-decay: recent behavior weighted more than historical
+- [x] **Reputation Scoring v2** (April 2026):
+  - [x] Weighted score derived from: tx success rate (40%), job completion rate (30%), volume (20%), consistency (10%)
+  - [x] Admin endpoints for recompute and drift inspection
+  - [x] `computeReputationScore()` returns 0–10,000 integer score
+  - [ ] Time-decay weighting (recent behavior > historical) — v3
+  - [ ] Daily cron job for automatic recompute — v3
 
 - **DeFi Protocol Expansion:**
   - Compound V3 (supply/borrow)
