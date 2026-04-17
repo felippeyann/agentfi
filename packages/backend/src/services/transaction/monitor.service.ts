@@ -39,17 +39,25 @@ export class MonitorService {
 
         if (receipt) {
           const confirmed = receipt.status === 'success';
+          const effectiveGasPriceWei =
+            receipt.effectiveGasPrice?.toString() ?? null;
           await this.db.transaction.update({
             where: { id: transactionId },
             data: {
               status: confirmed ? 'CONFIRMED' : 'REVERTED',
               gasUsed: receipt.gasUsed.toString(),
+              effectiveGasPriceWei,
               confirmedAt: new Date(),
             },
           });
 
           logger.info(
-            { txHash, status: receipt.status, gasUsed: receipt.gasUsed },
+            {
+              txHash,
+              status: receipt.status,
+              gasUsed: receipt.gasUsed,
+              effectiveGasPriceWei,
+            },
             'Transaction confirmed',
           );
           return;

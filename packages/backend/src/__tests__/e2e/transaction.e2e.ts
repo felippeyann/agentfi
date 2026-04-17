@@ -149,6 +149,8 @@ vi.mock('../../services/transaction/monitor.service.js', async () => {
                 data: {
                   status: confirmed ? 'CONFIRMED' : 'REVERTED',
                   gasUsed: receipt.gasUsed.toString(),
+                  effectiveGasPriceWei:
+                    receipt.effectiveGasPrice?.toString() ?? null,
                   confirmedAt: new Date(),
                 },
               });

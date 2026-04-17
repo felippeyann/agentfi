@@ -8,12 +8,13 @@
  * Earnings sources (v1):
  *   - A2A job rewards received (this agent as provider, status=COMPLETED)
  *
- * Cost sources (v1):
+ * Cost sources (v2):
  *   - Protocol fees paid (FeeEvent records linked via AgentBilling)
  *   - A2A job rewards paid out (this agent as requester, status=COMPLETED)
+ *   - Gas costs: gasUsed * effectiveGasPriceWei per CONFIRMED/REVERTED tx
+ *     (REVERTED txs still burn gas, so they are counted)
  *
- * Deferred to v2:
- *   - Gas costs (gasPrice not reliably stored at confirmation time)
+ * Deferred to future:
  *   - Realized yield from DEPOSIT transactions (needs on-chain reads)
  *
  * USD conversion uses the same price oracle as the fee and escrow services.
@@ -21,7 +22,8 @@
  */
 
 import { parseEther, parseUnits } from 'viem';
-import { db } from '../../db/client.js';
+import type { PrismaClient } from '@prisma/client';
+import { db as defaultDb } from '../../db/client.js';
 import { weiToUsd, tokenAmountToUsd } from '../transaction/price.service.js';
 import { logger } from '../../api/middleware/logger.js';
 
@@ -37,6 +39,7 @@ export interface PnLBreakdown {
   costs: {
     protocolFees: { count: number; usd: string };
     a2aJobsAsRequester: { count: number; usd: string };
+    gas: { count: number; usd: string };
     totalCostsUsd: string;
   };
   netPnlUsd: string;
@@ -76,6 +79,12 @@ async function rewardToUsd(reward: RewardJson | null): Promise<string> {
 }
 
 export class PnLService {
+  private readonly db: PrismaClient;
+
+  constructor(db: PrismaClient = defaultDb) {
+    this.db = db;
+  }
+
   /**
    * Computes P&L for a single agent.
    * @param agentId - the agent to analyze
@@ -85,7 +94,7 @@ export class PnLService {
     agentId: string;
     since?: Date;
   }): Promise<PnLBreakdown> {
-    const agent = await db.agent.findUnique({
+    const agent = await this.db.agent.findUnique({
       where: { id: params.agentId },
       select: { id: true, name: true, createdAt: true },
     });
@@ -99,7 +108,7 @@ export class PnLService {
     const notes: string[] = [];
 
     // --- Earnings: A2A jobs as provider (COMPLETED) ---
-    const jobsAsProvider = await db.job.findMany({
+    const jobsAsProvider = await this.db.job.findMany({
       where: {
         providerId: agent.id,
         status: 'COMPLETED',
@@ -115,7 +124,7 @@ export class PnLService {
     }
 
     // --- Costs: protocol fees paid ---
-    const feeEvents = await db.feeEvent.findMany({
+    const feeEvents = await this.db.feeEvent.findMany({
       where: {
         billing: { agentId: agent.id },
         collectedAt: { gte: periodStart },
@@ -129,7 +138,7 @@ export class PnLService {
     );
 
     // --- Costs: A2A jobs as requester (COMPLETED) ---
-    const jobsAsRequester = await db.job.findMany({
+    const jobsAsRequester = await this.db.job.findMany({
       where: {
         requesterId: agent.id,
         status: 'COMPLETED',
@@ -144,16 +153,54 @@ export class PnLService {
       rewardsPaidUsd += parseFloat(usd);
     }
 
-    // Deferred items — surface in notes rather than silently skipping.
+    // --- Costs: gas burned on confirmed/reverted txs ---
+    // REVERTED txs still burn gas on-chain, so they are counted as a real cost.
+    // Txs with missing gasUsed or effectiveGasPriceWei (older rows pre-migration)
+    // are silently skipped rather than biasing the total toward zero.
+    const gasTxs = await this.db.transaction.findMany({
+      where: {
+        agentId: agent.id,
+        status: { in: ['CONFIRMED', 'REVERTED'] },
+        confirmedAt: { gte: periodStart },
+      },
+      select: {
+        chainId: true,
+        gasUsed: true,
+        effectiveGasPriceWei: true,
+      },
+    });
+
+    let gasCostsUsd = 0;
+    let gasCostedTxCount = 0;
+    let gasMissingCount = 0;
+    for (const tx of gasTxs) {
+      if (!tx.gasUsed || !tx.effectiveGasPriceWei) {
+        gasMissingCount++;
+        continue;
+      }
+      try {
+        const gasCostWei =
+          BigInt(tx.gasUsed) * BigInt(tx.effectiveGasPriceWei);
+        const usd = await weiToUsd(gasCostWei, tx.chainId);
+        gasCostsUsd += parseFloat(usd);
+        gasCostedTxCount++;
+      } catch {
+        gasMissingCount++;
+      }
+    }
+
+    if (gasMissingCount > 0) {
+      notes.push(
+        `${gasMissingCount} tx(s) skipped in gas cost calc (missing gasUsed/effectiveGasPriceWei — likely pre-migration rows).`,
+      );
+    }
+
     notes.push(
-      'Gas costs not included in v1 (gasPrice not tracked at confirmation).',
-    );
-    notes.push(
-      'Realized yield from DEPOSIT transactions not included in v1.',
+      'Realized yield from DEPOSIT transactions not included (needs on-chain reads).',
     );
 
     const totalEarningsUsd = earningsUsd;
-    const totalCostsUsd = protocolFeesUsd + rewardsPaidUsd;
+    const totalCostsUsd = protocolFeesUsd + rewardsPaidUsd + gasCostsUsd;
     const netPnlUsd = totalEarningsUsd - totalCostsUsd;
 
     const breakdown: PnLBreakdown = {
@@ -176,6 +223,10 @@ export class PnLService {
         a2aJobsAsRequester: {
           count: jobsAsRequester.length,
           usd: rewardsPaidUsd.toFixed(6),
+        },
+        gas: {
+          count: gasCostedTxCount,
+          usd: gasCostsUsd.toFixed(6),
         },
         totalCostsUsd: totalCostsUsd.toFixed(6),
       },
