@@ -162,6 +162,7 @@ model Transaction {
   amountOut      String?
   gasUsed        String?
   gasPrice       String?
+  effectiveGasPriceWei String?
   error          String?
   simulation     Json?
   metadata       Json?

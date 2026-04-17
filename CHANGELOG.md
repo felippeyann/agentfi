@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Agent P&L v2 — Gas cost tracking (Phase 4)**: `PnLService` now counts real gas burn as a cost category
+- Migration 0006: adds `effectiveGasPriceWei` TEXT to `Transaction`
+- `MonitorService` persists `receipt.effectiveGasPrice` at confirmation time (same for E2E test poller)
+- New cost category `costs.gas` in the P&L breakdown — `usd = gasUsed * effectiveGasPriceWei * ETH/USD`, summed across CONFIRMED + REVERTED txs in the period (REVERTED txs still burn gas on-chain)
+- Pre-migration rows with missing `gasUsed`/`effectiveGasPriceWei` are skipped and reported in `notes`
+- `PnLService` constructor now accepts an optional `PrismaClient` (defaults to the shared client) so it is unit-testable without a live DB
+- New unit test `pnl.service.test.ts` — 8 cases covering gas math, REVERTED handling, missing-row skipping, profitability thresholds
 - **Fastify upgraded to v5** — resolves the last HIGH npm vulnerability (DoS via sendWebStream, content-type tab bypass, X-Forwarded-Proto spoofing). All plugins were already v5-compatible from prior Dependabot updates — zero code changes needed.
 - `packages/mcp-server/RELEASE.md` — complete publish guide for bumping the mcp-server npm package (versioning, keywords, npm publish, git tags, MCP directory submissions)
 - **Curve Finance StableSwap adapter**: `POST /v1/transactions/swap-curve` — token-to-token swaps on any Curve classic pool (3pool, tri-pool, etc.)
