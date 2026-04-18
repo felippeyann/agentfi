@@ -89,8 +89,11 @@ describe('LocalWalletService', () => {
       })) as Hex;
 
       // Recover sender from the signed transaction — must equal the wallet address.
+      // viem 2.x narrowed TransactionSerialized to a type-prefixed union; our
+      // legacy-type serialization satisfies it at runtime but needs an explicit
+      // cast to pass strict mode in the test.
       const recovered = await recoverTransactionAddress({
-        serializedTransaction: signed,
+        serializedTransaction: signed as `0x02${string}`,
       });
       expect(recovered.toLowerCase()).toBe(address.toLowerCase());
 
