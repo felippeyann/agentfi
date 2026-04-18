@@ -1,6 +1,18 @@
 # AgentFi — Operator Setup Checklist
 
-Work through this top to bottom. Each section links to where you sign up and what to copy into your `.env` file.
+This is the **third-party accounts + `.env` checklist** for running a real AgentFi instance with production-grade wallet custody (Turnkey MPC) and real chain RPC (Alchemy).
+
+**If you just want to evaluate or develop locally**, skip this entirely and use the [Dev Quickstart](../dev-quickstart.md) — zero external accounts, `docker compose up` to stack running in ~3 minutes.
+
+**Which steps are required depends on your goal:**
+
+| Goal | Required steps |
+|---|---|
+| Evaluate / develop locally | None — use [dev-quickstart.md](../dev-quickstart.md) |
+| Deploy with real custody but stub simulation | Steps 2, 3, 5, 6, 7 (skip Tenderly) |
+| Full production | All steps |
+
+Each section below links to where to sign up and what to copy into your `.env` file. Work through in order.
 
 ---
 
@@ -31,13 +43,16 @@ Used to broadcast transactions and read blockchain data.
 
 ## STEP 3 — Turnkey (MPC Wallet Provider)
 
-This is what keeps agent private keys secure. Keys are split across MPC shards and never reconstructed anywhere.
+This is what keeps agent private keys secure in production. Keys are split across MPC shards and never reconstructed anywhere.
+
+> **Skip this step** if you only need local development — set `WALLET_PROVIDER=local` in `.env` and the backend uses in-memory viem keys (keys lost on every restart, refused at boot in production). See [dev-quickstart.md](../dev-quickstart.md).
 
 1. Go to https://app.turnkey.com and create an account.
 2. Create an Organization (this is your AgentFi tenant).
 3. Go to API Keys → Create API Key.
 4. You'll get a public/private key pair. Copy them into `.env`:
 
+   WALLET_PROVIDER=turnkey
    TURNKEY_API_PUBLIC_KEY=your_public_key
    TURNKEY_API_PRIVATE_KEY=your_private_key
    TURNKEY_ORGANIZATION_ID=your_org_id
