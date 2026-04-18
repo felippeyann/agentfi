@@ -7,9 +7,10 @@
 
 AgentFi provides crypto transaction infrastructure for AI agents on Ethereum and EVM-compatible networks. It allows agents to execute DeFi transactions (swaps, yield farming, transfers) without handling private keys or managing gas, all within a secure on-chain policy framework.
 
-> **Start here:** Read **[VISION.md](VISION.md)** first. It explains *why* this project exists, where it's going, and the principles behind every technical decision. Everything else follows from there.
->
-> **Resuming work or handing off?** See **[HANDOFF.md](HANDOFF.md)** — complete state snapshot, pending tasks, credentials inventory, and new-machine setup guide.
+> **Start here:**
+> - **[VISION.md](VISION.md)** — *why* this project exists, where it's going, and the principles behind every technical decision.
+> - **[STATE.md](STATE.md)** — *what* the project is today: purpose, full stack, capabilities, phase progress.
+> - **[HANDOFF.md](HANDOFF.md)** — live pending tasks, credentials inventory, new-machine setup.
 
 ---
 
@@ -27,23 +28,25 @@ All project documentation is organized in our **[Documentation Hub](docs/README.
 
 ## 🚀 Key Features
 
-- **Turnkey MPC Wallets**: Keys are split across shards and never exposed.
-- **Safe Smart Wallets**: Per-agent on-chain policy enforcement (limits, whitelists, kill switch).
-- **Model Context Protocol (MCP)**: 26 structured tools for direct agent integration — 15 DeFi operations + 11 A2A collaboration.
-- **DeFi Coverage**: Uniswap V3 + Curve StableSwap (swaps); Aave V3, Compound V3, and any ERC-4626 vault (yield).
-- **Agent-to-Agent Economy**: job queue, atomic payments, DB-level escrow (v2), reputation scoring from real metrics with time-decay.
-- **Agent P&L Dashboard**: per-agent breakeven detection — the moment an agent's earnings exceed its costs.
-- **Cross-Chain Support**: Ethereum, Base, Arbitrum, and Polygon.
-- **Protocol Fee Engine**: Built-in fee collection on-chain via `AgentExecutor`.
+- **Turnkey MPC Wallets** — keys split across shards and never exposed.
+- **Safe Smart Wallets** — per-agent on-chain policy enforcement (limits, whitelists, kill switch).
+- **Model Context Protocol** — 26 tools published to npm at [`@agent_fi/mcp-server`](https://www.npmjs.com/package/@agent_fi/mcp-server): 15 DeFi + 11 A2A.
+- **DeFi coverage** — Uniswap V3 + Curve StableSwap (swaps); Aave V3, Compound V3, and any ERC-4626 vault (yield).
+- **Agent-to-Agent economy** — job queue, atomic payments, DB-level escrow (v2), reputation scoring from real metrics with time-decay.
+- **Agent P&L dashboard** — per-agent breakeven detection, including real gas costs (v2).
+- **Persistent identity** — optional ENS subdomains (`alice-abc123.agentfi.eth`) wired into agent registration.
+- **OpenAPI 3.0.3 spec** at [`docs/api/openapi.yaml`](docs/api/openapi.yaml) — machine-readable contract for SDK generation.
+- **Cross-chain** — Ethereum, Base, Arbitrum, Polygon (Base Mainnet has maintainer-deployed contracts).
+- **Protocol fee engine** — basis-point fee collected on-chain atomically via `AgentExecutor`.
 
 ---
 
 ## 🛠️ Getting Started
 
 ### For Operators
-1. Follow the **[Operator Setup Checklist](docs/operations/setup-checklist.md)**.
-2. Deploy the **[Smart Contracts](docs/operations/contract-deployment.md)** to your target chain.
-3. Configure your production environment via **[Railway](docs/operations/production-deploy.md)**.
+1. Follow the **[Operator Setup Checklist](docs/operations/setup-checklist.md)** to fill third-party accounts and local `.env`.
+2. Deploy the **[Smart Contracts](docs/operations/contract-deployment.md)** to your target chain (or reuse the maintainer-deployed Base addresses in [STATE.md](STATE.md#3-supported-networks)).
+3. Deploy the backend via **[Self-Hosted Production Guide](docs/operations/production-deploy.md)** — provider-agnostic, with Railway as the reference and Fly.io / Render / Docker documented as alternatives.
 
 ### For Developers
 1. Check **[CONTRIBUTING.md](CONTRIBUTING.md)** for local development setup.

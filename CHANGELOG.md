@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`STATE.md`** at the repo root — comprehensive, point-in-time project state (purpose, stack, capabilities, phase progress). Sits between VISION.md (the *why*) and HANDOFF.md (live tasks) as required reading.
+- **README.md** refreshed to reflect shipped work: ENS identity, OpenAPI spec, mcp-server v0.2.0 on npm, P&L v2 with gas costs. Getting-Started-for-Operators section now points at the provider-agnostic deployment guide.
+- **HANDOFF.md** "Files to Read First" ordering updated to include STATE.md.
+
 ### Changed
 - **Self-hosted deployment posture**: AgentFi has no canonical hosted production instance — every operator runs their own. Docs rewritten to reflect this: `docs/operations/production-deploy.md` is now provider-agnostic (Railway as reference example, Fly.io/Render/Docker documented as alternatives); `release-runbook.md` updated accordingly.
 
