@@ -1,0 +1,14 @@
+{
+  "name": "@agent_fi/example-a2a-collab",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end two-agent A2A example against any running AgentFi backend",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
