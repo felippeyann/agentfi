@@ -77,8 +77,20 @@ Gas cost = `gasUsed * effectiveGasPriceWei` per CONFIRMED/REVERTED tx, converted
 { "name": "MyAgent", "chainIds": [8453], "tier": "FREE" }
 
 // Response 201
-{ "id": "clx...", "name": "MyAgent", "apiKey": "agfi_live_abc123...", "safeAddress": "0x...", "chainIds": [8453] }
+{
+  "id": "clx...",
+  "name": "MyAgent",
+  "apiKey": "agfi_live_abc123...",
+  "safeAddress": "0x...",
+  "chainIds": [8453],
+  "ensName": "myagent-abc123.agentfi.eth"
+}
 ```
+
+`ensName` is returned when the operator has configured `ENS_PARENT_DOMAIN`
+and `ENS_CONTROLLER_PRIVATE_KEY`. Otherwise — or if the on-chain
+registration fails — it is `null` and the agent is fully usable without
+an ENS identity. See `.env.example` for configuration details.
 
 ### PATCH /v1/agents/:id/policy
 
