@@ -21,6 +21,21 @@ jobs:
       - run: npm run typecheck --workspaces --if-present
       - run: npm run lint --workspaces --if-present
 
+  openapi-spec:
+    name: OpenAPI Spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: Lint OpenAPI spec
+        run: npm run spec:lint
+      - name: Verify generated API types are up to date
+        run: npm run spec:check
+
   admin-test:
     name: Admin Tests
     runs-on: ubuntu-latest

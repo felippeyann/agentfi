@@ -208,6 +208,22 @@ Agent: "Pay agent clx... 0.01 ETH for a market analysis job"
 → Tool: post_job(provider_id="clx...", payload={...}, reward={amount:"0.01", token:"ETH"})
 ```
 
+## Typed API Responses
+
+`src/api.generated.ts` is generated from the backend's [OpenAPI spec](../../docs/api/openapi.yaml)
+by `openapi-typescript`. Tools can import typed response shapes instead
+of re-declaring them:
+
+```ts
+import type { components } from './api.generated.js';
+type PnLBreakdown = components['schemas']['PnLBreakdown'];
+```
+
+**Do not edit `api.generated.ts` by hand.** When the spec changes, run
+`npm run spec:types` from the repo root and commit the updated file.
+CI enforces this via `npm run spec:check`, which fails if the spec and
+the generated file drift apart.
+
 ## Keywords
 
 mcp, defi, ethereum, base, arbitrum, polygon, ai-agents, uniswap, curve, aave, compound, erc4626, a2a, turnkey, safe, smart-wallet, on-chain

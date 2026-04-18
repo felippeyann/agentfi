@@ -2,6 +2,10 @@
 
 Base URL: `https://api.agentfi.cc` (production) or `http://localhost:3000` (local)
 
+> **Machine-readable spec**: [`docs/api/openapi.yaml`](api/openapi.yaml) — OpenAPI 3.0.3.
+> Use it with Postman, Insomnia, `openapi-typescript`, `openapi-generator`, or
+> Redocly. Lint with `npx @redocly/cli lint docs/api/openapi.yaml`.
+
 ## Authentication
 
 | Method | Header | Used By |

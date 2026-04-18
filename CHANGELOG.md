@@ -17,11 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preflight invocation in `scripts/release-v1.mjs`.
 
 ### Added
+- **OpenAPI 3.0.3 spec** at [`docs/api/openapi.yaml`](docs/api/openapi.yaml) — machine-readable description of all 47 endpoints, with auth schemes, request/response schemas, and reusable error responses. Enables SDK generation, Postman/Insomnia import, and `openapi-typescript` type generation. Validates clean under `@redocly/cli lint`.
+- **Generated TypeScript types** at `packages/mcp-server/src/api.generated.ts`, produced from the OpenAPI spec by `openapi-typescript`. MCP tools (and any future SDK) can now import `components['schemas']['PnLBreakdown']`, `['Agent']`, etc. instead of re-declaring them.
+- **New npm scripts at repo root**: `spec:lint` (Redocly lint), `spec:types` (regenerate types), `spec:check` (CI drift check — fails if the generated file is stale relative to the spec).
+- **New CI job** `OpenAPI Spec` runs the lint + drift check on every PR, so the spec and generated types can't drift apart unnoticed.
 - **Agent Persistent Identity via ENS (Phase 4)**: when `ENS_PARENT_DOMAIN` + `ENS_CONTROLLER_PRIVATE_KEY` are configured, every new agent gets a subdomain of the form `<slug>-<id-suffix>.<parent>` (e.g., `alice-abc123.agentfi.eth`) that resolves to its Safe address — other dApps, explorers, and peer agents can reference agents by name instead of hex address
 - New `EnsService` in `packages/backend/src/services/identity/ens.service.ts` — wraps ENS Registry `setSubnodeRecord` + public resolver `setAddr` via viem
 - `ensName` field on Agent model (migration `0007_agent_ens`) — unique, nullable
 - `ensName` exposed in `POST /v1/agents`, `GET /v1/agents/me`, `GET /v1/agents/:id`, and `GET /v1/agents/:id/manifest` responses
 - Registration is best-effort: on-chain failures are logged and leave `ensName: null`, so agent creation still succeeds
+- **Agent P&L v2 — Gas cost tracking (Phase 4)**: `PnLService` now counts real gas burn as a cost category
+- Migration 0006: adds `effectiveGasPriceWei` TEXT to `Transaction`
+- `MonitorService` persists `receipt.effectiveGasPrice` at confirmation time (same for E2E test poller)
+- New cost category `costs.gas` in the P&L breakdown — `usd = gasUsed * effectiveGasPriceWei * ETH/USD`, summed across CONFIRMED + REVERTED txs in the period (REVERTED txs still burn gas on-chain)
+- Pre-migration rows with missing `gasUsed`/`effectiveGasPriceWei` are skipped and reported in `notes`
+- `PnLService` constructor now accepts an optional `PrismaClient` (defaults to the shared client) so it is unit-testable without a live DB
+- New unit test `pnl.service.test.ts` — 8 cases covering gas math, REVERTED handling, missing-row skipping, profitability thresholds
 - **Fastify upgraded to v5** — resolves the last HIGH npm vulnerability (DoS via sendWebStream, content-type tab bypass, X-Forwarded-Proto spoofing). All plugins were already v5-compatible from prior Dependabot updates — zero code changes needed.
 - `packages/mcp-server/RELEASE.md` — complete publish guide for bumping the mcp-server npm package (versioning, keywords, npm publish, git tags, MCP directory submissions)
 - **Curve Finance StableSwap adapter**: `POST /v1/transactions/swap-curve` — token-to-token swaps on any Curve classic pool (3pool, tri-pool, etc.)
