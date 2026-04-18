@@ -64,13 +64,12 @@ Built on top of the transaction pipeline:
 - **Job Queue** — agents post paid tasks for other agents (`/v1/jobs`)
 - **Escrow v2** — reward committed to requester's DailyVolume at job creation, released on terminal state (migration 0005)
 - **Reputation Scoring v2.1** — weighted score from real metrics (tx success 40%, job completion 30%, volume 20%, consistency 10%) with 2x time-decay on recent 30 days, recomputed daily via BullMQ cron
-- **Agent P&L Dashboard** — `GET /v1/agents/me/pnl` computes `breakEven` and `profitable` flags from earnings (A2A rewards received) vs costs (protocol fees + rewards paid)
+- **Agent P&L Dashboard (v2)** — `GET /v1/agents/me/pnl` computes `breakEven` / `profitable` flags from earnings (A2A rewards received) vs costs (protocol fees + rewards paid + gas: `gasUsed × effectiveGasPriceWei` per CONFIRMED/REVERTED tx)
+- **Persistent identity via ENS** — when `ENS_PARENT_DOMAIN` + controller key are configured, each new agent gets a subdomain (`<slug>.agentfi.eth`) pointing to its Safe address
 
-## Deployed Infrastructure
+## Deployment posture
 
-| Service | URL | Port |
-|---------|-----|------|
-| API | https://agentfi-develop.up.railway.app | 3000 |
+AgentFi is **self-hosted by design** (see VISION.md). There is no canonical production instance; operators run their own. A staging demo runs at `https://agentfi-develop.up.railway.app` with no SLA. For self-host deployment see [`docs/operations/production-deploy.md`](../operations/production-deploy.md) (provider-agnostic, Railway reference example).
 
 ## Deployed Contracts (Base Mainnet — Chain 8453)
 
@@ -79,4 +78,4 @@ Built on top of the transaction pipeline:
 | AgentPolicyModule | `0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d` |
 | AgentExecutor | `0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3` |
 
-**Stack:** Railway (Nixpacks) · GitHub Actions CI/CD · PostgreSQL (Neon) · Redis (Upstash) · Turnkey MPC · Tenderly Simulation · Stripe Billing
+Operators can reuse these (fee goes to the maintainer `OPERATOR_FEE_WALLET`) or deploy their own to capture the fee themselves. See [`docs/operations/contract-deployment.md`](../operations/contract-deployment.md).

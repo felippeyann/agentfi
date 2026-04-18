@@ -4,38 +4,49 @@ Welcome to the AgentFi documentation. This hub is designed for both human operat
 
 ## 📂 Navigation
 
-### 🌟 Vision & Project
-- **[Vision](../VISION.md)** (start here): The "Why" behind AgentFi. Required reading for all contributors and collaborators.
-- **[Handoff Guide](../HANDOFF.md)**: Complete state snapshot, pending tasks, and new-machine setup — read this when resuming work.
-- **[Go-Live Status](project/go-live-status.md)**: What was done, current state, and next steps.
-- **[Roadmap](project/roadmap.md)**: Our technical and business evolution plan.
-- **[Release Notes (HITL)](project/release-notes-hitl.md)**: Details on the new Human-in-the-Loop and Transparency features.
-- **[Contributing](../CONTRIBUTING.md)**: How to help build the future of agentic DeFi.
-- **[Changelog](../CHANGELOG.md)**: Release history and notable changes.
-- **[Security Policy](../SECURITY.md)**: Vulnerability disclosure process.
-- **[Code of Conduct](../CODE_OF_CONDUCT.md)**: Community standards.
+### 🌟 Start here (required reading, in order)
+- **[VISION](../VISION.md)** — *why* the project exists. Every technical decision derives from here.
+- **[STATE](../STATE.md)** — *what* the project is today: purpose, stack, capabilities, phase progress.
+- **[HANDOFF](../HANDOFF.md)** — *live* pending tasks + credentials + new-machine setup.
+
+### 🚀 Run the thing (fastest path)
+- **[Dev Quickstart](dev-quickstart.md)** — `docker compose up` → stack running in ~3 minutes, **zero external accounts**.
+- **[Examples](../examples/)** — three runnable demos:
+  - [`a2a-collab`](../examples/a2a-collab/README.md) — two-agent A2A loop
+  - [`swap-planner`](../examples/swap-planner/README.md) — DeFi planning pipeline
+  - [`delegation-chain`](../examples/delegation-chain/README.md) — three-agent cascade
 
 ### 🏗️ Architecture
-- **[System Overview](architecture/overview.md)**: The 4-layer stack from MPC wallets to MCP tools.
-- **[API Reference](api-reference.md)**: Complete REST API endpoint documentation.
-- **[Core Contracts](architecture/overview.md#deployed-contracts-base-mainnet--chain-8453)**: Information on AgentPolicyModule and AgentExecutor.
+- **[System Overview](architecture/overview.md)** — the 4-layer stack.
+- **[API Reference](api-reference.md)** — human-readable REST endpoint docs.
+- **[OpenAPI Spec](api/openapi.yaml)** — machine-readable, used for SDK codegen + CI drift guard.
+- **[A2A Interoperability](a2a-interoperability.md)** — the agent-to-agent protocol.
 
 ### ⚙️ Operations
-- **[Setup Checklist](operations/setup-checklist.md)**: Step-by-step guide for first-time operators.
-- **[Production Deployment](operations/production-deploy.md)**: How to go live on Railway.
-- **[Funding Wallets](operations/funding-wallets.md)**: Tutorial on depositing ETH to Base.
-- **[Contract Deployment](operations/contract-deployment.md)**: Guide for deploying policies and executors to new chains.
-- **[Release Runbook](operations/release-runbook.md)**: Procedures for production releases and rollbacks.
-- **[Go/No-Go Template](operations/templates/go-no-go.md)**: Template for release sign-off.
+- **[Setup Checklist](operations/setup-checklist.md)** — third-party accounts needed for a real deployment.
+- **[Self-Hosted Production Deployment](operations/production-deploy.md)** — provider-agnostic guide (Railway / Fly.io / Render / Docker).
+- **[Contract Deployment](operations/contract-deployment.md)** — deploying `AgentPolicyModule` + `AgentExecutor` to new chains.
+- **[Funding Wallets](operations/funding-wallets.md)** — moving ETH around for testing.
+- **[Release Runbook](operations/release-runbook.md)** — release + rollback procedures.
+- **[Go/No-Go Template](operations/templates/go-no-go.md)** — release sign-off checklist.
 
-### 🤖 Agent Context
-- **[Agent Quickstart](agents/quickstart.md)**: Get an agent executing transactions in < 5 minutes.
-- **[Claude Instructions](agents/claude-instructions.md)**: Specialized prompt context for Claude-based agents.
-- **[LLMs.txt](llms.txt)**: High-level context formatted for Large Language Models.
+### 🤖 Agent context
+- **[Agent Quickstart](agents/quickstart.md)** — connect an agent in < 5 minutes.
+- **[Claude Instructions](agents/claude-instructions.md)** — specialized brief for Claude-based agents (Portuguese).
+
+### 📦 Meta
+- **[Documentation Standards](STANDARDS.md)** — conventions all docs in this tree follow.
+- **[Roadmap](project/roadmap.md)** — forward-looking development plan.
+- **[Changelog](../CHANGELOG.md)** — release history.
+- **[Contributing](../CONTRIBUTING.md)** — how to propose changes.
+- **[Security](../SECURITY.md)** — vulnerability disclosure.
+- **[Code of Conduct](../CODE_OF_CONDUCT.md)** — community standards.
+- **[Archive](_archive/README.md)** — superseded historical docs.
 
 ---
 
 ## 🛠️ Developer Resources
 - **Repository**: [felippeyann/agentfi](https://github.com/felippeyann/agentfi)
+- **npm**: [@agent_fi/mcp-server](https://www.npmjs.com/package/@agent_fi/mcp-server)
 - **License**: Apache 2.0
-- **API Status**: [https://api.agentfi.cc/health](https://api.agentfi.cc/health)
+- **Staging demo**: `https://agentfi-develop.up.railway.app` (no SLA — demo only)

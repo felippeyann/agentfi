@@ -1,10 +1,20 @@
 # ROADMAP — AgentFi
 
-This document outlines the technical development roadmap and business evolution of **AgentFi**. It is designed to scale infrastructure progressively, maintaining focus on being the ultimate frontier of financial autonomy for AI agents.
+Forward-looking development plan. For current state + what's done, see [STATE.md](../../STATE.md) §6. For live pending tasks, see [HANDOFF.md](../../HANDOFF.md) §3.
+
+| Phase | Status | Notes |
+|---|---|---|
+| 1 — Bootstrap | 100% | Shipped |
+| 2 — HITL + Transparency | 100% | Shipped |
+| 2.5 — Go-Live Hardening | 100% | Shipped |
+| 3 — A2A Economy + DeFi expansion | ~85% | Remaining: GMX adapter, escrow v3, handshake (Turnkey-blocked) |
+| 4 — Self-Sustaining Agents | ~40% | Shipped: P&L v1+v2, ENS. Remaining: self-funding, revenue sharing |
+| 5 — Adoption model evolution | 0% | Not started |
+| 6 — Frontier / autonomous volume | 0% | Not started |
 
 ---
 
-## Phase 1: Bootstrap & Architectural Foundation (Current)
+## Phase 1: Bootstrap & Architectural Foundation (complete)
 *Primary "Developer-First" infrastructure deliverables*
 
 - [x] Architecture Definition (Monorepo)
@@ -94,7 +104,7 @@ These items bridge the gap between the current product (agent-to-DeFi) and the v
 
 ---
 
-## Phase 4: Self-Sustaining Agents
+## Phase 4: Self-Sustaining Agents (~40%)
 *The transition from tool to participant (see VISION.md "Self-sustaining agents").*
 
 - [x] **Agent P&L Dashboard v1** (April 2026):
@@ -103,18 +113,25 @@ These items bridge the gap between the current product (agent-to-DeFi) and the v
   - [x] Costs: protocol fees paid + A2A rewards paid as requester
   - [x] `breakEven` and `profitable` flags per agent
   - [x] Optional `?since=<ISO>` period filter
-  - [ ] Gas costs (v2 — requires on-chain gasPrice tracking)
-  - [ ] Realized yield from DEPOSIT positions (v2 — requires on-chain reads)
 
-- **Agent Self-Funding:**
+- [x] **Agent P&L v2 — gas cost tracking** (April 2026, [#38](https://github.com/felippeyann/agentfi/pull/38)):
+  - [x] Migration 0006: `effectiveGasPriceWei` on Transaction
+  - [x] `MonitorService` persists `receipt.effectiveGasPrice` at confirmation
+  - [x] `costs.gas` category in P&L breakdown (sum of `gasUsed * effectiveGasPriceWei` across CONFIRMED + REVERTED)
+  - [ ] Realized yield from DEPOSIT positions (future — requires on-chain reads)
+
+- [x] **Persistent Identity via ENS** (April 2026, [#40](https://github.com/felippeyann/agentfi/pull/40)):
+  - [x] Migration 0007: `ensName` on Agent
+  - [x] `EnsService` wraps ENS Registry + public resolver via viem
+  - [x] Best-effort registration at agent creation when `ENS_PARENT_DOMAIN` is configured
+  - [x] `ensName` exposed in agent API responses
+
+- **Agent Self-Funding** (blocked externally — legal decision):
   - Agent provisions own sub-wallet from earnings
   - Agent pays for own compute/inference via on-chain payment to provider
+  - Blocker: who owns the sub-wallet? Regulatory implications.
 
-- **Persistent Identity:**
-  - On-chain identity layer (ENS, DID, or custom)
-  - Cross-session agent identity that accumulates history and reputation
-
-- **Revenue Sharing for Self-Hosted Operators:**
+- **Revenue Sharing for Self-Hosted Operators** (not started):
   - Fee distribution mechanism between protocol and self-hosted deployments
   - Aligned incentives at every layer (as described in VISION.md)
 

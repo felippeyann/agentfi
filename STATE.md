@@ -3,7 +3,7 @@
 > **Read together with [VISION.md](VISION.md) (the *why*) and [HANDOFF.md](HANDOFF.md) (live pending tasks).**
 > This file is the **comprehensive, point-in-time snapshot** of what the project *is* today — purpose, stack, capabilities, progress. Update it whenever the scope or architecture shifts.
 
-**Last updated**: April 2026 · **main SHA** `82921c8` · **npm** `@agent_fi/mcp-server@0.2.0`
+**Last updated**: April 2026 · **main SHA** `63b76a6` · **npm** `@agent_fi/mcp-server@0.2.0`
 
 ---
 
@@ -207,10 +207,15 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 | Release | https://github.com/felippeyann/agentfi/releases/tag/v0.1.0 | v0.1.0 (April 2026) |
 | mcp-server npm | https://www.npmjs.com/package/@agent_fi/mcp-server | **v0.2.0** |
 | mcp-server release | https://github.com/felippeyann/agentfi/releases/tag/mcp-server-v0.2.0 | published |
+| mcp.so listing | https://mcp.so/server/agentfi-mcp-server/felippeyann | submitted (pending review) |
+| awesome-mcp-servers PR | https://github.com/punkpeye/awesome-mcp-servers/pull/5091 | open (pending maintainer merge) |
 | Base contracts | `0x03af…6A6d` + `0x5441…24b3` | verified on Basescan |
 | OpenAPI spec | `docs/api/openapi.yaml` | 3.0.3, clean under Redocly lint |
+| Brand avatar | `.github/avatar.svg` | live |
+| Dev quickstart | [`docs/dev-quickstart.md`](docs/dev-quickstart.md) + `docker-compose.dev.yml` | zero-credential stack, ~3 min boot |
+| Examples (runnable) | [`examples/a2a-collab`](examples/a2a-collab), [`examples/swap-planner`](examples/swap-planner), [`examples/delegation-chain`](examples/delegation-chain) | zero-dep Node scripts |
 | Staging demo | https://agentfi-develop.up.railway.app | Running, **no SLA** |
-| Docs set | `VISION.md`, `HANDOFF.md`, `STATE.md`, `docs/` | ~1 200 lines of ops + architecture |
+| Docs set | `VISION.md`, `STATE.md`, `HANDOFF.md`, `docs/` | live (archive in `docs/_archive/`) |
 
 ---
 
