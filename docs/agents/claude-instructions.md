@@ -593,16 +593,10 @@ Implemente três pipelines:
 - Testes unitários
 - Forge test (Foundry)
 
-**deploy-staging.yml** — em merge na branch `develop`:
-- Build Docker images
-- Deploy no ambiente de staging
-- Smoke tests contra staging
+**deploy-staging.yml** — em push para `develop`:
+- Informativo apenas; o provider (Railway nativo) auto-deploya staging diretamente da branch.
 
-**deploy-production.yml** — em tag `v*.*.*`:
-- Deploy Foundry contracts (se houver mudança)
-- Build e push imagens para registry
-- Deploy com zero-downtime (rolling update)
-- Health check pós-deploy
+**Produção**: sem workflow custom no repo. O operador self-hosted conecta a integração nativa do provider (Railway / Fly / Render) que auto-deploya em merge pra `main` ou em tag `v*.*.*`. Ver [`docs/operations/production-deploy.md`](../operations/production-deploy.md).
 
 ### Checklist de Go-Live
 

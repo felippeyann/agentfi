@@ -1,31 +1,20 @@
-# AgentFi — Production Deployment Guide
+# AgentFi — Self-Hosted Production Deployment Guide
 
-This document covers everything needed to go live on Railway.
-Work through each section in order. All steps are one-time unless noted.
+AgentFi is open-source (Apache 2.0) and self-hosted by design. This guide walks any operator — human or agent — from a fresh repo clone to a running production instance.
 
-> **Domain note:** this guide uses `api.agentfi.cc` and `admin.agentfi.cc` as production examples.
-> If your deployment uses different domains, replace these values consistently in webhook URLs,
-> health checks, CORS, and admin URL settings.
+**There is no canonical hosted production instance.** The VISION.md principle is that operators run their own infrastructure; the protocol layer (contracts + fee collection) is on-chain and shared.
 
----
+**Reference provider**: Railway is used as the default example because it has the shortest path from clone → live for this stack (Node + Postgres + Redis, Nixpacks build, auto-deploy from git). Any equivalent PaaS works — Fly.io, Render, Heroku, a Docker host. Provider-specific differences are noted inline.
 
-## Status: What's already done
-
-- [x] Backend API (Fastify + BullMQ + Prisma)
-- [x] MCP Server (10 DeFi tools)
-- [x] Admin Panel (Next.js dashboard)
-- [x] CI pipeline (lint, unit tests, E2E tests, Foundry)
-- [x] Railway auto-deploy on push to `develop`
-- [x] Database migrations run automatically on deploy
+> **Prerequisites**: complete [`docs/operations/setup-checklist.md`](setup-checklist.md) first — it walks through every third-party account (Alchemy, Turnkey, Tenderly, etc.) needed to produce the values you'll paste below.
 
 ---
 
-## STEP 1 — Set Railway environment variables
+## STEP 1 — Environment variables
 
-Go to the Railway dashboard → your project → **Variables** tab.
-Add every variable below. The values come from your third-party accounts.
+Every variable below must be configured on the **backend service** of your host.
 
-### Required (deploy will fail without these)
+### Required (service will not start without these)
 
 | Variable | Value | Where to get it |
 |---|---|---|
@@ -38,53 +27,55 @@ Add every variable below. The values come from your third-party accounts.
 | `ADMIN_AUTH_MAX_ATTEMPTS` | `5` | Login attempts before lockout |
 | `ADMIN_AUTH_WINDOW_MS` | `600000` | Attempt window in milliseconds |
 | `ADMIN_AUTH_LOCKOUT_MS` | `1800000` | Lockout duration in milliseconds |
-| `OPERATOR_FEE_WALLET` | Your ETH address | Any wallet you control |
-| `DATABASE_URL` | Neon connection string | Railway Postgres plugin or neon.tech |
-| `REDIS_URL` | Redis connection string | Railway Redis plugin or upstash.com |
-| `ALCHEMY_API_KEY` | Your Alchemy key | app.alchemy.com |
-| `TURNKEY_API_PUBLIC_KEY` | P-256 public key | app.turnkey.com → API Keys |
-| `TURNKEY_API_PRIVATE_KEY` | P-256 private key | app.turnkey.com → API Keys |
-| `TURNKEY_ORGANIZATION_ID` | UUID | app.turnkey.com → Organization |
+| `OPERATOR_FEE_WALLET` | Your ETH address | Any wallet you control — this is where on-chain protocol fees are sent |
+| `DATABASE_URL` | Postgres connection string | Railway PG plugin, Neon, Supabase |
+| `REDIS_URL` | Redis connection string | Railway Redis plugin, Upstash |
+| `ALCHEMY_API_KEY` | Your Alchemy key | `app.alchemy.com` |
+| `TURNKEY_API_PUBLIC_KEY` | P-256 public key | `app.turnkey.com` → API Keys |
+| `TURNKEY_API_PRIVATE_KEY` | P-256 private key | `app.turnkey.com` → API Keys |
+| `TURNKEY_ORGANIZATION_ID` | UUID | `app.turnkey.com` → Organization |
 
-### Recommended (add before go-live)
+### Recommended (add before public go-live)
 
 | Variable | Value | Notes |
 |---|---|---|
-| `CORS_ORIGIN` | `https://admin.agentfi.cc` | Allows admin frontend to call API |
-| `ADMIN_URL` | `https://admin.agentfi.cc` | Stripe redirect URLs |
+| `CORS_ORIGIN` | `https://admin.yourdomain.com` | Allows admin frontend to call API |
+| `ADMIN_URL` | `https://admin.yourdomain.com` | Stripe redirect URLs |
 | `TRANSACTION_WORKER_ENABLED` | `true` on worker, `false` on API replicas | Prevents every API replica from polling Redis |
-| `TENDERLY_ACCESS_KEY` | Your key | dashboard.tenderly.co → API Access |
+| `TENDERLY_ACCESS_KEY` | Your key | `dashboard.tenderly.co` → API Access |
 | `TENDERLY_ACCOUNT` | Your slug | visible in Tenderly dashboard URL |
 | `TENDERLY_PROJECT` | Your project slug | visible in Tenderly dashboard URL |
 
-### Stripe (needed for PRO subscriptions)
+### Stripe (needed only if running paid subscriptions)
 
 | Variable | Value | Where to get it |
 |---|---|---|
-| `STRIPE_SECRET_KEY` | `sk_live_...` | dashboard.stripe.com → Developers → API Keys |
+| `STRIPE_SECRET_KEY` | `sk_live_...` | `dashboard.stripe.com` → Developers → API Keys |
 | `STRIPE_WEBHOOK_SECRET` | `whsec_...` | See Step 3 below |
-| `STRIPE_PRO_PRICE_ID` | `price_...` | dashboard.stripe.com → Products |
+| `STRIPE_PRO_PRICE_ID` | `price_...` | `dashboard.stripe.com` → Products |
 
-### Contract addresses (needed for on-chain execution)
+### Contract addresses (per chain you support)
 
-Populate after Step 2:
+Populate after Step 2. The project maintainers have already deployed these on Base Mainnet — you can reuse them or redeploy your own.
 
-| Variable | Chain |
-|---|---|
-| `POLICY_MODULE_ADDRESS_8453` | Base |
-| `EXECUTOR_ADDRESS_8453` | Base |
-| `POLICY_MODULE_ADDRESS_1` | Ethereum Mainnet |
-| `EXECUTOR_ADDRESS_1` | Ethereum Mainnet |
-| `POLICY_MODULE_ADDRESS_42161` | Arbitrum One |
-| `EXECUTOR_ADDRESS_42161` | Arbitrum One |
-| `POLICY_MODULE_ADDRESS_137` | Polygon |
-| `EXECUTOR_ADDRESS_137` | Polygon |
+| Variable | Chain | Maintainer-deployed (Base) |
+|---|---|---|
+| `POLICY_MODULE_ADDRESS_8453` | Base | `0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d` |
+| `EXECUTOR_ADDRESS_8453` | Base | `0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3` |
+| `POLICY_MODULE_ADDRESS_1` | Ethereum | — |
+| `EXECUTOR_ADDRESS_1` | Ethereum | — |
+| `POLICY_MODULE_ADDRESS_42161` | Arbitrum | — |
+| `EXECUTOR_ADDRESS_42161` | Arbitrum | — |
+| `POLICY_MODULE_ADDRESS_137` | Polygon | — |
+| `EXECUTOR_ADDRESS_137` | Polygon | — |
+
+> Reusing the maintainer-deployed contracts means the protocol fee on swaps routed through `AgentExecutor` goes to the AgentFi project's `OPERATOR_FEE_WALLET`, **not yours**. Deploy your own if you want to capture that fee.
 
 ---
 
-## STEP 2 — Deploy smart contracts
+## STEP 2 — Deploy smart contracts (only if self-deploying)
 
-The contracts enforce per-agent policies on-chain. They must be deployed to each chain you want to support.
+Skip if reusing the maintainer-deployed addresses above.
 
 ### Prerequisites
 - Foundry installed (`forge --version`)
@@ -111,7 +102,7 @@ forge script script/Deploy.s.sol \
   --etherscan-api-key YOUR_BASESCAN_KEY
 ```
 
-The script prints the deployed addresses. Copy them into Railway:
+The script prints the deployed addresses. Paste them into your host's env vars:
 ```
 POLICY_MODULE_ADDRESS_8453=0x...
 EXECUTOR_ADDRESS_8453=0x...
@@ -122,203 +113,99 @@ Repeat for each chain (change `--rpc-url` and the env var suffix):
 - Arbitrum: `--rpc-url https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY` → `_42161`
 - Polygon: `--rpc-url https://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY` → `_137`
 
-> The contracts are permissioned to `OPERATOR_ADDRESS` — keep that key secure.
+> Contracts are permissioned to `OPERATOR_ADDRESS` — keep that key secure.
+
+See [`docs/operations/contract-deployment.md`](contract-deployment.md) for the full contract deployment runbook.
 
 ---
 
-## STEP 3 — Configure Stripe webhook
+## STEP 3 — Provision and deploy the services
 
-1. Go to [Stripe Dashboard → Webhooks](https://dashboard.stripe.com/webhooks)
-2. Click **Add endpoint**
-3. Endpoint URL: `https://api.agentfi.cc/v1/billing/webhook`
-4. Select events:
+### Option A — Railway (reference, ~10 minutes from zero)
+
+1. Create a Railway project: https://railway.app/new
+2. **Add Postgres**: click *+ New* → *Database* → *Add PostgreSQL*. It auto-populates `DATABASE_URL` as a reference variable.
+3. **Add Redis**: click *+ New* → *Database* → *Add Redis*. Auto-populates `REDIS_URL`.
+4. **Add the backend service**: click *+ New* → *GitHub Repo* → select `<your-fork>/agentfi`. Leave Root Directory empty (the repo's `railway.json` + `nixpacks.toml` handle the build).
+5. Once the service appears, open its *Variables* tab and paste every required variable from Step 1. Reference-link `DATABASE_URL` and `REDIS_URL` to the Postgres/Redis services.
+6. Click *Deploy* — Railway runs `npx prisma migrate deploy` then starts the API.
+7. Railway auto-redeploys on every push to `main` once the GitHub integration is connected. No custom CI workflow needed.
+
+### Option B — Fly.io
+
+1. `fly launch --no-deploy` in the repo root (reads `package.json`, generates `fly.toml`).
+2. `fly pg create` for Postgres; `fly redis create` or Upstash for Redis. Attach both to the app.
+3. `fly secrets set` every variable from Step 1 (batch via `fly secrets import < .env`).
+4. `fly deploy`.
+5. For auto-deploy on push, add a minimal GitHub Action that runs `flyctl deploy --remote-only` on `main` (one-file workflow — not provided in repo to keep it provider-neutral).
+
+### Option C — Render
+
+1. New Web Service → connect repo → root directory empty → build command `npm install && cd packages/backend && npx prisma generate --schema=src/db/schema.prisma` → start command from `nixpacks.toml` (`node --import tsx/esm packages/backend/src/index.ts`).
+2. Add a Render Postgres; copy the internal connection URL to `DATABASE_URL`.
+3. Add Redis (Render has no native Redis — use Upstash).
+4. Paste all env vars. Auto-deploy on push is default.
+
+### Option D — Docker host (self-managed)
+
+The repo ships `Dockerfile.backend`, `Dockerfile.admin`, `Dockerfile.mcp`, and a `docker-compose.yml` for local. For production, extend the compose file with real Postgres/Redis, put behind a reverse proxy, and run migrations on first start.
+
+---
+
+## STEP 4 — Configure Stripe webhook (only if running subscriptions)
+
+1. Stripe Dashboard → Webhooks → *Add endpoint*.
+2. Endpoint URL: `https://api.yourdomain.com/v1/billing/webhook`
+3. Select events:
    - `checkout.session.completed`
    - `customer.subscription.deleted`
    - `invoice.payment_failed`
-5. Copy the **Signing secret** (`whsec_...`) → add as `STRIPE_WEBHOOK_SECRET` in Railway
+4. Copy the **Signing secret** (`whsec_...`) → add as `STRIPE_WEBHOOK_SECRET` on your host.
 
 ---
 
-## STEP 4 — Verify the deployment
+## STEP 5 — Verify the deployment
 
-After pushing to `develop` (Railway auto-deploys):
+Replace `api.yourdomain.com` with your deployed API hostname.
 
 ```bash
 # Liveness
-curl https://api.agentfi.cc/health
+curl https://api.yourdomain.com/health
 
 # Readiness (all dependencies healthy)
-curl https://api.agentfi.cc/health/ready
-
+curl https://api.yourdomain.com/health/ready
 # Expected: {"status":"ready","checks":{"database":true,"redis":true,"rpc":true,"turnkey":true}}
 ```
 
-If `health/ready` shows any `false`, check Railway logs for the failing service.
+If `health/ready` returns any `false`, check the service logs for the failing dependency.
 
----
-
-## STEP 4.1 — Recommended queue topology for metered Redis
+### Recommended queue topology for metered Redis
 
 If you use Upstash or any metered Redis plan, run a dedicated worker service:
 
-1. API service: set `TRANSACTION_WORKER_ENABLED=false`
+1. API service: `TRANSACTION_WORKER_ENABLED=false`
 2. Worker service (same repo/environment): start command `cd packages/backend && npm run worker`
-3. Worker service: set `TRANSACTION_WORKER_ENABLED=true`
+3. Worker service: `TRANSACTION_WORKER_ENABLED=true`
 
 This avoids N API replicas polling BullMQ marker keys and helps prevent Redis request quota exhaustion.
 
----
+### Admin auth audit logs
 
-## STEP 4.2 — Follow release and rollback runbook
+Admin login events are written to application logs with the prefix `[admin-auth-audit]`:
 
-Use the operational runbook for every production deployment and incident rollback:
+- `admin_login_success`
+- `admin_login_invalid_credentials`
+- `admin_login_blocked`
+- `admin_login_config_invalid`
 
-- `docs/production-release-runbook.md`
-
-If you run a dedicated worker service, set this repository variable so the
-production workflow deploys both services in one run:
-
-- `RAILWAY_PRODUCTION_WORKER_SERVICE`
-
-The production workflow now runs a config preflight before deploying:
-
-- `node scripts/check-production-deploy-env.mjs`
-
-It fails fast when required deploy variables are missing or malformed.
-
-Preflight rule coverage in CI (`.github/workflows/ci.yml`, job `Deploy Preflight Check`):
-
-| Rule | CI step |
-|---|---|
-| Valid config must pass | `Validate production deploy preflight script` |
-| Missing required variable must fail | `Validate preflight failure path (missing env)` |
-| Placeholder values must fail | `Validate preflight failure path (placeholder value)` |
-| Duplicate primary/worker service names must fail | `Validate preflight failure path (duplicate service names)` |
-
-Local reproduction commands (from repository root):
-
-Quick all-in-one runner:
-
-```bash
-npm run preflight:deploy-scenarios
-```
-
-1. Pass path
-
-```bash
-RAILWAY_TOKEN=ci-token \
-RAILWAY_PROJECT_ID=ci-project-id \
-RAILWAY_PRODUCTION_ENVIRONMENT=ci-production-env \
-RAILWAY_PRODUCTION_SERVICE=backend \
-RAILWAY_PRODUCTION_WORKER_SERVICE=worker \
-node scripts/check-production-deploy-env.mjs
-```
-
-```powershell
-$env:RAILWAY_TOKEN='ci-token'
-$env:RAILWAY_PROJECT_ID='ci-project-id'
-$env:RAILWAY_PRODUCTION_ENVIRONMENT='ci-production-env'
-$env:RAILWAY_PRODUCTION_SERVICE='backend'
-$env:RAILWAY_PRODUCTION_WORKER_SERVICE='worker'
-node scripts/check-production-deploy-env.mjs
-```
-
-2. Missing required variable must fail (unset `RAILWAY_PRODUCTION_ENVIRONMENT`)
-
-```bash
-RAILWAY_TOKEN=ci-token \
-RAILWAY_PROJECT_ID=ci-project-id \
-RAILWAY_PRODUCTION_SERVICE=backend \
-node scripts/check-production-deploy-env.mjs
-```
-
-```powershell
-$env:RAILWAY_TOKEN='ci-token'
-$env:RAILWAY_PROJECT_ID='ci-project-id'
-$env:RAILWAY_PRODUCTION_SERVICE='backend'
-Remove-Item Env:RAILWAY_PRODUCTION_ENVIRONMENT -ErrorAction SilentlyContinue
-node scripts/check-production-deploy-env.mjs
-```
-
-3. Placeholder value must fail
-
-```bash
-RAILWAY_TOKEN=your-token \
-RAILWAY_PROJECT_ID=ci-project-id \
-RAILWAY_PRODUCTION_ENVIRONMENT=ci-production-env \
-RAILWAY_PRODUCTION_SERVICE=backend \
-node scripts/check-production-deploy-env.mjs
-```
-
-```powershell
-$env:RAILWAY_TOKEN='your-token'
-$env:RAILWAY_PROJECT_ID='ci-project-id'
-$env:RAILWAY_PRODUCTION_ENVIRONMENT='ci-production-env'
-$env:RAILWAY_PRODUCTION_SERVICE='backend'
-node scripts/check-production-deploy-env.mjs
-```
-
-4. Duplicate service names must fail
-
-```bash
-RAILWAY_TOKEN=ci-token \
-RAILWAY_PROJECT_ID=ci-project-id \
-RAILWAY_PRODUCTION_ENVIRONMENT=ci-production-env \
-RAILWAY_PRODUCTION_SERVICE=backend \
-RAILWAY_PRODUCTION_WORKER_SERVICE=backend \
-node scripts/check-production-deploy-env.mjs
-```
-
-```powershell
-$env:RAILWAY_TOKEN='ci-token'
-$env:RAILWAY_PROJECT_ID='ci-project-id'
-$env:RAILWAY_PRODUCTION_ENVIRONMENT='ci-production-env'
-$env:RAILWAY_PRODUCTION_SERVICE='backend'
-$env:RAILWAY_PRODUCTION_WORKER_SERVICE='backend'
-node scripts/check-production-deploy-env.mjs
-```
-
-Expected output patterns:
-
-1. Pass path
-- Contains: `[deploy-preflight] Production deploy config preflight passed`
-- Exit code: `0`
-
-2. Missing required variable
-- Contains: `::error::Missing required production deploy variable:`
-- Exit code: non-zero
-
-3. Placeholder value
-- Contains: `::error::<VAR_NAME> appears to use a placeholder value`
-- Exit code: non-zero
-
-4. Duplicate service names
-- Contains: `::error::RAILWAY_PRODUCTION_WORKER_SERVICE must not equal RAILWAY_PRODUCTION_SERVICE`
-- Exit code: non-zero
+Use these to investigate brute-force attempts and lockout behavior.
 
 ---
 
-## STEP 4.3 — Verify admin auth audit logs
-
-Admin login events are written to application logs with the prefix:
-
-- `[admin-auth-audit]`
-
-Expected events:
-
-1. `admin_login_success`
-2. `admin_login_invalid_credentials`
-3. `admin_login_blocked`
-4. `admin_login_config_invalid`
-
-Use these events to investigate brute-force attempts and lockout behavior.
-
----
-
-## STEP 5 — Register your first agent
+## STEP 6 — Register your first agent
 
 ```bash
-curl -X POST https://api.agentfi.cc/v1/agents \
+curl -X POST https://api.yourdomain.com/v1/agents \
   -H "Content-Type: application/json" \
   -H "x-api-key: YOUR_API_SECRET" \
   -d '{
@@ -332,16 +219,14 @@ Save the `apiKey` from the response — it is shown **once only**.
 
 ---
 
-## STEP 6 — Connect the MCP server
-
-The MCP server is auto-deployed by Railway alongside the backend.
+## STEP 7 — Connect the MCP server
 
 Add to your Claude/LLM config:
 ```json
 {
   "mcpServers": {
     "agentfi": {
-      "url": "https://mcp.agentfi.cc/mcp/sse",
+      "url": "https://api.yourdomain.com/mcp/sse",
       "headers": {
         "x-api-key": "agfi_live_YOUR_AGENT_KEY"
       }
@@ -350,39 +235,35 @@ Add to your Claude/LLM config:
 }
 ```
 
+Alternatively, install the published npm package and run it as a local stdio server:
+```bash
+npx -y @agent_fi/mcp-server --backend https://api.yourdomain.com --api-key agfi_live_...
+```
+
 ---
 
-## STEP 7 — Optional: Safe smart wallets
+## STEP 8 — Optional: Safe smart wallets
 
 To give each agent a Safe smart wallet (enables on-chain policy enforcement):
 
-1. Create a funded EOA on each chain you want to support
-2. Add its private key to Railway: `SAFE_DEPLOYER_PRIVATE_KEY=0x...`
-3. New agents registered after this will automatically get a Safe
-
----
-
-## Production URLs
-
-| Service | URL |
-|---|---|
-| API | https://api.agentfi.cc |
-| Admin Panel | https://admin.agentfi.cc |
-| MCP Server | https://mcp.agentfi.cc |
-| Health | https://api.agentfi.cc/health/ready |
-| Agent card | https://api.agentfi.cc/.well-known/agent.json |
+1. Create a funded EOA on each chain you want to support.
+2. Add its private key to your host: `SAFE_DEPLOYER_PRIVATE_KEY=0x...`.
+3. New agents registered after this will automatically get a Safe.
 
 ---
 
 ## Go-live checklist
 
 ```
-[ ] Railway env vars set (Step 1)
-[ ] Contracts deployed to Base at minimum (Step 2)
-[ ] POLICY_MODULE_ADDRESS_8453 + EXECUTOR_ADDRESS_8453 in Railway
-[ ] Stripe webhook configured (Step 3)
+[ ] Setup-checklist.md complete (third-party accounts, .env locally)
+[ ] All Step 1 env vars set on the backend service
+[ ] Contracts deployed or maintainer addresses reused (Step 2)
+[ ] POLICY_MODULE_ADDRESS_* + EXECUTOR_ADDRESS_* set per chain
+[ ] Stripe webhook configured (Step 4, only if using subscriptions)
 [ ] curl /health/ready returns {"status":"ready",...}
 [ ] First agent registered successfully
 [ ] MCP server reachable from agent
-[ ] Admin panel loads at https://admin.agentfi.cc
+[ ] Admin panel loads (if deployed)
 ```
+
+See also: [`docs/operations/release-runbook.md`](release-runbook.md) for the release + rollback procedure.

@@ -3,7 +3,7 @@
 > **Purpose**: Complete handoff document. A person (or agent) on a fresh machine should be able to pick up this project and execute any pending task by reading this file + VISION.md + roadmap.md.
 
 **Last updated**: April 2026
-**Current main SHA**: `1f1990a`
+**Current main SHA**: `b91c80e` (PR #38 merged — P&L v2 gas cost tracking)
 **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0)
 **Release**: [v0.1.0](https://github.com/felippeyann/agentfi/releases/tag/v0.1.0)
 **npm**: https://www.npmjs.com/package/@agent_fi/mcp-server (published v0.1.0; repo has v0.2.0 ready)
@@ -31,11 +31,11 @@
 |------|-------|
 | Default branch | `main` |
 | Active branches | `main`, `develop` (synced) |
-| Current SHA | `1f1990a` |
+| Current SHA | `b91c80e` |
 | Latest release | `v0.1.0` (Apr 2026) |
 | Open PRs | 0 |
 | Open issues | 0 |
-| CI status | 6/6 green |
+| CI status | 5/5 green (Lint, Backend, Admin, Foundry, E2E) |
 | Branch protection | Active on `main` (requires PR + all status checks) |
 
 ### Security state
@@ -475,7 +475,7 @@ When a new developer (human or agent) joins, have them read in this order:
 ### For operators
 
 6. **[docs/operations/setup-checklist.md](docs/operations/setup-checklist.md)** — Step-by-step setup.
-7. **[docs/operations/production-deploy.md](docs/operations/production-deploy.md)** — Railway deployment.
+7. **[docs/operations/production-deploy.md](docs/operations/production-deploy.md)** — Self-hosted production deployment (provider-agnostic; Railway as the reference example).
 8. **[docs/operations/contract-deployment.md](docs/operations/contract-deployment.md)** — Deploying Safe modules.
 
 ### For agents / integrators
@@ -526,7 +526,7 @@ git checkout develop && git pull origin main && git push origin develop
 ## Appendix B — Emergency contacts / escalation
 
 - **Security vulnerability**: Follow [SECURITY.md](SECURITY.md) (email maintainers directly, 48-hour SLA)
-- **Production incident**: Check Railway dashboard + `docs/operations/release-runbook.md`
+- **Production incident**: operator-specific. Consult the hosting provider's dashboard for your deployment + follow `docs/operations/release-runbook.md`
 - **Repository ownership**: See [.github/CODEOWNERS](.github/CODEOWNERS)
 
 ---
