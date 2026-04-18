@@ -28,6 +28,11 @@ model Agent {
   a2aTxCount      Int      @default(0)
   lastActiveAt    DateTime @default(now())
 
+  // Economic identity — optional ENS subdomain (e.g., "alice.agentfi.eth")
+  // pointing to the agent's Safe address. Null when ENS isn't configured
+  // for this operator or subdomain registration failed.
+  ensName         String?  @unique
+
   transactions Transaction[]
   requestedJobs Job[]      @relation("RequestedJobs")
   providedJobs  Job[]      @relation("ProvidedJobs")

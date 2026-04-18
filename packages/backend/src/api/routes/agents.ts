@@ -7,12 +7,14 @@ import { generateApiKey } from '../middleware/auth.js';
 import { PolicyService } from '../../services/policy/policy.service.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
 import { PnLService } from '../../services/billing/pnl.service.js';
+import { EnsService } from '../../services/identity/ens.service.js';
 import { logger } from '../middleware/logger.js';
 const turnkey = new TurnkeyService();
 const safeService = new SafeService();
 const policyService = new PolicyService(db);
 const reputationService = new ReputationService();
 const pnlService = new PnLService();
+const ensService = new EnsService();
 
 const createAgentSchema = z.object({
   name: z.string().min(1).max(100),
@@ -102,6 +104,24 @@ export async function agentRoutes(fastify: FastifyInstance) {
 
     logger.info({ agentId: agent.id, name: body.name }, 'Agent registered');
 
+    // Best-effort ENS subdomain registration. Failure here must not block
+    // the agent from being usable — we simply leave ensName null.
+    let ensName: string | null = null;
+    if (ensService.isConfigured()) {
+      const result = await ensService.registerSubdomain({
+        name: body.name,
+        agentId: agent.id,
+        targetAddress: safeAddress,
+      });
+      if (result) {
+        await db.agent.update({
+          where: { id: agent.id },
+          data: { ensName: result.fullName },
+        });
+        ensName = result.fullName;
+      }
+    }
+
     // Return plaintext API key only once
     return reply.code(201).send({
       id: agent.id,
@@ -112,6 +132,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
       safeAddress,
       chainIds: body.chainIds,
       tier: body.tier,
+      ensName,
     });
   });
 
@@ -165,6 +186,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
       name: agent.name,
       apiKeyPrefix: agent.apiKeyPrefix,
       walletAddress: agent.safeAddress,
+      ensName: agent.ensName,
       chainIds: agent.chainIds,
       active: agent.active,
       tier: agent.tier,
@@ -199,6 +221,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
       name: agent.name,
       apiKeyPrefix: agent.apiKeyPrefix,
       walletAddress: agent.safeAddress,
+      ensName: agent.ensName,
       chainIds: agent.chainIds,
       active: agent.active,
       tier: agent.tier,
@@ -297,7 +320,13 @@ export async function agentRoutes(fastify: FastifyInstance) {
   fastify.get<{ Params: { id: string } }>('/v1/agents/:id/manifest', async (request, reply) => {
     const agent = await db.agent.findUnique({
       where: { id: request.params.id },
-      select: { id: true, name: true, safeAddress: true, serviceManifest: true },
+      select: {
+        id: true,
+        name: true,
+        safeAddress: true,
+        ensName: true,
+        serviceManifest: true,
+      },
     });
 
     if (!agent) return reply.code(404).send({ error: 'Agent not found' });
