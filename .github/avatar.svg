@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="AgentFi">
+  <title>AgentFi</title>
+  <defs>
+    <linearGradient id="agentfi-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded dark background (avatar-safe corners) -->
+  <rect width="512" height="512" rx="96" fill="#000000"/>
+
+  <!-- Hexagon: on-chain context -->
+  <path d="M 256 104 L 384 178 L 384 334 L 256 408 L 128 334 L 128 178 Z"
+        fill="none" stroke="url(#agentfi-grad)" stroke-width="10" stroke-linejoin="round"/>
+
+  <!-- Left node (agent A — source, filled) -->
+  <circle cx="188" cy="256" r="28" fill="url(#agentfi-grad)"/>
+
+  <!-- Right node (agent B — destination, outlined) -->
+  <circle cx="324" cy="256" r="28" fill="none" stroke="url(#agentfi-grad)" stroke-width="6"/>
+
+  <!-- Flow line -->
+  <line x1="216" y1="256" x2="296" y2="256" stroke="url(#agentfi-grad)" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- Arrow head -->
+  <path d="M 286 244 L 300 256 L 286 268"
+        fill="none" stroke="url(#agentfi-grad)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
