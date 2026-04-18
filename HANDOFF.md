@@ -467,10 +467,11 @@ When a new developer (human or agent) joins, have them read in this order:
 ### Must-read (in order)
 
 1. **[VISION.md](VISION.md)** — Why the project exists. Everything else derives from this.
-2. **This file (HANDOFF.md)** — Current state + pending tasks.
-3. **[README.md](README.md)** — High-level overview + quick links.
-4. **[docs/architecture/overview.md](docs/architecture/overview.md)** — 4-layer stack explained.
-5. **[CONTRIBUTING.md](CONTRIBUTING.md)** — How to propose changes.
+2. **[STATE.md](STATE.md)** — Comprehensive current-state snapshot: purpose, stack, capabilities, phase progress.
+3. **This file (HANDOFF.md)** — Live pending tasks + credentials + new-machine setup.
+4. **[README.md](README.md)** — High-level overview + quick links.
+5. **[docs/architecture/overview.md](docs/architecture/overview.md)** — 4-layer stack explained.
+6. **[CONTRIBUTING.md](CONTRIBUTING.md)** — How to propose changes.
 
 ### For operators
 
