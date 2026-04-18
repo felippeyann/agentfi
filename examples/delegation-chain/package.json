@@ -1,0 +1,14 @@
+{
+  "name": "@agent_fi/example-delegation-chain",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Three agents cascading work via the AgentFi job queue — coordination substrate demo",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
