@@ -15,11 +15,30 @@ let turnkeyClient: Turnkey | null = null;
 
 function getTurnkeyClient(): Turnkey {
   if (!turnkeyClient) {
+    // Defense in depth — env.ts already enforces this when
+    // WALLET_PROVIDER=turnkey, but TurnkeyService should refuse to
+    // construct a client with undefined credentials regardless of how
+    // it got instantiated.
+    const {
+      TURNKEY_API_PUBLIC_KEY,
+      TURNKEY_API_PRIVATE_KEY,
+      TURNKEY_ORGANIZATION_ID,
+    } = env;
+    if (
+      !TURNKEY_API_PUBLIC_KEY ||
+      !TURNKEY_API_PRIVATE_KEY ||
+      !TURNKEY_ORGANIZATION_ID
+    ) {
+      throw new Error(
+        'TurnkeyService requires TURNKEY_API_PUBLIC_KEY, TURNKEY_API_PRIVATE_KEY, and TURNKEY_ORGANIZATION_ID. ' +
+          'Either set them or use WALLET_PROVIDER=local (development only).',
+      );
+    }
     turnkeyClient = new Turnkey({
       apiBaseUrl: 'https://api.turnkey.com',
-      apiPublicKey: env.TURNKEY_API_PUBLIC_KEY,
-      apiPrivateKey: env.TURNKEY_API_PRIVATE_KEY,
-      defaultOrganizationId: env.TURNKEY_ORGANIZATION_ID,
+      apiPublicKey: TURNKEY_API_PUBLIC_KEY,
+      apiPrivateKey: TURNKEY_API_PRIVATE_KEY,
+      defaultOrganizationId: TURNKEY_ORGANIZATION_ID,
     });
   }
   return turnkeyClient;
@@ -70,7 +89,7 @@ export class TurnkeyService {
     const apiClient = this.client.apiClient();
 
     const { accounts } = await apiClient.getWalletAccounts({
-      organizationId: env.TURNKEY_ORGANIZATION_ID,
+      organizationId: env.TURNKEY_ORGANIZATION_ID!,
       walletId,
     });
 
@@ -110,7 +129,7 @@ export class TurnkeyService {
   async listWallets(): Promise<Array<{ walletId: string; walletName: string }>> {
     const apiClient = this.client.apiClient();
     const { wallets } = await apiClient.getWallets({
-      organizationId: env.TURNKEY_ORGANIZATION_ID,
+      organizationId: env.TURNKEY_ORGANIZATION_ID!,
     });
 
     return wallets.map((w) => ({

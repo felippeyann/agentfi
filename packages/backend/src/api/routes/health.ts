@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { db } from '../../db/client.js';
 import { Redis } from 'ioredis';
-import { TurnkeyService } from '../../services/wallet/turnkey.service.js';
+import { getWalletService } from '../../services/wallet/index.js';
 import { env } from '../../config/env.js';
 import { createChainPublicClient } from '../../config/chains.js';
 const redis = new Redis(env.REDIS_URL, {
@@ -9,7 +9,7 @@ const redis = new Redis(env.REDIS_URL, {
   maxRetriesPerRequest: 1,
   connectTimeout: 5000,
 });
-const turnkey = new TurnkeyService();
+const turnkey = getWalletService();
 
 async function checkDatabase(): Promise<boolean> {
   try {

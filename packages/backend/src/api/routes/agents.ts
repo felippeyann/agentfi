@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
-import { TurnkeyService } from '../../services/wallet/turnkey.service.js';
+import { getWalletService } from '../../services/wallet/index.js';
 import { SafeService } from '../../services/wallet/safe.service.js';
 import { generateApiKey } from '../middleware/auth.js';
 import { PolicyService } from '../../services/policy/policy.service.js';
@@ -9,7 +9,7 @@ import { ReputationService } from '../../services/policy/reputation.service.js';
 import { PnLService } from '../../services/billing/pnl.service.js';
 import { EnsService } from '../../services/identity/ens.service.js';
 import { logger } from '../middleware/logger.js';
-const turnkey = new TurnkeyService();
+const turnkey = getWalletService();
 const safeService = new SafeService();
 const policyService = new PolicyService(db);
 const reputationService = new ReputationService();

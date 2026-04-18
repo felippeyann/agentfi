@@ -1,0 +1,110 @@
+# Zero-credential development stack.
+#
+# Lets anyone clone the repo and get the full backend + admin + MCP running
+# locally in ~3 minutes with NO external accounts required:
+#   docker compose -f docker-compose.dev.yml up --build
+#
+# What's different vs docker-compose.yml (production-ish):
+#   - WALLET_PROVIDER=local: in-memory viem keys, no Turnkey account needed.
+#     Keys are lost on every restart — dev only.
+#   - Inline placeholder values for API_SECRET / ADMIN_SECRET / ALCHEMY_API_KEY
+#     so nothing needs to be pre-provisioned.
+#   - No Turnkey credentials required.
+#   - No .env file required — env is set directly here.
+#
+# To graduate to a real deployment, follow docs/operations/production-deploy.md.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agentfi
+      POSTGRES_PASSWORD: agentfi
+      POSTGRES_DB: agentfi
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-dev-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U agentfi']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-dev-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: development
+      API_PORT: 3000
+      # Provider selection — `local` is what makes this stack zero-credential.
+      WALLET_PROVIDER: local
+      # Strong-enough placeholders for dev. NEVER use these in production.
+      API_SECRET: dev-api-secret-min-32-chars-long-xxxxx
+      ADMIN_SECRET: dev-admin-secret-min-32-chars-long-yyyy
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: admin
+      NEXTAUTH_SECRET: dev-nextauth-secret-min-32-chars-zzzzz
+      # OPERATOR_FEE_WALLET: any address works in dev; this is Anvil account 0.
+      OPERATOR_FEE_WALLET: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
+      # Stub Alchemy key — RPC calls against real networks will fail, but the
+      # app boots, registers agents, issues API keys, and the MCP server works.
+      ALCHEMY_API_KEY: stub
+      DATABASE_URL: postgresql://agentfi:agentfi@postgres:5432/agentfi
+      REDIS_URL: redis://redis:6379
+      TRANSACTION_WORKER_ENABLED: 'true'
+    ports:
+      - '3000:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    restart: unless-stopped
+    environment:
+      AGENTFI_API_URL: http://api:3000
+      MCP_TRANSPORT: sse
+      MCP_PORT: 3002
+    ports:
+      - '3002:3002'
+    depends_on:
+      - api
+
+  admin:
+    build:
+      context: .
+      dockerfile: Dockerfile.admin
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://api:3000
+      NEXTAUTH_SECRET: dev-nextauth-secret-min-32-chars-zzzzz
+      ADMIN_SECRET: dev-admin-secret-min-32-chars-long-yyyy
+    ports:
+      - '3001:3001'
+    depends_on:
+      - api
+
+volumes:
+  postgres-dev-data:
+  redis-dev-data:
