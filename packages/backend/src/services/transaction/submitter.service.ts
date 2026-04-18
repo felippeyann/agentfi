@@ -15,7 +15,7 @@ import {
   getPrimaryRpcUrl,
   getSecondaryRpcUrl,
 } from '../../config/chains.js';
-import { TurnkeyService } from '../wallet/turnkey.service.js';
+import { getWalletService, type WalletService } from '../wallet/index.js';
 
 export interface SubmissionResult {
   txHash: Hex;
@@ -23,10 +23,10 @@ export interface SubmissionResult {
 }
 
 export class SubmitterService {
-  private readonly turnkey: TurnkeyService;
+  private readonly turnkey: WalletService;
 
   constructor() {
-    this.turnkey = new TurnkeyService();
+    this.turnkey = getWalletService();
   }
 
   /**

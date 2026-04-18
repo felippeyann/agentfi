@@ -21,9 +21,12 @@ const envSchema = z.object({
   INFURA_API_KEY: z.string().optional(),
 
   // Wallet Infrastructure
-  TURNKEY_API_PUBLIC_KEY: z.string().min(1),
-  TURNKEY_API_PRIVATE_KEY: z.string().min(1),
-  TURNKEY_ORGANIZATION_ID: z.string().min(1),
+  // WALLET_PROVIDER=local uses in-memory viem keys — development only.
+  // WALLET_PROVIDER=turnkey (default) requires the three TURNKEY_* vars below.
+  WALLET_PROVIDER: z.enum(['turnkey', 'local']).default('turnkey'),
+  TURNKEY_API_PUBLIC_KEY: z.string().optional(),
+  TURNKEY_API_PRIVATE_KEY: z.string().optional(),
+  TURNKEY_ORGANIZATION_ID: z.string().optional(),
 
   // Simulation
   TENDERLY_ACCESS_KEY: z.string().optional(),
@@ -96,6 +99,36 @@ if (parsed.data.NODE_ENV === 'production') {
     console.error(
       'FATAL: ADMIN_SECRET is set to the .env.example placeholder value. ' +
       'Set a strong random secret before deploying to production.',
+    );
+    process.exit(1);
+  }
+
+  // Refuse to boot production with the local (in-memory) wallet provider —
+  // it's development-only and would silently lose keys on every restart.
+  if (parsed.data.WALLET_PROVIDER === 'local') {
+    console.error(
+      'FATAL: WALLET_PROVIDER=local is development-only and cannot run with NODE_ENV=production. ' +
+      'Set WALLET_PROVIDER=turnkey and provide TURNKEY_API_PUBLIC_KEY, TURNKEY_API_PRIVATE_KEY, TURNKEY_ORGANIZATION_ID.',
+    );
+    process.exit(1);
+  }
+}
+
+// When WALLET_PROVIDER=turnkey, the three TURNKEY_* vars must be present —
+// we relaxed them to optional at the schema level so local-mode boot works
+// without credentials, but the turnkey path still needs them.
+if (parsed.data.WALLET_PROVIDER === 'turnkey') {
+  const missing = [
+    ['TURNKEY_API_PUBLIC_KEY', parsed.data.TURNKEY_API_PUBLIC_KEY],
+    ['TURNKEY_API_PRIVATE_KEY', parsed.data.TURNKEY_API_PRIVATE_KEY],
+    ['TURNKEY_ORGANIZATION_ID', parsed.data.TURNKEY_ORGANIZATION_ID],
+  ].filter(([, v]) => !v || (typeof v === 'string' && v.length === 0));
+
+  if (missing.length > 0) {
+    console.error(
+      'Invalid environment variables: WALLET_PROVIDER=turnkey requires ' +
+      missing.map(([k]) => k).join(', ') +
+      '. Either supply those or set WALLET_PROVIDER=local (development only).',
     );
     process.exit(1);
   }

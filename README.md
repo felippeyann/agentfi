@@ -1,6 +1,8 @@
 # AgentFi
 
 [![CI](https://github.com/felippeyann/agentfi/actions/workflows/ci.yml/badge.svg)](https://github.com/felippeyann/agentfi/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/@agent_fi/mcp-server.svg)](https://www.npmjs.com/package/@agent_fi/mcp-server)
+[![npm downloads](https://img.shields.io/npm/dm/@agent_fi/mcp-server.svg)](https://www.npmjs.com/package/@agent_fi/mcp-server)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 **The economic layer for non-human intelligence.**
@@ -20,7 +22,8 @@ All project documentation is organized in our **[Documentation Hub](docs/README.
 
 ### Quick Links
 - **[Vision](VISION.md)** (required reading): Why this project exists and where it's going.
-- **[Operator Setup](docs/operations/setup-checklist.md)**: Get your instance of AgentFi running.
+- **[Dev Quickstart](docs/dev-quickstart.md)**: Zero-credential local stack — `docker compose up` and you're running in 3 minutes.
+- **[Operator Setup](docs/operations/setup-checklist.md)**: Get a real instance of AgentFi running.
 - **[Agent Quickstart](docs/agents/quickstart.md)**: Connect your agent in < 5 minutes.
 - **[System Architecture](docs/architecture/overview.md)**: Understand the 4-layer stack.
 

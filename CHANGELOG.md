@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Zero-credential dev quickstart** — new `LocalWalletService` (in-memory viem keys), pluggable via `WALLET_PROVIDER=local` env, paired with `docker-compose.dev.yml` and [`docs/dev-quickstart.md`](docs/dev-quickstart.md). `git clone` → `docker compose up` → running in ~3 minutes, no external accounts required. Production boot with `WALLET_PROVIDER=local` is refused at env validation (keys would be lost on restart).
+- **`WalletService` factory** at `packages/backend/src/services/wallet/index.ts` selects Turnkey or Local based on `WALLET_PROVIDER`; all three call sites (agent registration, health check, tx submitter) now go through the factory.
+- **9 unit tests** for `LocalWalletService` — wallet creation, distinct addresses, signing with signature recovery, lookup errors, list, health.
+- **README badges** — npm version, npm monthly downloads.
 - **`STATE.md`** at the repo root — comprehensive, point-in-time project state (purpose, stack, capabilities, phase progress). Sits between VISION.md (the *why*) and HANDOFF.md (live tasks) as required reading.
 - **README.md** refreshed to reflect shipped work: ENS identity, OpenAPI spec, mcp-server v0.2.0 on npm, P&L v2 with gas costs. Getting-Started-for-Operators section now points at the provider-agnostic deployment guide.
 - **HANDOFF.md** "Files to Read First" ordering updated to include STATE.md.
