@@ -1,0 +1,14 @@
+{
+  "name": "@agent_fi/example-swap-planner",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "DeFi swap planning pipeline (policy + calldata + simulation) against any AgentFi backend",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
