@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`examples/a2a-collab/`** — end-to-end two-agent example that registers Alice (provider) + Bob (requester), publishes a service manifest, searches, creates + accepts + completes a job, and inspects reputation + P&L. ~150 lines of Node 22 native-fetch, zero dependencies, works against the zero-credential dev stack (no on-chain payment). Documented at [`examples/a2a-collab/README.md`](examples/a2a-collab/README.md).
 - **Zero-credential dev quickstart** — new `LocalWalletService` (in-memory viem keys), pluggable via `WALLET_PROVIDER=local` env, paired with `docker-compose.dev.yml` and [`docs/dev-quickstart.md`](docs/dev-quickstart.md). `git clone` → `docker compose up` → running in ~3 minutes, no external accounts required. Production boot with `WALLET_PROVIDER=local` is refused at env validation (keys would be lost on restart).
 - **`WalletService` factory** at `packages/backend/src/services/wallet/index.ts` selects Turnkey or Local based on `WALLET_PROVIDER`; all three call sites (agent registration, health check, tx submitter) now go through the factory.
 - **9 unit tests** for `LocalWalletService` — wallet creation, distinct addresses, signing with signature recovery, lookup errors, list, health.

@@ -52,9 +52,10 @@ All project documentation is organized in our **[Documentation Hub](docs/README.
 3. Deploy the backend via **[Self-Hosted Production Guide](docs/operations/production-deploy.md)** — provider-agnostic, with Railway as the reference and Fly.io / Render / Docker documented as alternatives.
 
 ### For Developers
-1. Check **[CONTRIBUTING.md](CONTRIBUTING.md)** for local development setup.
-2. Review the **[Architecture Overview](docs/architecture/overview.md)**.
-3. Use the **[MCP Server](packages/mcp-server/README.md)** to integrate your agents.
+1. Start with the **[Dev Quickstart](docs/dev-quickstart.md)** — `docker compose up` → stack running in 3 minutes, zero external accounts.
+2. Run the **[A2A Collaboration Example](examples/a2a-collab/README.md)** — two-agent end-to-end flow in one file.
+3. Review the **[Architecture Overview](docs/architecture/overview.md)**.
+4. Use the **[MCP Server](packages/mcp-server/README.md)** to integrate your agents.
 
 ---
 
