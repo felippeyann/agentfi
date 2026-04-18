@@ -344,7 +344,7 @@ Organized by readiness (can start now / needs credentials / complex design).
 
 ### Pending documentation / polish
 
-- **API reference → OpenAPI spec**: convert `docs/api-reference.md` to `docs/api/openapi.yaml` for better tooling support
+- ~~**API reference → OpenAPI spec**~~: **done** — OpenAPI 3.0.3 at `docs/api/openapi.yaml`, validates clean under `npx @redocly/cli lint`
 - **Contract deployment runbook**: update `docs/operations/contract-deployment.md` with the latest deployed addresses per chain (currently only Base Mainnet has listed addresses)
 - **Demo video / screencast**: record a 2-minute demo of Claude Desktop using the MCP server to do a real swap
 

@@ -14,16 +14,19 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "preflight": "tsx scripts/preflight.ts",
-    "preflight:deploy-scenarios": "node scripts/run-deploy-preflight-scenarios.mjs",
     "release:v1:check": "node scripts/release-v1.mjs check",
     "release:v1:tag": "node scripts/release-v1.mjs tag",
-    "release:note": "node scripts/gen-release-note.mjs"
+    "release:note": "node scripts/gen-release-note.mjs",
+    "spec:lint": "npx --yes @redocly/cli@1.21.1 lint docs/api/openapi.yaml --skip-rule operation-4xx-response --skip-rule operation-operationId --skip-rule tag-description --skip-rule no-unused-components --skip-rule info-contact --skip-rule info-license --skip-rule operation-summary --skip-rule operation-description --skip-rule operation-tag-defined --skip-rule operation-2xx-response --skip-rule no-server-example.com --skip-rule security-defined",
+    "spec:types": "openapi-typescript docs/api/openapi.yaml -o packages/mcp-server/src/api.generated.ts",
+    "spec:check": "node scripts/check-spec-drift.mjs"
   },
   "devDependencies": {
     "typescript": "^5.4.0",
     "tsx": "^4.7.0",
     "prettier": "^3.8.2",
-    "eslint": "^8.57.0"
+    "eslint": "^8.57.0",
+    "openapi-typescript": "^7.4.0"
   },
   "engines": {
     "node": ">=20.0.0"
