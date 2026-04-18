@@ -7,65 +7,6 @@ on:
     branches: [develop, main]
 
 jobs:
-  deploy-preflight-check:
-    name: Deploy Preflight Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '22'
-      - name: Validate production deploy preflight script
-        env:
-          RAILWAY_TOKEN: ci-token
-          RAILWAY_PROJECT_ID: ci-project-id
-          RAILWAY_PRODUCTION_ENVIRONMENT: ci-production-env
-          RAILWAY_PRODUCTION_SERVICE: backend
-          RAILWAY_PRODUCTION_WORKER_SERVICE: worker
-        run: node scripts/check-production-deploy-env.mjs
-      - name: Validate preflight failure path (missing env)
-        run: |
-          set +e
-          RAILWAY_TOKEN=ci-token \
-          RAILWAY_PROJECT_ID=ci-project-id \
-          RAILWAY_PRODUCTION_SERVICE=backend \
-          node scripts/check-production-deploy-env.mjs
-          status=$?
-          if [ "$status" -eq 0 ]; then
-            echo "::error::Expected preflight to fail when RAILWAY_PRODUCTION_ENVIRONMENT is missing"
-            exit 1
-          fi
-          echo "Negative-path preflight check behaved as expected"
-      - name: Validate preflight failure path (placeholder value)
-        run: |
-          set +e
-          RAILWAY_TOKEN=your-token \
-          RAILWAY_PROJECT_ID=ci-project-id \
-          RAILWAY_PRODUCTION_ENVIRONMENT=ci-production-env \
-          RAILWAY_PRODUCTION_SERVICE=backend \
-          node scripts/check-production-deploy-env.mjs
-          status=$?
-          if [ "$status" -eq 0 ]; then
-            echo "::error::Expected preflight to fail when placeholder values are used"
-            exit 1
-          fi
-          echo "Placeholder-value preflight failure behaved as expected"
-      - name: Validate preflight failure path (duplicate service names)
-        run: |
-          set +e
-          RAILWAY_TOKEN=ci-token \
-          RAILWAY_PROJECT_ID=ci-project-id \
-          RAILWAY_PRODUCTION_ENVIRONMENT=ci-production-env \
-          RAILWAY_PRODUCTION_SERVICE=backend \
-          RAILWAY_PRODUCTION_WORKER_SERVICE=backend \
-          node scripts/check-production-deploy-env.mjs
-          status=$?
-          if [ "$status" -eq 0 ]; then
-            echo "::error::Expected preflight to fail when worker and primary services are identical"
-            exit 1
-          fi
-          echo "Duplicate-service preflight failure behaved as expected"
-
   lint-typecheck:
     name: Lint & Type Check
     runs-on: ubuntu-latest

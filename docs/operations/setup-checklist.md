@@ -235,26 +235,15 @@ Fix any red items before deploying.
 
 ## STEP 15 — Production hosting
 
-The project is hosted on **Railway**. No VPS or manual server management needed.
+AgentFi is **self-hosted by design**. There is no canonical hosted production instance; every operator runs their own. See [`production-deploy.md`](production-deploy.md) for the full provider-agnostic guide (Railway used as the reference, Fly.io / Render / Docker documented as alternatives).
 
 **CI/CD via GitHub Actions (`.github/workflows/`):**
-- `ci.yml` — typecheck, unit tests, contract tests on every push
-- `deploy-staging.yml` — no-op; Railway auto-deploys on push to `develop`
-- `deploy-production.yml` — deploys to Railway production on `v*.*.*` tags or manual dispatch (requires Railway secrets)
+- `ci.yml` — lint, typecheck, unit tests, contract tests, E2E on every PR and push.
+- `deploy-staging.yml` — informational only; staging (if configured) auto-deploys on push to `develop` via the provider's native GitHub integration.
 
-**Live services:**
-- API: https://agentfi-develop.up.railway.app
-- Health: https://agentfi-develop.up.railway.app/health
+**Production deploy:** the project does **not** ship a custom GitHub Action for production. Use the provider's native GitHub integration (auto-deploy on merge to `main` or on tag `v*.*.*`). This keeps the deploy path short enough for any operator — human or agent — to complete by reading the docs.
 
-**To deploy staging:** push to `develop` — Railway handles deployment automatically.
-
-**To deploy production:**
-- Configure `RAILWAY_TOKEN`, `RAILWAY_PROJECT_ID`, and `RAILWAY_PRODUCTION_ENVIRONMENT` in repository secrets
-- Optional: set repository variable `RAILWAY_PRODUCTION_SERVICE` (default: `backend`)
-- Optional: set repository variable `RAILWAY_PRODUCTION_WORKER_SERVICE` (for dedicated worker deploy)
-- Trigger `Deploy Production` manually (workflow_dispatch) or push a `v*.*.*` tag
-- Follow `docs/production-release-runbook.md` for verification and rollback procedure
-- Use `docs/release-go-no-go-template.md` to record go/no-go before dispatch
+**Staging reference**: `https://agentfi-develop.up.railway.app` (operated by the project maintainer, for demo only — not an SLA-backed service).
 
 **Recommended for metered Redis (Upstash):**
 - Run one dedicated backend worker process with `TRANSACTION_WORKER_ENABLED=true`

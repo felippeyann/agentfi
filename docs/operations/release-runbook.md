@@ -1,89 +1,87 @@
 # AgentFi Production Release and Rollback Runbook
 
-Date: 2026-04-01
-Owner: Platform/Operations
+Owner: the operator running the deployment (self-hosted by default).
 
-This runbook defines a deterministic process for production deploys and emergency rollback.
-It is designed for Railway deployment via GitHub Actions workflow Deploy Production.
+This runbook defines a deterministic process for production deploys and emergency rollback. AgentFi is self-hosted software — there is no canonical production instance maintained by the project. This runbook applies to **any operator** (human or agent) deploying their own instance.
+
+**Reference deployment**: Railway is used as the example throughout, because it has the shortest path from a repo clone to a running service (auto-deploy on git push, managed Postgres + Redis plugins, Nixpacks build). The same steps map to Fly.io, Render, or a Docker host; differences are noted inline.
 
 ---
 
 ## 1. Preconditions
 
-1. Production environment has required GitHub secrets:
-- RAILWAY_TOKEN
-- RAILWAY_PROJECT_ID
-- RAILWAY_PRODUCTION_ENVIRONMENT
+1. Hosting provider configured:
+   - Railway: project connected to the GitHub repo, `production` environment created, services for **backend**, **Postgres**, **Redis** exist and point to the repo root (auto-deploy on `main`).
+   - Or equivalent on another provider (see `docs/operations/production-deploy.md`).
 
-2. Service variable is configured (optional):
-- RAILWAY_PRODUCTION_SERVICE (default: backend)
-- RAILWAY_PRODUCTION_WORKER_SERVICE (for dedicated worker deploy)
+2. Environment variables configured on the backend service (never commit these):
+   - See `docs/operations/production-deploy.md` Section 1 for the complete list.
 
-3. Production health baseline is green:
-- API health endpoint responds
-- Ready endpoint responds with all checks true
+3. Production health baseline is green on the current deployed ref:
+   - `GET /health` responds 200
+   - `GET /health/ready` responds with `status: "ready"` and all checks true
 
-4. Release candidate commit has passed CI on develop/mainline:
-- Typecheck green
-- Backend tests green
-- Contract tests green
-
-5. Local deploy config checks are green:
-- Run `npm run preflight:deploy-scenarios`
-- Confirm all scenarios report PASS
+4. Release candidate commit has passed CI on `main`:
+   - Lint & Type Check, Backend Tests, Foundry Tests, Admin Tests, E2E Tests all green
 
 ---
 
 ## 2. Standard Production Release
 
-Option A: Manual dispatch (recommended)
+AgentFi uses native provider git integration — **no custom deploy workflow**. A push to `main` (or a tag, depending on provider config) triggers the deploy automatically.
 
-1. Run `npm run preflight:deploy-scenarios` from repository root.
-2. Open GitHub Actions and run workflow Deploy Production.
-3. Provide input ref:
-- Release tag (preferred): vX.Y.Z
-- Or exact commit SHA for a controlled hotfix deploy.
-4. Wait for workflow completion and verify Railway deployment state.
-5. If worker service is configured, confirm worker deployment completed too.
+Option A: Merge-triggered release (default for Railway/Render/Fly with auto-deploy enabled)
 
-Option B: Tag-triggered release
+1. Merge the release PR into `main` once CI is green.
+2. Hosting provider detects the push and starts a build.
+3. Wait for the build to complete in the provider dashboard.
+4. Run Post-Deploy Verification (Section 3).
 
-1. Create and push release tag via the release helper:
-- npm run release:v1:tag -- X.Y.Z --push
+Option B: Tag-triggered release (for providers configured to deploy on tags, or for audit-traced releases)
 
-  Notes:
-- The helper runs typecheck/tests/preflight checks before tagging (unless `--skip-check` is provided)
-- It refuses to tag when uncommitted tracked changes exist (except local `.claude/` and `docs/railway_logs/` artifacts)
+1. Create and push a release tag via the release helper:
+   ```bash
+   npm run release:v1:tag -- X.Y.Z --push
+   ```
+   Notes:
+   - The helper runs typecheck/tests before tagging (unless `--skip-check` is provided).
+   - It refuses to tag when uncommitted tracked changes exist (except local `.claude/` and `docs/railway_logs/` artifacts).
 
 2. Manual commands remain available if needed:
-- git tag vX.Y.Z
-- git push origin vX.Y.Z
-3. Confirm Deploy Production workflow executed successfully.
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+3. Confirm the provider dashboard picked up the tag and completed the build.
+4. Run Post-Deploy Verification (Section 3).
 
 ---
 
 ## 3. Post-Deploy Verification (must pass)
 
-Run these checks immediately after deployment:
+Replace `api.example.com` with your deployed API hostname.
 
 1. Liveness
-- curl https://api.agentfi.cc/health
+   ```bash
+   curl https://api.example.com/health
+   ```
 
 2. Readiness
-- curl https://api.agentfi.cc/health/ready
-- Expected: status ready and checks all true
+   ```bash
+   curl https://api.example.com/health/ready
+   ```
+   Expected: `status: "ready"` and all checks `true`.
 
-3. Core API smoke test
-- Verify one authenticated endpoint returns expected schema
+3. Core API smoke test — verify one authenticated endpoint returns expected schema.
 
 4. Queue/worker sanity
-- Confirm dedicated worker service is running if using metered Redis
-- Confirm API replicas use TRANSACTION_WORKER_ENABLED=false
+   - Dedicated worker service running if using metered Redis.
+   - API replicas use `TRANSACTION_WORKER_ENABLED=false`.
 
-5. Error budget check (first 10-15 min)
-- No sustained 5xx spikes
-- No Redis max request limit errors
-- No abnormal queue backlog growth
+5. Error budget check (first 10–15 min)
+   - No sustained 5xx spikes.
+   - No Redis max request limit errors.
+   - No abnormal queue backlog growth.
 
 If any critical check fails, execute rollback immediately.
 
@@ -98,9 +96,10 @@ Rollback target selection:
 
 Rollback execution:
 
-1. Run Deploy Production workflow manually.
-2. Set input ref to last known good ref.
-3. Wait for workflow completion.
+1. Provider dashboard → Deployments → Redeploy the last known good ref.
+   - Railway: Deployments tab → three-dot menu on the good build → Redeploy.
+   - Fly/Render: equivalent "redeploy previous" action.
+2. If the provider doesn't offer one-click redeploy, revert the merge commit on `main` and let auto-deploy trigger again.
 
 Rollback verification:
 
@@ -136,15 +135,15 @@ If Redis quota exhaustion is observed:
 Recommended production topology for metered Redis:
 
 1. API services:
-- TRANSACTION_WORKER_ENABLED=false
+   - `TRANSACTION_WORKER_ENABLED=false`
 
 2. Worker service:
-- Start command: cd packages/backend && npm run worker
-- TRANSACTION_WORKER_ENABLED=true
-- Tune as needed:
-  - TRANSACTION_WORKER_CONCURRENCY
-  - TRANSACTION_WORKER_DRAIN_DELAY_SEC
-  - TRANSACTION_WORKER_STALLED_INTERVAL_MS
+   - Start command: `cd packages/backend && npm run worker`
+   - `TRANSACTION_WORKER_ENABLED=true`
+   - Tune as needed:
+     - `TRANSACTION_WORKER_CONCURRENCY`
+     - `TRANSACTION_WORKER_DRAIN_DELAY_SEC`
+     - `TRANSACTION_WORKER_STALLED_INTERVAL_MS`
 
 ---
 
@@ -166,16 +165,16 @@ For each production release, capture:
 Track these signals from app logs and gateway metrics:
 
 1. Admin lockout events (`admin_login_blocked`)
-- Warning: >= 3 events in 10 minutes from the same IP/user fingerprint
-- Critical: >= 10 events in 10 minutes across multiple fingerprints
+   - Warning: >= 3 events in 10 minutes from the same IP/user fingerprint
+   - Critical: >= 10 events in 10 minutes across multiple fingerprints
 
 2. Invalid admin credential events (`admin_login_invalid_credentials`)
-- Warning: >= 10 events in 5 minutes
-- Critical: >= 30 events in 5 minutes
+   - Warning: >= 10 events in 5 minutes
+   - Critical: >= 30 events in 5 minutes
 
 3. Unauthorized admin proxy responses (HTTP 401 from admin API routes)
-- Warning: >= 20 responses in 5 minutes
-- Critical: >= 100 responses in 5 minutes
+   - Warning: >= 20 responses in 5 minutes
+   - Critical: >= 100 responses in 5 minutes
 
 Response playbook for warning or critical thresholds:
 

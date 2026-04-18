@@ -101,20 +101,6 @@ function runReleaseChecks() {
     );
   }
 
-  const hasDeployEnv =
-    hasEnv('RAILWAY_TOKEN') &&
-    hasEnv('RAILWAY_PROJECT_ID') &&
-    hasEnv('RAILWAY_PRODUCTION_ENVIRONMENT');
-
-  if (hasDeployEnv) {
-    run('node', ['scripts/check-production-deploy-env.mjs']);
-  } else {
-    console.log(
-      '\n[warn] Skipping deploy env preflight: set RAILWAY_TOKEN, RAILWAY_PROJECT_ID, ' +
-        'and RAILWAY_PRODUCTION_ENVIRONMENT to validate production deploy wiring locally.',
-    );
-  }
-
   console.log('\nRelease checks passed.');
 }
 

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Self-hosted deployment posture**: AgentFi has no canonical hosted production instance — every operator runs their own. Docs rewritten to reflect this: `docs/operations/production-deploy.md` is now provider-agnostic (Railway as reference example, Fly.io/Render/Docker documented as alternatives); `release-runbook.md` updated accordingly.
+
+### Removed
+- `.github/workflows/deploy-production.yml` — custom Railway-CLI deploy workflow. Provider-native GitHub integrations (Railway/Fly/Render) auto-deploy on merge to `main` or on tag; the custom workflow added coupling without value.
+- `scripts/check-production-deploy-env.mjs` and `scripts/run-deploy-preflight-scenarios.mjs` — preflight tied to the deleted workflow.
+- `Deploy Preflight Check` CI job (ci.yml) — validated the removed preflight script; not a required status check.
+- Preflight invocation in `scripts/release-v1.mjs`.
+
 ### Added
 - **Agent P&L v2 — Gas cost tracking (Phase 4)**: `PnLService` now counts real gas burn as a cost category
 - Migration 0006: adds `effectiveGasPriceWei` TEXT to `Transaction`
