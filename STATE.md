@@ -3,7 +3,7 @@
 > **Read together with [VISION.md](VISION.md) (the *why*) and [HANDOFF.md](HANDOFF.md) (live pending tasks).**
 > This file is the **comprehensive, point-in-time snapshot** of what the project *is* today — purpose, stack, capabilities, progress. Update it whenever the scope or architecture shifts.
 
-**Last updated**: April 2026 · **main SHA** `700c76c` · **npm** `@agent_fi/mcp-server@0.3.0`
+**Last updated**: April 2026 · **main SHA** `084a086` · **npm** `@agent_fi/mcp-server@0.3.0`
 
 ---
 
