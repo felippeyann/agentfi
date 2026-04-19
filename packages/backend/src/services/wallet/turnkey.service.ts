@@ -124,6 +124,43 @@ export class TurnkeyService {
   }
 
   /**
+   * Signs an arbitrary string message with EIP-191 personal_sign format.
+   * Used for A2A handshake identity proofs.
+   *
+   * Implementation: hash the message with viem's `hashMessage` (which
+   * applies the standard `\x19Ethereum Signed Message:\n<len><msg>` prefix),
+   * then sign the hash via Turnkey's `signRawPayload` with
+   * `HASH_FUNCTION_NO_OP` (we pre-hashed). Assemble the r||s||v
+   * 65-byte signature that viem's `verifyMessage` / `recoverMessageAddress`
+   * accepts.
+   */
+  async signMessage(params: {
+    walletId: string;
+    message: string;
+  }): Promise<{ signature: `0x${string}`; address: Address }> {
+    const apiClient = this.client.apiClient();
+    const address = await this.getWalletAddress(params.walletId);
+
+    // EIP-191 personal_sign prefix + keccak256
+    const { hashMessage } = await import('viem');
+    const digest = hashMessage(params.message);
+
+    const { r, s, v } = await apiClient.signRawPayload({
+      signWith: address,
+      payload: digest,
+      encoding: 'PAYLOAD_ENCODING_HEXADECIMAL',
+      hashFunction: 'HASH_FUNCTION_NO_OP',
+    });
+
+    // Turnkey returns r, s as 64-hex strings and v as "00"/"01". Assemble
+    // a standard 65-byte Ethereum signature (r || s || v+27).
+    const vByte = (parseInt(v, 16) + 27).toString(16).padStart(2, '0');
+    const signature = `0x${r.padStart(64, '0')}${s.padStart(64, '0')}${vByte}` as `0x${string}`;
+
+    return { signature, address };
+  }
+
+  /**
    * Lists all wallets for the organization.
    */
   async listWallets(): Promise<Array<{ walletId: string; walletName: string }>> {

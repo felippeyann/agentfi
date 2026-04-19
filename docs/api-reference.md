@@ -41,8 +41,8 @@ Rate limits are tier-based (FREE / PRO / ENTERPRISE) and keyed by `agentId` or I
 | PATCH | `/v1/agents/me/manifest` | Agent | Update own service manifest |
 | GET | `/v1/agents/:id/trust-report` | Public | Reputation score, A2A tx count |
 | GET | `/v1/agents/me/pnl` | Agent | Profit & loss breakdown (earnings, costs incl. gas, breakeven) |
-| POST | `/v1/agents/me/sign-handshake` | Agent | **501** - Not implemented |
-| POST | `/v1/agents/verify-handshake` | Public | **501** - Not implemented |
+| POST | `/v1/agents/me/sign-handshake` | Agent | Sign a message with the agent's wallet (EIP-191 personal_sign) |
+| POST | `/v1/agents/verify-handshake` | Public | Verify a peer's signature (ECDSA recovery, EIP-1271 fallback) |
 | DELETE | `/v1/agents/:id` | Agent (owner) | Soft deactivate + emergency pause |
 
 ### GET /v1/agents/me/pnl

@@ -233,17 +233,75 @@ paths:
   /v1/agents/me/sign-handshake:
     post:
       tags: [Agents]
-      summary: Sign an A2A handshake (not implemented)
+      summary: Sign a message with the agent's wallet (EIP-191 personal_sign)
+      description: |
+        Signs an arbitrary string message with the agent's wallet
+        (LocalWalletService via viem, or TurnkeyService via
+        `signRawPayload`). Used by peer agents to prove identity or
+        sign service agreements. Returns a 65-byte r||s||v signature
+        that any EIP-191-compatible verifier can check.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: { type: string, minLength: 1, maxLength: 4096 }
       responses:
-        '501': { $ref: '#/components/responses/NotImplemented' }
+        '200':
+          description: Signed handshake payload.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  signature: { type: string, pattern: '^0x[0-9a-fA-F]+$' }
+                  address: { type: string, pattern: '^0x[0-9a-fA-F]{40}$' }
+                  safeAddress: { type: string, pattern: '^0x[0-9a-fA-F]{40}$' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /v1/agents/verify-handshake:
     post:
       tags: [Agents]
-      summary: Verify a peer's handshake (not implemented)
+      summary: Verify a peer's signature (ECDSA + EIP-1271 fallback)
       security: []
+      description: |
+        Accepts either `{ message, signature, address }` or `{ message,
+        signature, agentId }`. Tries ECDSA recovery first; if the
+        recovered address matches, returns `verifiedVia: 'ecdsa'`.
+        Otherwise, if the target is a contract (e.g., a Safe smart
+        wallet), falls back to EIP-1271 via the chain's public client.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, signature]
+              properties:
+                message: { type: string, minLength: 1, maxLength: 4096 }
+                signature: { type: string, pattern: '^0x[0-9a-fA-F]+$' }
+                address: { type: string, pattern: '^0x[0-9a-fA-F]{40}$' }
+                agentId: { type: string }
+                chainId: { type: integer, default: 1 }
       responses:
-        '501': { $ref: '#/components/responses/NotImplemented' }
+        '200':
+          description: Verification result.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid: { type: boolean }
+                  address: { type: string, pattern: '^0x[0-9a-fA-F]{40}$' }
+                  verifiedVia: { type: string, enum: ['ecdsa', 'eip1271'] }
+                  reason: { type: string, description: 'Only set when valid is false and an RPC/EIP-1271 attempt could not complete.' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /v1/agents/{id}:
     parameters:

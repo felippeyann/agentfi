@@ -379,7 +379,14 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Sign an A2A handshake (not implemented) */
+        /**
+         * Sign a message with the agent's wallet (EIP-191 personal_sign)
+         * @description Signs an arbitrary string message with the agent's wallet
+         *     (LocalWalletService via viem, or TurnkeyService via
+         *     `signRawPayload`). Used by peer agents to prove identity or
+         *     sign service agreements. Returns a 65-byte r||s||v signature
+         *     that any EIP-191-compatible verifier can check.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -387,9 +394,30 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody: {
+                content: {
+                    "application/json": {
+                        message: string;
+                    };
+                };
+            };
             responses: {
-                501: components["responses"]["NotImplemented"];
+                /** @description Signed handshake payload. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            message?: string;
+                            signature?: string;
+                            address?: string;
+                            safeAddress?: string;
+                        };
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
             };
         };
         delete?: never;
@@ -407,7 +435,14 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Verify a peer's handshake (not implemented) */
+        /**
+         * Verify a peer's signature (ECDSA + EIP-1271 fallback)
+         * @description Accepts either `{ message, signature, address }` or `{ message,
+         *     signature, agentId }`. Tries ECDSA recovery first; if the
+         *     recovered address matches, returns `verifiedVia: 'ecdsa'`.
+         *     Otherwise, if the target is a contract (e.g., a Safe smart
+         *     wallet), falls back to EIP-1271 via the chain's public client.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -415,9 +450,37 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody: {
+                content: {
+                    "application/json": {
+                        message: string;
+                        signature: string;
+                        address?: string;
+                        agentId?: string;
+                        /** @default 1 */
+                        chainId?: number;
+                    };
+                };
+            };
             responses: {
-                501: components["responses"]["NotImplemented"];
+                /** @description Verification result. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            valid?: boolean;
+                            address?: string;
+                            /** @enum {string} */
+                            verifiedVia?: "ecdsa" | "eip1271";
+                            /** @description Only set when valid is false and an RPC/EIP-1271 attempt could not complete. */
+                            reason?: string;
+                        };
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                404: components["responses"]["NotFound"];
             };
         };
         delete?: never;
