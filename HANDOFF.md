@@ -2,7 +2,7 @@
 
 > Live pending tasks, credentials inventory, and working conventions. For *what the project is*, read [STATE.md](STATE.md). For *why*, read [VISION.md](VISION.md). This file is the shortest path from "resuming work" → "executing something useful."
 
-**Last updated**: April 2026 · **main SHA** `63b76a6` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0) · **Release**: [v0.1.0](https://github.com/felippeyann/agentfi/releases/tag/v0.1.0) · **npm**: [`@agent_fi/mcp-server@0.2.0`](https://www.npmjs.com/package/@agent_fi/mcp-server)
+**Last updated**: April 2026 · **main SHA** `700c76c` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0) · **Release**: [v0.1.0](https://github.com/felippeyann/agentfi/releases/tag/v0.1.0) · **npm**: [`@agent_fi/mcp-server@0.3.0`](https://www.npmjs.com/package/@agent_fi/mcp-server)
 
 ---
 
