@@ -437,28 +437,134 @@ export async function agentRoutes(fastify: FastifyInstance) {
 
   /**
    * POST /v1/agents/me/sign-handshake — sign a message using the agent's wallet.
-   * Used to prove identity or sign service agreements.
+   * Returns the signature + address so peers can verify-handshake.
    */
-  fastify.post('/v1/agents/me/sign-handshake', async (_request, reply) => {
-    // A2A handshake signing requires Turnkey MPC integration.
-    // Returning placeholder signatures is a security risk — disabled until
-    // proper Turnkey message signing is implemented.
-    return reply.code(501).send({
-      error: 'Not implemented',
-      details: 'A2A handshake signing requires Turnkey MPC integration. See: https://docs.turnkey.com/features/signatures',
+  fastify.post('/v1/agents/me/sign-handshake', async (request, reply) => {
+    const schema = z.object({ message: z.string().min(1).max(4096) });
+    const parsed = schema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid body', details: parsed.error.flatten() });
+    }
+
+    const agent = await db.agent.findUnique({
+      where: { id: request.agentId },
+      select: { walletId: true, safeAddress: true },
     });
+    if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+    try {
+      const { signature, address } = await turnkey.signMessage({
+        walletId: agent.walletId,
+        message: parsed.data.message,
+      });
+      return reply.send({
+        message: parsed.data.message,
+        signature,
+        address,
+        safeAddress: agent.safeAddress,
+      });
+    } catch (err) {
+      logger.error({ err, agentId: request.agentId }, 'sign-handshake failed');
+      return reply.code(500).send({
+        error: 'Signing failed',
+        details: err instanceof Error ? err.message : String(err),
+      });
+    }
   });
 
   /**
    * POST /v1/agents/verify-handshake — verify a peer's signature.
+   *
+   * Accepts either:
+   *   - { message, signature, address }  — verifies signature at the
+   *     given address (EOA via ECDSA recovery, or contract via EIP-1271)
+   *   - { message, signature, agentId }  — looks the peer up in our DB
+   *     and verifies against their registered safeAddress
+   *
+   * Returns { valid, address, verifiedVia: 'ecdsa' | 'eip1271' } on 200.
+   * Rejects with 400 on bad input; does NOT return 200 when `valid: false`
+   * to keep the API unambiguous.
    */
-  fastify.post('/v1/agents/verify-handshake', async (_request, reply) => {
-    // A2A handshake verification requires EIP-1271 (Safe) or ECDSA recovery (EOA).
-    // Returning valid: true without actual verification is a security risk.
-    return reply.code(501).send({
-      error: 'Not implemented',
-      details: 'A2A handshake verification requires EIP-1271 or ECDSA recovery. See: https://eips.ethereum.org/EIPS/eip-1271',
+  fastify.post('/v1/agents/verify-handshake', async (request, reply) => {
+    const schema = z.object({
+      message: z.string().min(1).max(4096),
+      signature: z.string().regex(/^0x[0-9a-fA-F]+$/),
+      address: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional(),
+      agentId: z.string().min(1).optional(),
+      chainId: z.number().int().default(1),
+    }).refine((d) => d.address || d.agentId, {
+      message: 'Either `address` or `agentId` is required',
     });
+    const parsed = schema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid body', details: parsed.error.flatten() });
+    }
+    const { message, signature, chainId } = parsed.data;
+
+    let resolvedAddress = parsed.data.address;
+    if (!resolvedAddress && parsed.data.agentId) {
+      const peer = await db.agent.findUnique({
+        where: { id: parsed.data.agentId },
+        select: { safeAddress: true, active: true },
+      });
+      if (!peer || !peer.active) {
+        return reply.code(404).send({ error: 'Peer agent not found or inactive' });
+      }
+      resolvedAddress = peer.safeAddress;
+    }
+
+    try {
+      const { createPublicClient, http, getAddress, recoverMessageAddress } =
+        await import('viem');
+      const { getChain, getPrimaryRpcUrl } = await import('../../config/chains.js');
+
+      const targetAddress = getAddress(resolvedAddress!);
+
+      // First try ECDSA recovery (works for EOA). If the recovered address
+      // matches the target, the target IS the signer.
+      const recovered = await recoverMessageAddress({
+        message,
+        signature: signature as `0x${string}`,
+      });
+      if (getAddress(recovered) === targetAddress) {
+        return reply.send({
+          valid: true,
+          address: targetAddress,
+          verifiedVia: 'ecdsa',
+        });
+      }
+
+      // If the target is a contract (Safe smart wallet), fall back to EIP-1271.
+      const rpcUrl = getPrimaryRpcUrl(chainId);
+      if (!rpcUrl) {
+        return reply.send({
+          valid: false,
+          address: targetAddress,
+          verifiedVia: 'ecdsa',
+          reason: `ECDSA recovery mismatched; no RPC for chain ${chainId} to attempt EIP-1271.`,
+        });
+      }
+      const publicClient = createPublicClient({
+        chain: getChain(chainId),
+        transport: http(rpcUrl),
+      });
+      const valid = await publicClient.verifyMessage({
+        address: targetAddress,
+        message,
+        signature: signature as `0x${string}`,
+      });
+      return reply.send({
+        valid,
+        address: targetAddress,
+        verifiedVia: valid ? 'eip1271' : 'ecdsa',
+      });
+    } catch (err) {
+      logger.warn({ err }, 'verify-handshake error');
+      return reply.code(400).send({
+        error: 'Verification failed',
+        details: err instanceof Error ? err.message : String(err),
+      });
+    }
   });
 
   /**

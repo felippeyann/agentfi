@@ -83,7 +83,6 @@ Ranked by closure value, not effort.
 
 | Task | Blocked by |
 |---|---|
-| Sign/verify handshake | Turnkey message-signing API access scope |
 | Self-funding sub-wallets | Legal decision (who owns the sub-wallet when an agent provisions it) |
 
 ### 3.4 The meta-guidance

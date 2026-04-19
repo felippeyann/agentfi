@@ -115,6 +115,30 @@ export class LocalWalletService {
     return signed;
   }
 
+  /**
+   * Signs an arbitrary string message with the wallet's private key using
+   * EIP-191 personal_sign format. Used for A2A handshake identity proofs.
+   * Returns `0x`-prefixed hex signature.
+   */
+  async signMessage(params: {
+    walletId: string;
+    message: string;
+  }): Promise<{ signature: `0x${string}`; address: Address }> {
+    const entry = wallets.get(params.walletId);
+    if (!entry) {
+      throw new Error(
+        `[local-wallet] wallet ${params.walletId} not found (in-memory store is cleared on restart)`,
+      );
+    }
+    const signature = await entry.account.signMessage({
+      message: params.message,
+    });
+    return {
+      signature,
+      address: getAddress(entry.account.address),
+    };
+  }
+
   async listWallets(): Promise<Array<{ walletId: string; walletName: string }>> {
     return Array.from(wallets.values()).map((w) => ({
       walletId: w.walletId,
