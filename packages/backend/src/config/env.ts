@@ -82,6 +82,12 @@ const envSchema = z.object({
   RATE_LIMIT_FREE: z.coerce.number().int().positive().default(30),
   RATE_LIMIT_PRO: z.coerce.number().int().positive().default(300),
   RATE_LIMIT_ENTERPRISE: z.coerce.number().int().positive().default(3000),
+
+  // Public self-registration limit (per IP, per hour).
+  // Default 5/hour = 120/day per IP, which lets an evaluator poke around
+  // without enabling industrial-scale scraping of wallet creations. Set to
+  // 0 to effectively disable (any positive value is allowed; 0 rejects all).
+  PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR: z.coerce.number().int().min(0).default(5),
 });
 
 const parsed = envSchema.safeParse(process.env);

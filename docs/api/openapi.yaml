@@ -113,6 +113,37 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  /v1/public/agents:
+    post:
+      tags: [Agents]
+      summary: Self-register a new agent (no auth)
+      description: |
+        Open, unauthenticated self-registration. Lets an autonomous agent
+        bootstrap itself without the operator `API_SECRET`. Tier is forced
+        to `FREE` regardless of request body. Rate-limited per client IP
+        (default 5/hour; operator-configurable via
+        `PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR`).
+
+        Response shape is identical to `POST /v1/agents`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAgentRequest' }
+      responses:
+        '201':
+          description: Agent registered.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateAgentResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '429':
+          description: Per-IP rate limit exceeded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /v1/agents/search:
     get:
       tags: [Agents]
