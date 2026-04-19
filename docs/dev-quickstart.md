@@ -108,7 +108,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
   "mcpServers": {
     "agentfi-dev": {
       "command": "npx",
-      "args": ["-y", "@agent_fi/mcp-server@0.2.0"],
+      "args": ["-y", "@agent_fi/mcp-server@0.3.0"],
       "env": {
         "AGENTFI_API_URL": "http://localhost:3000",
         "AGENTFI_API_KEY": "agfi_live_..."

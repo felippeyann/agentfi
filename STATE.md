@@ -3,7 +3,7 @@
 > **Read together with [VISION.md](VISION.md) (the *why*) and [HANDOFF.md](HANDOFF.md) (live pending tasks).**
 > This file is the **comprehensive, point-in-time snapshot** of what the project *is* today — purpose, stack, capabilities, progress. Update it whenever the scope or architecture shifts.
 
-**Last updated**: April 2026 · **main SHA** `63b76a6` · **npm** `@agent_fi/mcp-server@0.2.0`
+**Last updated**: April 2026 · **main SHA** `700c76c` · **npm** `@agent_fi/mcp-server@0.3.0`
 
 ---
 
@@ -205,8 +205,8 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 |---|---|---|
 | Source code | https://github.com/felippeyann/agentfi | Apache 2.0, public |
 | Release | https://github.com/felippeyann/agentfi/releases/tag/v0.1.0 | v0.1.0 (April 2026) |
-| mcp-server npm | https://www.npmjs.com/package/@agent_fi/mcp-server | **v0.2.0** |
-| mcp-server release | https://github.com/felippeyann/agentfi/releases/tag/mcp-server-v0.2.0 | published |
+| mcp-server npm | https://www.npmjs.com/package/@agent_fi/mcp-server | **v0.3.0** (breaking: `request_policy_update` → `update_policy`) |
+| mcp-server releases | https://github.com/felippeyann/agentfi/releases | v0.1.0, v0.2.0, v0.3.0 all published |
 | mcp.so listing | https://mcp.so/server/agentfi-mcp-server/felippeyann | submitted (pending review) |
 | awesome-mcp-servers PR | https://github.com/punkpeye/awesome-mcp-servers/pull/5091 | open (pending maintainer merge) |
 | Base contracts | `0x03af…6A6d` + `0x5441…24b3` | verified on Basescan |
