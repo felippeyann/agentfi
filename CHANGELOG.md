@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (breaking — mcp-server 0.2.0 → 0.3.0)
+- **MCP tool rename: `request_policy_update` → `update_policy`.** Closes step 6 of [#49](https://github.com/felippeyann/agentfi/issues/49). The old name + description implied an operator-approval workflow; the tool actually wrote the policy immediately. Renamed honestly and rewrote the description: *"applies IMMEDIATELY — there is no operator approval step. The operator can audit and revert via the admin panel."* `reason` field is still required and logged for audit but does not gate the write. `@agent_fi/mcp-server` bumped to **0.3.0** (SemVer breaking); no deprecated alias — pre-1.0 project, clean rename.
+
 ### Added
 - **A2A handshake — `sign_handshake` / `verify_handshake` implemented.** Closes steps 3–5 of [#49](https://github.com/felippeyann/agentfi/issues/49); previously both returned 501.
   - `POST /v1/agents/me/sign-handshake` now signs an arbitrary message with the agent's wallet via EIP-191 `personal_sign`. `LocalWalletService` uses viem's `signMessage`; `TurnkeyService` uses `signRawPayload` with `HASH_FUNCTION_NO_OP` after pre-hashing with viem's `hashMessage`, then assembles a standard 65-byte r‖s‖v signature.
