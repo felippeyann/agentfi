@@ -13,7 +13,8 @@
 3. [Pending work](#3-pending-work)
 4. [Credentials inventory](#4-credentials-inventory)
 5. [Working conventions](#5-working-conventions)
-6. [Known quirks and non-issues](#6-known-quirks-and-non-issues)
+6. [Principles (learned the hard way)](#6-principles-learned-the-hard-way)
+7. [Known quirks and non-issues](#7-known-quirks-and-non-issues)
 
 ---
 
@@ -157,7 +158,57 @@ git checkout develop && git pull origin main && git push origin develop  # sync 
 
 ---
 
-## 6. Known quirks and non-issues
+## 6. Principles (learned the hard way)
+
+These are session-level lessons captured so future agents don't repeat the same mistakes. Each one has a specific event behind it, not just theory.
+
+### 6.1 Adoption signal gates code
+
+**The rule:** new features need a specific external trigger — an issue, a user ask, a concrete integration dependency. *"The roadmap says this is next"* is not a trigger; it's drift in disguise.
+
+**The evidence:** the productive work in recent sessions came from exactly two sources:
+1. Responding to issue #49 (three PRs #50/#51/#52, clean delivery, issue closed)
+2. Reducing adoption wall after explicit agreement that distribution was the bottleneck (dev-quickstart, 3 examples)
+
+Large features that were in the roadmap but had no external demand (GMX adapter, escrow v3) were deferred *by design*. Shipping them would have consumed context budget without validating any hypothesis.
+
+**How to apply:** before starting anything in §3.2, ask "what happens if I don't build this?" If the answer is "nothing specific breaks and no one is waiting," stop. Work on §3.1 (distribution / manual tasks) or pause.
+
+### 6.2 CI green ≠ functionally validated
+
+**The rule:** type-check + unit tests + CI passing does not mean the thing works end-to-end. Always run the happy path manually before shipping user-facing surface.
+
+**The evidence:** three `examples/*` scripts and `docker-compose.dev.yml` shipped across PRs #44–#47 all had green CI but were never actually run `docker compose up` → `node examples/…` by the shipping agent. This was flagged in the session review as validation debt. The next session still owes paying it.
+
+**How to apply:** for anything a new user or evaluator might run (examples, quickstarts, install commands), execute the full path locally at least once before merging. For backend-only changes, CI is usually sufficient.
+
+### 6.3 Breaking changes ship alone
+
+**The rule:** a release that contains a breaking change should contain only the breaking change. Don't bundle features.
+
+**The evidence:** PR #52 bumped `@agent_fi/mcp-server` to 0.3.0 for a single clean reason: `request_policy_update` → `update_policy` rename. Users upgrading know exactly what changed. If we'd bundled GMX or new adapters in that release, the CHANGELOG entry would have been noisy and downstream clients would have had more to diff.
+
+**How to apply:** `0.x.0` releases should have one-sentence CHANGELOG reasons. New tools, adapters, and improvements go in `0.x.1` / `0.x+1.0` patches/minors after the breaking change is out.
+
+### 6.4 Drift is usually a diagnostic error
+
+**The rule:** when a task is classified as "blocked" or "can't be done," check the diagnostic first. It's often wrong.
+
+**The evidence:** HANDOFF classified sign/verify-handshake as "Turnkey-blocked" for months. When PR #51 touched it, we discovered Turnkey's SDK exposes `signRawPayload` — no new access scope, no real blocker. The classification was a diagnostic error from an older session that never got revisited.
+
+**How to apply:** when §3.3 says something is blocked, spend 15 minutes verifying the blocker is real before accepting the classification. If it's not, move the task to §3.2 and consider doing it.
+
+### 6.5 Docs consolidation pays off
+
+**The rule:** stale docs poison LLM context more than code does. Archive or prune aggressively.
+
+**The evidence:** consolidation PR #48 moved `docs/railway_logs/`, `docs/project/release-notes-hitl.md`, and `docs/project/go-live-status.md` into `docs/_archive/` because they were snapshots from infra that had been removed or frozen moments in time. The replacement was a clear triad (VISION → STATE → HANDOFF) that a new agent can read top-to-bottom without getting misled.
+
+**How to apply:** when a doc stops being the live truth, update it in place, archive it to `docs/_archive/`, or delete it. Do not leave it in a navigable path hoping readers will intuit that it's stale.
+
+---
+
+## 7. Known quirks and non-issues
 
 ### Prisma schema and migrations
 - Migrations are **never auto-generated** — write them manually in `packages/backend/src/db/migrations/NNNN_name/migration.sql`.
