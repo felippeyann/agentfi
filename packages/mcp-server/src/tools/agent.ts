@@ -54,16 +54,18 @@ export const agentTools = [
   },
 
   {
-    name: 'request_policy_update',
+    name: 'update_policy',
     description:
-      'Autonomously requests a change to the agent\'s own operational policy. ' +
+      'Updates the agent\'s own operational policy. ' +
+      'The change applies IMMEDIATELY — there is no operator approval step. ' +
+      'The operator can audit and revert via the admin panel. ' +
       'Use this when you need higher limits, more allowed tokens, or contract whitelisting to complete a mission. ' +
-      'The request must be justified by your current goals.',
+      'Provide a `reason` for audit — it is logged but does not gate the change.',
     inputSchema: z.object({
-      max_value_per_tx_eth: z.string().optional().describe('Requested new max ETH per transaction.'),
+      max_value_per_tx_eth: z.string().optional().describe('New max ETH per transaction.'),
       allowed_tokens: z.array(z.string()).optional().describe('New tokens to add to whitelist.'),
       allowed_contracts: z.array(z.string()).optional().describe('New contracts to add to whitelist.'),
-      reason: z.string().describe('Detailed justification for why this policy change is needed.'),
+      reason: z.string().describe('Justification for the change — recorded in audit log, does not gate the write.'),
     }),
     handler: async (input: {
       max_value_per_tx_eth?: string;
@@ -73,7 +75,7 @@ export const agentTools = [
     }) => {
       // Get current agent ID first
       const me = await api.get<{ id: string }>('/v1/agents/me');
-      
+
       const result = await api.patch(`/v1/agents/${me.id}/policy`, {
         maxValuePerTxEth: input.max_value_per_tx_eth,
         allowedTokens: input.allowed_tokens,
@@ -83,7 +85,7 @@ export const agentTools = [
       return {
         success: true,
         updatedPolicy: result,
-        audit: `Policy update requested autonomously. Reason: ${input.reason}`,
+        audit: `Policy updated by agent. Reason: ${input.reason}`,
       };
     },
   },
