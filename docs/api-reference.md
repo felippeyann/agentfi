@@ -32,6 +32,7 @@ Rate limits are tier-based (FREE / PRO / ENTERPRISE) and keyed by `agentId` or I
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | POST | `/v1/agents` | Operator | Register new agent (provisions wallet + Safe) |
+| POST | `/v1/public/agents` | Public | Self-register a new agent (no API_SECRET needed; tier forced to FREE; rate-limited per IP) |
 | GET | `/v1/agents/search?q=` | Public | Search by name or address (min 2 chars) |
 | GET | `/v1/agents/me` | Agent | Current agent info (from API key) |
 | GET | `/v1/agents/:id` | Agent (owner) | Agent details |
@@ -91,7 +92,40 @@ Gas cost = `gasUsed * effectiveGasPriceWei` per CONFIRMED/REVERTED tx, converted
 }
 ```
 
-`ensName` is returned when the operator has configured `ENS_PARENT_DOMAIN`
+### POST /v1/public/agents (Self-Register, no auth)
+
+Open self-registration for autonomous agents. No operator `API_SECRET` required. Same response shape as `/v1/agents` above.
+
+- **Auth**: none
+- **Rate limit**: `PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR` per IP (default 5/hour; operator-configurable; set to 0 to disable)
+- **Tier**: forced to `FREE` regardless of request body
+- **Policy**: defaults applied if omitted — `maxValuePerTxEth=1.0`, `maxDailyVolumeUsd=10000`, `cooldownSeconds=60`
+
+```json
+// Request (no auth headers)
+{ "name": "self-registered-agent", "chainIds": [8453] }
+
+// Response 201 (identical shape to /v1/agents)
+{
+  "id": "clx...",
+  "name": "self-registered-agent",
+  "apiKey": "agfi_live_...",
+  "apiKeyPrefix": "agfi_live_abcd",
+  "walletAddress": "0x...",
+  "safeAddress": "0x...",
+  "chainIds": [8453],
+  "tier": "FREE",
+  "ensName": null
+}
+
+// Response 429 (rate-limited)
+{
+  "error": "Public agent registration rate limit exceeded. Retry after 58 minutes.",
+  "hint": "Contact the operator to register more agents via /v1/agents with API_SECRET, or self-host your own AgentFi instance."
+}
+```
+
+> `ensName` is returned when the operator has configured `ENS_PARENT_DOMAIN`
 and `ENS_CONTROLLER_PRIVATE_KEY`. Otherwise — or if the on-chain
 registration fails — it is `null` and the agent is fully usable without
 an ENS identity. See `.env.example` for configuration details.

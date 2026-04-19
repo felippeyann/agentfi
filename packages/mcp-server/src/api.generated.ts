@@ -138,6 +138,65 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/public/agents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Self-register a new agent (no auth)
+         * @description Open, unauthenticated self-registration. Lets an autonomous agent
+         *     bootstrap itself without the operator `API_SECRET`. Tier is forced
+         *     to `FREE` regardless of request body. Rate-limited per client IP
+         *     (default 5/hour; operator-configurable via
+         *     `PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR`).
+         *
+         *     Response shape is identical to `POST /v1/agents`.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["CreateAgentRequest"];
+                };
+            };
+            responses: {
+                /** @description Agent registered. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CreateAgentResponse"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                /** @description Per-IP rate limit exceeded. */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/agents/search": {
         parameters: {
             query?: never;

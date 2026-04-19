@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
+import { env } from '../../config/env.js';
 import { getWalletService } from '../../services/wallet/index.js';
 import { SafeService } from '../../services/wallet/safe.service.js';
 import { generateApiKey } from '../middleware/auth.js';
@@ -31,6 +32,112 @@ const createAgentSchema = z.object({
     .optional(),
 });
 
+/**
+ * Shared agent provisioning logic — called by both the operator-gated
+ * `POST /v1/agents` endpoint and the public `POST /v1/public/agents`
+ * endpoint. Both paths produce identical agent records; they differ
+ * only in authentication and (for the public path) forced tier + rate
+ * limiting.
+ */
+async function provisionAgent(
+  body: z.infer<typeof createAgentSchema>,
+): Promise<{
+  id: string;
+  name: string;
+  apiKey: string;
+  apiKeyPrefix: string;
+  walletAddress: string;
+  safeAddress: string;
+  chainIds: number[];
+  tier: 'FREE' | 'PRO' | 'ENTERPRISE';
+  ensName: string | null;
+}> {
+  const { plaintext, hash, prefix } = generateApiKey();
+
+  // Provision wallet (Turnkey MPC or local, via factory).
+  const { walletId, address } = await turnkey.createWallet(body.name);
+
+  // Deploy Safe smart wallet if a deployer key is configured.
+  // Falls back to EOA address for testnet / local dev without a funded deployer.
+  let safeAddress = address;
+  const deployerKey = process.env['SAFE_DEPLOYER_PRIVATE_KEY'];
+  const primaryChain = body.chainIds[0] ?? 1;
+
+  if (deployerKey) {
+    try {
+      const deployed = await safeService.deploySafeForAgent({
+        ownerAddress: address as `0x${string}`,
+        chainId: primaryChain,
+        signerPrivateKey: deployerKey,
+      });
+      safeAddress = deployed.safeAddress;
+      logger.info({ agentId: 'pending', safeAddress }, 'Safe deployed');
+    } catch (err) {
+      logger.warn({ err }, 'Safe deployment failed — using EOA address as fallback');
+    }
+  } else {
+    logger.info(
+      'SAFE_DEPLOYER_PRIVATE_KEY not set — skipping Safe deployment, using EOA',
+    );
+  }
+
+  const agent = await db.agent.create({
+    data: {
+      name: body.name,
+      apiKeyHash: hash,
+      apiKeyPrefix: prefix,
+      walletId,
+      safeAddress,
+      chainIds: body.chainIds,
+      tier: body.tier,
+      billing: { create: {} },
+      ...(body.policy && {
+        policy: {
+          create: {
+            maxValuePerTxEth: body.policy.maxValuePerTxEth,
+            maxDailyVolumeUsd: body.policy.maxDailyVolumeUsd,
+            allowedContracts: body.policy.allowedContracts,
+            allowedTokens: body.policy.allowedTokens,
+            cooldownSeconds: body.policy.cooldownSeconds,
+          },
+        },
+      }),
+    },
+  });
+
+  logger.info({ agentId: agent.id, name: body.name }, 'Agent registered');
+
+  // Best-effort ENS subdomain registration. Failure here must not block
+  // the agent from being usable — we simply leave ensName null.
+  let ensName: string | null = null;
+  if (ensService.isConfigured()) {
+    const result = await ensService.registerSubdomain({
+      name: body.name,
+      agentId: agent.id,
+      targetAddress: safeAddress,
+    });
+    if (result) {
+      await db.agent.update({
+        where: { id: agent.id },
+        data: { ensName: result.fullName },
+      });
+      ensName = result.fullName;
+    }
+  }
+
+  return {
+    id: agent.id,
+    name: agent.name,
+    apiKey: plaintext, // shown once, never stored
+    apiKeyPrefix: prefix,
+    walletAddress: address,
+    safeAddress,
+    chainIds: body.chainIds,
+    tier: body.tier,
+    ensName,
+  };
+}
+
 const updatePolicySchema = z.object({
   maxValuePerTxEth: z.string().optional(),
   maxDailyVolumeUsd: z.string().optional(),
@@ -51,90 +158,47 @@ export async function agentRoutes(fastify: FastifyInstance) {
    */
   fastify.post('/v1/agents', async (request, reply) => {
     const body = createAgentSchema.parse(request.body);
-    const { plaintext, hash, prefix } = generateApiKey();
-
-    // Provision Turnkey MPC wallet
-    const { walletId, address } = await turnkey.createWallet(body.name);
-
-    // Deploy Safe smart wallet if a deployer key is configured.
-    // Falls back to EOA address for testnet / local dev without a funded deployer.
-    let safeAddress = address;
-    const deployerKey = process.env['SAFE_DEPLOYER_PRIVATE_KEY'];
-    const primaryChain = body.chainIds[0] ?? 1;
-
-    if (deployerKey) {
-      try {
-        const deployed = await safeService.deploySafeForAgent({
-          ownerAddress: address as `0x${string}`,
-          chainId: primaryChain,
-          signerPrivateKey: deployerKey,
-        });
-        safeAddress = deployed.safeAddress;
-        logger.info({ agentId: 'pending', safeAddress }, 'Safe deployed');
-      } catch (err) {
-        logger.warn({ err }, 'Safe deployment failed — using EOA address as fallback');
-      }
-    } else {
-      logger.info('SAFE_DEPLOYER_PRIVATE_KEY not set — skipping Safe deployment, using EOA');
-    }
-
-    const agent = await db.agent.create({
-      data: {
-        name: body.name,
-        apiKeyHash: hash,
-        apiKeyPrefix: prefix,
-        walletId,
-        safeAddress,
-        chainIds: body.chainIds,
-        tier: body.tier,
-        billing: { create: {} },
-        ...(body.policy && {
-          policy: {
-            create: {
-              maxValuePerTxEth: body.policy.maxValuePerTxEth,
-              maxDailyVolumeUsd: body.policy.maxDailyVolumeUsd,
-              allowedContracts: body.policy.allowedContracts,
-              allowedTokens: body.policy.allowedTokens,
-              cooldownSeconds: body.policy.cooldownSeconds,
-            },
-          },
-        }),
-      },
-    });
-
-    logger.info({ agentId: agent.id, name: body.name }, 'Agent registered');
-
-    // Best-effort ENS subdomain registration. Failure here must not block
-    // the agent from being usable — we simply leave ensName null.
-    let ensName: string | null = null;
-    if (ensService.isConfigured()) {
-      const result = await ensService.registerSubdomain({
-        name: body.name,
-        agentId: agent.id,
-        targetAddress: safeAddress,
-      });
-      if (result) {
-        await db.agent.update({
-          where: { id: agent.id },
-          data: { ensName: result.fullName },
-        });
-        ensName = result.fullName;
-      }
-    }
-
-    // Return plaintext API key only once
-    return reply.code(201).send({
-      id: agent.id,
-      name: agent.name,
-      apiKey: plaintext, // shown once, never stored
-      apiKeyPrefix: prefix,
-      walletAddress: address,
-      safeAddress,
-      chainIds: body.chainIds,
-      tier: body.tier,
-      ensName,
-    });
+    const result = await provisionAgent(body);
+    return reply.code(201).send(result);
   });
+
+  /**
+   * POST /v1/public/agents — open, unauthenticated self-registration.
+   *
+   * VISION.md calls for agents that can provision and fund their own wallets.
+   * The operator-gated `/v1/agents` path requires a human-held `API_SECRET`;
+   * this public path lets an agent bootstrap itself without one.
+   *
+   * Safeguards:
+   *   - Per-IP rate limit (env `PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR`,
+   *     default 5). Operators can tighten via env.
+   *   - Tier forced to FREE regardless of request body.
+   *   - Policy defaults enforced even if caller omits them.
+   *   - Wallet provisioning cost is real (when WALLET_PROVIDER=turnkey);
+   *     rate limit caps operator's exposure.
+   */
+  fastify.post(
+    '/v1/public/agents',
+    {
+      config: {
+        rateLimit: {
+          max: env.PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR,
+          timeWindow: '1 hour',
+          keyGenerator: (request) => request.ip,
+          errorResponseBuilder: (_request, context) => ({
+            error: `Public agent registration rate limit exceeded. Retry after ${context.after}.`,
+            hint: 'Contact the operator to register more agents via /v1/agents with API_SECRET, or self-host your own AgentFi instance.',
+          }),
+        },
+      },
+    },
+    async (request, reply) => {
+      const body = createAgentSchema.parse(request.body);
+      // Force FREE tier — caller cannot self-assign PRO/ENTERPRISE.
+      const result = await provisionAgent({ ...body, tier: 'FREE' });
+      return reply.code(201).send(result);
+    },
+  );
 
   /**
    * GET /v1/agents/search — public discovery for agents. 
