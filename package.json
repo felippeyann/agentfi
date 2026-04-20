@@ -22,7 +22,7 @@
     "spec:check": "node scripts/check-spec-drift.mjs"
   },
   "devDependencies": {
-    "typescript": "^5.4.0",
+    "typescript": "^6.0.3",
     "tsx": "^4.7.0",
     "prettier": "^3.8.2",
     "eslint": "^8.57.0",
