@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import type { JobStatus } from '@prisma/client';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { logger } from '../middleware/logger.js';
@@ -156,56 +157,111 @@ export async function jobRoutes(fastify: FastifyInstance) {
       });
     }
 
+    // Issue #71 — A2A revenue integrity (see docs/project/issue-71-a2a-revenue-integrity.md).
+    // For paid completions we no longer flip straight to COMPLETED. We move to
+    // PAYMENT_PENDING, fire the on-chain transfer, and only finalize as COMPLETED
+    // (with reputation + escrow release) when the transfer confirms. This keeps
+    // ghost completions out of the PnL dashboard.
+    const reward =
+      job.reward as { amount?: string; token?: string; chainId?: number } | null;
+    const isPaidCompletion = body.status === 'COMPLETED' && Boolean(reward?.amount);
+
+    const persistedStatus: JobStatus = isPaidCompletion ? 'PAYMENT_PENDING' : body.status;
+
     const updatedJob = await db.job.update({
       where: { id: request.params.id },
       data: {
-        status: body.status,
+        status: persistedStatus,
         ...(body.result !== undefined ? { result: body.result } : {}),
       },
     });
 
-    // Logic Sentinel: Automatically update reputation on outcome
-    if (body.status === 'COMPLETED') {
-      await reputationService.recordJobOutcome(job.providerId, true);
-
-      // v2 Escrow: mark reservation as released (consumed by payment).
-      // DailyVolume was already committed at reservation time, so we don't
-      // double-count. The payment execution re-checks policy anyway.
-      if (job.reservationStatus === 'PENDING') {
-        await markEscrowReleased(job.id);
+    if (isPaidCompletion) {
+      // Two-phase completion: side effects (reputation, escrow release, final
+      // COMPLETED status) only run inside the payment promise's resolution
+      // handlers, never before the on-chain transfer is settled.
+      const provider = await db.agent.findUnique({
+        where: { id: job.providerId },
+        select: { safeAddress: true },
+      });
+      if (!provider) {
+        // Defensive: provider record vanished between job creation and completion.
+        // Refund the requester and bail without firing payment.
+        await db.job.update({
+          where: { id: job.id },
+          data: { status: 'PAYMENT_FAILED' },
+        });
+        if (job.reservationStatus === 'PENDING') {
+          await releaseJobEscrow(job.id);
+        }
+        logger.error(
+          { jobId: job.id, providerId: job.providerId },
+          'A2A payment skipped — provider record missing; job marked PAYMENT_FAILED',
+        );
+        return reply.code(409).send({ error: 'Provider record missing; payment aborted' });
       }
 
-      // A2A Payment: if reward was specified, trigger atomic payment from
-      // requester to provider. Runs async — payment failures don't block
-      // the job status update, but are logged for operator review.
-      const reward = job.reward as { amount?: string; token?: string; chainId?: number } | null;
-      if (reward && reward.amount) {
-        const provider = await db.agent.findUnique({
-          where: { id: job.providerId },
-          select: { safeAddress: true },
-        });
-        if (provider) {
-          executeA2APayment({
-            requesterId: job.requesterId,
-            providerSafeAddress: provider.safeAddress,
-            amount: reward.amount,
-            token: reward.token ?? 'ETH',
-            chainId: reward.chainId ?? 1,
-            jobId: job.id,
-          })
-            .then((result) => {
-              logger.info(
-                { jobId: job.id, paymentTxId: result.transactionId },
-                'A2A payment triggered',
-              );
-            })
-            .catch((err) => {
-              logger.error(
-                { jobId: job.id, err: err?.message ?? String(err) },
-                'A2A payment failed — manual resolution required (escrow already released)',
-              );
+      // Capture reward fields locally; reward is non-null here (isPaidCompletion).
+      const amount = reward!.amount as string;
+      const token = reward!.token ?? 'ETH';
+      const chainId = reward!.chainId ?? 1;
+
+      executeA2APayment({
+        requesterId: job.requesterId,
+        providerSafeAddress: provider.safeAddress,
+        amount,
+        token,
+        chainId,
+        jobId: job.id,
+      })
+        .then(async (result) => {
+          // Payment confirmed → finalize: COMPLETED + reputation + escrow released.
+          await db.job.update({
+            where: { id: job.id },
+            data: { status: 'COMPLETED' },
+          });
+          await reputationService.recordJobOutcome(job.providerId, true);
+          if (job.reservationStatus === 'PENDING') {
+            await markEscrowReleased(job.id);
+          }
+          logger.info(
+            { jobId: job.id, paymentTxId: result.transactionId },
+            'A2A payment confirmed → COMPLETED',
+          );
+        })
+        .catch(async (err) => {
+          // Payment failed → mark PAYMENT_FAILED + refund escrow to requester.
+          // No reputation update: provider does not get credit for an unpaid job.
+          try {
+            await db.job.update({
+              where: { id: job.id },
+              data: { status: 'PAYMENT_FAILED' },
             });
-        }
+            if (job.reservationStatus === 'PENDING') {
+              await releaseJobEscrow(job.id);
+            }
+          } catch (recoveryErr) {
+            logger.error(
+              {
+                jobId: job.id,
+                paymentErr: err?.message ?? String(err),
+                recoveryErr:
+                  (recoveryErr as Error)?.message ?? String(recoveryErr),
+              },
+              'A2A payment failed AND status/escrow recovery failed — manual reconciliation required',
+            );
+            return;
+          }
+          logger.error(
+            { jobId: job.id, err: err?.message ?? String(err) },
+            'A2A payment failed → PAYMENT_FAILED, escrow refunded',
+          );
+        });
+    } else if (body.status === 'COMPLETED') {
+      // Free job (no reward) — completes synchronously, same as before.
+      await reputationService.recordJobOutcome(job.providerId, true);
+      if (job.reservationStatus === 'PENDING') {
+        await markEscrowReleased(job.id);
       }
     } else if (body.status === 'FAILED' || body.status === 'CANCELLED') {
       // v2 Escrow: release reservation, return daily volume credit to requester
@@ -217,7 +273,7 @@ export async function jobRoutes(fastify: FastifyInstance) {
       }
     }
 
-    logger.info({ jobId: job.id, status: body.status }, 'A2A Job Updated');
+    logger.info({ jobId: job.id, status: persistedStatus }, 'A2A Job Updated');
     return updatedJob;
   });
 
