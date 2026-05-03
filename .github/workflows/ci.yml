@@ -148,7 +148,7 @@ jobs:
           DATABASE_URL: postgresql://agentfi:agentfi@localhost:5432/agentfi_e2e
           REDIS_URL: redis://localhost:6379
           API_SECRET: e2e-test-secret-min-32-chars-long
-          ADMIN_SECRET: e2e-admin-secret
+          ADMIN_SECRET: e2e-admin-secret-min-32-chars-long
           # Dummy values — Alchemy/Turnkey are bypassed by E2E mocks
           ALCHEMY_API_KEY: e2e-dummy
           TURNKEY_API_PUBLIC_KEY: e2e-dummy
