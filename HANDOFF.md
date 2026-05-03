@@ -229,6 +229,25 @@ Large features that were in the roadmap but had no external demand (GMX adapter,
 - `ethers v5` low-severity vulns in `npm audit` — transitive via `@safe-global/protocol-kit`.
 - Vercel preview deploy failures on PRs — separate pipeline for admin dashboard, not a required check.
 
+### Repo layout — landing site lives outside this monorepo
+The `agentfi.cc` landing site is a **separate repository**, not a workspace
+in this monorepo. The Vercel project `agentfi-landing` deploys from
+`felippeyann/agentfi-landing` (or the standalone repo connected at the
+time you read this — check the Vercel dashboard for the exact source).
+
+Don't add a `packages/landing/` workspace here. An earlier attempt did
+exactly that and produced redundant deploys + brittle Vercel config that
+fought the monorepo (`cd ../.. && npm install --legacy-peer-deps` in
+`vercel.json`). The polyrepo split was kept because (a) landing is a
+static marketing site that almost never needs atomic changes with the
+backend, and (b) keeping it out of the monorepo means edits don't trigger
+the full backend CI suite.
+
+If you ever need a coordinated landing+backend change (e.g. landing
+embeds a versioned API URL), open one PR per repo and merge them in
+order. Don't re-attempt monorepo consolidation without explicit user
+agreement.
+
 ### Validation debt from the last session
 The three `examples/*` scripts and `docker-compose.dev.yml` passed typecheck/syntax/CI but were **not run end-to-end** by the agent that shipped them. Before shipping new examples or touching the dev stack, run through the quickstart + all three examples manually. If something breaks, fixing that comes first.
 
