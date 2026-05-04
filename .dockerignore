@@ -1,0 +1,77 @@
+# .dockerignore — keep the build context lean for Fly.io / docker builds.
+# Mirrors .gitignore patterns + a few extras that should never reach the image.
+
+# Dependencies — installed fresh inside the image
+node_modules
+**/node_modules
+.pnp
+.pnp.js
+
+# Build artifacts
+**/dist
+**/build
+**/.next
+**/.turbo
+**/.cache
+**/coverage
+**/*.tsbuildinfo
+
+# Source maps / instrumentation outputs
+**/*.map
+
+# Foundry / contracts artifacts
+packages/contracts/out
+packages/contracts/cache
+packages/contracts/broadcast
+
+# Local env files — secrets stay in fly secrets, not in images
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Local DBs / runtime data
+**/*.sqlite
+**/*.sqlite-journal
+**/prisma/migrations/dev.db*
+
+# IDE / OS
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+
+# Git + CI metadata (Fly doesn't need these)
+.git
+.github
+.gitignore
+
+# Docs and infra-only files (not needed in the runtime image)
+docs
+**/*.md
+!packages/backend/README.md
+LICENSE
+CHANGELOG.md
+SESSION_NOTES.md
+HANDOFF.md
+STATE.md
+VISION.md
+fly.toml
+docker-compose*.yml
+Dockerfile.*
+!Dockerfile.backend
+
+# Tests — not needed at runtime
+**/__tests__
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+
+# Misc
+**/.eslintcache
+**/*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
