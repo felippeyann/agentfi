@@ -68,7 +68,7 @@ const envSchema = z.object({
   STRIPE_PRO_PRICE_ID: z.string().optional(),
 
   // Admin dashboard — required to protect /admin/* routes
-  ADMIN_SECRET: z.string().min(1),
+  ADMIN_SECRET: z.string().min(32),
   ADMIN_ALLOW_REMOTE: z.enum(['true', 'false']).default('false'),
 
   // CORS — comma-separated allowed origins for the admin frontend in production.
