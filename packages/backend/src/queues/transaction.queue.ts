@@ -9,6 +9,7 @@ import { SubmitterService } from '../services/transaction/submitter.service.js';
 import { MonitorService } from '../services/transaction/monitor.service.js';
 import { FeeService } from '../services/policy/fee.service.js';
 import { weiToUsd } from '../services/transaction/price.service.js';
+import { finalizeA2APaymentJob } from '../services/job/payment-finalizer.service.js';
 import { logger } from '../api/middleware/logger.js';
 import type { Address, Hex } from 'viem';
 
@@ -123,7 +124,7 @@ export function startTransactionWorker(): Worker<TransactionJobData> {
       }).then(async () => {
         const tx = await db.transaction.findUnique({
           where: { id: data.transactionId },
-          select: { status: true, amountIn: true },
+          select: { status: true, amountIn: true, error: true, metadata: true },
         });
         if (tx?.status === 'CONFIRMED') {
           await feeService.incrementTxUsage(data.agentId);
@@ -150,6 +151,31 @@ export function startTransactionWorker(): Worker<TransactionJobData> {
           if (parseFloat(valueUsd) > 0) {
             const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
             await addDailyVolumeAtomic(data.agentId, today, valueUsd);
+          }
+        }
+
+        // Issue #81: A2A payment Job lifecycle is driven by the on-chain
+        // outcome here, not by executeA2APayment's resolution. The Transaction
+        // worker is the sole source of truth for finalizing paid jobs.
+        const meta = (tx?.metadata ?? null) as
+          | { jobId?: string; a2aPayment?: boolean }
+          | null;
+        if (meta?.a2aPayment === true && typeof meta.jobId === 'string') {
+          if (tx?.status === 'CONFIRMED') {
+            await finalizeA2APaymentJob({
+              jobId: meta.jobId,
+              transactionId: data.transactionId,
+              outcome: 'CONFIRMED',
+            });
+          } else {
+            // REVERTED, FAILED (timeout), or anything not-CONFIRMED → refund.
+            await finalizeA2APaymentJob({
+              jobId: meta.jobId,
+              transactionId: data.transactionId,
+              outcome: 'FAILED',
+              reason:
+                tx?.error ?? `Transaction ${tx?.status ?? 'unknown'} on-chain`,
+            });
           }
         }
       }).catch((err) => {
@@ -238,6 +264,33 @@ export function startTransactionWorker(): Worker<TransactionJobData> {
       });
     } catch (dbErr) {
       logger.error({ transactionId, dbErr }, 'Failed to update transaction status to FAILED');
+    }
+
+    // Issue #81: if this tx was an A2A payment, finalize the Job too.
+    // Without this, broadcast-time failures (estimateGas, RPC reject, etc.)
+    // leave the Job stuck in PAYMENT_PENDING forever after BullMQ exhausts
+    // retries. monitor.waitForConfirmation never runs in this path.
+    try {
+      const tx = await db.transaction.findUnique({
+        where: { id: transactionId },
+        select: { metadata: true },
+      });
+      const meta = (tx?.metadata ?? null) as
+        | { jobId?: string; a2aPayment?: boolean }
+        | null;
+      if (meta?.a2aPayment === true && typeof meta.jobId === 'string') {
+        await finalizeA2APaymentJob({
+          jobId: meta.jobId,
+          transactionId,
+          outcome: 'FAILED',
+          reason: err.message.slice(0, 500),
+        });
+      }
+    } catch (finalizeErr) {
+      logger.error(
+        { transactionId, finalizeErr },
+        'Failed to finalize A2A payment job after permanent broadcast failure',
+      );
     }
   });
 

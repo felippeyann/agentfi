@@ -133,6 +133,60 @@ PATCH endpoint.
 - **Payment service idempotency** — Phase 2 will need
   `executeA2APayment` to be safely retryable.
 
+### Phase 1.5 — Worker-driven Job finalization (issue #81, branch `fix/issue-81-payment-lifecycle`)
+
+**What we discovered:** end-to-end validation on Fly.io after Phase 1
+shipped revealed that the Phase 1 fix is **incomplete**. With a stub
+Alchemy URL guaranteeing on-chain failure (`HttpRequestError` from
+`estimateGas`), the test job still finalized as `COMPLETED` with
+`reservationStatus = RELEASED`, and Telegram fired
+`TRANSACTION_CONFIRMED` instead of `TRANSACTION_FAILED`.
+
+**Root cause:** `executeA2APayment` (in `api/routes/transactions.ts`)
+resolves its promise after **queueing** the tx into BullMQ, not after
+on-chain confirmation. The `.then(...)` in `jobs.ts` ran immediately
+after enqueue, finalizing the Job before the worker had even
+broadcast. Phase 1 only protected against synchronous failures
+(auth/policy/sim), not against async on-chain failures from the
+worker.
+
+**Fix:** make the Transaction worker the single source of truth for
+A2A Job finalization.
+
+- New module `services/job/payment-finalizer.service.ts` —
+  `finalizeA2APaymentJob({ jobId, transactionId, outcome, reason })`,
+  idempotent (no-op when Job is not in `PAYMENT_PENDING`).
+- `queues/transaction.queue.ts`:
+  - After `monitor.waitForConfirmation` resolves, inspect
+    `tx.metadata.a2aPayment` + `metadata.jobId`. CONFIRMED → finalize
+    as `COMPLETED`; REVERTED / timeout-FAILED → finalize as
+    `PAYMENT_FAILED`.
+  - In `worker.on('failed')` (broadcast retries exhausted), do the
+    same finalization with outcome `FAILED` so the Job doesn't sit in
+    `PAYMENT_PENDING` forever.
+- `api/routes/jobs.ts`:
+  - Drop the `.then(...)` chain — Job state must NOT be touched at
+    queue-resolution time.
+  - Keep a `.catch(...)` that calls the finalizer with `outcome:
+    'FAILED'` and `transactionId: null` for synchronous pre-queue
+    failures (the worker will never run for these).
+
+**Why this slipped past CI/Phase 1 review:** Phase 1 was reviewed
+under the assumption that `executeA2APayment` resolves on
+confirmation. We didn't run a real E2E with a guaranteed-failing tx
+until the Fly deploy. Same lesson as HANDOFF §6.2 — CI green ≠
+functionally validated.
+
+**Knock-on effect on follow-ups:**
+
+- #73 (recovery worker) becomes simpler — the worker is now the
+  canonical source for state, so the recovery worker just re-fires
+  the finalizer for stale `PAYMENT_PENDING` rows.
+- #74 (idempotency via `txIntentId`) is unchanged in scope but
+  benefits: the finalizer is already idempotent on the Job side, so
+  combining it with intent-keyed broadcast closes the
+  retry-double-spend gap fully.
+
 ### Phase 2 — Revenue snapshots (separate PR)
 
 **Goal:** PnL history stops being volatile. The reward USD value is
@@ -226,8 +280,9 @@ These came out of the investigation but are scope creep for the
 
 ## 5. Status
 
-| Phase | Status     | PR  | Notes |
-| ----- | ---------- | --- | ----- |
-| 1     | in progress | TBD | branch `fix/a2a-revenue-integrity` |
+| Phase | Status      | PR  | Notes |
+| ----- | ----------- | --- | ----- |
+| 1     | shipped     | #72 | branch `fix/a2a-revenue-integrity` (merged) |
+| 1.5   | in progress | TBD | branch `fix/issue-81-payment-lifecycle` — closes #81 |
 | 2     | not started | —   | depends on Phase 1 schema being merged |
 | 3     | not started | —   | depends on Phase 2 snapshot fields |

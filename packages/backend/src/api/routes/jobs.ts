@@ -10,7 +10,7 @@ import {
   releaseJobEscrow,
   markEscrowReleased,
 } from '../../services/policy/escrow.service.js';
-import { notificationService } from '../../services/notification.service.js';
+import { finalizeA2APaymentJob } from '../../services/job/payment-finalizer.service.js';
 const reputationService = new ReputationService();
 
 const createJobSchema = z.object({
@@ -178,12 +178,15 @@ export async function jobRoutes(fastify: FastifyInstance) {
     });
 
     if (isPaidCompletion) {
-      // Two-phase completion: side effects (reputation, escrow release, final
-      // COMPLETED status) only run inside the payment promise's resolution
-      // handlers, never before the on-chain transfer is settled.
+      // Issue #81 (Phase 1.5 of #71): the Job lifecycle is finalized by the
+      // Transaction worker once the on-chain outcome is known — see
+      // queues/transaction.queue.ts and services/job/payment-finalizer.service.ts.
+      // Here we only need to (a) verify the provider exists, (b) hand off to
+      // executeA2APayment, and (c) handle synchronous failures (auth, policy,
+      // simulation, db) that prevent the tx from ever being queued.
       const provider = await db.agent.findUnique({
         where: { id: job.providerId },
-        select: { safeAddress: true, name: true },
+        select: { safeAddress: true },
       });
       if (!provider) {
         // Defensive: provider record vanished between job creation and completion.
@@ -215,94 +218,35 @@ export async function jobRoutes(fastify: FastifyInstance) {
         chainId,
         jobId: job.id,
       })
-        .then(async (result) => {
-          // Payment confirmed → finalize: COMPLETED + reputation + escrow released.
-          await db.job.update({
-            where: { id: job.id },
-            data: { status: 'COMPLETED' },
-          });
-          await reputationService.recordJobOutcome(job.providerId, true);
-          if (job.reservationStatus === 'PENDING') {
-            await markEscrowReleased(job.id);
-          }
+        .then((result) => {
+          // Tx queued (or PENDING_APPROVAL) — the worker now owns the Job
+          // lifecycle. Do NOT update Job state here: this resolves at queue
+          // time, not on-chain confirmation (#81 root cause).
           logger.info(
-            { jobId: job.id, paymentTxId: result.transactionId },
-            'A2A payment confirmed → COMPLETED',
+            { jobId: job.id, paymentTxId: result.transactionId, status: result.status },
+            'A2A payment dispatched; awaiting worker finalization',
           );
-          // Operator notification (Discord/Telegram/webhook fan-out is non-fatal).
-          notificationService
-            .notify({
-              type: 'TRANSACTION_CONFIRMED',
-              agentId: job.providerId,
-              agentName: provider.name,
-              transactionId: result.transactionId,
-              message: `A2A payment settled: ${amount} ${token} (chain ${chainId}) for job ${job.id}`,
-              metadata: {
-                jobId: job.id,
-                requesterId: job.requesterId,
-                providerId: job.providerId,
-                amount,
-                token,
-                chainId,
-              },
-            })
-            .catch((notifyErr) =>
-              logger.warn(
-                { jobId: job.id, err: (notifyErr as Error)?.message ?? String(notifyErr) },
-                'A2A payment success notification failed (non-fatal)',
-              ),
-            );
         })
-        .catch(async (err) => {
-          // Payment failed → mark PAYMENT_FAILED + refund escrow to requester.
-          // No reputation update: provider does not get credit for an unpaid job.
-          try {
-            await db.job.update({
-              where: { id: job.id },
-              data: { status: 'PAYMENT_FAILED' },
-            });
-            if (job.reservationStatus === 'PENDING') {
-              await releaseJobEscrow(job.id);
-            }
-          } catch (recoveryErr) {
+        .catch((err) => {
+          // Synchronous pre-queue failure (auth, policy denied, simulation
+          // failed, db error). No Transaction row may exist; the worker will
+          // never run for this job. Finalize as PAYMENT_FAILED inline.
+          finalizeA2APaymentJob({
+            jobId: job.id,
+            transactionId: null,
+            outcome: 'FAILED',
+            reason: err?.message ?? String(err),
+          }).catch((finalizeErr) =>
             logger.error(
               {
                 jobId: job.id,
                 paymentErr: err?.message ?? String(err),
-                recoveryErr:
-                  (recoveryErr as Error)?.message ?? String(recoveryErr),
+                finalizeErr:
+                  (finalizeErr as Error)?.message ?? String(finalizeErr),
               },
-              'A2A payment failed AND status/escrow recovery failed — manual reconciliation required',
-            );
-            return;
-          }
-          logger.error(
-            { jobId: job.id, err: err?.message ?? String(err) },
-            'A2A payment failed → PAYMENT_FAILED, escrow refunded',
+              'A2A payment failed AND finalizer failed — manual reconciliation required',
+            ),
           );
-          // Operator notification — critical, but still non-fatal if delivery fails.
-          notificationService
-            .notify({
-              type: 'TRANSACTION_FAILED',
-              agentId: job.providerId,
-              agentName: provider.name,
-              message: `A2A payment FAILED: ${amount} ${token} (chain ${chainId}) for job ${job.id}. Escrow refunded to requester. Reason: ${err?.message ?? String(err)}`,
-              metadata: {
-                jobId: job.id,
-                requesterId: job.requesterId,
-                providerId: job.providerId,
-                amount,
-                token,
-                chainId,
-                error: err?.message ?? String(err),
-              },
-            })
-            .catch((notifyErr) =>
-              logger.warn(
-                { jobId: job.id, err: (notifyErr as Error)?.message ?? String(notifyErr) },
-                'A2A payment failure notification failed (non-fatal) — operator may miss this event',
-              ),
-            );
         });
     } else if (body.status === 'COMPLETED') {
       // Free job (no reward) — completes synchronously, same as before.
