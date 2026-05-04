@@ -79,6 +79,8 @@ enum JobStatus {
   COMPLETED
   FAILED
   CANCELLED
+  PAYMENT_PENDING  // Provider marked work done; on-chain payment in flight. Not counted as revenue.
+  PAYMENT_FAILED   // Payment broadcast failed/reverted; escrow refunded to requester.
 }
 
 // Subscription tiers — drives rate limits and fee rates
