@@ -3,13 +3,28 @@ WORKDIR /app
 
 FROM base AS deps
 COPY package.json package-lock.json* ./
+# Copy ALL workspace manifests so npm sees the full graph.
 COPY packages/backend/package.json ./packages/backend/package.json
-RUN npm ci --workspace=packages/backend --include-workspace-root
+COPY packages/admin/package.json ./packages/admin/package.json
+COPY packages/adapters/package.json ./packages/adapters/package.json
+COPY packages/mcp-server/package.json ./packages/mcp-server/package.json
+# Plain `npm ci` (no --workspace flag) installs deps for all workspaces with
+# proper hoisting to /app/node_modules. The earlier --workspace=packages/backend
+# variant left some packages in packages/backend/node_modules which the runner
+# stage doesn't copy, producing ERR_MODULE_NOT_FOUND for fastify-plugin etc.
+# Slightly bigger deps stage (admin/adapters/mcp-server deps included), but
+# the final runner image only copies /app/node_modules so size unchanged.
+RUN npm ci
 
 FROM base AS builder
 WORKDIR /app
 RUN apk add --no-cache openssl
 COPY --from=deps /app/node_modules ./node_modules
+# npm with workspaces does NOT always hoist deps to root — packages used by
+# only one workspace stay in that workspace's node_modules. We must carry
+# the per-workspace node_modules into the builder so tsc and prisma generate
+# can resolve them.
+COPY --from=deps /app/packages/backend/node_modules ./packages/backend/node_modules
 COPY tsconfig.base.json ./tsconfig.base.json
 COPY packages/backend ./packages/backend
 RUN cd packages/backend && npx prisma generate --schema=src/db/schema.prisma
@@ -20,7 +35,11 @@ ENV NODE_ENV=production
 WORKDIR /app/packages/backend
 RUN apk add --no-cache openssl
 COPY --from=builder /app/packages/backend/dist ./dist
+# Same hoisting story at runtime: copy BOTH the root and per-workspace
+# node_modules so Node's ESM resolution can walk up from dist/* and find
+# every dep, regardless of where npm put it.
 COPY --from=builder /app/node_modules ../../node_modules
+COPY --from=builder /app/packages/backend/node_modules ./node_modules
 COPY --from=builder /app/packages/backend/src/db/schema.prisma ./src/db/schema.prisma
 COPY --from=builder /app/packages/backend/src/db/migrations ./src/db/migrations
 # PORT is injected by Fly.io (8080); fallback to API_PORT then 3000 for other hosts

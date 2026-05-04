@@ -16,7 +16,31 @@ import { jobRoutes } from './api/routes/jobs.js';
 import { startTransactionWorker } from './queues/transaction.queue.js';
 import { startReputationWorker, scheduleReputationUpdate } from './queues/reputation.queue.js';
 
-const fastify = Fastify({ logger: logger as any });
+// Fastify v5 expects a logger CONFIG object (not a pino instance). We pass
+// the same options that middleware/logger.ts uses for its standalone export,
+// so request logs and code-imported logger calls produce identical output â€”
+// just from two pino instances rather than one. The shared `logger` import
+// is still used by route handlers that log directly.
+const fastify = Fastify({
+  logger: {
+    level: env.NODE_ENV === 'production' ? 'info' : 'debug',
+    redact: {
+      paths: [
+        'req.headers.authorization',
+        'req.headers["x-api-key"]',
+        'body.privateKey',
+        'body.apiKey',
+        '*.privateKey',
+        '*.apiKey',
+        '*.apiKeyHash',
+      ],
+      remove: true,
+    },
+    ...(env.NODE_ENV !== 'production'
+      ? { transport: { target: 'pino-pretty', options: { colorize: true } } }
+      : {}),
+  },
+});
 
 // Stripe webhook needs the raw request body for signature verification.
 // Register a raw content-type parser BEFORE any other plugins so Fastify
@@ -96,7 +120,7 @@ async function start() {
   }
 
   // Reputation daily cron worker (BullMQ repeatable job).
-  // Non-fatal if Redis is temporarily unavailable — retries on reconnect.
+  // Non-fatal if Redis is temporarily unavailable ï¿½ retries on reconnect.
   let reputationWorker: ReturnType<typeof startReputationWorker> | undefined;
   try {
     reputationWorker = startReputationWorker();
