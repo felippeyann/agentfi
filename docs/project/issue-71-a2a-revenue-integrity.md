@@ -283,6 +283,7 @@ These came out of the investigation but are scope creep for the
 | Phase | Status      | PR  | Notes |
 | ----- | ----------- | --- | ----- |
 | 1     | shipped     | #72 | branch `fix/a2a-revenue-integrity` (merged) |
-| 1.5   | in progress | TBD | branch `fix/issue-81-payment-lifecycle` — closes #81 |
+| 1.5   | shipped     | #83 | branch `fix/issue-81-payment-lifecycle` (merged) — closed #81 |
+| #74   | in progress | TBD | branch `fix/issue-74-tx-idempotency` — adds `Transaction.intentId` for safe retry |
 | 2     | not started | —   | depends on Phase 1 schema being merged |
 | 3     | not started | —   | depends on Phase 2 snapshot fields |

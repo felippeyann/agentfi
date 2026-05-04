@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 import { getAddress, parseUnits, maxUint256 } from 'viem';
 import { db } from '../../db/client.js';
 import { TransactionBuilder } from '../../services/transaction/builder.service.js';
@@ -1759,7 +1760,39 @@ export async function executeA2APayment(params: {
   token: string;
   chainId: number;
   jobId: string;
+  /**
+   * Issue #74: deterministic idempotency key. When supplied, this function
+   * short-circuits to the existing Transaction row if one already exists
+   * with this intentId — no policy/sim work, no new broadcast. Lets the
+   * recovery worker (#73) and any manual re-trigger re-invoke this safely
+   * without double-spending.
+   *
+   * Convention: `a2a-payment:<jobId>` for A2A flows. Globally unique on
+   * the Transaction table.
+   */
+  intentId?: string;
 }): Promise<{ transactionId: string; status: string }> {
+  // Idempotency short-circuit. Cheap one-row indexed lookup before we do any
+  // expensive policy/sim/oracle work or hit the chain.
+  if (params.intentId) {
+    const existing = await db.transaction.findUnique({
+      where: { intentId: params.intentId },
+      select: { id: true, status: true },
+    });
+    if (existing) {
+      logger.info(
+        {
+          intentId: params.intentId,
+          jobId: params.jobId,
+          transactionId: existing.id,
+          status: existing.status,
+        },
+        'A2A payment short-circuited by intentId — returning existing tx',
+      );
+      return { transactionId: existing.id, status: existing.status };
+    }
+  }
+
   const requester = await db.agent.findUnique({
     where: { id: params.requesterId },
     select: {
@@ -1845,30 +1878,63 @@ export async function executeA2APayment(params: {
     tier,
   });
 
-  const tx = await db.transaction.create({
-    data: {
-      agentId: requester.id,
-      chainId: params.chainId,
-      status: policyResult.requiresApproval ? 'PENDING_APPROVAL' : 'QUEUED',
-      type: 'TRANSFER',
-      fromToken: params.token,
-      toToken: params.providerSafeAddress,
-      amountIn: params.amount,
-      simulation: sim as any,
-      metadata: {
-        jobId: params.jobId,
-        a2aPayment: true,
-        queuePayload: {
-          to: txData.to,
-          data: txData.data,
-          value: txData.value.toString(),
-          feeAmountWei: feeCalc.feeAmountWei.toString(),
-          feeBps: feeCalc.feeBps,
-          routedViaExecutor: false,
+  let tx;
+  try {
+    tx = await db.transaction.create({
+      data: {
+        agentId: requester.id,
+        chainId: params.chainId,
+        status: policyResult.requiresApproval ? 'PENDING_APPROVAL' : 'QUEUED',
+        type: 'TRANSFER',
+        fromToken: params.token,
+        toToken: params.providerSafeAddress,
+        amountIn: params.amount,
+        ...(params.intentId ? { intentId: params.intentId } : {}),
+        simulation: sim as any,
+        metadata: {
+          jobId: params.jobId,
+          a2aPayment: true,
+          queuePayload: {
+            to: txData.to,
+            data: txData.data,
+            value: txData.value.toString(),
+            feeAmountWei: feeCalc.feeAmountWei.toString(),
+            feeBps: feeCalc.feeBps,
+            routedViaExecutor: false,
+          },
         },
       },
-    },
-  });
+    });
+  } catch (err) {
+    // Concurrency race: another caller (e.g. duplicate recovery worker tick)
+    // inserted a Transaction with the same intentId between our short-circuit
+    // check and this insert. The unique index is the source of truth — fall
+    // back to returning the row that won.
+    if (
+      params.intentId &&
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === 'P2002' &&
+      Array.isArray((err.meta as { target?: string[] } | undefined)?.target) &&
+      ((err.meta as { target?: string[] }).target ?? []).includes('intentId')
+    ) {
+      const existing = await db.transaction.findUnique({
+        where: { intentId: params.intentId },
+        select: { id: true, status: true },
+      });
+      if (existing) {
+        logger.warn(
+          {
+            intentId: params.intentId,
+            jobId: params.jobId,
+            transactionId: existing.id,
+          },
+          'A2A payment race resolved by intentId unique constraint — returning row that won',
+        );
+        return { transactionId: existing.id, status: existing.status };
+      }
+    }
+    throw err;
+  }
 
   if (!policyResult.requiresApproval) {
     await transactionQueue.add('a2a-payment', {

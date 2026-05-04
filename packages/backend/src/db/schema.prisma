@@ -157,6 +157,10 @@ model X402Nonce {
 model Transaction {
   id             String    @id @default(cuid())
   idempotencyKey String?
+  // System-supplied deterministic idempotency key for internal callers
+  // (A2A payments, recovery worker). Globally unique. NULL for txs that
+  // don't need server-side replay protection. See migration 0009.
+  intentId       String?   @unique
   agentId        String
   agent          Agent     @relation(fields: [agentId], references: [id])
   chainId        Int
