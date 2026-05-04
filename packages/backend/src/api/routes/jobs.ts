@@ -10,6 +10,7 @@ import {
   releaseJobEscrow,
   markEscrowReleased,
 } from '../../services/policy/escrow.service.js';
+import { notificationService } from '../../services/notification.service.js';
 const reputationService = new ReputationService();
 
 const createJobSchema = z.object({
@@ -182,7 +183,7 @@ export async function jobRoutes(fastify: FastifyInstance) {
       // handlers, never before the on-chain transfer is settled.
       const provider = await db.agent.findUnique({
         where: { id: job.providerId },
-        select: { safeAddress: true },
+        select: { safeAddress: true, name: true },
       });
       if (!provider) {
         // Defensive: provider record vanished between job creation and completion.
@@ -228,6 +229,29 @@ export async function jobRoutes(fastify: FastifyInstance) {
             { jobId: job.id, paymentTxId: result.transactionId },
             'A2A payment confirmed → COMPLETED',
           );
+          // Operator notification (Discord/Telegram/webhook fan-out is non-fatal).
+          notificationService
+            .notify({
+              type: 'TRANSACTION_CONFIRMED',
+              agentId: job.providerId,
+              agentName: provider.name,
+              transactionId: result.transactionId,
+              message: `A2A payment settled: ${amount} ${token} (chain ${chainId}) for job ${job.id}`,
+              metadata: {
+                jobId: job.id,
+                requesterId: job.requesterId,
+                providerId: job.providerId,
+                amount,
+                token,
+                chainId,
+              },
+            })
+            .catch((notifyErr) =>
+              logger.warn(
+                { jobId: job.id, err: (notifyErr as Error)?.message ?? String(notifyErr) },
+                'A2A payment success notification failed (non-fatal)',
+              ),
+            );
         })
         .catch(async (err) => {
           // Payment failed → mark PAYMENT_FAILED + refund escrow to requester.
@@ -256,6 +280,29 @@ export async function jobRoutes(fastify: FastifyInstance) {
             { jobId: job.id, err: err?.message ?? String(err) },
             'A2A payment failed → PAYMENT_FAILED, escrow refunded',
           );
+          // Operator notification — critical, but still non-fatal if delivery fails.
+          notificationService
+            .notify({
+              type: 'TRANSACTION_FAILED',
+              agentId: job.providerId,
+              agentName: provider.name,
+              message: `A2A payment FAILED: ${amount} ${token} (chain ${chainId}) for job ${job.id}. Escrow refunded to requester. Reason: ${err?.message ?? String(err)}`,
+              metadata: {
+                jobId: job.id,
+                requesterId: job.requesterId,
+                providerId: job.providerId,
+                amount,
+                token,
+                chainId,
+                error: err?.message ?? String(err),
+              },
+            })
+            .catch((notifyErr) =>
+              logger.warn(
+                { jobId: job.id, err: (notifyErr as Error)?.message ?? String(notifyErr) },
+                'A2A payment failure notification failed (non-fatal) — operator may miss this event',
+              ),
+            );
         });
     } else if (body.status === 'COMPLETED') {
       // Free job (no reward) — completes synchronously, same as before.
