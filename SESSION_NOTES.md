@@ -1,138 +1,98 @@
-# Session Notes — 2026-05-03
+# Session Notes — 2026-05-04 (continued from 2026-05-03)
 
 > Single-point handoff doc. Update on every substantive session, prune stale
 > sections aggressively. If this file is older than a few days when you read
 > it, trust `git log`, `gh pr list`, and `gh issue list` over the contents
-> here. See [project_agentfi.md memory](../.claude/projects/.../memory/project_agentfi.md)
-> for the convention.
+> here.
 
 ---
 
-## Where we are right now
+## TL;DR for the next person opening this repo
 
-**3 PRs ready to merge (all CI-green on required checks):**
+**Backend is live in production** at `https://agentfi-backend.fly.dev/` — Fly.io free tier (`gru` region), Postgres on Fly, Redis on Upstash (us-east-1). Telegram operator notifications are wired into a group called "agentfi" via bot `@af_agentfi_bot` (chat_id `-5083790936`).
 
-| PR | Title | Branch | What it does | Recommended merge order |
-| -- | ----- | ------ | ------------ | ----------------------- |
-| [#70](https://github.com/felippeyann/agentfi/pull/70) | `fix(backend): ADMIN_SECRET min-32 validation + Discord/Telegram operator notifications` | `fix/security-notifications` | Closes #68 (notifications) and #69 (security) | 1st |
-| [#76](https://github.com/felippeyann/agentfi/pull/76) | `docs(handoff): note landing site lives in a separate repo (polyrepo)` | `docs/handoff-landing-polyrepo` | Captures the polyrepo decision in HANDOFF.md §7 | 2nd |
-| [#72](https://github.com/felippeyann/agentfi/pull/72) | `fix(backend): A2A revenue integrity — Phase 1 (ghost completions)` | `fix/a2a-revenue-integrity` | Closes Phase 1 of #71 — adds `PAYMENT_PENDING`/`PAYMENT_FAILED` job states | 3rd |
-
-The `Vercel` check failing on each PR is the long-standing `agentfi-admin`
-preview deploy issue documented in HANDOFF §7 — not a required check, ignore.
-
-**1 preserved branch — not yet a PR:**
-
-- `feat/fly-io-deploy` — single commit (Fly.io config: `fly.toml` + `Dockerfile.backend` PORT env). Cherry-picked clean from a previous attempt that got pulled out of PR #70 during scope cleanup. Open a PR from this when you decide to deploy backend on Fly.io. Until then, no action needed.
+**Status: validated end-to-end with one architectural bug discovered ([#81](https://github.com/felippeyann/agentfi/issues/81)).** Phase 1 of #71 (PR #72) does not actually wait for on-chain confirmation — `executeA2APayment` resolves on BullMQ enqueue, not on tx settlement. Job lifecycle still produces ghost completions when the worker fails the tx asynchronously. Fix design is in [#81](https://github.com/felippeyann/agentfi/issues/81); needs a Phase 1.5 PR.
 
 ---
 
-## What changed this session (2026-05-03)
+## What's deployed where (read this first)
 
-### 1. CI rescue on PR #70 (force-pushed clean)
+| Resource | Provider | Identifier | Notes |
+| -------- | -------- | ---------- | ----- |
+| Backend (Fastify API) | Fly.io | App `agentfi-backend`, region `gru` | `flyctl logs --app agentfi-backend`, `flyctl ssh console --app agentfi-backend` |
+| Postgres | Fly.io | App `agentfi-pg`, machine `d8d1390c252428` | Auto-stops aggressively on free tier — `flyctl machine start <id> --app agentfi-pg` if `P1001` errors hit |
+| Redis | Upstash | DB `agentfi`, `generous-mustang-85669.upstash.io:6379` | Free tier (500k cmds/month) |
+| Admin dashboard | Vercel | `agentfi-admin` | Pre-existing, `Vercel` check on PRs always fails — ignore |
+| Landing | Vercel + standalone repo | `agentfi-landing` deploys from `felippeyann/agentfi-landing` (NOT this monorepo) | See HANDOFF.md §7 |
+| Telegram notifications | Bot `@af_agentfi_bot` → group "agentfi" | Chat ID `-5083790936` | Secrets `OPERATOR_TELEGRAM_BOT_TOKEN` + `OPERATOR_TELEGRAM_CHAT_ID` set on Fly app |
 
-PR #70 had grown to 5 commits across 3 unrelated scopes (security fix +
-landing page + Fly.io infra). CI was red. After investigation:
-
-- Root cause of CI red: the landing commit added `@agentfi/landing` as a
-  workspace but didn't regenerate `package-lock.json`, so `npm ci` failed
-  on every Linux job.
-- Latent bug found: the `e2e-test` job in `ci.yml` had `ADMIN_SECRET: e2e-admin-secret`
-  (16 chars), which violated the new `z.string().min(32)` validator
-  introduced by the security commit itself. Survived only because
-  `continue-on-error: true` masked it.
-
-**Cleanup performed (force-push authorized):**
-- Reset `fix/security-notifications` to a clean state with 2 commits:
-  the original security fix + a focused `fix(ci)` commit that only
-  lengthens the e2e ADMIN_SECRET to 32 chars.
-- Landing commit dropped (decision was polyrepo — see §3 below).
-- Fly.io commit preserved on the `feat/fly-io-deploy` branch isolated
-  from main.
-- `deploy/landing` branch deleted from origin (was a duplicate of the
-  landing content already in the cleaned-up PR #70).
-
-### 2. Issue #71 — Phase 1 of A2A revenue integrity
-
-Investigation found three coupled bugs in
-[`packages/backend/src/api/routes/jobs.ts`](packages/backend/src/api/routes/jobs.ts):
-
-1. **Ghost completions** — `executeA2APayment(...)` was called fire-and-forget
-   AFTER the job was already updated to `COMPLETED`. If the on-chain
-   transfer failed, the job stayed `COMPLETED`, the PnL dashboard reported
-   revenue that never arrived in the provider's wallet, and the error
-   log said "manual resolution required" as the design.
-2. **Reputation also corrupted** — `recordJobOutcome(success=true)` ran
-   before payment fired, so providers earned reputation for unpaid jobs.
-3. **Escrow released prematurely** — `markEscrowReleased` ran before
-   payment fired. Same fire-and-forget problem.
-
-**Fix shipped in PR #72:**
-- New `JobStatus` enum values: `PAYMENT_PENDING` and `PAYMENT_FAILED`.
-- Migration `0008_job_payment_status` (idempotent `ALTER TYPE ... ADD VALUE IF NOT EXISTS`).
-- Provider's `PATCH COMPLETED` on a rewarded job now sets `PAYMENT_PENDING`
-  and fires the payment. The status finalizes to `COMPLETED` (with
-  reputation + escrow release) only inside the payment promise's `.then`.
-  On payment failure → `PAYMENT_FAILED` and escrow refunded to requester.
-- Free jobs (no reward) still complete synchronously — no behavior change.
-- API contract unchanged: `VALID_TRANSITIONS` still exposes only
-  `COMPLETED`/`FAILED`/`CANCELLED` to clients. New states are system-only.
-
-**Full investigation + 3-phase plan documented at:**
-[`docs/project/issue-71-a2a-revenue-integrity.md`](docs/project/issue-71-a2a-revenue-integrity.md)
-(landed with PR #72).
-
-### 3. Landing site → polyrepo (not monorepo)
-
-Discovered mid-session: the working `agentfi-landing` Vercel project is
-connected to a **standalone repo**, not to this monorepo. The
-`packages/landing/` folder that had been added in PR #70 was redundant —
-duplicate code that wasn't even being deployed.
-
-**Decision (user-confirmed):** keep the polyrepo split. Static landing
-site rarely needs atomic changes with the backend, and keeping it out of
-the monorepo means landing edits don't trigger the full backend CI suite.
-Documented in HANDOFF.md §7 via PR #76, and saved as a memory entry so
-future agents don't re-attempt monorepo consolidation.
-
-### 4. Three follow-up tickets filed for Phase 1 gaps
-
-- [#73 — Stale PAYMENT_PENDING recovery worker (BullMQ)](https://github.com/felippeyann/agentfi/issues/73) — critical. Without this, a server crash between `PAYMENT_PENDING` and the payment promise resolving leaves jobs stuck forever.
-- [#74 — executeA2APayment idempotency (txIntentId)](https://github.com/felippeyann/agentfi/issues/74) — must ship before #73 to avoid double-spend on retry.
-- [#75 — Admin dashboard PAYMENT_PENDING/FAILED queues + reconcile UI](https://github.com/felippeyann/agentfi/issues/75) — operator-facing surfacing for the new states.
+**Backend env on Fly is currently `NODE_ENV=staging` + `WALLET_PROVIDER=local`** because Turnkey access was lost when the operator's old machine died. Real production demands switching to `WALLET_PROVIDER=turnkey` + 3 Turnkey keys. See "Operator pending tasks" below.
 
 ---
 
-## Open issues (post-session)
+## What's open (PRs and issues)
 
-- [#71](https://github.com/felippeyann/agentfi/issues/71) — parent issue. Phase 1 closed by #72; Phase 2 (revenue snapshots) and Phase 3 (PnL refactor) still pending. Plan in [`docs/project/issue-71-a2a-revenue-integrity.md`](docs/project/issue-71-a2a-revenue-integrity.md).
-- [#73](https://github.com/felippeyann/agentfi/issues/73), [#74](https://github.com/felippeyann/agentfi/issues/74), [#75](https://github.com/felippeyann/agentfi/issues/75) — Phase 1 follow-ups.
-- 10 dependabot PRs (#56–#65) untouched — usual triage; bullmq, viem, tailwind 4, typescript 6, etc.
+**Open PRs:** none merged in this session need attention. All 5 from this and prior session are merged: #70, #72, #76, #77, #78, #79, #80.
 
-## Manual tasks pending on the user
+**Open issues:**
 
-1. **Merge the 3 ready PRs** in order: #70 → #76 → #72.
-2. **Vercel `agentfi-landing` minor tweaks** (optional, captured in chat
-   history during this session): align Node.js version 24.x → 22.x to
-   match CI; add apex domain `agentfi.cc` (currently only `www.agentfi.cc`).
-3. **Standalone landing repo** — archive or delete it via GitHub UI if
-   you've decided the monorepo is dead for that surface (you have full
-   permission, I don't have access to repos outside `felippeyann/agentfi`).
-4. **Decide on the `feat/fly-io-deploy` branch:** open a PR when you want
-   to deploy backend to Fly.io, or delete the branch if you've moved
-   away from that hosting choice.
+- [#71](https://github.com/felippeyann/agentfi/issues/71) — A2A revenue integrity. Parent. Phase 1 (#72) shipped but turned out incomplete — see #81.
+- [#73](https://github.com/felippeyann/agentfi/issues/73) — Stale `PAYMENT_PENDING` recovery worker.
+- [#74](https://github.com/felippeyann/agentfi/issues/74) — `executeA2APayment` idempotency (must ship before #73).
+- [#75](https://github.com/felippeyann/agentfi/issues/75) — Admin dashboard reconcile UI for new payment states.
+- **[#81](https://github.com/felippeyann/agentfi/issues/81) — Phase 1 incomplete: `executeA2APayment` resolves on queue, not on chain confirmation.** Filed in this session after E2E validation revealed the bug. Highest priority next step — the BullMQ worker, not the request handler, should drive the Job lifecycle for paid A2A jobs.
+- 10 dependabot PRs (#56–#65) untouched.
+
+---
+
+## What happened this session (2026-05-04)
+
+### 1. Got the backend running on Fly.io (~3 hours of debugging)
+
+Multiple compounding issues discovered and fixed in commit `fbbaacf` (PR #80):
+
+1. **Dockerfile.backend deps stage** — `npm ci --workspace=packages/backend --include-workspace-root` was leaving some packages (`fastify-plugin`, etc.) in `packages/backend/node_modules/` instead of hoisting to `/app/node_modules`. Fix: copy ALL workspace package.jsons (admin, adapters, mcp-server) so npm sees the full graph, switch to plain `npm ci`, and copy BOTH node_modules paths in builder + runner stages.
+2. **fly.toml** — backend was booting against an empty Postgres because no migration mechanism existed. Added `[deploy] release_command = "npx prisma migrate deploy --schema=./src/db/schema.prisma"`. If migrations fail the deploy aborts cleanly.
+3. **Fastify v5 logger API change** — `Fastify({ logger: pinoInstance })` no longer works. v5 wants either a config object via `logger: {...}` or a pre-built instance via `loggerInstance`. We went with inline config matching `middleware/logger.ts`, sidestepping a TypeScript inference cascade that `loggerInstance` triggered.
+4. **Fly free trial 5-minute auto-stop** (without payment method). Operator added a credit card; allowance kicks in (no charge under free thresholds).
+5. **REDIS_URL was being corrupted by chat-paste artifacts** — Claude Code chat renders email-like strings (`token@host:port`) as markdown links `[text](mailto:...)`. The operator copied my generated URL and pasted, getting literal `[`, `]`, `(`, `mailto:` in the value. ioredis fell back to UNIX socket mode → `ENOENT`. Fix: never paste full URLs from chat; paste only the password and concatenate in PowerShell.
+
+### 2. Telegram channel validated end-to-end
+
+Created `@af_agentfi_bot` via `@BotFather`, added to a group called "agentfi", captured chat_id `-5083790936`, set `OPERATOR_TELEGRAM_BOT_TOKEN` + `OPERATOR_TELEGRAM_CHAT_ID` on Fly. Triggered a paid A2A job (Alice → Bob, 0.001 ETH) with stub Alchemy guaranteed to fail. Got a Telegram notification.
+
+### 3. Discovered #81 (the actual completion of Phase 1)
+
+The notification said "TRANSACTION_CONFIRMED" instead of "TRANSACTION_FAILED" because `executeA2APayment` resolves on enqueue, not on confirmation. Phase 1's premise was wrong. Job ended up `COMPLETED` despite the on-chain tx failing in BullMQ. Fix design captured in #81 — wire the transaction worker, not the request handler, to drive the Job lifecycle for paid A2A jobs.
+
+### 4. PRs landed this session
+
+Beyond the four merged in 2026-05-03 (#70, #76, #77, #72), this session merged:
+
+- **#79** — `feat/fly-io-deploy` (the original fly.toml + Dockerfile changes preserved during 2026-05-03 cleanup)
+- **#80** — `chore/dockerignore-for-fly` plus the three infra fixes from §1 above (Dockerfile.backend, fly.toml release_command, index.ts logger)
+
+The `feat/fly-io-deploy` and `chore/dockerignore-for-fly` branches are now deleted from origin.
+
+---
+
+## Operator pending tasks (next time you sit down)
+
+1. **Decide on Phase 1.5** ([#81](https://github.com/felippeyann/agentfi/issues/81)). The cleanest path is wiring the BullMQ worker to drive Job state for `metadata.a2aPayment === true` transactions. Estimate: 30–60 min coding + verification, depends on having Fly stack running so we can re-validate E2E.
+2. **Rotate exposed credentials** — both the Telegram bot token and the Upstash Redis password were pasted in this chat session's transcripts. After confirming Fly is healthy, rotate both via @BotFather (`/revoke`) and Upstash dashboard, then `flyctl secrets set` the new values.
+3. **Graduate to production-grade wallet provider** — currently `WALLET_PROVIDER=local` with `NODE_ENV=staging`. To run against real chains, regain Turnkey access (recovery flow on lost-device), set `TURNKEY_API_PUBLIC_KEY` / `TURNKEY_API_PRIVATE_KEY` / `TURNKEY_ORGANIZATION_ID`, replace `ALCHEMY_API_KEY` stub with a real key, then `flyctl secrets set NODE_ENV=production WALLET_PROVIDER=turnkey ...`.
+4. **Postgres auto-stop is annoying** — every cold deploy needs `flyctl machine start <id> --app agentfi-pg` first. Consider either (a) keeping `flyctl pg connect` open in a side terminal during ops, or (b) upgrading the Postgres machine config to `auto_stop_machines = false` if Fly allows that on the free tier.
+5. **Vercel landing tweaks** — Node.js version 24.x → 22.x to match CI; add apex domain `agentfi.cc` (currently only `www.agentfi.cc` is configured).
+6. **Standalone landing repo** — archive or delete via GitHub UI now that polyrepo decision is documented in HANDOFF.md §7.
+
+---
 
 ## Conventions reaffirmed this session
 
-- Force-pushing PR branches to clean up scope is fine when authorized;
-  always preserve dropped commits on a feature branch first
-  (`feat/fly-io-deploy` was preserved as a one-commit branch with
-  `git cherry-pick` on top of `main`).
-- Migrations are still hand-written. `0008_job_payment_status` follows
-  the existing `NNNN_name/migration.sql` pattern.
-- `Co-Authored-By:` footer on AI-assisted commits.
-- Don't add `packages/landing/` to this repo — see HANDOFF.md §7.
+- **Don't paste URLs containing `@` from this chat into commands** — Claude Code renders them as markdown links and the literal brackets/parens get into your value. Always paste tokens raw and concatenate.
+- **Fly free tier is free in name only** — without a payment method, machines die after 5 minutes. With a card on file, the free allowance is real (3 small VMs always-on). Add the card.
+- **CI green ≠ functionally validated** (HANDOFF.md §6.2) reaffirmed by #81 — Phase 1 typechecked and tested in unit tests but only end-to-end on a real Fly deploy revealed the lifecycle gap.
 
 ---
 
-*Last touch: 2026-05-03. Replace this header with the new session date when you update.*
+*Last touch: 2026-05-04. Replace this header with the new session date when you update.*
