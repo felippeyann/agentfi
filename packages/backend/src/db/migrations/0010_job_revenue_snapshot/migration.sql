@@ -1,0 +1,34 @@
+-- Migration: 0010_job_revenue_snapshot
+-- Purpose: Phase 2 of #71 — historical revenue integrity. Capture the USD
+--          value of an A2A reward at the exact moment of payment
+--          confirmation, so PnL reporting no longer re-prices completed
+--          jobs against live market data.
+--
+-- Why two columns instead of one:
+--   * rewardUsd        — total USD value of the reward at completion. This
+--                        is what PnLService sums into earnings/costs.
+--   * rewardPriceUsd   — price-per-token-unit at completion (e.g. ETH/USD).
+--                        Kept alongside rewardUsd so we can audit/reconstruct
+--                        the snapshot, and so a future tooling pass can
+--                        re-derive rewardUsd if reward.amount is ever
+--                        normalized.
+--
+-- NULL semantics:
+--   * NULL on a non-COMPLETED job is the normal case — no snapshot taken yet.
+--   * NULL on a COMPLETED job means the price oracle was unresolved at the
+--     moment of finalization (CoinGecko down, unknown token, etc.). The
+--     finalizer deliberately writes NULL rather than '0' so that PnLService
+--     can distinguish "snapshot unresolved → fall back to live pricing and
+--     emit a warning" from "snapshot is legitimately zero" (free job).
+--
+-- Backfill:
+--   No backfill in this migration. Historical COMPLETED jobs keep NULL
+--   snapshots and PnLService falls back to live pricing for them
+--   (preserving today's behavior). A separate one-shot script can
+--   backfill rewardUsd from the original reward + a historical price
+--   feed if desired — out of scope for this change.
+--
+-- Idempotent: IF NOT EXISTS guards keep this re-runnable in dev/CI.
+
+ALTER TABLE "Job" ADD COLUMN IF NOT EXISTS "rewardUsd" TEXT;
+ALTER TABLE "Job" ADD COLUMN IF NOT EXISTS "rewardPriceUsd" TEXT;

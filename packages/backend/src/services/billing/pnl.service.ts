@@ -17,15 +17,24 @@
  * Deferred to future:
  *   - Realized yield from DEPOSIT transactions (needs on-chain reads)
  *
- * USD conversion uses the same price oracle as the fee and escrow services.
- * On oracle failure, individual values are returned as '0' (graceful degradation).
+ * USD conversion (Phase 3 of #71):
+ *   - Per-job rewards prefer the `rewardUsd` snapshot persisted by the
+ *     finalizer at the moment the on-chain payment confirmed. Once written,
+ *     the historical revenue figure is locked — no longer affected by
+ *     subsequent token-price moves or oracle outages.
+ *   - When a COMPLETED job has no snapshot (oracle was unresolved at
+ *     finalization, or the row pre-dates this column), we fall back to
+ *     live pricing AND record a "snapshot unresolved" warning so the
+ *     dashboard can flag the row instead of silently zeroing it.
+ *   - Gas costs are still computed live — no snapshot needed because
+ *     gasUsed * effectiveGasPriceWei is denominated in wei, not USD.
  */
 
-import { parseEther, parseUnits } from 'viem';
 import type { PrismaClient } from '@prisma/client';
 import { db as defaultDb } from '../../db/client.js';
-import { weiToUsd, tokenAmountToUsd } from '../transaction/price.service.js';
+import { weiToUsd } from '../transaction/price.service.js';
 import { logger } from '../../api/middleware/logger.js';
+import { resolveRewardUsd, type RewardJson } from './reward-pricing.js';
 
 export interface PnLBreakdown {
   agentId: string;
@@ -48,34 +57,29 @@ export interface PnLBreakdown {
   notes: string[];
 }
 
-interface RewardJson {
-  amount?: string;
-  token?: string;
-  chainId?: number;
-}
-
 /**
- * Convert a reward spec to USD string. Returns '0' on any failure
- * (unknown token, price oracle error, malformed amount).
+ * Resolve a row's USD value: prefer the persisted snapshot, fall back to
+ * live pricing. Returns the USD figure plus whether the snapshot was used —
+ * the caller aggregates an "unresolved" count for the dashboard warning.
  */
-async function rewardToUsd(reward: RewardJson | null): Promise<string> {
-  if (!reward || !reward.amount) return '0';
-
-  const token = reward.token ?? 'ETH';
-  const chainId = reward.chainId ?? 1;
-  const isEth = token.toUpperCase() === 'ETH';
-
-  try {
-    if (isEth) {
-      const wei = parseEther(reward.amount);
-      return await weiToUsd(wei, chainId);
-    }
-    // Assume 6 decimals (USDC/USDT) as MVP fallback.
-    const units = parseUnits(reward.amount, 6);
-    return await tokenAmountToUsd(units, token, 6, chainId);
-  } catch {
-    return '0';
+async function rewardRowToUsd(row: {
+  reward: unknown;
+  rewardUsd: string | null;
+}): Promise<{ usd: number; usedSnapshot: boolean; resolved: boolean }> {
+  if (row.rewardUsd != null) {
+    const parsed = parseFloat(row.rewardUsd);
+    return {
+      usd: Number.isFinite(parsed) ? parsed : 0,
+      usedSnapshot: true,
+      resolved: true,
+    };
   }
+  const live = await resolveRewardUsd(row.reward as RewardJson | null);
+  return {
+    usd: parseFloat(live.usd),
+    usedSnapshot: false,
+    resolved: live.resolved,
+  };
 }
 
 export class PnLService {
@@ -114,13 +118,21 @@ export class PnLService {
         status: 'COMPLETED',
         updatedAt: { gte: periodStart },
       },
-      select: { reward: true },
+      select: { reward: true, rewardUsd: true },
     });
 
     let earningsUsd = 0;
+    let earningsSnapshotCount = 0;
+    let earningsLiveFallbackCount = 0;
+    let earningsUnresolvedCount = 0;
     for (const job of jobsAsProvider) {
-      const usd = await rewardToUsd(job.reward as RewardJson | null);
-      earningsUsd += parseFloat(usd);
+      const r = await rewardRowToUsd(job);
+      earningsUsd += r.usd;
+      if (r.usedSnapshot) earningsSnapshotCount++;
+      else {
+        earningsLiveFallbackCount++;
+        if (!r.resolved) earningsUnresolvedCount++;
+      }
     }
 
     // --- Costs: protocol fees paid ---
@@ -144,13 +156,21 @@ export class PnLService {
         status: 'COMPLETED',
         updatedAt: { gte: periodStart },
       },
-      select: { reward: true },
+      select: { reward: true, rewardUsd: true },
     });
 
     let rewardsPaidUsd = 0;
+    let costsSnapshotCount = 0;
+    let costsLiveFallbackCount = 0;
+    let costsUnresolvedCount = 0;
     for (const job of jobsAsRequester) {
-      const usd = await rewardToUsd(job.reward as RewardJson | null);
-      rewardsPaidUsd += parseFloat(usd);
+      const r = await rewardRowToUsd(job);
+      rewardsPaidUsd += r.usd;
+      if (r.usedSnapshot) costsSnapshotCount++;
+      else {
+        costsLiveFallbackCount++;
+        if (!r.resolved) costsUnresolvedCount++;
+      }
     }
 
     // --- Costs: gas burned on confirmed/reverted txs ---
@@ -192,6 +212,29 @@ export class PnLService {
     if (gasMissingCount > 0) {
       notes.push(
         `${gasMissingCount} tx(s) skipped in gas cost calc (missing gasUsed/effectiveGasPriceWei — likely pre-migration rows).`,
+      );
+    }
+
+    // Phase 3 of #71 — surface revenue-snapshot quality so the dashboard
+    // can flag rows the oracle couldn't price. We split between earnings
+    // and cost-as-requester sides because the same agent can be on either
+    // side of an oracle outage and we want both signals visible.
+    if (earningsLiveFallbackCount > 0) {
+      const tail =
+        earningsUnresolvedCount > 0
+          ? ` (${earningsUnresolvedCount} unresolved — counted as $0; figure may understate true revenue)`
+          : '';
+      notes.push(
+        `${earningsLiveFallbackCount} earning job(s) priced live (no stored snapshot)${tail}.`,
+      );
+    }
+    if (costsLiveFallbackCount > 0) {
+      const tail =
+        costsUnresolvedCount > 0
+          ? ` (${costsUnresolvedCount} unresolved — counted as $0; figure may understate true cost)`
+          : '';
+      notes.push(
+        `${costsLiveFallbackCount} cost-as-requester job(s) priced live (no stored snapshot)${tail}.`,
       );
     }
 
@@ -241,6 +284,12 @@ export class PnLService {
         agentId: agent.id,
         netPnlUsd: breakdown.netPnlUsd,
         profitable: breakdown.profitable,
+        earningsSnapshotCount,
+        earningsLiveFallbackCount,
+        earningsUnresolvedCount,
+        costsSnapshotCount,
+        costsLiveFallbackCount,
+        costsUnresolvedCount,
       },
       'Agent P&L computed',
     );

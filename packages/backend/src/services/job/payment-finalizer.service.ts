@@ -28,6 +28,7 @@ import {
   markEscrowReleased,
 } from '../policy/escrow.service.js';
 import { notificationService } from '../notification.service.js';
+import { resolveRewardUsd } from '../billing/reward-pricing.js';
 
 const reputationService = new ReputationService();
 
@@ -85,6 +86,21 @@ export async function finalizeA2APaymentJob(
   const providerName = job.provider?.name ?? job.providerId;
 
   if (outcome === 'CONFIRMED') {
+    // Phase 2 of #71 — capture the USD value of the reward at the moment
+    // of confirmation. Done BEFORE the status flip so it lands in the same
+    // write as `status: 'COMPLETED'`. If the price oracle is unresolved
+    // (CoinGecko down, unknown token, malformed amount), we deliberately
+    // leave the snapshot columns NULL rather than persisting '0' — that
+    // way PnLService can later distinguish "we never priced this" from
+    // "the reward was genuinely zero" (free job).
+    const snapshot = await resolveRewardUsd(reward);
+    if (!snapshot.resolved) {
+      logger.warn(
+        { jobId, transactionId, reward },
+        'A2A finalizer: reward price unresolved at confirmation — snapshot left NULL, PnL will fall back to live pricing',
+      );
+    }
+
     // Order matters (mirrors the FAILED branch below): perform side effects
     // first, flip the public Job status last. An observer polling between
     // writes sees either old (PAYMENT_PENDING + PENDING) or new
@@ -95,10 +111,19 @@ export async function finalizeA2APaymentJob(
     await reputationService.recordJobOutcome(job.providerId, true);
     await db.job.update({
       where: { id: jobId },
-      data: { status: 'COMPLETED' },
+      data: {
+        status: 'COMPLETED',
+        rewardUsd: snapshot.resolved ? snapshot.usd : null,
+        rewardPriceUsd: snapshot.resolved ? snapshot.priceUsd : null,
+      },
     });
     logger.info(
-      { jobId, transactionId },
+      {
+        jobId,
+        transactionId,
+        rewardUsd: snapshot.resolved ? snapshot.usd : null,
+        snapshotResolved: snapshot.resolved,
+      },
       'A2A finalizer: payment confirmed → COMPLETED',
     );
 

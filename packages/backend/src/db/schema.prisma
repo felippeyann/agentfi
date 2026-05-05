@@ -64,6 +64,12 @@ model Job {
   reservedAt        DateTime? // Reservation timestamp
   reservationStatus String?   // "PENDING" | "RELEASED" | "CANCELLED"
 
+  // Phase 2 of #71 — revenue snapshot captured at payment confirmation.
+  // NULL on a COMPLETED job ⇒ oracle was unresolved at finalization;
+  // PnLService falls back to live pricing and surfaces a warning.
+  rewardUsd      String?   // Total USD value of the reward at completion
+  rewardPriceUsd String?   // Price-per-token-unit at completion (e.g. ETH/USD)
+
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
