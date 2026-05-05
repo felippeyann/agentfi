@@ -15,6 +15,10 @@ import { mcpRoutes } from './api/routes/mcp.js';
 import { jobRoutes } from './api/routes/jobs.js';
 import { startTransactionWorker } from './queues/transaction.queue.js';
 import { startReputationWorker, scheduleReputationUpdate } from './queues/reputation.queue.js';
+import {
+  startPaymentRecoveryWorker,
+  schedulePaymentRecovery,
+} from './queues/payment-recovery.queue.js';
 
 // Fastify v5 expects a logger CONFIG object (not a pino instance). We pass
 // the same options that middleware/logger.ts uses for its standalone export,
@@ -129,11 +133,29 @@ async function start() {
     logger.error({ err }, 'Reputation worker failed to start');
   }
 
+  // Payment recovery cron worker (#73). Tied to TRANSACTION_WORKER_ENABLED
+  // because there's no point running recovery on a replica that doesn't also
+  // process transactions — both feed off the same Job/Transaction tables and
+  // the recovery logic is harmless to run on multiple replicas (idempotent),
+  // but pointless on replicas where the transaction worker is disabled.
+  let paymentRecoveryWorker:
+    | ReturnType<typeof startPaymentRecoveryWorker>
+    | undefined;
+  if (env.TRANSACTION_WORKER_ENABLED === 'true') {
+    try {
+      paymentRecoveryWorker = startPaymentRecoveryWorker();
+      await schedulePaymentRecovery();
+    } catch (err) {
+      logger.error({ err }, 'Payment recovery worker failed to start');
+    }
+  }
+
   // Graceful shutdown
   const shutdown = async () => {
     logger.info('Shutting down...');
     if (worker) await worker.close();
     if (reputationWorker) await reputationWorker.close();
+    if (paymentRecoveryWorker) await paymentRecoveryWorker.close();
     await fastify.close();
     process.exit(0);
   };
