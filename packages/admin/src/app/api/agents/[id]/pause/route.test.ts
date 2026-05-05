@@ -20,7 +20,7 @@ describe('admin agent pause route auth guard', () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
 
     const res = await POST(new Request('http://localhost/api/agents/test/pause'), {
-      params: { id: 'test-agent' },
+      params: Promise.resolve({ id: 'test-agent' }),
     });
     const body = (await res.json()) as { error: string };
 
@@ -42,7 +42,7 @@ describe('admin agent pause route auth guard', () => {
     );
 
     const res = await POST(new Request('http://localhost/api/agents/test/pause'), {
-      params: { id: 'test-agent' },
+      params: Promise.resolve({ id: 'test-agent' }),
     });
     const body = (await res.json()) as { success: boolean };
 
