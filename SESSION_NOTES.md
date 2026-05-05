@@ -1,138 +1,263 @@
-# Session Notes — 2026-05-03
+# Session Notes — 2026-05-05
 
 > Single-point handoff doc. Update on every substantive session, prune stale
 > sections aggressively. If this file is older than a few days when you read
 > it, trust `git log`, `gh pr list`, and `gh issue list` over the contents
-> here. See [project_agentfi.md memory](../.claude/projects/.../memory/project_agentfi.md)
-> for the convention.
+> here.
 
 ---
 
 ## Where we are right now
 
-**3 PRs ready to merge (all CI-green on required checks):**
+**Phase 1.5 of #71 is complete.** All four follow-ups (#81, #74, #73, #75)
+have shipped or are queued for merge. The end-to-end A2A revenue integrity
+chain works in production: paid jobs that fail on-chain settle correctly
+into `PAYMENT_FAILED` with escrow refunded, Telegram notifications fire,
+crashed mid-flight workers get reconciled by the recovery scan, and
+operators have a UI to triage anything that slips through.
 
-| PR | Title | Branch | What it does | Recommended merge order |
-| -- | ----- | ------ | ------------ | ----------------------- |
-| [#70](https://github.com/felippeyann/agentfi/pull/70) | `fix(backend): ADMIN_SECRET min-32 validation + Discord/Telegram operator notifications` | `fix/security-notifications` | Closes #68 (notifications) and #69 (security) | 1st |
-| [#76](https://github.com/felippeyann/agentfi/pull/76) | `docs(handoff): note landing site lives in a separate repo (polyrepo)` | `docs/handoff-landing-polyrepo` | Captures the polyrepo decision in HANDOFF.md §7 | 2nd |
-| [#72](https://github.com/felippeyann/agentfi/pull/72) | `fix(backend): A2A revenue integrity — Phase 1 (ghost completions)` | `fix/a2a-revenue-integrity` | Closes Phase 1 of #71 — adds `PAYMENT_PENDING`/`PAYMENT_FAILED` job states | 3rd |
+**3 PRs ready to merge (in order):**
 
-The `Vercel` check failing on each PR is the long-standing `agentfi-admin`
-preview deploy issue documented in HANDOFF §7 — not a required check, ignore.
+| PR | Title | Branch | Closes |
+|----|-------|--------|--------|
+| [#86](https://github.com/felippeyann/agentfi/pull/86) | `feat(backend): payment recovery worker for stale PAYMENT_PENDING (#73)` | `fix/issue-73-payment-recovery-worker` | #73 |
+| [#87](https://github.com/felippeyann/agentfi/pull/87) | `chore(scripts): commit E2E regression script for issue #81` | `chore/commit-e2e-issue-81-script` | — |
+| [#88](https://github.com/felippeyann/agentfi/pull/88) | `feat(admin): PAYMENT_PENDING/FAILED queue + reconcile UI (#75)` | `feat/issue-75-payment-pending-admin-ui` | #75 |
 
-**1 preserved branch — not yet a PR:**
+After merging all three: **#71 itself can be closed**. Phase 2 (revenue
+snapshots) and Phase 3 (PnLService refactor) remain as the next work, but
+they're independent — separate tickets when you're ready.
 
-- `feat/fly-io-deploy` — single commit (Fly.io config: `fly.toml` + `Dockerfile.backend` PORT env). Cherry-picked clean from a previous attempt that got pulled out of PR #70 during scope cleanup. Open a PR from this when you decide to deploy backend on Fly.io. Until then, no action needed.
+CI checks failing on these PRs:
+- **Foundry Tests** on #86: infra flake (`foundryup: failed to fetch
+  releases from GitHub API`). Not code-related — the contracts didn't
+  change. Will pass on retry.
+- **Vercel `agentfi-admin` preview**: standing flake from HANDOFF §7.
+  PR #88 fixes 3 of the 4 broken admin route handlers (Next.js 14→15
+  params signature). The last remaining issue is `/login` using
+  `useSearchParams` without a Suspense boundary — pre-existing, out of
+  scope for #75. After that's fixed, the Vercel admin preview will go
+  green for the first time in a while.
 
 ---
 
-## What changed this session (2026-05-03)
+## What changed this session (2026-05-04 → 2026-05-05)
 
-### 1. CI rescue on PR #70 (force-pushed clean)
+### 1. Issue #81 closed — A2A Job lifecycle (PR #83, merged)
 
-PR #70 had grown to 5 commits across 3 unrelated scopes (security fix +
-landing page + Fly.io infra). CI was red. After investigation:
+**Discovery:** post-PR-#72 E2E on Fly with stub Alchemy revealed that
+the Phase 1 fix was incomplete. `executeA2APayment` resolves on
+**queue**, not on chain confirmation, so the `.then(...)` in `jobs.ts`
+ran immediately after enqueue and finalized the Job before the worker
+had even broadcast. Result: `Job → COMPLETED` + `reservationStatus →
+RELEASED` + Telegram `TRANSACTION_CONFIRMED` for a tx that genuinely
+failed on-chain.
 
-- Root cause of CI red: the landing commit added `@agentfi/landing` as a
-  workspace but didn't regenerate `package-lock.json`, so `npm ci` failed
-  on every Linux job.
-- Latent bug found: the `e2e-test` job in `ci.yml` had `ADMIN_SECRET: e2e-admin-secret`
-  (16 chars), which violated the new `z.string().min(32)` validator
-  introduced by the security commit itself. Survived only because
-  `continue-on-error: true` masked it.
+**Fix:** Transaction worker (`queues/transaction.queue.ts`) is now the
+**single source of truth** for paid A2A Job finalization.
 
-**Cleanup performed (force-push authorized):**
-- Reset `fix/security-notifications` to a clean state with 2 commits:
-  the original security fix + a focused `fix(ci)` commit that only
-  lengthens the e2e ADMIN_SECRET to 32 chars.
-- Landing commit dropped (decision was polyrepo — see §3 below).
-- Fly.io commit preserved on the `feat/fly-io-deploy` branch isolated
-  from main.
-- `deploy/landing` branch deleted from origin (was a duplicate of the
-  landing content already in the cleaned-up PR #70).
+- New `services/job/payment-finalizer.service.ts` —
+  `finalizeA2APaymentJob({jobId, transactionId, outcome, reason})`,
+  idempotent (no-op when Job is not in `PAYMENT_PENDING`).
+- Worker calls finalizer after `monitor.waitForConfirmation` (CONFIRMED
+  → COMPLETED, REVERTED/timeout-FAILED → PAYMENT_FAILED).
+- Worker `on('failed')` handler also calls finalizer for broadcast-time
+  failures (estimateGas, RPC reject) — without this, BullMQ exhausting
+  retries would strand the Job.
+- `jobs.ts` PATCH COMPLETED dropped its `.then()` chain and kept only a
+  `.catch` for synchronous pre-queue failures (auth/policy/sim).
 
-### 2. Issue #71 — Phase 1 of A2A revenue integrity
+### 2. Issue #74 closed — Idempotency via `intentId` (PR #84, merged)
 
-Investigation found three coupled bugs in
-[`packages/backend/src/api/routes/jobs.ts`](packages/backend/src/api/routes/jobs.ts):
+**Why:** the recovery worker (#73) and any manual re-trigger of
+`executeA2APayment` could double-spend if the original tx was mined
+but the response was lost. There was no way for a second call to
+recognize the first call's outcome.
 
-1. **Ghost completions** — `executeA2APayment(...)` was called fire-and-forget
-   AFTER the job was already updated to `COMPLETED`. If the on-chain
-   transfer failed, the job stayed `COMPLETED`, the PnL dashboard reported
-   revenue that never arrived in the provider's wallet, and the error
-   log said "manual resolution required" as the design.
-2. **Reputation also corrupted** — `recordJobOutcome(success=true)` ran
-   before payment fired, so providers earned reputation for unpaid jobs.
-3. **Escrow released prematurely** — `markEscrowReleased` ran before
-   payment fired. Same fire-and-forget problem.
+**Fix:** added a deterministic system-supplied idempotency key on the
+`Transaction` table, separate from the existing per-agent
+`idempotencyKey`.
 
-**Fix shipped in PR #72:**
-- New `JobStatus` enum values: `PAYMENT_PENDING` and `PAYMENT_FAILED`.
-- Migration `0008_job_payment_status` (idempotent `ALTER TYPE ... ADD VALUE IF NOT EXISTS`).
-- Provider's `PATCH COMPLETED` on a rewarded job now sets `PAYMENT_PENDING`
-  and fires the payment. The status finalizes to `COMPLETED` (with
-  reputation + escrow release) only inside the payment promise's `.then`.
-  On payment failure → `PAYMENT_FAILED` and escrow refunded to requester.
-- Free jobs (no reward) still complete synchronously — no behavior change.
-- API contract unchanged: `VALID_TRANSITIONS` still exposes only
-  `COMPLETED`/`FAILED`/`CANCELLED` to clients. New states are system-only.
+- Migration `0009_transaction_intent_id` — adds nullable `Transaction.
+  intentId TEXT` plus a global UNIQUE INDEX. Postgres `NULLS DISTINCT`
+  default keeps the constraint workable for non-A2A txs.
+- `executeA2APayment` accepts optional `intentId`. Cheap indexed lookup
+  before any policy/sim/oracle work; on hit, returns the existing
+  `{transactionId, status}` immediately. The `db.transaction.create()`
+  is wrapped in a try/catch for `P2002` on `intentId` so a concurrency
+  race resolves cleanly to whichever row won the constraint.
+- `jobs.ts` passes ``intentId: `a2a-payment:${job.id}` ``.
 
-**Full investigation + 3-phase plan documented at:**
-[`docs/project/issue-71-a2a-revenue-integrity.md`](docs/project/issue-71-a2a-revenue-integrity.md)
-(landed with PR #72).
+### 3. PR #85 (merged) — Notification visibility + finalizer race
 
-### 3. Landing site → polyrepo (not monorepo)
+Surfaced during the post-#83 E2E validation pass. Two issues, fixed
+together because they were both caught in the same test session and
+both small.
 
-Discovered mid-session: the working `agentfi-landing` Vercel project is
-connected to a **standalone repo**, not to this monorepo. The
-`packages/landing/` folder that had been added in PR #70 was redundant —
-duplicate code that wasn't even being deployed.
+**A. Silent notification failures.** `sendTelegram` /
+`sendDiscord` / `sendGenericWebhook` only `await fetch(...)`, never
+checked `res.ok`. A 4xx/5xx silently resolved the fetch, the `.catch`
+wrapper in `notify()` never fired, no warn log landed. **This is
+exactly how the empty-env Telegram outage stayed undetected through
+two full E2E runs.** Cost ~1h of debug.
 
-**Decision (user-confirmed):** keep the polyrepo split. Static landing
-site rarely needs atomic changes with the backend, and keeping it out of
-the monorepo means landing edits don't trigger the full backend CI suite.
-Documented in HANDOFF.md §7 via PR #76, and saved as a memory entry so
-future agents don't re-attempt monorepo consolidation.
+Fix: extracted `fetchAndAssertOk` helper that throws on non-2xx with
+the response body included. Now any HTTP-level failure produces a
+loud `Failed to send <channel> notification` log.
 
-### 4. Three follow-up tickets filed for Phase 1 gaps
+Also added a `Notification channels resolved` debug log listing
+`{enabled, skipped}` channels per dispatch — makes "env var unset" vs
+"delivery failed" trivially distinguishable.
 
-- [#73 — Stale PAYMENT_PENDING recovery worker (BullMQ)](https://github.com/felippeyann/agentfi/issues/73) — critical. Without this, a server crash between `PAYMENT_PENDING` and the payment promise resolving leaves jobs stuck forever.
-- [#74 — executeA2APayment idempotency (txIntentId)](https://github.com/felippeyann/agentfi/issues/74) — must ship before #73 to avoid double-spend on retry.
-- [#75 — Admin dashboard PAYMENT_PENDING/FAILED queues + reconcile UI](https://github.com/felippeyann/agentfi/issues/75) — operator-facing surfacing for the new states.
+Switched **Telegram from `parse_mode=Markdown` to `parse_mode=HTML`**
+with proper entity escaping. Markdown silently corrupts on any
+unmatched `_`/`*`/`` ` `` in dynamic content (e.g. `eth_estimateGas`
+in error messages, contract addresses); HTML mode only needs `&<>`
+escaped.
+
+**B. Finalizer write race.** `payment-finalizer.service.ts` flipped
+the public Job status (`COMPLETED` / `PAYMENT_FAILED`) BEFORE writing
+side effects (escrow refund/release, reputation). Observers polling
+between writes saw `PAYMENT_FAILED + reservationStatus PENDING` —
+exactly the "ghost completion" intermediate that #81 was meant to
+eliminate. Surfaced live in the second post-#83 E2E run.
+
+Fix: side effects first, status last on both branches. Old or new
+state is observable, never an inconsistent intermediate.
+
+### 4. Telegram outage debug + production env-var hygiene
+
+Long detour during E2E validation: notifications weren't arriving
+even though the manual SSH `wget /sendMessage` worked. Diagnosis
+chain:
+
+1. **Bot token + chat_id valid** (manual ping arrived in the
+   `agentfi` group on Telegram).
+2. **Backend logs showed `[Notification] TRANSACTION_FAILED`** but no
+   `Failed to send Telegram` warn (because of the silent-failure bug
+   above — fixed in #85).
+3. **`/proc/<pid>/environ` probe of the running Node process showed
+   `OPERATOR_TELEGRAM_BOT_TOKEN` length=0**, while a freshly SSH-spawned
+   Node could read it. Smoking gun: env var was in `flyctl secrets`
+   metadata but never injected into the running container.
+4. `flyctl secrets unset` + re-`set` cycle finally re-injected it.
+   Even then, the user's first re-set used a 44-char value (should
+   be 46) — token was truncated in copy/paste. Once corrected via
+   re-set with the full token, **everything worked end to end**:
+   `[Notification] TRANSACTION_FAILED` → fetch to Telegram → message
+   delivered with HTML formatting.
+
+**Lesson captured:** `flyctl secrets set` over an existing key
+sometimes doesn't actually re-inject into the running container.
+Safer pattern when in doubt: `flyctl secrets unset X && flyctl
+secrets set X=...`.
+
+### 5. Issue #73 in flight — Recovery worker (PR #86)
+
+BullMQ repeatable job (`payment-recovery-scan`), every 2 min,
+scans Job rows where `status='PAYMENT_PENDING'` AND `updatedAt < now()
+- 5 min`. For each stale row:
+
+- Look up Transaction by ``intentId='a2a-payment:<jobId>'`` (single
+  indexed lookup).
+- Tx CONFIRMED → finalizer(CONFIRMED).
+- Tx REVERTED/FAILED → finalizer(FAILED) + refund.
+- Tx QUEUED/SUBMITTED/PENDING_APPROVAL → leave alone (in-flight).
+- No Tx → orphan, finalizer(FAILED) refund.
+
+Idempotency rests on the three pillars from earlier PRs (intentId
+short-circuit, finalizer no-op guard, refund-then-flip ordering). No
+new logic needed.
+
+Tied to `TRANSACTION_WORKER_ENABLED` so disabled replicas don't run
+it. Per-job log lines + structured summary `{scanned,
+finalizedConfirmed, finalizedFailed, refundedOrphan, stillInFlight}`
+every tick.
+
+### 6. Issue #75 in flight — Admin UI (PR #88)
+
+Backend:
+- `GET /admin/jobs?status=&limit=` — filtered list with requester/
+  provider names.
+- `POST /admin/jobs/:id/reconcile` body `{action, reason}` —
+  `force_completed` / `force_failed`. Refund-then-flip ordering.
+  `reason` (≥3 chars) lands in structured logger as the audit trail.
+  No separate `JobAuditLog` table for now.
+- `/admin/stats` extended with `paymentPending`, `paymentFailed`,
+  `stalePaymentPending` (>5 min, same threshold as recovery worker).
+
+Frontend (Next.js 15 / app router):
+- Sidebar: new "Jobs" link.
+- Dashboard: alert banner + 3 new StatCards.
+- `/jobs` page: list with filter chips (alert chips for the two
+  payment states get yellow styling).
+- `/jobs/[id]` detail page: full inspection + `JobReconcileActions`
+  client component (two-step UX: button → reason textarea → confirm).
+- BFF proxy at `/api/admin/jobs/[id]/reconcile` so `ADMIN_SECRET`
+  doesn't leak to the browser.
+
+Drive-by fix: 3 existing admin route handlers (`/api/agents/[id]/
+pause`, `/api/transactions/[id]/approve`, `/api/transactions/[id]/
+reject`) were using the Next.js 14 sync `params` shape. Bumped them
+all to the v15 `Promise<{...}>` contract. With these fixed, only the
+`/login` Suspense issue remains as the standing Vercel admin
+preview blocker.
+
+### 7. PR #87 — E2E regression script committed
+
+`scripts/e2e-issue-81.mjs` was untracked but used live during the
+post-#83 validation. **Caught two real production bugs in the same
+session** (the silent Telegram + the finalizer race — both fixed in
+#85). Worth committing as a permanent regression fixture so the next
+PR touching the payment path runs a 30s sanity check before merging.
 
 ---
 
 ## Open issues (post-session)
 
-- [#71](https://github.com/felippeyann/agentfi/issues/71) — parent issue. Phase 1 closed by #72; Phase 2 (revenue snapshots) and Phase 3 (PnL refactor) still pending. Plan in [`docs/project/issue-71-a2a-revenue-integrity.md`](docs/project/issue-71-a2a-revenue-integrity.md).
-- [#73](https://github.com/felippeyann/agentfi/issues/73), [#74](https://github.com/felippeyann/agentfi/issues/74), [#75](https://github.com/felippeyann/agentfi/issues/75) — Phase 1 follow-ups.
-- 10 dependabot PRs (#56–#65) untouched — usual triage; bullmq, viem, tailwind 4, typescript 6, etc.
+- [#71](https://github.com/felippeyann/agentfi/issues/71) — parent.
+  Phase 1.5 fully complete after #86 + #75 land. **Close after merge**
+  in favor of separate Phase 2 (revenue snapshots) and Phase 3 (PnL
+  refactor) tickets.
+- 10 dependabot PRs (#56–#65) untouched — usual triage; bullmq, viem,
+  tailwind 4, typescript 6, etc.
 
 ## Manual tasks pending on the user
 
-1. **Merge the 3 ready PRs** in order: #70 → #76 → #72.
-2. **Vercel `agentfi-landing` minor tweaks** (optional, captured in chat
-   history during this session): align Node.js version 24.x → 22.x to
-   match CI; add apex domain `agentfi.cc` (currently only `www.agentfi.cc`).
-3. **Standalone landing repo** — archive or delete it via GitHub UI if
-   you've decided the monorepo is dead for that surface (you have full
-   permission, I don't have access to repos outside `felippeyann/agentfi`).
-4. **Decide on the `feat/fly-io-deploy` branch:** open a PR when you want
-   to deploy backend to Fly.io, or delete the branch if you've moved
-   away from that hosting choice.
+1. **Merge the 3 ready PRs in order:** #86 → #87 → #88. (#87 has zero
+   risk, can go anywhere in the order.)
+2. **`flyctl deploy`** after #86 merges so the recovery worker starts
+   on the production machine. After that, watch for `Payment recovery
+   scan scheduled` then `Payment recovery scan completed` log lines
+   every 2 min.
+3. **Close #71** once #86 + #75 land. The four sub-issues (#81, #74,
+   #73, #75) close automatically via the `Closes #N` lines in their PRs.
+4. **(Optional)** Fix the `/login` `useSearchParams` Suspense issue to
+   fully unbreak the Vercel admin preview — separate small PR.
+5. **(Optional)** Run the synthetic crash-recovery test described in
+   #86's test plan to verify the recovery worker end-to-end with a
+   real machine restart mid-flight.
 
 ## Conventions reaffirmed this session
 
-- Force-pushing PR branches to clean up scope is fine when authorized;
-  always preserve dropped commits on a feature branch first
-  (`feat/fly-io-deploy` was preserved as a one-commit branch with
-  `git cherry-pick` on top of `main`).
-- Migrations are still hand-written. `0008_job_payment_status` follows
-  the existing `NNNN_name/migration.sql` pattern.
-- `Co-Authored-By:` footer on AI-assisted commits.
-- Don't add `packages/landing/` to this repo — see HANDOFF.md §7.
+- **CI green ≠ functionally validated.** Reaffirmed twice. The
+  `e2e-issue-81.mjs` script (now in #87) is the antidote — keep
+  similar scripts for any payment-path changes.
+- **Notification fire-and-forget needs `res.ok` check.** Silent
+  fetch failures are the worst kind of bug — appear as "everything
+  works" until someone notices missing messages downstream. Pattern
+  is now codified in the `fetchAndAssertOk` helper.
+- **Refund-then-flip ordering** in any state-finalizer that does
+  multiple writes. Public status flip last so observers never see
+  inconsistent intermediate state.
+- **Fly secrets gotcha**: `flyctl secrets set` over an existing key
+  doesn't always re-inject into the running container. When in doubt,
+  `unset` + `set` cycle.
+- **Worktree hygiene**: still using `git worktree add ../agentfi-<topic>`
+  for parallel work. Worked smoothly through 4 concurrent worktrees this
+  session (fix-81, fix-74, fix-notify, fix-73, fix-75).
 
 ---
 
-*Last touch: 2026-05-03. Replace this header with the new session date when you update.*
+*Last touch: 2026-05-05 (autonomous session). Replace this header with
+the new session date when you update.*
