@@ -217,6 +217,10 @@ export async function jobRoutes(fastify: FastifyInstance) {
         token,
         chainId,
         jobId: job.id,
+        // Issue #74: deterministic key keyed on jobId. The recovery worker
+        // (#73) re-invokes with the same key after a crash and gets back
+        // the original tx instead of double-spending.
+        intentId: `a2a-payment:${job.id}`,
       })
         .then((result) => {
           // Tx queued (or PENDING_APPROVAL) — the worker now owns the Job
