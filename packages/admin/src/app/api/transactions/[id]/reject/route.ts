@@ -5,10 +5,11 @@ const ADMIN_SECRET = process.env['ADMIN_SECRET'] ?? '';
 
 export async function POST(
   request: Request,
-  { params }: { params: { id: string } }
+  context: { params: Promise<{ id: string }> },
 ) {
+  const { id } = await context.params;
   try {
-    const res = await fetch(`${API_URL}/admin/transactions/${params.id}/reject`, {
+    const res = await fetch(`${API_URL}/admin/transactions/${id}/reject`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
