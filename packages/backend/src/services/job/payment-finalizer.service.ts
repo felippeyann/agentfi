@@ -85,14 +85,18 @@ export async function finalizeA2APaymentJob(
   const providerName = job.provider?.name ?? job.providerId;
 
   if (outcome === 'CONFIRMED') {
+    // Order matters (mirrors the FAILED branch below): perform side effects
+    // first, flip the public Job status last. An observer polling between
+    // writes sees either old (PAYMENT_PENDING + PENDING) or new
+    // (COMPLETED + RELEASED) state — never an inconsistent intermediate.
+    if (job.reservationStatus === 'PENDING') {
+      await markEscrowReleased(jobId);
+    }
+    await reputationService.recordJobOutcome(job.providerId, true);
     await db.job.update({
       where: { id: jobId },
       data: { status: 'COMPLETED' },
     });
-    await reputationService.recordJobOutcome(job.providerId, true);
-    if (job.reservationStatus === 'PENDING') {
-      await markEscrowReleased(jobId);
-    }
     logger.info(
       { jobId, transactionId },
       'A2A finalizer: payment confirmed → COMPLETED',
@@ -124,14 +128,23 @@ export async function finalizeA2APaymentJob(
   }
 
   // outcome === 'FAILED'
+  // Order matters: refund the escrow FIRST, then flip the Job status. The
+  // Job status (`PAYMENT_FAILED`) is the public signal everyone polls on
+  // (admin dashboard, requester UI, automated tests). If we flipped status
+  // first and then refunded, an observer polling between the two writes
+  // would see `PAYMENT_FAILED` + `reservationStatus: PENDING` — which is
+  // exactly the "ghost completion" symptom #81 was meant to eliminate.
+  // By doing the refund first, any in-flight observer either sees the old
+  // (`PAYMENT_PENDING` + `PENDING`) or the new (`PAYMENT_FAILED` + `CANCELLED`)
+  // state — never an inconsistent intermediate.
   try {
+    if (job.reservationStatus === 'PENDING') {
+      await releaseJobEscrow(jobId);
+    }
     await db.job.update({
       where: { id: jobId },
       data: { status: 'PAYMENT_FAILED' },
     });
-    if (job.reservationStatus === 'PENDING') {
-      await releaseJobEscrow(jobId);
-    }
   } catch (recoveryErr) {
     logger.error(
       {
