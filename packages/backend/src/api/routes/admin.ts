@@ -144,6 +144,12 @@ export async function adminRoutes(fastify: FastifyInstance) {
     todayDate.setHours(0, 0, 0, 0);
     const todayStr = todayDate.toISOString().slice(0, 10);
 
+    // Stale PAYMENT_PENDING threshold mirrors the recovery worker's default
+    // (5 min). Anything sitting in PAYMENT_PENDING longer than that is a
+    // candidate for the recovery scan and worth surfacing on the dashboard
+    // as an at-a-glance health signal — see #73 / #75.
+    const stalePaymentPendingCutoff = new Date(Date.now() - 5 * 60 * 1000);
+
     const [
       activeAgents,
       totalTransactions,
@@ -151,6 +157,9 @@ export async function adminRoutes(fastify: FastifyInstance) {
       failedToday,
       feeEvents,
       dailyVolumes,
+      paymentPending,
+      paymentFailed,
+      stalePaymentPending,
     ] = await Promise.all([
       db.agent.count({ where: { active: true } }),
       db.transaction.count(),
@@ -167,6 +176,14 @@ export async function adminRoutes(fastify: FastifyInstance) {
       db.dailyVolume.findMany({
         where: { date: todayStr },
         select: { volumeUsd: true },
+      }),
+      db.job.count({ where: { status: 'PAYMENT_PENDING' } }),
+      db.job.count({ where: { status: 'PAYMENT_FAILED' } }),
+      db.job.count({
+        where: {
+          status: 'PAYMENT_PENDING',
+          updatedAt: { lt: stalePaymentPendingCutoff },
+        },
       }),
     ]);
 
@@ -185,6 +202,9 @@ export async function adminRoutes(fastify: FastifyInstance) {
       failedToday,
       volumeToday,
       totalFeesUsd,
+      paymentPending,
+      paymentFailed,
+      stalePaymentPending,
     };
   });
 
@@ -234,6 +254,158 @@ export async function adminRoutes(fastify: FastifyInstance) {
       });
 
       return { transactions };
+    },
+  );
+
+  /**
+   * GET /admin/jobs — global Job log with optional status filter.
+   * Issue #75: surfaces PAYMENT_PENDING / PAYMENT_FAILED queues operators
+   * previously had to query the DB directly to find.
+   */
+  fastify.get('/admin/jobs', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+    const query = request.query as { limit?: string; status?: string };
+    const limit = Math.min(parseInt(query.limit ?? '50'), 200);
+
+    const jobs = await db.job.findMany({
+      ...(query.status ? { where: { status: query.status as any } } : {}),
+      orderBy: { updatedAt: 'desc' },
+      take: limit,
+      include: {
+        requester: { select: { id: true, name: true } },
+        provider: { select: { id: true, name: true } },
+      },
+    });
+
+    return { jobs };
+  });
+
+  /**
+   * POST /admin/jobs/:id/reconcile — manual reconciliation for stuck/failed jobs.
+   * Issue #75: gives operators the "Force COMPLETED" / "Force FAILED + Refund"
+   * escape hatches for cases the recovery worker can't resolve automatically
+   * (operator manually verified payment off-system, etc.).
+   *
+   * Action semantics:
+   *   - force_completed: Job → COMPLETED, escrow marked RELEASED, reputation
+   *     awarded. Use when payment has been verified through other means.
+   *   - force_failed:    Job → PAYMENT_FAILED, escrow refunded to requester.
+   *     Use when a stuck PAYMENT_PENDING is confirmed never to settle.
+   *
+   * Audit trail lands in the structured logger output (operator-facing log
+   * shipping captures it). For now we don't persist a separate JobAuditLog
+   * table — the structured logs are the audit trail.
+   */
+  const reconcileSchema = z.object({
+    action: z.enum(['force_completed', 'force_failed']),
+    reason: z.string().min(3).max(500),
+  });
+
+  fastify.post<{ Params: { id: string } }>(
+    '/admin/jobs/:id/reconcile',
+    async (request, reply) => {
+      if (!requireAdmin(request, reply)) return;
+
+      const parsed = reconcileSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({
+          error: 'Invalid request body',
+          details: parsed.error.flatten().fieldErrors,
+        });
+      }
+      const { action, reason } = parsed.data;
+
+      const job = await db.job.findUnique({
+        where: { id: request.params.id },
+        select: {
+          id: true,
+          status: true,
+          providerId: true,
+          requesterId: true,
+          reservationStatus: true,
+          reward: true,
+        },
+      });
+      if (!job) return reply.code(404).send({ error: 'Job not found' });
+
+      // Only allow reconcile on payment-state jobs to avoid accidental
+      // overrides on healthy lifecycle states (PENDING/ACCEPTED/COMPLETED/etc).
+      if (job.status !== 'PAYMENT_PENDING' && job.status !== 'PAYMENT_FAILED') {
+        return reply.code(409).send({
+          error: `Job is in ${job.status} status; reconcile only valid for PAYMENT_PENDING / PAYMENT_FAILED.`,
+        });
+      }
+
+      // Refund-then-flip ordering, mirroring the finalizer (#85 lesson) so
+      // any concurrent observer sees a consistent state.
+      try {
+        if (action === 'force_completed') {
+          if (job.reservationStatus === 'PENDING') {
+            // Mark as RELEASED (consumed by payment), don't refund — operator
+            // claims payment happened off-system.
+            await db.job.update({
+              where: { id: job.id },
+              data: { reservationStatus: 'RELEASED' },
+            });
+          }
+          await reputationService.recordJobOutcome(job.providerId, true);
+          await db.job.update({
+            where: { id: job.id },
+            data: { status: 'COMPLETED' },
+          });
+        } else {
+          // force_failed
+          if (job.reservationStatus === 'PENDING') {
+            // Refund: same path as releaseJobEscrow used by the automated
+            // finalizer. We use the existing helper so DailyVolume is
+            // adjusted consistently.
+            const { releaseJobEscrow } = await import(
+              '../../services/policy/escrow.service.js'
+            );
+            await releaseJobEscrow(job.id);
+          }
+          await db.job.update({
+            where: { id: job.id },
+            data: { status: 'PAYMENT_FAILED' },
+          });
+        }
+      } catch (err) {
+        logger.error(
+          {
+            jobId: job.id,
+            action,
+            reason,
+            err: (err as Error)?.message ?? String(err),
+          },
+          'Admin reconcile failed mid-write — manual DB inspection required',
+        );
+        return reply.code(500).send({
+          error: 'Reconcile failed mid-write; check server logs.',
+        });
+      }
+
+      logger.warn(
+        {
+          adminAction: 'job_reconcile',
+          jobId: job.id,
+          action,
+          reason,
+          previousStatus: job.status,
+          providerId: job.providerId,
+          requesterId: job.requesterId,
+          // request.ip captures origin IP but operator identity beyond
+          // ADMIN_SECRET-holder isn't tracked yet (no per-operator auth).
+          remoteIp: request.ip,
+        },
+        'Admin manually reconciled a payment job',
+      );
+
+      return {
+        jobId: job.id,
+        previousStatus: job.status,
+        newStatus: action === 'force_completed' ? 'COMPLETED' : 'PAYMENT_FAILED',
+        reservationStatus: action === 'force_completed' ? 'RELEASED' : 'CANCELLED',
+      };
     },
   );
 
