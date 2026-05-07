@@ -1,4 +1,4 @@
-# Session Notes — 2026-05-05
+# Session Notes — 2026-05-07
 
 > Single-point handoff doc. Update on every substantive session, prune stale
 > sections aggressively. If this file is older than a few days when you read
@@ -9,255 +9,157 @@
 
 ## Where we are right now
 
-**Phase 1.5 of #71 is complete.** All four follow-ups (#81, #74, #73, #75)
-have shipped or are queued for merge. The end-to-end A2A revenue integrity
-chain works in production: paid jobs that fail on-chain settle correctly
-into `PAYMENT_FAILED` with escrow refunded, Telegram notifications fire,
-crashed mid-flight workers get reconciled by the recovery scan, and
-operators have a UI to triage anything that slips through.
+**#71 is now fully closed end-to-end.** Phase 1.5 landed last session
+(#83/#84/#85/#86/#87/#88/#89). Phase 2 (revenue snapshots) and Phase 3
+(PnLService refactor) shipped together this session as PR **#90**, which
+is **green on every check** (Backend Tests, Lint & Type Check, E2E,
+Foundry, OpenAPI, Admin Tests, Vercel preview, Railway).
 
-**3 PRs ready to merge (in order):**
+The historical-integrity gap that motivated the original #71
+investigation is closed: completed jobs no longer re-price against live
+market data on every PnL load, and oracle outages can't silently zero
+out historical revenue.
 
-| PR | Title | Branch | Closes |
-|----|-------|--------|--------|
-| [#86](https://github.com/felippeyann/agentfi/pull/86) | `feat(backend): payment recovery worker for stale PAYMENT_PENDING (#73)` | `fix/issue-73-payment-recovery-worker` | #73 |
-| [#87](https://github.com/felippeyann/agentfi/pull/87) | `chore(scripts): commit E2E regression script for issue #81` | `chore/commit-e2e-issue-81-script` | — |
-| [#88](https://github.com/felippeyann/agentfi/pull/88) | `feat(admin): PAYMENT_PENDING/FAILED queue + reconcile UI (#75)` | `feat/issue-75-payment-pending-admin-ui` | #75 |
+**1 PR ready to merge:**
 
-After merging all three: **#71 itself can be closed**. Phase 2 (revenue
-snapshots) and Phase 3 (PnLService refactor) remain as the next work, but
-they're independent — separate tickets when you're ready.
-
-CI checks failing on these PRs:
-- **Foundry Tests** on #86: infra flake (`foundryup: failed to fetch
-  releases from GitHub API`). Not code-related — the contracts didn't
-  change. Will pass on retry.
-- **Vercel `agentfi-admin` preview**: standing flake from HANDOFF §7.
-  PR #88 fixes 3 of the 4 broken admin route handlers (Next.js 14→15
-  params signature). The last remaining issue is `/login` using
-  `useSearchParams` without a Suspense boundary — pre-existing, out of
-  scope for #75. After that's fixed, the Vercel admin preview will go
-  green for the first time in a while.
+| PR | Title | Branch |
+|----|-------|--------|
+| [#90](https://github.com/felippeyann/agentfi/pull/90) | `feat(backend): revenue snapshots + PnL refactor (Phase 2/3 of #71)` | `feat/issue-71-phase-2-revenue-snapshots` |
 
 ---
 
-## What changed this session (2026-05-04 → 2026-05-05)
+## What changed this session (2026-05-07)
 
-### 1. Issue #81 closed — A2A Job lifecycle (PR #83, merged)
+### Phase 2 — Revenue snapshots (DB + finalizer)
 
-**Discovery:** post-PR-#72 E2E on Fly with stub Alchemy revealed that
-the Phase 1 fix was incomplete. `executeA2APayment` resolves on
-**queue**, not on chain confirmation, so the `.then(...)` in `jobs.ts`
-ran immediately after enqueue and finalized the Job before the worker
-had even broadcast. Result: `Job → COMPLETED` + `reservationStatus →
-RELEASED` + Telegram `TRANSACTION_CONFIRMED` for a tx that genuinely
-failed on-chain.
+Migration `0010_job_revenue_snapshot` adds two nullable columns to
+`Job`:
 
-**Fix:** Transaction worker (`queues/transaction.queue.ts`) is now the
-**single source of truth** for paid A2A Job finalization.
+- `rewardUsd` — total USD value of the reward at the moment of payment
+  confirmation.
+- `rewardPriceUsd` — price-per-token-unit at the same moment (e.g.
+  ETH/USD = `2000.000000`). Kept alongside `rewardUsd` for audit /
+  reconstruction.
 
-- New `services/job/payment-finalizer.service.ts` —
-  `finalizeA2APaymentJob({jobId, transactionId, outcome, reason})`,
-  idempotent (no-op when Job is not in `PAYMENT_PENDING`).
-- Worker calls finalizer after `monitor.waitForConfirmation` (CONFIRMED
-  → COMPLETED, REVERTED/timeout-FAILED → PAYMENT_FAILED).
-- Worker `on('failed')` handler also calls finalizer for broadcast-time
-  failures (estimateGas, RPC reject) — without this, BullMQ exhausting
-  retries would strand the Job.
-- `jobs.ts` PATCH COMPLETED dropped its `.then()` chain and kept only a
-  `.catch` for synchronous pre-queue failures (auth/policy/sim).
+Both NULL on non-COMPLETED rows is the normal case. **NULL on a
+COMPLETED row carries semantic weight**: it means the price oracle was
+unresolved at finalization time, NOT "free job". This distinction is
+exactly what the original #71 investigation called out as the silent-
+zero bug — persisting `'0'` on oracle failure indistinguishably from a
+real zero is what causes historical revenue to "vanish". We deliberately
+write NULL instead so PnLService can fall back to live pricing AND
+surface a warning.
 
-### 2. Issue #74 closed — Idempotency via `intentId` (PR #84, merged)
+The capture happens in `payment-finalizer.service.ts` CONFIRMED branch,
+in the **same `db.job.update(...)` that flips status to COMPLETED**.
+No second round-trip, no observable intermediate state where status is
+COMPLETED but the snapshot hasn't landed yet. Refund-then-flip ordering
+established in #85 is preserved.
 
-**Why:** the recovery worker (#73) and any manual re-trigger of
-`executeA2APayment` could double-spend if the original tx was mined
-but the response was lost. There was no way for a second call to
-recognize the first call's outcome.
+### Phase 3 — PnLService refactor
 
-**Fix:** added a deterministic system-supplied idempotency key on the
-`Transaction` table, separate from the existing per-agent
-`idempotencyKey`.
+Both reward loops (earnings as provider, costs as requester) now read
+`rewardUsd` first, falling back to live pricing only when NULL.
+Snapshot/live-fallback/unresolved counts are tracked separately for
+each side and surfaced in the `notes` field:
 
-- Migration `0009_transaction_intent_id` — adds nullable `Transaction.
-  intentId TEXT` plus a global UNIQUE INDEX. Postgres `NULLS DISTINCT`
-  default keeps the constraint workable for non-A2A txs.
-- `executeA2APayment` accepts optional `intentId`. Cheap indexed lookup
-  before any policy/sim/oracle work; on hit, returns the existing
-  `{transactionId, status}` immediately. The `db.transaction.create()`
-  is wrapped in a try/catch for `P2002` on `intentId` so a concurrency
-  race resolves cleanly to whichever row won the constraint.
-- `jobs.ts` passes ``intentId: `a2a-payment:${job.id}` ``.
+> "N earning job(s) priced live (no stored snapshot) (M unresolved —
+> counted as $0; figure may understate true revenue)."
 
-### 3. PR #85 (merged) — Notification visibility + finalizer race
+Same response shape (`PnLBreakdown` interface unchanged) — admin
+dashboard reads notes as free-form strings, no frontend change needed.
 
-Surfaced during the post-#83 E2E validation pass. Two issues, fixed
-together because they were both caught in the same test session and
-both small.
+### Shared `resolveRewardUsd` helper
 
-**A. Silent notification failures.** `sendTelegram` /
-`sendDiscord` / `sendGenericWebhook` only `await fetch(...)`, never
-checked `res.ok`. A 4xx/5xx silently resolved the fetch, the `.catch`
-wrapper in `notify()` never fired, no warn log landed. **This is
-exactly how the empty-env Telegram outage stayed undetected through
-two full E2E runs.** Cost ~1h of debug.
+New `services/billing/reward-pricing.ts` returning
+`{ usd, priceUsd, resolved }`. Used by both the finalizer (snapshot
+capture) and PnLService (live fallback). Replaces the in-line
+`rewardToUsd` helper in `pnl.service.ts` that returned the ambiguous
+`'0'` sentinel — the boolean `resolved` field is the whole point.
 
-Fix: extracted `fetchAndAssertOk` helper that throws on non-2xx with
-the response body included. Now any HTTP-level failure produces a
-loud `Failed to send <channel> notification` log.
+### Tests
 
-Also added a `Notification channels resolved` debug log listing
-`{enabled, skipped}` channels per dispatch — makes "env var unset" vs
-"delivery failed" trivially distinguishable.
+- `pnl.service.test.ts` (+4 cases): snapshot priority overrides live
+  oracle; live-fallback adds a note; oracle-zero produces a visible
+  "unresolved" warning instead of silently zeroing; mixed
+  snapshot+live-fallback in one call aggregates correctly.
+- `payment-finalizer.snapshot.test.ts` (new, 4 cases): snapshot fields
+  land on the same write as `status: 'COMPLETED'`; unresolved oracle
+  ⇒ NULL columns (not `'0'`); FAILED outcome doesn't write snapshot
+  fields; the existing idempotency guard still short-circuits when the
+  Job is already terminal.
+- Both files now include a `vi.hoisted` env stub (mirroring the pattern
+  from `ens.service.test.ts`) so the suite runs locally outside CI.
 
-Switched **Telegram from `parse_mode=Markdown` to `parse_mode=HTML`**
-with proper entity escaping. Markdown silently corrupts on any
-unmatched `_`/`*`/`` ` `` in dynamic content (e.g. `eth_estimateGas`
-in error messages, contract addresses); HTML mode only needs `&<>`
-escaped.
+All 16 affected tests pass. Backend `tsc --noEmit` clean.
 
-**B. Finalizer write race.** `payment-finalizer.service.ts` flipped
-the public Job status (`COMPLETED` / `PAYMENT_FAILED`) BEFORE writing
-side effects (escrow refund/release, reputation). Observers polling
-between writes saw `PAYMENT_FAILED + reservationStatus PENDING` —
-exactly the "ghost completion" intermediate that #81 was meant to
-eliminate. Surfaced live in the second post-#83 E2E run.
+### #71 fully closed
 
-Fix: side effects first, status last on both branches. Old or new
-state is observable, never an inconsistent intermediate.
+For the record, sub-issues all closed last session via merged PRs:
+- #73 → #86 (recovery worker)
+- #74 → #84 (idempotency via intentId)
+- #75 → #88 (admin PAYMENT_PENDING/FAILED UI)
+- #81 → #83 (lifecycle driven by on-chain outcome)
 
-### 4. Telegram outage debug + production env-var hygiene
-
-Long detour during E2E validation: notifications weren't arriving
-even though the manual SSH `wget /sendMessage` worked. Diagnosis
-chain:
-
-1. **Bot token + chat_id valid** (manual ping arrived in the
-   `agentfi` group on Telegram).
-2. **Backend logs showed `[Notification] TRANSACTION_FAILED`** but no
-   `Failed to send Telegram` warn (because of the silent-failure bug
-   above — fixed in #85).
-3. **`/proc/<pid>/environ` probe of the running Node process showed
-   `OPERATOR_TELEGRAM_BOT_TOKEN` length=0**, while a freshly SSH-spawned
-   Node could read it. Smoking gun: env var was in `flyctl secrets`
-   metadata but never injected into the running container.
-4. `flyctl secrets unset` + re-`set` cycle finally re-injected it.
-   Even then, the user's first re-set used a 44-char value (should
-   be 46) — token was truncated in copy/paste. Once corrected via
-   re-set with the full token, **everything worked end to end**:
-   `[Notification] TRANSACTION_FAILED` → fetch to Telegram → message
-   delivered with HTML formatting.
-
-**Lesson captured:** `flyctl secrets set` over an existing key
-sometimes doesn't actually re-inject into the running container.
-Safer pattern when in doubt: `flyctl secrets unset X && flyctl
-secrets set X=...`.
-
-### 5. Issue #73 in flight — Recovery worker (PR #86)
-
-BullMQ repeatable job (`payment-recovery-scan`), every 2 min,
-scans Job rows where `status='PAYMENT_PENDING'` AND `updatedAt < now()
-- 5 min`. For each stale row:
-
-- Look up Transaction by ``intentId='a2a-payment:<jobId>'`` (single
-  indexed lookup).
-- Tx CONFIRMED → finalizer(CONFIRMED).
-- Tx REVERTED/FAILED → finalizer(FAILED) + refund.
-- Tx QUEUED/SUBMITTED/PENDING_APPROVAL → leave alone (in-flight).
-- No Tx → orphan, finalizer(FAILED) refund.
-
-Idempotency rests on the three pillars from earlier PRs (intentId
-short-circuit, finalizer no-op guard, refund-then-flip ordering). No
-new logic needed.
-
-Tied to `TRANSACTION_WORKER_ENABLED` so disabled replicas don't run
-it. Per-job log lines + structured summary `{scanned,
-finalizedConfirmed, finalizedFailed, refundedOrphan, stillInFlight}`
-every tick.
-
-### 6. Issue #75 in flight — Admin UI (PR #88)
-
-Backend:
-- `GET /admin/jobs?status=&limit=` — filtered list with requester/
-  provider names.
-- `POST /admin/jobs/:id/reconcile` body `{action, reason}` —
-  `force_completed` / `force_failed`. Refund-then-flip ordering.
-  `reason` (≥3 chars) lands in structured logger as the audit trail.
-  No separate `JobAuditLog` table for now.
-- `/admin/stats` extended with `paymentPending`, `paymentFailed`,
-  `stalePaymentPending` (>5 min, same threshold as recovery worker).
-
-Frontend (Next.js 15 / app router):
-- Sidebar: new "Jobs" link.
-- Dashboard: alert banner + 3 new StatCards.
-- `/jobs` page: list with filter chips (alert chips for the two
-  payment states get yellow styling).
-- `/jobs/[id]` detail page: full inspection + `JobReconcileActions`
-  client component (two-step UX: button → reason textarea → confirm).
-- BFF proxy at `/api/admin/jobs/[id]/reconcile` so `ADMIN_SECRET`
-  doesn't leak to the browser.
-
-Drive-by fix: 3 existing admin route handlers (`/api/agents/[id]/
-pause`, `/api/transactions/[id]/approve`, `/api/transactions/[id]/
-reject`) were using the Next.js 14 sync `params` shape. Bumped them
-all to the v15 `Promise<{...}>` contract. With these fixed, only the
-`/login` Suspense issue remains as the standing Vercel admin
-preview blocker.
-
-### 7. PR #87 — E2E regression script committed
-
-`scripts/e2e-issue-81.mjs` was untracked but used live during the
-post-#83 validation. **Caught two real production bugs in the same
-session** (the silent Telegram + the finalizer race — both fixed in
-#85). Worth committing as a permanent regression fixture so the next
-PR touching the payment path runs a 30s sanity check before merging.
+#71 itself was closed in 2026-05-05 11:15Z.
 
 ---
-
-## Open issues (post-session)
-
-- [#71](https://github.com/felippeyann/agentfi/issues/71) — parent.
-  Phase 1.5 fully complete after #86 + #75 land. **Close after merge**
-  in favor of separate Phase 2 (revenue snapshots) and Phase 3 (PnL
-  refactor) tickets.
-- 10 dependabot PRs (#56–#65) untouched — usual triage; bullmq, viem,
-  tailwind 4, typescript 6, etc.
 
 ## Manual tasks pending on the user
 
-1. **Merge the 3 ready PRs in order:** #86 → #87 → #88. (#87 has zero
-   risk, can go anywhere in the order.)
-2. **`flyctl deploy`** after #86 merges so the recovery worker starts
-   on the production machine. After that, watch for `Payment recovery
-   scan scheduled` then `Payment recovery scan completed` log lines
-   every 2 min.
-3. **Close #71** once #86 + #75 land. The four sub-issues (#81, #74,
-   #73, #75) close automatically via the `Closes #N` lines in their PRs.
-4. **(Optional)** Fix the `/login` `useSearchParams` Suspense issue to
-   fully unbreak the Vercel admin preview — separate small PR.
-5. **(Optional)** Run the synthetic crash-recovery test described in
-   #86's test plan to verify the recovery worker end-to-end with a
-   real machine restart mid-flight.
-
-## Conventions reaffirmed this session
-
-- **CI green ≠ functionally validated.** Reaffirmed twice. The
-  `e2e-issue-81.mjs` script (now in #87) is the antidote — keep
-  similar scripts for any payment-path changes.
-- **Notification fire-and-forget needs `res.ok` check.** Silent
-  fetch failures are the worst kind of bug — appear as "everything
-  works" until someone notices missing messages downstream. Pattern
-  is now codified in the `fetchAndAssertOk` helper.
-- **Refund-then-flip ordering** in any state-finalizer that does
-  multiple writes. Public status flip last so observers never see
-  inconsistent intermediate state.
-- **Fly secrets gotcha**: `flyctl secrets set` over an existing key
-  doesn't always re-inject into the running container. When in doubt,
-  `unset` + `set` cycle.
-- **Worktree hygiene**: still using `git worktree add ../agentfi-<topic>`
-  for parallel work. Worked smoothly through 4 concurrent worktrees this
-  session (fix-81, fix-74, fix-notify, fix-73, fix-75).
+1. **Merge #90.** Standalone backend change, no other PRs depend on it.
+2. **`prisma migrate deploy`** in staging/prod after merge so the new
+   columns appear. Verify with a fresh A2A job that `Job.rewardUsd` is
+   non-null on the resulting row.
+3. **Smoke check the PnL endpoint** for an agent with mixed pre/post-
+   migration completed jobs — expect a "priced live (no stored
+   snapshot)" note naming the pre-migration row count.
+4. **(Optional)** Force a brief CoinGecko outage (network blackhole on
+   the recovery worker container) and confirm new completions land with
+   NULL snapshot + warn log, and that PnL surfaces the "unresolved"
+   note instead of silently zeroing.
 
 ---
 
-*Last touch: 2026-05-05 (autonomous session). Replace this header with
+## Open follow-ups (no ticket yet — file when prioritized)
+
+- **Backfill script for pre-migration COMPLETED rows.** Reconstruct
+  `rewardUsd` from a historical price-history feed (CoinGecko has a
+  paid endpoint; otherwise the on-chain timestamp + a daily-close feed
+  is enough for revenue accounting). Out of scope for #90.
+- **Token-registry lookup** to drop the "assume 6 decimals" MVP
+  fallback in non-ETH reward pricing. Same caveat as before #90 — it
+  didn't get worse, but this is the lurking accuracy bug for any
+  future support of 18-decimal ERC-20s.
+- **`/login` `useSearchParams` Suspense fix.** Standing pre-existing
+  blocker for the Vercel admin preview. #88 already cleared 3 of the
+  4 admin route handlers, but the `/login` page still needs a Suspense
+  boundary. Tiny separate PR.
+- **10 dependabot PRs (#56–#65)** — usual triage; bullmq, viem,
+  tailwind 4, typescript 6, etc.
+
+---
+
+## Conventions reaffirmed this session
+
+- **NULL ≠ 0 in financial columns.** When a sentinel value (`'0'`,
+  `''`, `0n`) is forced to mean both "real zero" and "unresolved", you
+  get silent data corruption that's invisible until a downstream
+  consumer (dashboard, accounting) misreports something. Use NULL +
+  a `resolved` boolean wrapper. The whole #90 story is a worked
+  example.
+- **Persist USD value at the moment of the event, not at the moment of
+  query.** Same lesson as fee.service already learned — historical
+  values must be locked, not re-derived against current market data.
+- **Hoisted env stubs in unit tests.** `vi.hoisted` to set the env
+  vars `config/env.ts` requires lets the suite run cleanly outside
+  CI. Pattern is in `ens.service.test.ts` and now `pnl.service.test.ts`
+  + `payment-finalizer.snapshot.test.ts`.
+- **`prisma generate` will silently bump `@prisma/client` and
+  `prisma` versions in `package.json`/`package-lock.json`.** Always
+  diff before committing. (Caught and reverted this session.)
+
+---
+
+*Last touch: 2026-05-07 (autonomous session). Replace this header with
 the new session date when you update.*
