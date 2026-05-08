@@ -107,6 +107,19 @@ Fixed blockers found during that validation:
   `/v1/agents/:id/trust-report`, `/v1/agents/verify-handshake`) are now skipped
   by the global agent-key middleware.
 
+### Token decimals / reward accounting
+
+The non-ETH reward pricing path no longer assumes 6 decimals for every ERC-20.
+
+- Added a local token registry for chain-specific USDC/WETH-style reward
+  decimals and reused it from transaction decimal lookup.
+- `resolveRewardUsd()` now prices native ETH directly, prices known ERC-20
+  rewards through the registry, and reports unknown ERC-20 rewards as
+  unresolved instead of guessing.
+- DB escrow reservations now reuse the same reward-pricing helper used by
+  payment snapshots and P&L live fallback, so accounting behavior is consistent
+  across create, finalize, and dashboard paths.
+
 ---
 
 ## Validation
@@ -114,7 +127,12 @@ Fixed blockers found during that validation:
 Completed locally:
 
 - `npm ci` passed after #64.
+- `npm run lint --workspaces --if-present` passed (workspaces currently echo
+  "no eslint configured").
 - `npm run typecheck --workspaces --if-present` passed.
+- `npm run test -w packages/backend -- reward-pricing` passed.
+- `npm run test -w packages/backend` passed with local Docker Postgres/Redis
+  running and the required test env vars set.
 - `npm run spec:check` passed.
 - `npm run spec:lint` passed.
 - `npm test -w packages/admin` passed.
@@ -124,6 +142,8 @@ Completed locally:
   volumes.
 - All compose services reached healthy state: Postgres, Redis, API, admin, MCP.
 - `npm run smoke:dev` passed against the running dev stack.
+- `docker compose -f docker-compose.dev.yml up --build -d` and
+  `npm run smoke:dev` passed again after the reward-accounting change.
 - `node examples/a2a-collab/index.mjs` passed.
 - `node examples/swap-planner/index.mjs` passed.
 - `node examples/delegation-chain/index.mjs` passed.
@@ -139,7 +159,6 @@ now been executed and fixed locally.
 
 ## Next non-P0 technical work
 
-- Token registry / decimals lookup for non-ETH rewards. This reduces accounting error risk from the current 6-decimal MVP assumption.
 - Demo screencast using Claude Desktop + AgentFi MCP.
 
 Large roadmap work such as GMX/perps, escrow v3, and revenue sharing should still wait for a concrete user/integration signal.

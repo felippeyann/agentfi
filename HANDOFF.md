@@ -270,6 +270,14 @@ node examples/delegation-chain/index.mjs
 Expected result: all five services healthy, smoke passes, and all three examples
 complete without external credentials.
 
+### Reward accounting decimals
+
+A2A reward accounting intentionally prices only native ETH and ERC-20 rewards
+known to the local token registry. Unknown ERC-20 reward tokens are marked
+unresolved and counted as `$0` with P&L notes instead of guessing decimals.
+Add a token to `packages/backend/src/services/transaction/token-registry.ts`
+before relying on it for escrow volume, revenue snapshots, or live P&L fallback.
+
 ---
 
 ## Appendix — Quick commands
