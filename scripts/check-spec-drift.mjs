@@ -9,9 +9,10 @@
  */
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 
 const TYPES_PATH = 'packages/mcp-server/src/api.generated.ts';
+const OPENAPI_TYPESCRIPT_VERSION = '7.13.0';
+const OPENAPI_TYPESCRIPT_TS_VERSION = '5.9.3';
 
 const original = (() => {
   try {
@@ -22,21 +23,24 @@ const original = (() => {
   }
 })();
 
-// Resolve the openapi-typescript binary inside the repo and invoke it
-// directly with node — avoids the shell:true DeprecationWarning and is
-// portable between bash/PowerShell.
-const require = createRequire(import.meta.url);
-const pkgJson = require.resolve('openapi-typescript/package.json');
-const pkgDir = pkgJson.replace(/[\\/]package\.json$/, '');
-const { bin } = require(pkgJson);
-const binRel = typeof bin === 'string' ? bin : bin['openapi-typescript'];
-const binPath = `${pkgDir}/${binRel}`;
+const codegenArgs = [
+  '--yes',
+  '--package',
+  `openapi-typescript@${OPENAPI_TYPESCRIPT_VERSION}`,
+  '--package',
+  `typescript@${OPENAPI_TYPESCRIPT_TS_VERSION}`,
+  'openapi-typescript',
+  'docs/api/openapi.yaml',
+  '-o',
+  TYPES_PATH,
+];
 
-const gen = spawnSync(
-  process.execPath,
-  [binPath, 'docs/api/openapi.yaml', '-o', TYPES_PATH],
-  { stdio: 'inherit' },
-);
+const gen =
+  process.platform === 'win32'
+    ? spawnSync('cmd.exe', ['/d', '/s', '/c', `npx ${codegenArgs.join(' ')}`], {
+        stdio: 'inherit',
+      })
+    : spawnSync('npx', codegenArgs, { stdio: 'inherit' });
 if (gen.status !== 0) {
   console.error('[spec:check] openapi-typescript failed.');
   process.exit(gen.status ?? 1);

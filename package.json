@@ -18,15 +18,14 @@
     "release:v1:tag": "node scripts/release-v1.mjs tag",
     "release:note": "node scripts/gen-release-note.mjs",
     "spec:lint": "npx --yes @redocly/cli@1.21.1 lint docs/api/openapi.yaml --skip-rule operation-4xx-response --skip-rule operation-operationId --skip-rule tag-description --skip-rule no-unused-components --skip-rule info-contact --skip-rule info-license --skip-rule operation-summary --skip-rule operation-description --skip-rule operation-tag-defined --skip-rule operation-2xx-response --skip-rule no-server-example.com --skip-rule security-defined",
-    "spec:types": "openapi-typescript docs/api/openapi.yaml -o packages/mcp-server/src/api.generated.ts",
+    "spec:types": "npx --yes --package openapi-typescript@7.13.0 --package typescript@5.9.3 openapi-typescript docs/api/openapi.yaml -o packages/mcp-server/src/api.generated.ts",
     "spec:check": "node scripts/check-spec-drift.mjs"
   },
   "devDependencies": {
     "typescript": "^6.0.3",
     "tsx": "^4.7.0",
     "prettier": "^3.8.3",
-    "eslint": "^8.57.0",
-    "openapi-typescript": "^7.4.0"
+    "eslint": "^8.57.0"
   },
   "engines": {
     "node": ">=20.0.0"
