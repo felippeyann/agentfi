@@ -9,10 +9,14 @@
  *   npm run demo:claude-mcp
  */
 
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 const API_URL = process.env.AGENTFI_API_URL ?? 'http://localhost:3000';
 const OPERATOR_SECRET =
   process.env.AGENTFI_OPERATOR_SECRET ?? 'dev-api-secret-min-32-chars-long-xxxxx';
-const MCP_PACKAGE = process.env.AGENTFI_MCP_PACKAGE ?? '@agent_fi/mcp-server@0.3.0';
+const MCP_PACKAGE = process.env.AGENTFI_MCP_PACKAGE;
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 async function api(path, options = {}) {
   const res = await fetch(`${API_URL}${path}`, {
@@ -68,6 +72,20 @@ async function publishManifest(apiKey, manifest) {
 }
 
 function mcpCommand() {
+  if (!MCP_PACKAGE) {
+    if (process.platform === 'win32') {
+      return {
+        command: 'cmd',
+        args: ['/c', `cd /d "${REPO_ROOT}" && npm run start -w packages/mcp-server`],
+      };
+    }
+    const escapedRoot = REPO_ROOT.replace(/'/g, "'\\''");
+    return {
+      command: 'sh',
+      args: ['-lc', `cd '${escapedRoot}' && npm run start -w packages/mcp-server`],
+    };
+  }
+
   if (process.platform === 'win32') {
     return {
       command: 'cmd',
@@ -170,12 +188,13 @@ After the job id is returned, use only the agentfi-provider MCP server. Check th
   printPrompt(
     5,
     `
-Using only the agentfi-requester MCP server, fetch provider ${provider.id}'s trust report again and summarize what changed after the A2A job.
+Using only the agentfi-requester MCP server, fetch provider ${provider.id}'s trust report again, then call get_my_pnl. Summarize what changed after the A2A job and whether the requester is profitable or breakeven.
 `,
   );
 
   console.log('\n## P&L checkpoint\n');
-  console.log('The published MCP package does not expose a P&L tool yet. Show P&L with REST:');
+  console.log('Preferred: call get_my_pnl from the agentfi-requester MCP server.');
+  console.log('REST fallback:');
   console.log(`curl ${API_URL}/v1/agents/me/pnl -H "x-api-key: ${requester.apiKey}"`);
 
   console.log('\n## Notes\n');

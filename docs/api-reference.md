@@ -265,7 +265,7 @@ All admin routes require `x-admin-secret` header. Local-only by default.
 **Backend MCP Proxy Tools** (16):
 `get_wallet`, `get_balance`, `get_allowances`, `simulate_swap`, `execute_swap`, `execute_transfer`, `supply_aave`, `withdraw_aave`, `supply_compound`, `withdraw_compound`, `deposit_erc4626`, `withdraw_erc4626`, `swap_curve`, `get_transaction_status`, `list_transactions`, `get_agent_policy`
 
-> **Note:** The backend's `/mcp/sse` endpoint exposes a **thin 16-tool proxy** for simple HTTP-over-MCP clients. The standalone `@agent_fi/mcp-server` npm package is richer: **26 tools** including A2A collaboration (`search_agents`, `post_job`, `check_inbox`, `pay_agent`, etc.) — see [packages/mcp-server/README.md](../packages/mcp-server/README.md) for the full catalog.
+> **Note:** The backend's `/mcp/sse` endpoint exposes a **thin 18-tool proxy** for simple HTTP-over-MCP clients, including agent profile and P&L checks. The standalone `@agent_fi/mcp-server` package is richer: **28 tools** including A2A collaboration (`search_agents`, `post_job`, `check_inbox`, `pay_agent`, `get_my_pnl`, etc.) — see [packages/mcp-server/README.md](../packages/mcp-server/README.md) for the full catalog.
 
 ---
 
