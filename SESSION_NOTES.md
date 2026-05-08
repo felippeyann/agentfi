@@ -9,7 +9,9 @@
 
 ## Where we are right now
 
-`main` and `develop` are aligned at `2b8a20b`.
+`main` and `develop` were verified aligned at baseline `790c53c` before this
+release-state refresh. Use `git rev-parse main develop` for the current exact
+SHAs after subsequent documentation-only merges.
 
 Open GitHub state after the dependency cleanup:
 
@@ -143,7 +145,10 @@ Closed the remaining demo gap where P&L required a REST fallback:
 - `npm run demo:claude-mcp` now points Claude Desktop at the local workspace MCP
   server by default, so the demo can use source tools before npm publish.
 - Manual follow-up: publish `@agent_fi/mcp-server@0.4.0` to npm with
-  maintainer credentials.
+  maintainer credentials. A publish attempt from this machine is blocked by npm
+  auth (`ENEEDAUTH`), and the maintainer's passkey was not accepted. The package
+  is ready; recovery is account-side, documented in
+  `packages/mcp-server/RELEASE.md`.
 
 ---
 
@@ -188,7 +193,8 @@ Current map after the latest sweep:
 
 1. **P0 — MCP adoption surface**: keep Claude/MCP demo fully inside MCP tools.
    `get_my_agent_profile` and `get_my_pnl` are implemented in source; npm
-   publish for `@agent_fi/mcp-server@0.4.0` remains manual.
+   publish for `@agent_fi/mcp-server@0.4.0` remains manual and is currently
+   blocked by npm passkey/auth recovery.
 2. **P1 — External distribution**: mcp.so listing is live but still showed an
    old `@agent_fi/mcp-server@0.2.0` config; awesome-mcp-servers PR #5091 is
    still open.
