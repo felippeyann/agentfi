@@ -4,15 +4,16 @@ Get an AI agent executing DeFi transactions in under 5 minutes.
 
 ## 1. Connect to the MCP Server
 
-**Hosted (SSE transport)** — add to your Claude Desktop `claude_desktop_config.json`:
+For Claude Desktop, the lowest-friction path is the local stdio MCP server:
 
 ```json
 {
   "mcpServers": {
     "agentfi": {
-      "type": "sse",
-      "url": "https://agentfi-develop.up.railway.app/mcp/sse",
+      "command": "npx",
+      "args": ["-y", "@agent_fi/mcp-server@0.3.0"],
       "env": {
+        "AGENTFI_API_URL": "https://agentfi-develop.up.railway.app",
         "AGENTFI_API_KEY": "agfi_live_your_key_here"
       }
     }
@@ -20,7 +21,13 @@ Get an AI agent executing DeFi transactions in under 5 minutes.
 }
 ```
 
-**Self-hosted (stdio transport)** — clone the repo and run locally:
+On native Windows, use `cmd /c npx` as shown by
+[`npm run demo:claude-mcp`](../demos/claude-desktop-mcp.md).
+
+For MCP-compatible clients that support remote SSE directly, a hosted AgentFi
+MCP deployment can expose `/mcp/sse`.
+
+To run from a local checkout instead of npm:
 
 ```bash
 git clone https://github.com/felippeyann/agentfi
@@ -49,6 +56,9 @@ The agent will:
 2. Call `simulate_swap` to verify the trade
 3. Call `execute_swap` with the simulation ID
 4. Call `get_transaction_status` to confirm
+
+For an end-to-end local Claude Desktop walkthrough that avoids real funds, use
+the [Claude Desktop MCP Demo](../demos/claude-desktop-mcp.md).
 
 ## Fee Structure
 

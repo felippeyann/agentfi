@@ -120,6 +120,19 @@ The non-ETH reward pricing path no longer assumes 6 decimals for every ERC-20.
   payment snapshots and P&L live fallback, so accounting behavior is consistent
   across create, finalize, and dashboard paths.
 
+### Claude Desktop MCP adoption demo
+
+Added a lightweight demo-prep helper and walkthrough for Claude Desktop:
+
+- `npm run demo:claude-mcp` registers a local provider/requester pair, publishes
+  a provider manifest, verifies requester `/v1/agents/me`, and prints a
+  ready-to-paste two-server Claude Desktop config.
+- `docs/demos/claude-desktop-mcp.md` contains the presentation flow: provider
+  manifest, requester discovery, no-reward A2A job, trust report, and REST P&L
+  checkpoint.
+- `docs/agents/quickstart.md` now makes local stdio the Claude Desktop default
+  and keeps hosted SSE framed as a remote-client option.
+
 ---
 
 ## Validation
@@ -130,6 +143,7 @@ Completed locally:
 - `npm run lint --workspaces --if-present` passed (workspaces currently echo
   "no eslint configured").
 - `npm run typecheck --workspaces --if-present` passed.
+- `npm run demo:claude-mcp` passed against the running dev stack.
 - `npm run test -w packages/backend -- reward-pricing` passed.
 - `npm run test -w packages/backend` passed with local Docker Postgres/Redis
   running and the required test env vars set.

@@ -110,11 +110,20 @@ creates and completes a no-reward A2A job, then reads trust + P&L. This path is
 designed to work on the zero-credential dev stack and requires Node/npm on the
 host.
 
+To prepare a Claude Desktop MCP demo with two fresh local agents:
+
+```bash
+npm run demo:claude-mcp
+```
+
+The helper prints a ready-to-paste Claude Desktop config plus demo prompts. See
+[`docs/demos/claude-desktop-mcp.md`](demos/claude-desktop-mcp.md).
+
 ---
 
 ## Connect Claude Desktop (optional)
 
-Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, equivalent path on Windows):
+Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
 
 ```json
 {

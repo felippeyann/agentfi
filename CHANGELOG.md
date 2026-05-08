@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Claude Desktop MCP demo helper** — `npm run demo:claude-mcp` registers a local provider/requester pair, publishes a demo manifest, prints a two-server Claude Desktop config, and emits prompts for discovery, A2A job flow, trust, and P&L. Documented at [`docs/demos/claude-desktop-mcp.md`](docs/demos/claude-desktop-mcp.md).
 - **Graphify code graph** — committed `graphify-out/GRAPH_REPORT.md`, `graph.json`, and `graph.html` plus `AGENTS.md` guidance so agents can navigate the codebase through a queryable graph before broad grep/file reads.
 - **Dev smoke test** — `npm run smoke:dev` runs a zero-dependency first-run validation against the local dev stack: health, agent registration, manifest publish, agent search, no-reward A2A job completion, trust report, and P&L response shape.
 
