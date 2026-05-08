@@ -3,7 +3,7 @@
 > **Read together with [VISION.md](VISION.md) (the _why_) and [HANDOFF.md](HANDOFF.md) (live pending tasks).**
 > This file is the **comprehensive, point-in-time snapshot** of what the project _is_ today — purpose, stack, capabilities, progress. Update it whenever the scope or architecture shifts.
 
-**Last updated**: May 2026 · **main SHA** `81c778c` · **npm** `@agent_fi/mcp-server@0.3.0`
+**Last updated**: May 2026 · **main SHA** `2b8a20b` · **npm** `@agent_fi/mcp-server@0.3.0`
 
 ---
 
@@ -212,7 +212,7 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 | Base contracts         | `0x03af…6A6d` + `0x5441…24b3`                                                                                                                            | verified on Basescan                                                    |
 | OpenAPI spec           | `docs/api/openapi.yaml`                                                                                                                                  | 3.0.3, clean under Redocly lint                                         |
 | Brand avatar           | `.github/avatar.svg`                                                                                                                                     | live                                                                    |
-| Dev quickstart         | [`docs/dev-quickstart.md`](docs/dev-quickstart.md) + `docker-compose.dev.yml` + `npm run smoke:dev`                                                      | zero-credential stack, ~3 min boot, smoke path for first-run validation |
+| Dev quickstart         | [`docs/dev-quickstart.md`](docs/dev-quickstart.md) + `docker-compose.dev.yml` + `npm run smoke:dev`                                                      | zero-credential stack; first-run Docker + smoke + examples validated locally |
 | Examples (runnable)    | [`examples/a2a-collab`](examples/a2a-collab), [`examples/swap-planner`](examples/swap-planner), [`examples/delegation-chain`](examples/delegation-chain) | zero-dep Node scripts                                                   |
 | Staging demo           | https://agentfi-develop.up.railway.app                                                                                                                   | Running, **no SLA**                                                     |
 | Docs set               | `VISION.md`, `STATE.md`, `HANDOFF.md`, `docs/`                                                                                                           | live (archive in `docs/_archive/`)                                      |
@@ -231,7 +231,6 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 
 ## 9. Current pending work (details in HANDOFF.md)
 
-- **Verify dev stack + examples end-to-end** (`docker compose -f docker-compose.dev.yml up --build`, `npm run smoke:dev`, then all three `examples/*`) — local Docker was unavailable in the latest session, so CI is green but first-run manual validation is still owed.
 - **GMX / Perp adapter** (Phase 3 close)
 - **On-chain escrow v3** (Phase 3, requires Safe module deploy + audit prep)
 - **Self-funding sub-wallets** (Phase 4, blocked on legal structure decision)

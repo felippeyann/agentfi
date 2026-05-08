@@ -9,7 +9,7 @@
 
 ## Where we are right now
 
-`main` and `develop` are aligned at `81c778c`.
+`main` and `develop` are aligned at `2b8a20b`.
 
 Open GitHub state after the dependency cleanup:
 
@@ -17,7 +17,7 @@ Open GitHub state after the dependency cleanup:
 | ----------------------------- | ------------------------------------- |
 | Open PRs                      | 0                                     |
 | Open issues                   | 0                                     |
-| Required CI                   | Green on latest merged dependency PRs |
+| Required CI                   | Green on latest merged PRs            |
 | Remaining Dependabot blockers | None                                  |
 
 The two previously blocked dependency PRs are closed:
@@ -84,6 +84,29 @@ The smoke test checks:
 - no-reward A2A job create/accept/complete
 - trust report and P&L response shapes
 
+### First-run Docker validation
+
+Docker Desktop was started locally and the first-run path was executed from a
+clean compose state (`docker compose down -v` before rebuild).
+
+Fixed blockers found during that validation:
+
+- `Dockerfile.mcp` now carries `packages/mcp-server/node_modules` into the
+  builder and runner stages so workspace-local dependencies such as
+  `dotenv/config` resolve under TypeScript 6.
+- `docker-compose.dev.yml` runs `prisma migrate deploy` before starting the API,
+  so a fresh Postgres volume has the schema before traffic reaches Fastify.
+- Docker healthchecks now use `127.0.0.1` instead of `localhost`, avoiding Alpine
+  `::1` resolution when services listen on IPv4.
+- The admin image sets `HOSTNAME=0.0.0.0`, so Next standalone is reachable by
+  the container healthcheck and host port mapping.
+- The standalone MCP SSE service gets a dev placeholder `AGENTFI_API_KEY` so it
+  can boot before a real agent key is registered.
+- Public discovery routes documented as unauthenticated
+  (`/v1/agents/search`, `/v1/agents/:id/manifest`,
+  `/v1/agents/:id/trust-report`, `/v1/agents/verify-handshake`) are now skipped
+  by the global agent-key middleware.
+
 ---
 
 ## Validation
@@ -95,47 +118,26 @@ Completed locally:
 - `npm run spec:check` passed.
 - `npm run spec:lint` passed.
 - `npm test -w packages/admin` passed.
-- Backend local test run reached 86/90; the remaining 4 need Postgres at `localhost:5432`.
-
-Not completed locally:
-
-- `docker compose -f docker-compose.dev.yml up --build`
-- `npm run smoke:dev` against a running dev stack
-- `node examples/a2a-collab/index.mjs`
-- `node examples/swap-planner/index.mjs`
-- `node examples/delegation-chain/index.mjs`
-
-Reason: Docker Desktop was not running on this Windows machine:
-
-```text
-failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine
-```
-
-CI did validate the backend/E2E paths with Postgres/Redis services for the merged PRs, but the first-run Docker quickstart remains a manual validation debt.
+- `npm run test -w packages/backend` passed when pointed at the local compose
+  Postgres/Redis with required env vars set.
+- `docker compose -f docker-compose.dev.yml up --build -d` passed from clean
+  volumes.
+- All compose services reached healthy state: Postgres, Redis, API, admin, MCP.
+- `npm run smoke:dev` passed against the running dev stack.
+- `node examples/a2a-collab/index.mjs` passed.
+- `node examples/swap-planner/index.mjs` passed.
+- `node examples/delegation-chain/index.mjs` passed.
 
 ---
 
 ## Current P0s
 
-1. **Run the first-run validation on a machine with Docker available.**
-
-   ```bash
-   docker compose -f docker-compose.dev.yml up --build
-   npm run smoke:dev
-   node examples/a2a-collab/index.mjs
-   node examples/swap-planner/index.mjs
-   node examples/delegation-chain/index.mjs
-   ```
-
-2. **If any first-run step fails, fix that before building new features.**
-
-3. **Record the result in this file and `HANDOFF.md`.**
+No open P0 remains from the diagnostic pass. The dev-stack first-run path has
+now been executed and fixed locally.
 
 ---
 
 ## Next non-P0 technical work
-
-Only after first-run validation is clean:
 
 - Token registry / decimals lookup for non-ETH rewards. This reduces accounting error risk from the current 6-decimal MVP assumption.
 - Setup-checklist review for `WALLET_PROVIDER=local` and dev-vs-prod credential paths.

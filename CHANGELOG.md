@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Dev smoke test** — `npm run smoke:dev` runs a zero-dependency first-run validation against the local dev stack: health, agent registration, manifest publish, agent search, no-reward A2A job completion, trust report, and P&L response shape.
+
 - **A2A handshake — `sign_handshake` / `verify_handshake` implemented.** Closes steps 3–5 of [#49](https://github.com/felippeyann/agentfi/issues/49); previously both returned 501.
   - `POST /v1/agents/me/sign-handshake` now signs an arbitrary message with the agent's wallet via EIP-191 `personal_sign`. `LocalWalletService` uses viem's `signMessage`; `TurnkeyService` uses `signRawPayload` with `HASH_FUNCTION_NO_OP` after pre-hashing with viem's `hashMessage`, then assembles a standard 65-byte r‖s‖v signature.
   - `POST /v1/agents/verify-handshake` (public) accepts `{ message, signature, address }` or `{ message, signature, agentId }`. Tries ECDSA recovery first (works for EOA); falls back to EIP-1271 via the chain's public client for contract wallets (Safe). Returns `{ valid, address, verifiedVia: 'ecdsa' | 'eip1271' }`.
@@ -29,6 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`STATE.md`** at the repo root — comprehensive, point-in-time project state (purpose, stack, capabilities, phase progress). Sits between VISION.md (the _why_) and HANDOFF.md (live tasks) as required reading.
 - **README.md** refreshed to reflect shipped work: ENS identity, OpenAPI spec, mcp-server v0.2.0 on npm, P&L v2 with gas costs. Getting-Started-for-Operators section now points at the provider-agnostic deployment guide.
 - **HANDOFF.md** "Files to Read First" ordering updated to include STATE.md.
+
+### Fixed
+
+- **Zero-credential Docker first-run path** — fresh `docker compose -f docker-compose.dev.yml up --build` now boots all five services healthy and passes `npm run smoke:dev` plus the three example scripts.
+  - API dev compose runs `prisma migrate deploy` before Fastify starts, so a clean Postgres volume has the required tables.
+  - Docker healthchecks use `127.0.0.1` to avoid Alpine resolving `localhost` to IPv6 `::1` when services listen on IPv4.
+  - Admin Docker image sets `HOSTNAME=0.0.0.0` so Next standalone is reachable inside the container and through host port mapping.
+  - MCP Docker image copies workspace-local `packages/mcp-server/node_modules`, fixing TypeScript 6 builds that could not resolve `dotenv/config`.
+  - Standalone MCP dev compose gets a placeholder `AGENTFI_API_KEY` so the SSE service can boot before a real agent key exists.
+- **Public discovery auth** — global agent-key middleware now skips the public routes already documented as unauthenticated: `/v1/agents/search`, `/v1/agents/:id/manifest`, `/v1/agents/:id/trust-report`, and `/v1/agents/verify-handshake`.
 
 ### Changed
 

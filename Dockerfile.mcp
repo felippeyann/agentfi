@@ -9,6 +9,7 @@ RUN npm ci --workspace=packages/mcp-server --include-workspace-root
 FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/packages/mcp-server/node_modules ./packages/mcp-server/node_modules
 COPY tsconfig.base.json ./tsconfig.base.json
 COPY packages/mcp-server ./packages/mcp-server
 RUN cd packages/mcp-server && npm run build
@@ -18,9 +19,10 @@ ENV NODE_ENV=production
 WORKDIR /app/packages/mcp-server
 COPY --from=builder /app/packages/mcp-server/dist ./dist
 COPY --from=builder /app/node_modules ../../node_modules
+COPY --from=builder /app/packages/mcp-server/node_modules ./node_modules
 EXPOSE 3002
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:3002/health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3002/health || exit 1
 RUN addgroup -g 1001 appuser && adduser -D -u 1001 -G appuser appuser
 USER appuser
 

@@ -10,8 +10,10 @@
 
 - **Docker** (with Compose v2) — `docker --version` and `docker compose version` both return something.
 - Ports **3000, 3001, 3002, 5432, 6379** available locally.
+- Optional: **Node 22 + npm** if you want to run `npm run smoke:dev` or the
+  example scripts from your host machine.
 
-That's it. No Node install, no npm, no API signups.
+That's it for the Docker stack. No API signups.
 
 ---
 
@@ -105,7 +107,8 @@ npm run smoke:dev
 
 It registers two local agents, publishes a manifest, discovers the provider,
 creates and completes a no-reward A2A job, then reads trust + P&L. This path is
-designed to work on the zero-credential dev stack.
+designed to work on the zero-credential dev stack and requires Node/npm on the
+host.
 
 ---
 

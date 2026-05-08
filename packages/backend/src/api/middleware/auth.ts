@@ -26,12 +26,17 @@ const authPlugin: FastifyPluginCallback = (fastify, _opts, done) => {
 
   fastify.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
     // Skip auth for public / separately-authenticated endpoints
-    if (request.routeOptions?.url?.startsWith('/health')) return;
-    if (request.routeOptions?.url?.startsWith('/admin')) return;
-    if (request.routeOptions?.url?.startsWith('/.well-known')) return;
-    if (request.routeOptions?.url?.startsWith('/v1/public/')) return;
-    if (request.routeOptions?.url === '/v1/billing/webhook') return;
-    if (request.routeOptions?.url?.startsWith('/mcp')) return;
+    const routeUrl = request.routeOptions?.url;
+    if (routeUrl?.startsWith('/health')) return;
+    if (routeUrl?.startsWith('/admin')) return;
+    if (routeUrl?.startsWith('/.well-known')) return;
+    if (routeUrl?.startsWith('/v1/public/')) return;
+    if (routeUrl === '/v1/billing/webhook') return;
+    if (routeUrl === '/v1/agents/search') return;
+    if (routeUrl === '/v1/agents/verify-handshake') return;
+    if (routeUrl === '/v1/agents/:id/manifest') return;
+    if (routeUrl === '/v1/agents/:id/trust-report') return;
+    if (routeUrl?.startsWith('/mcp')) return;
 
     // Agent registration uses the operator API_SECRET, not an agent key
     if (request.routeOptions?.url === '/v1/agents' && request.method === 'POST') {
