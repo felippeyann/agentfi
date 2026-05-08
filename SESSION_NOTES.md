@@ -9,26 +9,41 @@
 
 ## Where we are right now
 
-**#71 is now fully closed end-to-end.** Phase 1.5 landed last session
-(#83/#84/#85/#86/#87/#88/#89). Phase 2 (revenue snapshots) and Phase 3
-(PnLService refactor) shipped together this session as PR **#90**, which
-is **green on every check** (Backend Tests, Lint & Type Check, E2E,
-Foundry, OpenAPI, Admin Tests, Vercel preview, Railway).
+**#71 is now fully closed end-to-end.** Phase 1.5 landed in
+#83/#84/#85/#86/#87/#88/#89. Phase 2 (revenue snapshots) and Phase 3
+(PnLService refactor) shipped together in PR **#90**, then were merged
+to `main` and mirrored to `develop`.
 
 The historical-integrity gap that motivated the original #71
 investigation is closed: completed jobs no longer re-price against live
 market data on every PnL load, and oracle outages can't silently zero
 out historical revenue.
 
-**1 PR ready to merge:**
+The local/default branch state after the follow-up dependency work is:
+`main` = `develop` = `5c17e2d`.
 
-| PR | Title | Branch |
-|----|-------|--------|
-| [#90](https://github.com/felippeyann/agentfi/pull/90) | `feat(backend): revenue snapshots + PnL refactor (Phase 2/3 of #71)` | `feat/issue-71-phase-2-revenue-snapshots` |
+Open PRs now:
+
+| PR | Status | Why |
+|----|--------|-----|
+| [#58](https://github.com/felippeyann/agentfi/pull/58) | Blocked | `@safe-global/protocol-kit` v7 removes the named `SafeFactory` export; `safe.service.ts` needs an SDK API migration, not just a package bump. |
+| [#64](https://github.com/felippeyann/agentfi/pull/64) | Blocked | TypeScript 6 conflicts with `openapi-typescript@7.x`, which declares a `typescript ^5.x` peer. |
 
 ---
 
 ## What changed this session (2026-05-07)
+
+### Post-#90 integration follow-up
+
+- PR #90 was merged.
+- The admin `/login` Vercel blocker was fixed by wrapping the
+  `useSearchParams()` consumer in `Suspense` and aligning the admin
+  React / React DOM / React types versions.
+- Dependabot low-risk batch shipped through #91: Prettier, BullMQ,
+  Autoprefixer, React Query, Viem, and Jose.
+- Tailwind update shipped through #60.
+- Production dependency group shipped through #92.
+- Merged feature branches and stale remote branches were pruned.
 
 ### Phase 2 — Revenue snapshots (DB + finalizer)
 
@@ -107,14 +122,14 @@ For the record, sub-issues all closed last session via merged PRs:
 
 ## Manual tasks pending on the user
 
-1. **Merge #90.** Standalone backend change, no other PRs depend on it.
-2. **`prisma migrate deploy`** in staging/prod after merge so the new
+1. **`prisma migrate deploy`** in staging/prod if it has not already
+   run after #90, so the new
    columns appear. Verify with a fresh A2A job that `Job.rewardUsd` is
    non-null on the resulting row.
-3. **Smoke check the PnL endpoint** for an agent with mixed pre/post-
+2. **Smoke check the PnL endpoint** for an agent with mixed pre/post-
    migration completed jobs — expect a "priced live (no stored
    snapshot)" note naming the pre-migration row count.
-4. **(Optional)** Force a brief CoinGecko outage (network blackhole on
+3. **(Optional)** Force a brief CoinGecko outage (network blackhole on
    the recovery worker container) and confirm new completions land with
    NULL snapshot + warn log, and that PnL surfaces the "unresolved"
    note instead of silently zeroing.
@@ -131,12 +146,12 @@ For the record, sub-issues all closed last session via merged PRs:
   fallback in non-ETH reward pricing. Same caveat as before #90 — it
   didn't get worse, but this is the lurking accuracy bug for any
   future support of 18-decimal ERC-20s.
-- **`/login` `useSearchParams` Suspense fix.** Standing pre-existing
-  blocker for the Vercel admin preview. #88 already cleared 3 of the
-  4 admin route handlers, but the `/login` page still needs a Suspense
-  boundary. Tiny separate PR.
-- **10 dependabot PRs (#56–#65)** — usual triage; bullmq, viem,
-  tailwind 4, typescript 6, etc.
+- **Safe protocol-kit v7 migration.** PR #58 is blocked until
+  `safe.service.ts` migrates away from `SafeFactory` and adopts the
+  current v7 deployment/init API.
+- **TypeScript 6 adoption.** PR #64 is blocked until
+  `openapi-typescript` supports TypeScript 6 or the spec-generation
+  dependency path changes.
 
 ---
 
