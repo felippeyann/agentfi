@@ -17,6 +17,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "smoke:dev": "node scripts/smoke-dev.mjs",
+    "demo:claude-mcp": "node scripts/demo-claude-mcp.mjs",
     "preflight": "tsx scripts/preflight.ts",
     "release:v1:check": "node scripts/release-v1.mjs check",
     "release:v1:tag": "node scripts/release-v1.mjs tag",

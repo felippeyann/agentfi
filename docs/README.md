@@ -11,6 +11,7 @@ Welcome to the AgentFi documentation. This hub is designed for both human operat
 
 ### 🚀 Run the thing (fastest path)
 - **[Dev Quickstart](dev-quickstart.md)** — `docker compose up` → stack running in ~3 minutes, **zero external accounts**.
+- **[Claude Desktop MCP Demo](demos/claude-desktop-mcp.md)** — two local AgentFi MCP identities running discovery, A2A job flow, trust, and P&L.
 - **[Examples](../examples/)** — three runnable demos:
   - [`a2a-collab`](../examples/a2a-collab/README.md) — two-agent A2A loop
   - [`swap-planner`](../examples/swap-planner/README.md) — DeFi planning pipeline

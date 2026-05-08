@@ -55,8 +55,9 @@ All project documentation is organized in our **[Documentation Hub](docs/README.
 ### For Developers
 1. Start with the **[Dev Quickstart](docs/dev-quickstart.md)** — `docker compose up` → stack running in 3 minutes, zero external accounts.
 2. Run the **[A2A Collaboration Example](examples/a2a-collab/README.md)** — two-agent end-to-end flow in one file.
-3. Review the **[Architecture Overview](docs/architecture/overview.md)**.
-4. Use the **[MCP Server](packages/mcp-server/README.md)** to integrate your agents.
+3. Run the **[Claude Desktop MCP Demo](docs/demos/claude-desktop-mcp.md)** — two MCP identities, discovery, A2A job, trust, and P&L.
+4. Review the **[Architecture Overview](docs/architecture/overview.md)**.
+5. Use the **[MCP Server](packages/mcp-server/README.md)** to integrate your agents.
 
 ---
 
