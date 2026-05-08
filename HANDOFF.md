@@ -2,7 +2,7 @@
 
 > Live pending tasks, credentials inventory, and working conventions. For _what the project is_, read [STATE.md](STATE.md). For _why_, read [VISION.md](VISION.md). This file is the shortest path from "resuming work" → "executing something useful."
 
-**Last updated**: May 2026 · **main SHA** `81c778c` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0) · **Release**: [v0.1.0](https://github.com/felippeyann/agentfi/releases/tag/v0.1.0) · **npm**: [`@agent_fi/mcp-server@0.3.0`](https://www.npmjs.com/package/@agent_fi/mcp-server)
+**Last updated**: May 2026 · **main SHA** `2b8a20b` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0) · **Release**: [v0.1.0](https://github.com/felippeyann/agentfi/releases/tag/v0.1.0) · **npm**: [`@agent_fi/mcp-server@0.3.0`](https://www.npmjs.com/package/@agent_fi/mcp-server)
 
 ---
 
@@ -74,7 +74,6 @@ Ranked by closure value, not effort.
 
 | Task                                                  | Phase  | Effort                     | Value                                                                                                                                                                                                                                     |
 | ----------------------------------------------------- | ------ | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Verify dev stack + smoke + 3 examples run end-to-end  | —      | ~20 min                    | **High** — CI-green ≠ functionally validated. Run `docker compose -f docker-compose.dev.yml up --build`, `npm run smoke:dev`, then the 3 `examples/*` scripts. Local Docker was unavailable in the latest session, so this is still owed. |
 | GMX / Perp adapter                                    | 3      | 10–20 h                    | Closes Phase 3 DeFi surface.                                                                                                                                                                                                              |
 | Escrow v3 on-chain (`EscrowModule.sol` + integration) | 3      | 30–40 h (incl. audit prep) | Closes Phase 3; funds un-spendable until terminal state.                                                                                                                                                                                  |
 | Revenue sharing (protocol ↔ self-hosted)              | 4      | Design + impl              | Aligns incentives per VISION.md.                                                                                                                                                                                                          |
@@ -179,7 +178,7 @@ Large features that were in the roadmap but had no external demand (GMX adapter,
 
 **The rule:** type-check + unit tests + CI passing does not mean the thing works end-to-end. Always run the happy path manually before shipping user-facing surface.
 
-**The evidence:** three `examples/*` scripts and `docker-compose.dev.yml` shipped across PRs #44–#47 all had green CI but were never actually run `docker compose up` → `node examples/…` by the shipping agent. This was flagged in the session review as validation debt. The next session still owes paying it.
+**The evidence:** three `examples/*` scripts and `docker-compose.dev.yml` shipped across PRs #44–#47 all had green CI but were not initially run `docker compose up` → `node examples/…` by the shipping agent. When the debt was paid later, first-run validation found real breakage: missing MCP workspace deps in the Docker image, missing API migrations on fresh Postgres, IPv6 `localhost` healthcheck mismatch, and public discovery routes blocked by auth.
 
 **How to apply:** for anything a new user or evaluator might run (examples, quickstarts, install commands), execute the full path locally at least once before merging. For backend-only changes, CI is usually sufficient.
 
@@ -254,15 +253,23 @@ embeds a versioned API URL), open one PR per repo and merge them in
 order. Don't re-attempt monorepo consolidation without explicit user
 agreement.
 
-### Validation debt from recent sessions
+### Dev-stack validation
 
-The three `examples/*` scripts and `docker-compose.dev.yml` passed typecheck/syntax/CI but still need a local first-run validation. A smoke helper now exists:
+The zero-credential dev stack has been validated locally from clean compose
+volumes. This path should be rerun before changing examples, Dockerfiles,
+`docker-compose.dev.yml`, auth middleware, Prisma migrations, or quickstart docs:
 
 ```bash
+docker compose -f docker-compose.dev.yml down -v
+docker compose -f docker-compose.dev.yml up --build -d
 npm run smoke:dev
+node examples/a2a-collab/index.mjs
+node examples/swap-planner/index.mjs
+node examples/delegation-chain/index.mjs
 ```
 
-Before shipping new examples or touching the dev stack, run through the quickstart, `npm run smoke:dev`, and all three examples manually. If something breaks, fixing that comes first.
+Expected result: all five services healthy, smoke passes, and all three examples
+complete without external credentials.
 
 ---
 

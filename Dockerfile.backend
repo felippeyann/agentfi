@@ -45,7 +45,7 @@ COPY --from=builder /app/packages/backend/src/db/migrations ./src/db/migrations
 # PORT is injected by Fly.io (8080); fallback to API_PORT then 3000 for other hosts
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT:-3000}/health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:${PORT:-3000}/health || exit 1
 RUN addgroup -g 1001 appuser && adduser -D -u 1001 -G appuser appuser
 USER appuser
 

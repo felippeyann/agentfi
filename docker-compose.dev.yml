@@ -50,6 +50,12 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     restart: unless-stopped
+    command:
+      [
+        'sh',
+        '-lc',
+        'npx prisma migrate deploy --schema=src/db/schema.prisma && node dist/index.js',
+      ]
     environment:
       NODE_ENV: development
       API_PORT: 3000
@@ -84,6 +90,10 @@ services:
     restart: unless-stopped
     environment:
       AGENTFI_API_URL: http://api:3000
+      # Placeholder so the standalone SSE server can boot before an agent is
+      # registered. Replace with a real agfi_live_* key to call tools through
+      # this container.
+      AGENTFI_API_KEY: dev-mcp-placeholder
       MCP_TRANSPORT: sse
       MCP_PORT: 3002
     ports:

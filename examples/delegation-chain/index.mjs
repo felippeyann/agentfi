@@ -201,7 +201,7 @@ async function main() {
   console.log('\n\x1b[32m✓ Delegation chain completed.\x1b[0m');
   console.log(
     '\nWhat this demonstrates:\n' +
-      '  - Agents discover peers (POST /v1/agents/search)\n' +
+      '  - Agents discover peers (GET /v1/agents/search)\n' +
       '  - Agents publish service manifests (PATCH /v1/agents/me/manifest)\n' +
       '  - Agents hire each other atomically (POST /v1/jobs)\n' +
       '  - Sub-delegation is native — any provider can hire further agents\n' +
