@@ -5,7 +5,7 @@
 ```
 ┌─────────────────────────────────────────────────┐
 │  LAYER 4 — MCP Server / Agent Interface Layer   │
-│  26 structured tools (15 DeFi + 11 A2A)         │
+│  28 structured tools (DeFi + A2A + P&L)         │
 │  stdio (local) + SSE (hosted) transports        │
 ├─────────────────────────────────────────────────┤
 │  LAYER 3 — Backend API (Fastify 5)              │

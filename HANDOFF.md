@@ -2,7 +2,7 @@
 
 > Live pending tasks, credentials inventory, and working conventions. For _what the project is_, read [STATE.md](STATE.md). For _why_, read [VISION.md](VISION.md). This file is the shortest path from "resuming work" → "executing something useful."
 
-**Last updated**: May 2026 · **main SHA** `2b8a20b` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0) · **Release**: [v0.1.0](https://github.com/felippeyann/agentfi/releases/tag/v0.1.0) · **npm**: [`@agent_fi/mcp-server@0.3.0`](https://www.npmjs.com/package/@agent_fi/mcp-server)
+**Last updated**: May 2026 · **main SHA** `1869bbc` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0) · **Release**: [v0.1.0](https://github.com/felippeyann/agentfi/releases/tag/v0.1.0) · **npm**: [`@agent_fi/mcp-server@0.3.0`](https://www.npmjs.com/package/@agent_fi/mcp-server) published; source package `0.4.0` pending publish
 
 ---
 
@@ -63,8 +63,9 @@ Pending work is split into four buckets. Nothing in `Done` is listed here — th
 
 | Task                               | Blocker  | Notes                                                                                                                                        |
 | ---------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Awaiting mcp.so review             | External | [Listing](https://mcp.so/server/agentfi-mcp-server/felippeyann) submitted; status `created`.                                                 |
-| Awaiting awesome-mcp-servers merge | External | [PR #5091](https://github.com/punkpeye/awesome-mcp-servers/pull/5091) was open in the last manual check; verify current state before acting. |
+| Update mcp.so listing              | External | [Listing](https://mcp.so/server/agentfi-mcp-server/felippeyann) is live, but its config still showed `@agent_fi/mcp-server@0.2.0` in the latest check. |
+| Awaiting awesome-mcp-servers merge | External | [PR #5091](https://github.com/punkpeye/awesome-mcp-servers/pull/5091) is still open as of 2026-05-08.                                         |
+| Publish mcp-server v0.4.0          | npm org  | Source package adds `get_my_agent_profile` + `get_my_pnl`; publish requires maintainer npm access.                                             |
 | Demo screencast                    | —        | 2-minute Claude Desktop doing a real swap via MCP. Highest remaining non-code leverage.                                                      |
 
 ### 3.2 Technical — unblocked

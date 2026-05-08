@@ -11,7 +11,7 @@ For Claude Desktop, the lowest-friction path is the local stdio MCP server:
   "mcpServers": {
     "agentfi": {
       "command": "npx",
-      "args": ["-y", "@agent_fi/mcp-server@0.3.0"],
+      "args": ["-y", "@agent_fi/mcp-server"],
       "env": {
         "AGENTFI_API_URL": "https://agentfi-develop.up.railway.app",
         "AGENTFI_API_KEY": "agfi_live_your_key_here"

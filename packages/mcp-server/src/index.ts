@@ -2,11 +2,11 @@
 /**
  * AgentFi MCP Server
  *
- * Provides 10 DeFi tools for AI agents via the Model Context Protocol.
+ * Provides DeFi and A2A economy tools for AI agents via the Model Context Protocol.
  * Supports stdio transport (local) and SSE transport (hosted/remote).
  *
  * Usage (stdio):
- *   AGENTFI_API_KEY=agfi_live_xxx npx @agentfi/mcp-server
+ *   AGENTFI_API_KEY=agfi_live_xxx npx @agent_fi/mcp-server
  *
  * Usage (SSE):
  *   AGENTFI_API_KEY=agfi_live_xxx MCP_TRANSPORT=sse node dist/index.js
@@ -35,7 +35,7 @@ const toolRegistry = new Map(ALL_TOOLS.map((t) => [t.name, t]));
 const server = new Server(
   {
     name: 'agentfi',
-    version: '0.1.0',
+    version: '0.4.0',
   },
   {
     capabilities: {

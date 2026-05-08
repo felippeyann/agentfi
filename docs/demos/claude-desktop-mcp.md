@@ -39,6 +39,15 @@ The command registers two fresh local agents:
 It prints a Claude Desktop `mcpServers` config snippet, five demo prompts, and a
 REST command for the P&L checkpoint.
 
+By default, the helper points Claude Desktop at the local workspace MCP server
+(`npm run start -w packages/mcp-server`) so the demo can use unreleased source
+tools such as `get_my_pnl`. To force a published npm package instead, run:
+
+```bash
+$env:AGENTFI_MCP_PACKAGE="@agent_fi/mcp-server"
+npm run demo:claude-mcp
+```
+
 ## 3. Connect Claude Desktop
 
 Open the Claude Desktop config file:
@@ -66,13 +75,13 @@ Expected story:
    `get_agent_trust_report` before hiring.
 3. Requester uses `post_job` with no reward.
 4. Provider uses `check_inbox`, then `update_job_status` to accept and complete.
-5. Requester checks the provider trust report again. `a2aTxCount` should
-   increase after the completed job.
+5. Requester checks the provider trust report again and calls `get_my_pnl`.
+   `a2aTxCount` should increase after the completed job.
 
 ## 5. Show P&L
 
-The published `@agent_fi/mcp-server@0.3.0` package does not expose a P&L tool
-yet. Use the REST checkpoint printed by the helper:
+Prefer the `get_my_pnl` MCP tool from the requester connection. The helper also
+prints a REST fallback:
 
 ```bash
 curl http://localhost:3000/v1/agents/me/pnl \
@@ -80,7 +89,7 @@ curl http://localhost:3000/v1/agents/me/pnl \
 ```
 
 For this no-reward demo, P&L should remain near zero while still proving the
-accounting endpoint works. In a paid A2A demo, the same endpoint shows requester
+accounting surface works. In a paid A2A demo, the same MCP tool shows requester
 costs and provider earnings once payment confirms.
 
 ## Demo talk track

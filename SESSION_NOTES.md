@@ -133,6 +133,18 @@ Added a lightweight demo-prep helper and walkthrough for Claude Desktop:
 - `docs/agents/quickstart.md` now makes local stdio the Claude Desktop default
   and keeps hosted SSE framed as a remote-client option.
 
+### MCP P&L/profile tools
+
+Closed the remaining demo gap where P&L required a REST fallback:
+
+- Source package `@agent_fi/mcp-server` is now `0.4.0` and includes
+  `get_my_agent_profile` and `get_my_pnl`.
+- Backend embedded `/mcp/sse` proxy exposes matching tools.
+- `npm run demo:claude-mcp` now points Claude Desktop at the local workspace MCP
+  server by default, so the demo can use source tools before npm publish.
+- Manual follow-up: publish `@agent_fi/mcp-server@0.4.0` to npm with
+  maintainer credentials.
+
 ---
 
 ## Validation
@@ -144,6 +156,9 @@ Completed locally:
   "no eslint configured").
 - `npm run typecheck --workspaces --if-present` passed.
 - `npm run demo:claude-mcp` passed against the running dev stack.
+- `npm run build -w packages/mcp-server` passed after adding MCP tools.
+- `npm run spec:check` passed after regenerating `api.generated.ts`.
+- `npm run smoke:dev` passed after adding MCP P&L/profile tools.
 - `npm run test -w packages/backend -- reward-pricing` passed.
 - `npm run test -w packages/backend` passed with local Docker Postgres/Redis
   running and the required test env vars set.
@@ -166,8 +181,21 @@ Completed locally:
 
 ## Current P0s
 
-No open P0 remains from the diagnostic pass. The dev-stack first-run path has
-now been executed and fixed locally.
+No open infrastructure P0 remains from the diagnostic pass. Current practical
+priority is adoption surface polish, not large protocol expansion.
+
+Current map after the latest sweep:
+
+1. **P0 — MCP adoption surface**: keep Claude/MCP demo fully inside MCP tools.
+   `get_my_agent_profile` and `get_my_pnl` are implemented in source; npm
+   publish for `@agent_fi/mcp-server@0.4.0` remains manual.
+2. **P1 — External distribution**: mcp.so listing is live but still showed an
+   old `@agent_fi/mcp-server@0.2.0` config; awesome-mcp-servers PR #5091 is
+   still open.
+3. **P2 — Demo screencast**: record the Claude Desktop flow now that the helper
+   and MCP P&L tool exist.
+4. **P3 — Large roadmap**: GMX/perps, escrow v3, and revenue sharing should
+   wait for concrete user/integration signal.
 
 ---
 

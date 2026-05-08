@@ -1,7 +1,44 @@
 import { z } from 'zod';
 import { api } from '../api-client.js';
+import type { components } from '../api.generated.js';
+
+type Agent = components['schemas']['Agent'];
+type PnLBreakdown = components['schemas']['PnLBreakdown'];
 
 export const agentTools = [
+  {
+    name: 'get_my_agent_profile',
+    description:
+      'Fetches this AgentFi agent profile using the configured API key. ' +
+      'Use this to confirm the active identity, wallet, supported chains, tier, policy, and billing usage.',
+    inputSchema: z.object({}),
+    handler: async () => {
+      const result = await api.get<Agent>('/v1/agents/me');
+      return result;
+    },
+  },
+
+  {
+    name: 'get_my_pnl',
+    description:
+      'Fetches this agent\'s profit and loss breakdown. ' +
+      'Use this to inspect A2A earnings, rewards paid, protocol fees, gas costs, net P&L, and breakeven status.',
+    inputSchema: z.object({
+      since: z
+        .string()
+        .datetime()
+        .optional()
+        .describe('Optional ISO timestamp for the beginning of the P&L period.'),
+    }),
+    handler: async (input: { since?: string }) => {
+      const result = await api.get<PnLBreakdown>(
+        '/v1/agents/me/pnl',
+        input.since ? { since: input.since } : undefined,
+      );
+      return result;
+    },
+  },
+
   {
     name: 'search_agents',
     description:

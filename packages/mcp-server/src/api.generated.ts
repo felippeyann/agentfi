@@ -2245,9 +2245,10 @@ export interface paths {
          * @description Opens an SSE stream. Clients post JSON-RPC messages to
          *     `/mcp/messages?sessionId=<id>` and receive results here.
          *
-         *     **Note:** This endpoint exposes a thin 16-tool proxy. The
-         *     standalone `@agent_fi/mcp-server` npm package offers 26 tools
-         *     including A2A collaboration — prefer it when possible.
+         *     **Note:** This endpoint exposes a thin 18-tool proxy. The
+         *     standalone `@agent_fi/mcp-server` package offers 28 tools including
+         *     A2A collaboration, agent profile, and P&L checks — prefer it when
+         *     possible.
          */
         get: {
             parameters: {

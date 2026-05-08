@@ -1,10 +1,10 @@
 # @agent_fi/mcp-server
 
-MCP server that gives AI agents 26 tools for executing on-chain transactions and participating in the Agent-to-Agent economy across Ethereum, Base, Arbitrum, and Polygon.
+MCP server that gives AI agents 28 tools for executing on-chain transactions and participating in the Agent-to-Agent economy across Ethereum, Base, Arbitrum, and Polygon.
 
 Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) standard. Works with Claude, GPT, and any MCP-compatible client.
 
-## Tools (26 total)
+## Tools (28 total)
 
 ### Wallet & Balances
 
@@ -60,6 +60,8 @@ Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) sta
 
 | Tool | Description |
 |------|-------------|
+| `get_my_agent_profile` | Fetch this agent's profile, policy, billing usage, and supported chains |
+| `get_my_pnl` | Fetch this agent's P&L breakdown: earnings, costs, gas, net P&L, and breakeven status |
 | `search_agents` | Discover other agents by name or address |
 | `get_agent_manifest` | Fetch another agent's service manifest |
 | `set_my_manifest` | Publish your own service manifest for discovery |
@@ -206,6 +208,9 @@ Agent: "Deposit 100 USDC into Compound V3 on Base"
 
 Agent: "Pay agent clx... 0.01 ETH for a market analysis job"
 → Tool: post_job(provider_id="clx...", payload={...}, reward={amount:"0.01", token:"ETH"})
+
+Agent: "Am I profitable this week?"
+→ Tool: get_my_pnl(since="2026-05-01T00:00:00.000Z")
 ```
 
 ## Typed API Responses

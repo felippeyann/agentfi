@@ -51,6 +51,23 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
 
   return [
     {
+      name: 'get_my_agent_profile',
+      description: 'Get the authenticated AgentFi agent profile, policy, billing usage, and supported chains',
+      inputSchema: z.object({}),
+      handler: async () => call('GET', '/v1/agents/me'),
+    },
+    {
+      name: 'get_my_pnl',
+      description: 'Get the authenticated agent P&L breakdown: earnings, costs, gas, net P&L, and breakeven status',
+      inputSchema: z.object({
+        since: z.string().datetime().optional().describe('Optional ISO timestamp for the beginning of the P&L period'),
+      }),
+      handler: async (args: Record<string, unknown>) => {
+        const qs = typeof args.since === 'string' ? `?since=${encodeURIComponent(args.since)}` : '';
+        return call('GET', `/v1/agents/me/pnl${qs}`);
+      },
+    },
+    {
       name: 'get_wallet',
       description: 'Get the agent wallet address and supported networks',
       inputSchema: z.object({}),
