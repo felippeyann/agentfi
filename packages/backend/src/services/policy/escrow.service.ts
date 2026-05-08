@@ -25,10 +25,9 @@
  *   - No automatic cleanup of stale ACCEPTED jobs (operator task)
  */
 
-import { parseEther, parseUnits } from 'viem';
 import { db } from '../../db/client.js';
 import { logger } from '../../api/middleware/logger.js';
-import { weiToUsd, tokenAmountToUsd } from '../transaction/price.service.js';
+import { resolveRewardUsd } from '../billing/reward-pricing.js';
 
 interface RewardSpec {
   amount: string;
@@ -47,24 +46,8 @@ interface ReservationResult {
  * Falls back to '0' if price oracle fails (graceful degradation).
  */
 async function rewardToUsd(reward: RewardSpec): Promise<string> {
-  const isEth = reward.token.toUpperCase() === 'ETH';
-  if (isEth) {
-    try {
-      const wei = parseEther(reward.amount);
-      return await weiToUsd(wei, reward.chainId);
-    } catch {
-      return '0';
-    }
-  }
-
-  // For ERC-20 tokens, assume 6 decimals (USDC/USDT) as a sensible default
-  // for MVP. Accurate decimal lookup happens at payment execution time.
-  try {
-    const units = parseUnits(reward.amount, 6);
-    return await tokenAmountToUsd(units, reward.token, 6, reward.chainId);
-  } catch {
-    return '0';
-  }
+  const resolved = await resolveRewardUsd(reward);
+  return resolved.resolved ? resolved.usd : '0';
 }
 
 /**

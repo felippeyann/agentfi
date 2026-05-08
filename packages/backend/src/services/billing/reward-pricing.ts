@@ -23,6 +23,10 @@
 
 import { parseEther, parseUnits } from 'viem';
 import { weiToUsd, tokenAmountToUsd } from '../transaction/price.service.js';
+import {
+  isNativeTokenSymbol,
+  resolveKnownPricedToken,
+} from '../transaction/token-registry.js';
 
 export interface RewardJson {
   amount?: string;
@@ -51,6 +55,7 @@ const ZERO_RESULT: RewardPriceResult = {
  * Returns `resolved: false` when:
  *   - The reward is null or has no amount (nothing to price).
  *   - The reward amount is malformed (parseEther/parseUnits throws).
+ *   - The reward is a non-native token absent from the local token registry.
  *   - The price oracle returns '0' (its "unresolved" sentinel).
  *
  * On success, both `usd` and `priceUsd` are non-zero strings.
@@ -66,7 +71,7 @@ export async function resolveRewardUsd(
 
   const token = reward.token ?? 'ETH';
   const chainId = reward.chainId ?? 1;
-  const isEth = token.toUpperCase() === 'ETH';
+  const isEth = isNativeTokenSymbol(token);
 
   try {
     if (isEth) {
@@ -84,12 +89,16 @@ export async function resolveRewardUsd(
       return { usd, priceUsd, resolved: true };
     }
 
-    // Non-ETH path. MVP assumption (matches existing PnL behavior): treat
-    // the token symbol field as a 6-decimal contract address (USDC/USDT
-    // shape). Long-term this should consult a token registry — out of
-    // scope for #71 Phase 2/3.
-    const units = parseUnits(reward.amount, 6);
-    const usd = await tokenAmountToUsd(units, token, 6, chainId);
+    const pricedToken = resolveKnownPricedToken(token, chainId);
+    if (!pricedToken) return ZERO_RESULT;
+
+    const units = parseUnits(reward.amount, pricedToken.decimals);
+    const usd = await tokenAmountToUsd(
+      units,
+      pricedToken.address,
+      pricedToken.decimals,
+      chainId,
+    );
     if (usd === '0') return ZERO_RESULT;
     const amountFloat = parseFloat(reward.amount);
     const priceUsd =

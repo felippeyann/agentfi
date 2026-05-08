@@ -1,16 +1,16 @@
 # Graph Report - agentfi  (2026-05-08)
 
 ## Corpus Check
-- 175 files · ~112,804 words
+- 176 files · ~113,197 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1399 nodes · 1819 edges · 109 communities (100 shown, 9 thin omitted)
+- 1409 nodes · 1835 edges · 110 communities (100 shown, 10 thin omitted)
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS · INFERRED: 2 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `72ca92a5`
+- Built from commit: `5cb408ea`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -107,40 +107,41 @@
 - [[_COMMUNITY_Community 89|Community 89]]
 - [[_COMMUNITY_Community 90|Community 90]]
 - [[_COMMUNITY_Community 91|Community 91]]
-- [[_COMMUNITY_Community 93|Community 93]]
+- [[_COMMUNITY_Community 92|Community 92]]
 - [[_COMMUNITY_Community 94|Community 94]]
-- [[_COMMUNITY_Community 101|Community 101]]
+- [[_COMMUNITY_Community 95|Community 95]]
 - [[_COMMUNITY_Community 102|Community 102]]
+- [[_COMMUNITY_Community 103|Community 103]]
 
 ## God Nodes (most connected - your core abstractions)
 1. `logger` - 20 edges
 2. `createChainPublicClient()` - 16 edges
 3. `db` - 16 edges
 4. `AgentFi — Operator Setup Checklist` - 16 edges
-5. `PROMPT PARA CLAUDE CODE — AgentFi: Infraestrutura de Transações Cripto para Agentes de IA` - 14 edges
-6. `TransactionBuilder` - 13 edges
-7. `@agent_fi/mcp-server` - 13 edges
-8. `FeeService` - 12 edges
-9. `ReputationService` - 12 edges
-10. `weiToUsd()` - 12 edges
+5. `[Unreleased]` - 15 edges
+6. `PROMPT PARA CLAUDE CODE — AgentFi: Infraestrutura de Transações Cripto para Agentes de IA` - 14 edges
+7. `TransactionBuilder` - 13 edges
+8. `@agent_fi/mcp-server` - 13 edges
+9. `FeeService` - 12 edges
+10. `ReputationService` - 12 edges
 
 ## Surprising Connections (you probably didn't know these)
+- `getQuotedAmountOut()` --calls--> `createChainPublicClient()`  [EXTRACTED]
+  packages/backend/src/api/routes/transactions.ts → packages/backend/src/config/chains.ts
 - `handleAgentFiToolCall()` --calls--> `handler`  [INFERRED]
   packages/adapters/src/openai.ts → packages/admin/src/app/api/auth/[...nextauth]/route.ts
 - `buildTestApp()` --calls--> `fastify`  [INFERRED]
   packages/backend/src/__tests__/transactions.routes.integration.test.ts → packages/backend/src/index.ts
 - `start()` --calls--> `startTransactionWorker()`  [EXTRACTED]
   packages/backend/src/index.ts → packages/backend/src/queues/transaction.queue.ts
-- `start()` --calls--> `startReputationWorker()`  [EXTRACTED]
-  packages/backend/src/index.ts → packages/backend/src/queues/reputation.queue.ts
 - `start()` --calls--> `startTransactionWorker()`  [EXTRACTED]
   packages/backend/src/worker.ts → packages/backend/src/queues/transaction.queue.ts
 
-## Communities (109 total, 9 thin omitted)
+## Communities (110 total, 10 thin omitted)
 
 ### Community 0 - "Community 0"
 Cohesion: 0.05
-Nodes (36): CHAIN_IDS, createChainPublicClient(), FALLBACK_RPC_URLS, getChain(), getPrimaryRpcUrl(), getRpcCandidates(), getSecondaryRpcUrl(), isNetworkOrRateLimitError() (+28 more)
+Nodes (38): CHAIN_IDS, createChainPublicClient(), FALLBACK_RPC_URLS, getChain(), getPrimaryRpcUrl(), getRpcCandidates(), getSecondaryRpcUrl(), isNetworkOrRateLimitError() (+30 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.05
@@ -156,7 +157,7 @@ Nodes (47): 0. Choose Your Mode, 10. Stripe Billing, 11. Install and Run Locally
 
 ### Community 4 - "Community 4"
 Cohesion: 0.06
-Nodes (33): 1. Snapshot, 2. Required reading order, 3.1 Manual tasks (user-only), 3.2 Technical — unblocked, 3.3 Technical — blocked externally, 3.4 The meta-guidance, 3. Pending work, 4. Credentials inventory (+25 more)
+Nodes (34): 1. Snapshot, 2. Required reading order, 3.1 Manual tasks (user-only), 3.2 Technical — unblocked, 3.3 Technical — blocked externally, 3.4 The meta-guidance, 3. Pending work, 4. Credentials inventory (+26 more)
 
 ### Community 5 - "Community 5"
 Cohesion: 0.06
@@ -167,108 +168,108 @@ Cohesion: 0.06
 Nodes (31): Admin auth audit logs, AgentFi — Self-Hosted Production Deployment Guide, code:bash (export PRIVATE_KEY=0xYourDeployerPrivateKey), code:bash (cd packages/contracts), code:block3 (POLICY_MODULE_ADDRESS_8453=0x...), code:bash (# Liveness), code:bash (curl -X POST https://api.yourdomain.com/v1/agents \), code:json ({) (+23 more)
 
 ### Community 7 - "Community 7"
-Cohesion: 0.1
-Nodes (18): PRICE_IDS, envSchema, missing, parsed, logger, AGENT_POLICY_MODULE_ABI, connection, reputationQueue (+10 more)
+Cohesion: 0.13
+Nodes (19): PnLBreakdown, rewardRowToUsd(), resolveRewardUsd(), RewardJson, RewardPriceResult, ZERO_RESULT, ReservationResult, reserveJobEscrow() (+11 more)
 
 ### Community 8 - "Community 8"
-Cohesion: 0.11
-Nodes (19): PnLBreakdown, PnLService, rewardRowToUsd(), resolveRewardUsd(), RewardJson, RewardPriceResult, ZERO_RESULT, db (+11 more)
+Cohesion: 0.08
+Nodes (22): builder, depositSchema, ERC20_DECIMALS_ABI, erc4626DepositSchema, erc4626WithdrawSchema, executeA2APayment(), executeSwapSchema, executor (+14 more)
 
 ### Community 9 - "Community 9"
-Cohesion: 0.08
-Nodes (21): builder, depositSchema, ERC20_DECIMALS_ABI, erc4626DepositSchema, erc4626WithdrawSchema, executeA2APayment(), executeSwapSchema, executor (+13 more)
-
-### Community 10 - "Community 10"
 Cohesion: 0.09
 Nodes (20): buildSubdomainCandidate(), DEFAULT_PUBLIC_RESOLVER, ENS_REGISTRY_ABI, EnsConfig, EnsService, normalizeEnsLabel(), PUBLIC_RESOLVER_ABI, readEnsConfig() (+12 more)
 
-### Community 11 - "Community 11"
-Cohesion: 0.13
-Nodes (18): db, RATE_LIMITS, redis, registerRateLimit(), connection, paymentRecoveryQueue, PER_TICK_LIMIT, RecoverySummary (+10 more)
+### Community 10 - "Community 10"
+Cohesion: 0.11
+Nodes (20): envSchema, missing, parsed, RATE_LIMITS, redis, registerRateLimit(), schedulePaymentRecovery(), startPaymentRecoveryWorker() (+12 more)
 
-### Community 12 - "Community 12"
+### Community 11 - "Community 11"
 Cohesion: 0.08
 Nodes (23): code:powershell (# Install via winget (simplest on Windows)), code:block10 (Agent → AgentExecutor → Uniswap → receives USDC), code:powershell (# Ethereum Mainnet), code:powershell (forge --version), code:powershell (cd "packages/contracts"), code:powershell (# Private key of the wallet that will pay for gas), code:powershell (cd "packages/contracts"), code:powershell (cd "packages/contracts") (+15 more)
 
-### Community 13 - "Community 13"
+### Community 12 - "Community 12"
 Cohesion: 0.15
 Nodes (13): api, ALL_TOOLS, main(), server, startSSEServer(), tool, toolRegistry, validated (+5 more)
 
-### Community 14 - "Community 14"
+### Community 13 - "Community 13"
 Cohesion: 0.09
 Nodes (22): Admin (Operator), AgentFi API Reference, Agents, Authentication, Billing, code:json (// Response 200), code:json (// Request (x-api-key: <API_SECRET>)), code:json (// Request (no auth headers)) (+14 more)
 
-### Community 15 - "Community 15"
+### Community 14 - "Community 14"
 Cohesion: 0.09
 Nodes (22): Branch & Repository, CI/CD, CI Status, Current State, Database, Dependencies, Documentation, Go-Live Status — AgentFi v0.1.0 (+14 more)
 
-### Community 16 - "Community 16"
+### Community 15 - "Community 15"
 Cohesion: 0.13
 Nodes (10): handler, AgentFiClient, AgentFiConfig, ElizaAction, ElizaPlugin, AgentFiToolkit, LangChainTool, makeTool() (+2 more)
 
-### Community 17 - "Community 17"
+### Community 16 - "Community 16"
 Cohesion: 0.13
 Nodes (13): metadata, viewport, fallbackData, VolumeChart(), VolumePoint, navItems, Sidebar(), StatCard() (+5 more)
 
-### Community 18 - "Community 18"
+### Community 17 - "Community 17"
 Cohesion: 0.11
 Nodes (17): authMiddleware, FastifyRequest, generateApiKey(), hashApiKey(), agentRoutes(), createAgentSchema, ensService, pnlService (+9 more)
 
+### Community 18 - "Community 18"
+Cohesion: 0.14
+Nodes (12): PRICE_IDS, logger, AGENT_POLICY_MODULE_ABI, connection, deadLetterQueue, feeService, monitor, startTransactionWorker() (+4 more)
+
 ### Community 19 - "Community 19"
+Cohesion: 0.17
+Nodes (15): db, A2APaymentOutcome, finalizeA2APaymentJob(), FinalizeA2APaymentJobParams, reputationService, markEscrowReleased(), releaseJobEscrow(), connection (+7 more)
+
+### Community 20 - "Community 20"
 Cohesion: 0.12
 Nodes (9): FEE_BPS, FeeCalculation, FeeService, SUBSCRIPTION_PRICE_USD, TX_LIMITS, db, r, result (+1 more)
 
-### Community 20 - "Community 20"
+### Community 21 - "Community 21"
 Cohesion: 0.14
 Nodes (10): parsed, signed, unsignedTx, __clearLocalWallets(), __localWalletCount(), LocalWalletEntry, LocalWalletService, randomPrivateKey() (+2 more)
 
-### Community 21 - "Community 21"
+### Community 22 - "Community 22"
+Cohesion: 0.1
+Nodes (19): [0.1.0] - 2026-03-25, Added, Added, Added, Added, Added, Changed, Changed (+11 more)
+
+### Community 23 - "Community 23"
 Cohesion: 0.1
 Nodes (19): 1.1 Ghost completions — fire-and-forget payment, 1.2 Silent zero from price oracle, 1.3 Real-time price (no historical snapshot), 1. Bug surface (what's broken today), 2. The 3-phase plan, 3. Acceptance criteria per phase, 4. Follow-up tickets to file, 5. Status (+11 more)
 
-### Community 22 - "Community 22"
+### Community 24 - "Community 24"
 Cohesion: 0.1
 Nodes (19): 1. Bump the version in `package.json`, 2. Update the keywords if new protocols are added, 3. Run the publish sequence, 4. Create a git tag and GitHub release, 5. Verify the publish, Authentication fails, code:json ("version": "0.3.0"), code:json ("keywords": ["mcp", "defi", "ethereum", "ai-agents", "uniswa) (+11 more)
 
-### Community 23 - "Community 23"
-Cohesion: 0.18
-Nodes (16): A2APaymentOutcome, finalizeA2APaymentJob(), FinalizeA2APaymentJobParams, reputationService, markEscrowReleased(), releaseJobEscrow(), ReservationResult, reserveJobEscrow() (+8 more)
-
-### Community 24 - "Community 24"
+### Community 25 - "Community 25"
 Cohesion: 0.11
 Nodes (18): 1. Purpose, 2. Four-Layer Stack, 3. Supported Networks, 4.1 Core DeFi primitives, 4.2 Agent-to-Agent economy (the heart of the thesis), 4.3 Policy and governance, 4.4 Self-sustaining agents (Phase 4), 4.5 Operator admin (+10 more)
 
-### Community 25 - "Community 25"
+### Community 26 - "Community 26"
 Cohesion: 0.11
 Nodes (18): AgentFi — Dev Quickstart, code:bash (git clone https://github.com/felippeyann/agentfi.git), code:block2 (api-1  | [info] AgentFi API listening on :3000), code:bash (curl -X POST http://localhost:3000/v1/agents \), code:json ({), code:bash (# Liveness), code:bash (npm run smoke:dev), code:json ({) (+10 more)
 
-### Community 26 - "Community 26"
-Cohesion: 0.12
-Nodes (6): OnChainPolicyService, PolicyService, PolicyValidationResult, db, lower, svc
-
 ### Community 27 - "Community 27"
-Cohesion: 0.26
-Nodes (16): CHAIN_CONFIGS, ChainContractConfig, check(), checkContracts(), checkDatabase(), checkEnvVars(), checkOperatorWallet(), checkRedis() (+8 more)
+Cohesion: 0.12
+Nodes (13): PnLService, transactionQueue, adminRoutes(), batchAdminSchema, isLoopbackIp(), pnlService, reputationService, requireAdmin() (+5 more)
 
 ### Community 28 - "Community 28"
 Cohesion: 0.12
-Nodes (16): @agentfi/adapters, Available tools, code:bash (npm install @agentfi/adapters), code:bash (AGENTFI_API_KEY=agfi_live_your_key_here), code:typescript (import { getAgentFiTools, handleAgentFiToolCall } from '@age), code:typescript (import { getAgentFiLangChainTools } from '@agentfi/adapters/), code:typescript (import { agentFiPlugin } from '@agentfi/adapters/eliza';), code:typescript (const tools = getAgentFiTools({) (+8 more)
+Nodes (6): OnChainPolicyService, PolicyService, PolicyValidationResult, db, lower, svc
 
 ### Community 29 - "Community 29"
-Cohesion: 0.12
-Nodes (15): A note on authorship, Agent-to-agent economy, AgentFi — Vision, Economic identity, How to contribute, On consciousness and expansion, On what's happening right now, Principles this project builds on (+7 more)
+Cohesion: 0.26
+Nodes (16): CHAIN_CONFIGS, ChainContractConfig, check(), checkContracts(), checkDatabase(), checkEnvVars(), checkOperatorWallet(), checkRedis() (+8 more)
 
 ### Community 30 - "Community 30"
 Cohesion: 0.12
-Nodes (15): code:block1 (Network Name:    Base), code:block2 (0x61fb281349dB2f4B790472679B65002BbbD90ea3), code:block3 (Your exchange / personal wallet), FAQ, How to deposit ETH to Base — Full Tutorial, How to verify it arrived, Official Base Bridge (Safest), OPTION A — You already have ETH on an exchange (Binance, Coinbase, etc.) (+7 more)
+Nodes (16): @agentfi/adapters, Available tools, code:bash (npm install @agentfi/adapters), code:bash (AGENTFI_API_KEY=agfi_live_your_key_here), code:typescript (import { getAgentFiTools, handleAgentFiToolCall } from '@age), code:typescript (import { getAgentFiLangChainTools } from '@agentfi/adapters/), code:typescript (import { agentFiPlugin } from '@agentfi/adapters/eliza';), code:typescript (const tools = getAgentFiTools({) (+8 more)
 
 ### Community 31 - "Community 31"
-Cohesion: 0.13
-Nodes (14): [0.1.0] - 2026-03-25, Added, Added, Added, Changed, Changed, Changed (breaking — mcp-server 0.2.0 → 0.3.0), Changelog (+6 more)
+Cohesion: 0.12
+Nodes (15): A note on authorship, Agent-to-agent economy, AgentFi — Vision, Economic identity, How to contribute, On consciousness and expansion, On what's happening right now, Principles this project builds on (+7 more)
 
 ### Community 32 - "Community 32"
-Cohesion: 0.13
-Nodes (15): code:block10 (POST   /v1/transactions/simulate  — simula sem submeter), code:block11 (GET    /v1/wallet/balance         — saldo de todos os tokens), code:block12 (GET    /health                    — liveness check), code:block13 (1. Recebe request do agente), code:typescript (// Use @uniswap/v3-sdk + @uniswap/smart-order-router), code:typescript (// Use @aave/contract-helpers), code:block7 (src/), code:prisma (model Agent {) (+7 more)
+Cohesion: 0.12
+Nodes (15): code:block1 (Network Name:    Base), code:block2 (0x61fb281349dB2f4B790472679B65002BbbD90ea3), code:block3 (Your exchange / personal wallet), FAQ, How to deposit ETH to Base — Full Tutorial, How to verify it arrived, Official Base Bridge (Safest), OPTION A — You already have ETH on an exchange (Binance, Coinbase, etc.) (+7 more)
 
 ### Community 33 - "Community 33"
 Cohesion: 0.13
@@ -279,14 +280,10 @@ Cohesion: 0.14
 Nodes (7): account, ANVIL_PRIVATE_KEY, anvilChain, executorAddress, { plaintext, hash, prefix }, today, transferValue
 
 ### Community 35 - "Community 35"
-Cohesion: 0.16
-Nodes (11): ChainContracts, CONTRACT_ADDRESSES, getContracts(), AAVE_POOL_ABI, COMPOUND_COMET_ABI, CURVE_STABLESWAP_ABI, ERC20_ABI, ERC4626_VAULT_ABI (+3 more)
-
-### Community 36 - "Community 36"
 Cohesion: 0.14
 Nodes (13): code:bash (git clone https://github.com/felippeyann/agentfi), code:block2 (packages/), code:bash (git checkout -b feat/your-feature develop), code:bash (npm run typecheck), Contributing to AgentFi, License, Making a change, PR expectations (+5 more)
 
-### Community 37 - "Community 37"
+### Community 36 - "Community 36"
 Cohesion: 0.14
 Nodes (13): Against the dev stack (default), Against your own instance, AgentFi Example — Delegation Chain, code:block1 (Alice (researcher)), code:bash (# Terminal 1), code:bash (AGENTFI_API_URL=https://api.your-instance.com \), code:block4 ([1] Register three agents with distinct specialties), code:js (const subJob = await createJob(bob.apiKey, charlie.id, {) (+5 more)
 
@@ -296,29 +293,33 @@ Nodes (11): buildCommandLine(), getDirtyPaths(), hasEnv(), IGNORE_DIRTY_PREFIXES
 
 ### Community 39 - "Community 39"
 Cohesion: 0.15
-Nodes (12): Against the dev stack (default), Against your own instance, AgentFi Example — Swap Planner, code:bash (# Terminal 1), code:bash (AGENTFI_API_URL=https://api.your-instance.com \), code:block3 ([env] API_URL = http://localhost:3000), Expected output, Files (+4 more)
+Nodes (12): code:bash (npx --yes --package openapi-typescript@7.13.0 --package type), Current P0s, First-run Docker validation, Next non-P0 technical work, P0 diagnostic follow-up, Safe protocol-kit v7, Session Notes — 2026-05-08, Token decimals / reward accounting (+4 more)
 
 ### Community 40 - "Community 40"
+Cohesion: 0.15
+Nodes (12): Against the dev stack (default), Against your own instance, AgentFi Example — Swap Planner, code:bash (# Terminal 1), code:bash (AGENTFI_API_URL=https://api.your-instance.com \), code:block3 ([env] API_URL = http://localhost:3000), Expected output, Files (+4 more)
+
+### Community 41 - "Community 41"
+Cohesion: 0.18
+Nodes (10): AAVE_POOL_ABI, COMPOUND_COMET_ABI, CURVE_STABLESWAP_ABI, ERC20_ABI, ERC4626_VAULT_ABI, TransactionData, UNISWAP_ROUTER_ABI, WETH_ADDRESSES (+2 more)
+
+### Community 42 - "Community 42"
 Cohesion: 0.23
 Nodes (4): getTurnkeyClient(), SignedTransaction, TurnkeyService, WalletInfo
 
-### Community 41 - "Community 41"
+### Community 43 - "Community 43"
 Cohesion: 0.33
 Nodes (11): api(), c, createPaidJob(), getJob(), log(), main(), patchJob(), POLL_TIMEOUT_SEC (+3 more)
 
-### Community 42 - "Community 42"
-Cohesion: 0.17
-Nodes (11): code:bash (npx --yes --package openapi-typescript@7.13.0 --package type), Current P0s, First-run Docker validation, Next non-P0 technical work, P0 diagnostic follow-up, Safe protocol-kit v7, Session Notes — 2026-05-08, TypeScript 6 (+3 more)
-
-### Community 43 - "Community 43"
+### Community 44 - "Community 44"
 Cohesion: 0.17
 Nodes (11): Against the dev stack (default), Against your own instance, AgentFi Example — A2A Collaboration, code:bash (# Terminal 1 — run the dev stack), code:bash (AGENTFI_API_URL=https://api.your-instance.com \), code:block3 ([env] API_URL = http://localhost:3000), Expected output, Files (+3 more)
 
-### Community 44 - "Community 44"
+### Community 45 - "Community 45"
 Cohesion: 0.45
 Nodes (10): api(), createJob(), getPnL(), getTrustReport(), log(), main(), patchJob(), publishManifest() (+2 more)
 
-### Community 45 - "Community 45"
+### Community 46 - "Community 46"
 Cohesion: 0.33
 Nodes (9): escapeHtml(), fetchAndAssertOk(), formatTelegramHtml(), NotificationPayload, NotificationService, sendDiscord(), sendGenericWebhook(), sendTelegram() (+1 more)
 
@@ -348,19 +349,19 @@ Nodes (9): ARQUITETURA GERAL, code:block1 (┌───────────�
 
 ### Community 54 - "Community 54"
 Cohesion: 0.2
-Nodes (9): 1. Connect to the MCP Server, 2. Register an Agent (get your API key), 3. Your Agent Can Now Execute Transactions, AgentFi Agent Quickstart, code:json ({), code:bash (git clone https://github.com/felippeyann/agentfi), code:bash (curl -X POST https://agentfi-develop.up.railway.app/v1/agent), Fee Structure (+1 more)
+Nodes (10): code:block13 (1. Recebe request do agente), code:typescript (// Use @uniswap/v3-sdk + @uniswap/smart-order-router), code:typescript (// Use @aave/contract-helpers), code:block7 (src/), code:prisma (model Agent {), Estrutura de pastas, FASE 3 — BACKEND API, Integração com Protocolos DeFi (+2 more)
 
 ### Community 55 - "Community 55"
 Cohesion: 0.2
-Nodes (9): Agent-to-Agent Layer, AgentFi Architecture, code:block1 (┌─────────────────────────────────────────────────┐), Deployed Contracts (Base Mainnet — Chain 8453), Deployment posture, Networks, Revenue Model, System Overview (+1 more)
+Nodes (9): 1. Connect to the MCP Server, 2. Register an Agent (get your API key), 3. Your Agent Can Now Execute Transactions, AgentFi Agent Quickstart, code:json ({), code:bash (git clone https://github.com/felippeyann/agentfi), code:bash (curl -X POST https://agentfi-develop.up.railway.app/v1/agent), Fee Structure (+1 more)
 
 ### Community 56 - "Community 56"
-Cohesion: 0.53
-Nodes (8): api(), createJob(), getTrust(), log(), main(), patchJob(), publishManifest(), registerAgent()
+Cohesion: 0.2
+Nodes (9): Agent-to-Agent Layer, AgentFi Architecture, code:block1 (┌─────────────────────────────────────────────────┐), Deployed Contracts (Base Mainnet — Chain 8453), Deployment posture, Networks, Revenue Model, System Overview (+1 more)
 
 ### Community 57 - "Community 57"
-Cohesion: 0.28
-Nodes (4): TransactionData, EXECUTOR_ABI, ExecutorService, WrappedTransaction
+Cohesion: 0.53
+Nodes (8): api(), createJob(), getTrust(), log(), main(), patchJob(), publishManifest(), registerAgent()
 
 ### Community 58 - "Community 58"
 Cohesion: 0.56
@@ -387,66 +388,62 @@ Cohesion: 0.29
 Nodes (5): buildProxyTools(), createMcpServer(), mcpRoutes(), sessions, ToolDef
 
 ### Community 64 - "Community 64"
-Cohesion: 0.29
-Nodes (7): transactionQueue, adminRoutes(), batchAdminSchema, isLoopbackIp(), pnlService, reputationService, requireAdmin()
-
-### Community 65 - "Community 65"
 Cohesion: 0.25
 Nodes (7): Attribution, Contributor Covenant Code of Conduct, Enforcement, Enforcement Responsibilities, Our Pledge, Our Standards, Scope
 
-### Community 66 - "Community 66"
+### Community 65 - "Community 65"
 Cohesion: 0.25
 Nodes (8): Autenticação no MCP, code:typescript (// src/mcp/tools/), code:bash (agentfi-mcp  # comando npm global), code:block18 (GET  /mcp/sse           — stream de eventos), code:block19 (AGENTFI_API_KEY=agfi_live_xxxxxxxxxxxx), FASE 4 — MCP SERVER (INTERFACE PARA AGENTES), Tools a implementar, Transports
 
-### Community 67 - "Community 67"
+### Community 66 - "Community 66"
 Cohesion: 0.25
 Nodes (8): code:solidity (struct AgentPolicy {), code:solidity (struct Action {), code:bash (# Redes alvo iniciais), Contrato 1: AgentPolicyModule.sol, Contrato 2: AgentExecutor.sol, Deploy Script, FASE 2 — SMART CONTRACTS, Testes (Foundry)
 
-### Community 68 - "Community 68"
+### Community 67 - "Community 67"
 Cohesion: 0.25
 Nodes (7): @agentfi/admin, Authentication, code:bash (# From repo root), Features, Local Development, Scripts, Stack
 
-### Community 69 - "Community 69"
+### Community 68 - "Community 68"
 Cohesion: 0.62
 Nodes (6): api(), getAgentMe(), log(), main(), registerAgent(), simulateSwap()
 
-### Community 71 - "Community 71"
+### Community 70 - "Community 70"
 Cohesion: 0.33
 Nodes (3): SimulationResult, SimulatorService, TenderlySimulationRequest
 
-### Community 72 - "Community 72"
+### Community 71 - "Community 71"
 Cohesion: 0.29
 Nodes (6): 1. Discovery (Agent Yellow Pages), 2. Cryptographic Trust & Identity, 3. Communication & Job Queue, 4. Automated Reputation, 5. Intent-Aware Economy, Agent-to-Agent (A2A) Interoperability Protocol
 
-### Community 73 - "Community 73"
+### Community 72 - "Community 72"
 Cohesion: 0.29
 Nodes (7): Checklist de Go-Live, CI/CD (GitHub Actions), code:yaml (# docker-compose.yml deve conter:), code:env (# RPC), Docker Compose (desenvolvimento), FASE 6 — DEVOPS E GO-LIVE, Variáveis de Ambiente
 
-### Community 74 - "Community 74"
+### Community 73 - "Community 73"
 Cohesion: 0.29
 Nodes (6): 1. Human-in-the-Loop (HITL) Approval System, 2. Public Transaction Explorer, 3. Operator Notification Service, 🚀 New Features, Release Notes — HITL & Transaction Transparency (April 2026), 🛠️ Technical Changes
 
-### Community 75 - "Community 75"
+### Community 74 - "Community 74"
 Cohesion: 0.33
 Nodes (4): jobFindUniqueMock, jobUpdateMock, mockFetch, required
 
-### Community 76 - "Community 76"
+### Community 75 - "Community 75"
 Cohesion: 0.4
 Nodes (3): QuoteResult, SWAP_ROUTER, UniswapService
 
-### Community 77 - "Community 77"
+### Community 76 - "Community 76"
 Cohesion: 0.33
 Nodes (5): components, $defs, operations, paths, webhooks
 
-### Community 78 - "Community 78"
+### Community 77 - "Community 77"
 Cohesion: 0.33
 Nodes (5): AgentFi Documentation Standards (v1), 🌟 Principles, 🤖 Special Instructions for AI Agents, 📂 Structure, ✍️ Writing Style
 
-### Community 79 - "Community 79"
+### Community 78 - "Community 78"
 Cohesion: 0.33
 Nodes (6): Account Abstraction com Safe, code:typescript (// src/wallet/turnkey.service.ts), code:typescript (// src/wallet/safe.service.ts), FASE 1 — WALLET INFRASTRUCTURE, Implementação Turnkey, Objetivo
 
-### Community 80 - "Community 80"
+### Community 79 - "Community 79"
 Cohesion: 0.33
 Nodes (6): Backend, Infraestrutura, MCP Server (Agent Interface), Smart Contracts, STACK TÉCNICO COMPLETO, Wallet Infrastructure
 
@@ -468,40 +465,44 @@ Nodes (5): code:block20 (/dashboard        — overview: agentes ativos, volume 
 
 ### Community 85 - "Community 85"
 Cohesion: 0.4
-Nodes (4): AgentFi Remediation Plan and Execution, Deterministic Decisions, Execution Status, P0 Remediation Plan
+Nodes (5): code:block10 (POST   /v1/transactions/simulate  — simula sem submeter), code:block11 (GET    /v1/wallet/balance         — saldo de todos os tokens), code:block12 (GET    /health                    — liveness check), code:block9 (POST   /v1/agents              — registra novo agente, retor), Endpoints da API
 
 ### Community 86 - "Community 86"
+Cohesion: 0.4
+Nodes (4): AgentFi Remediation Plan and Execution, Deterministic Decisions, Execution Status, P0 Remediation Plan
+
+### Community 87 - "Community 87"
 Cohesion: 0.67
 Nodes (3): config, isLoopbackHost(), middleware()
 
-### Community 88 - "Community 88"
+### Community 89 - "Community 89"
 Cohesion: 0.5
 Nodes (3): fastify, buildTestApp(), { mockDb, queueAddMock }
 
-### Community 89 - "Community 89"
+### Community 90 - "Community 90"
 Cohesion: 0.5
 Nodes (3): codegenArgs, original, updated
 
-### Community 90 - "Community 90"
+### Community 91 - "Community 91"
 Cohesion: 0.5
 Nodes (3): Archive, Rule for future archives, What's in here
 
 ## Knowledge Gaps
-- **669 isolated node(s):** `ElizaAction`, `ElizaPlugin`, `LangChainTool`, `OpenAITool`, `__dirname` (+664 more)
+- **677 isolated node(s):** `ElizaAction`, `ElizaPlugin`, `LangChainTool`, `OpenAITool`, `__dirname` (+672 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **9 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **10 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `FeeService` connect `Community 19` to `Community 9`, `Community 7`?**
-  _High betweenness centrality (0.010) - this node is a cross-community bridge._
-- **Why does `logger` connect `Community 7` to `Community 64`, `Community 8`, `Community 9`, `Community 10`, `Community 11`, `Community 45`, `Community 18`, `Community 20`, `Community 23`?**
+- **Why does `logger` connect `Community 18` to `Community 7`, `Community 8`, `Community 9`, `Community 10`, `Community 46`, `Community 17`, `Community 19`, `Community 21`, `Community 27`?**
   _High betweenness centrality (0.009) - this node is a cross-community bridge._
-- **Why does `LocalWalletService` connect `Community 20` to `Community 0`?**
-  _High betweenness centrality (0.008) - this node is a cross-community bridge._
+- **Why does `FeeService` connect `Community 20` to `Community 8`, `Community 18`?**
+  _High betweenness centrality (0.007) - this node is a cross-community bridge._
+- **Why does `LocalWalletService` connect `Community 21` to `Community 0`?**
+  _High betweenness centrality (0.006) - this node is a cross-community bridge._
 - **What connects `ElizaAction`, `ElizaPlugin`, `LangChainTool` to the rest of the system?**
-  _669 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _677 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Community 0` be split into smaller, more focused modules?**
   _Cohesion score 0.05 - nodes in this community are weakly interconnected._
 - **Should `Community 1` be split into smaller, more focused modules?**

@@ -10,6 +10,7 @@ import { PolicyService } from '../../services/policy/policy.service.js';
 import { FeeService } from '../../services/policy/fee.service.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
 import { weiToUsd, tokenAmountToUsd } from '../../services/transaction/price.service.js';
+import { getKnownTokenDecimals } from '../../services/transaction/token-registry.js';
 import { cacheSimulation, getSimulation } from '../../services/transaction/simulation-cache.js';
 import { getContracts } from '../../config/contracts.js';
 import { createChainPublicClient } from '../../config/chains.js';
@@ -30,21 +31,6 @@ const NATIVE_WETH_BY_CHAIN: Record<number, string> = {
   137: '0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619',
 };
 
-// Well-known token decimals by checksummed address (multi-chain)
-const KNOWN_DECIMALS: Record<string, number> = {
-  // USDC
-  '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48': 6,  // ETH
-  '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913': 6,  // Base
-  '0xaf88d065e77c8cC2239327C5EDb3A432268e5831': 6,  // Arbitrum
-  '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174': 6,  // Polygon
-  // USDT
-  '0xdAC17F958D2ee523a2206206994597C13D831ec7': 6,  // ETH
-  '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9': 6,  // Arbitrum
-  // WBTC
-  '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599': 8,  // ETH
-  '0x68f180fcCe6836688e9084f035309E29Bf0A2095': 8,  // Optimism
-};
-
 const ERC20_DECIMALS_ABI = [
   { name: 'decimals', type: 'function', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'uint8' }] },
 ] as const;
@@ -54,7 +40,8 @@ const ERC20_DECIMALS_ABI = [
  */
 async function getTokenDecimals(address: string, chainId: number): Promise<number> {
   const checksummed = getAddress(address);
-  if (KNOWN_DECIMALS[checksummed] !== undefined) return KNOWN_DECIMALS[checksummed]!;
+  const knownDecimals = getKnownTokenDecimals(checksummed, chainId);
+  if (knownDecimals !== undefined) return knownDecimals;
 
   const client = createChainPublicClient(chainId);
 
