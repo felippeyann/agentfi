@@ -49,6 +49,7 @@ Thumbs.db
 # ============================================================
 .idea/
 .vscode/
+.codex/
 # Uncomment to keep shared VS Code settings:
 # !.vscode/settings.json
 
@@ -61,6 +62,15 @@ packages/backend/src/db/generated/
 # Coverage
 # ============================================================
 coverage/
+
+# ============================================================
+# Graphify local state
+# Keep graphify-out/graph.json, graph.html, and GRAPH_REPORT.md versioned.
+# ============================================================
+graphify-out/manifest.json
+graphify-out/cost.json
+graphify-out/cache/
+graphify-out/.graphify_root
 
 # ============================================================
 # Docker volumes
