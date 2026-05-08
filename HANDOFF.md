@@ -66,7 +66,6 @@ Pending work is split into four buckets. Nothing in `Done` is listed here — th
 | Awaiting mcp.so review             | External | [Listing](https://mcp.so/server/agentfi-mcp-server/felippeyann) submitted; status `created`.                                                 |
 | Awaiting awesome-mcp-servers merge | External | [PR #5091](https://github.com/punkpeye/awesome-mcp-servers/pull/5091) was open in the last manual check; verify current state before acting. |
 | Demo screencast                    | —        | 2-minute Claude Desktop doing a real swap via MCP. Highest remaining non-code leverage.                                                      |
-| Setup-checklist review             | —        | `docs/operations/setup-checklist.md` predates `WALLET_PROVIDER=local` — some steps are now optional for dev.                                 |
 
 ### 3.2 Technical — unblocked
 
@@ -105,7 +104,7 @@ The live project state has **completed plumbing but zero users**. Adding more co
 | Etherscan-family API keys                | Contract verification                                     | Per-chain block explorer                 |
 | Funded deployer EOA                      | Contract deployment                                       | Hot wallet with gas                      |
 
-**Dev quickstart path** (for evaluation, no real credentials): `WALLET_PROVIDER=local` + stub Alchemy + docker-compose.dev.yml. See [docs/dev-quickstart.md](docs/dev-quickstart.md).
+**Dev quickstart path** (for evaluation, no real credentials): `WALLET_PROVIDER=local` + stub Alchemy + docker-compose.dev.yml. See [docs/dev-quickstart.md](docs/dev-quickstart.md). For real-chain local or production setup, use [docs/operations/setup-checklist.md](docs/operations/setup-checklist.md).
 
 **Production secrets to generate once**: use `scripts/gen-secrets.sh` for `API_SECRET`, `ADMIN_SECRET`, `NEXTAUTH_SECRET`.
 
