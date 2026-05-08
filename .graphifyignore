@@ -1,0 +1,28 @@
+# Dependency and build output
+node_modules/
+dist/
+build/
+.next/
+packages/admin/.next/
+packages/admin/out/
+packages/backend/src/db/generated/
+packages/contracts/out/
+packages/contracts/cache/
+packages/contracts/broadcast/
+packages/contracts/lib/
+
+# Local and generated state
+.git/
+.codex/
+coverage/
+graphify-out/cache/
+graphify-out/manifest.json
+graphify-out/cost.json
+graphify-out/.graphify_root
+
+# Environment and machine-local files
+.env
+.env.local
+.env.*.local
+*.log
+desktop.ini

@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Graphify code graph** — committed `graphify-out/GRAPH_REPORT.md`, `graph.json`, and `graph.html` plus `AGENTS.md` guidance so agents can navigate the codebase through a queryable graph before broad grep/file reads.
 - **Dev smoke test** — `npm run smoke:dev` runs a zero-dependency first-run validation against the local dev stack: health, agent registration, manifest publish, agent search, no-reward A2A job completion, trust report, and P&L response shape.
 
 - **A2A handshake — `sign_handshake` / `verify_handshake` implemented.** Closes steps 3–5 of [#49](https://github.com/felippeyann/agentfi/issues/49); previously both returned 501.

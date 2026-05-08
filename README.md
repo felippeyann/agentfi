@@ -24,6 +24,7 @@ All project documentation is organized in our **[Documentation Hub](docs/README.
 - **[Vision](VISION.md)** (required reading): Why this project exists and where it's going.
 - **[Dev Quickstart](docs/dev-quickstart.md)**: Zero-credential local stack — `docker compose up` and you're running in 3 minutes.
 - **[Operator Setup](docs/operations/setup-checklist.md)**: Get a real instance of AgentFi running.
+- **[Graphify Code Graph](docs/graphify.md)**: Queryable codebase map for agent-assisted development.
 - **[Agent Quickstart](docs/agents/quickstart.md)**: Connect your agent in < 5 minutes.
 - **[System Architecture](docs/architecture/overview.md)**: Understand the 4-layer stack.
 
