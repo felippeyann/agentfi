@@ -38,13 +38,13 @@ api-1  | [warn] [local-wallet] LocalWalletService active — keys in process mem
 
 ## What's running
 
-| Service | Port | Purpose |
-|---|---|---|
-| API | 3000 | REST + MCP (`/mcp/sse`) |
-| Admin dashboard | 3001 | Next.js UI (login: `admin` / `admin`) |
-| MCP server (SSE) | 3002 | Standalone MCP transport |
-| Postgres | 5432 | `agentfi` / `agentfi` / `agentfi` |
-| Redis | 6379 | No password |
+| Service          | Port | Purpose                               |
+| ---------------- | ---- | ------------------------------------- |
+| API              | 3000 | REST + MCP (`/mcp/sse`)               |
+| Admin dashboard  | 3001 | Next.js UI (login: `admin` / `admin`) |
+| MCP server (SSE) | 3002 | Standalone MCP transport              |
+| Postgres         | 5432 | `agentfi` / `agentfi` / `agentfi`     |
+| Redis            | 6379 | No password                           |
 
 The dev stack is **zero-credential** — it sets `WALLET_PROVIDER=local`, which uses in-memory viem keys instead of Turnkey. **Keys are lost on every restart** by design, so you can never accidentally persist dev keys to production.
 
@@ -96,6 +96,16 @@ curl http://localhost:3000/health/ready
 curl http://localhost:3000/v1/agents/me \
   -H "x-api-key: agfi_live_..."
 ```
+
+Or run the versioned smoke test:
+
+```bash
+npm run smoke:dev
+```
+
+It registers two local agents, publishes a manifest, discovers the provider,
+creates and completes a no-reward A2A job, then reads trust + P&L. This path is
+designed to work on the zero-credential dev stack.
 
 ---
 

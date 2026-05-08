@@ -1,4 +1,4 @@
-# Session Notes — 2026-05-07
+# Session Notes — 2026-05-08
 
 > Single-point handoff doc. Update on every substantive session, prune stale
 > sections aggressively. If this file is older than a few days when you read
@@ -9,172 +9,140 @@
 
 ## Where we are right now
 
-**#71 is now fully closed end-to-end.** Phase 1.5 landed in
-#83/#84/#85/#86/#87/#88/#89. Phase 2 (revenue snapshots) and Phase 3
-(PnLService refactor) shipped together in PR **#90**, then were merged
-to `main` and mirrored to `develop`.
+`main` and `develop` are aligned at `81c778c`.
 
-The historical-integrity gap that motivated the original #71
-investigation is closed: completed jobs no longer re-price against live
-market data on every PnL load, and oracle outages can't silently zero
-out historical revenue.
+Open GitHub state after the dependency cleanup:
 
-The local/default branch state after the follow-up dependency work is:
-`main` = `develop` = `5c17e2d`.
+| Surface                       | Status                                |
+| ----------------------------- | ------------------------------------- |
+| Open PRs                      | 0                                     |
+| Open issues                   | 0                                     |
+| Required CI                   | Green on latest merged dependency PRs |
+| Remaining Dependabot blockers | None                                  |
 
-Open PRs now:
+The two previously blocked dependency PRs are closed:
 
-| PR | Status | Why |
-|----|--------|-----|
-| [#58](https://github.com/felippeyann/agentfi/pull/58) | Blocked | `@safe-global/protocol-kit` v7 removes the named `SafeFactory` export; `safe.service.ts` needs an SDK API migration, not just a package bump. |
-| [#64](https://github.com/felippeyann/agentfi/pull/64) | Blocked | TypeScript 6 conflicts with `openapi-typescript@7.x`, which declares a `typescript ^5.x` peer. |
+- [#58](https://github.com/felippeyann/agentfi/pull/58) — `@safe-global/protocol-kit` 4.1.7 -> 7.1.0 was merged after migrating `safe.service.ts` away from the removed `SafeFactory` named export.
+- [#64](https://github.com/felippeyann/agentfi/pull/64) — TypeScript 5.9.3 -> 6.0.3 was merged after isolating OpenAPI codegen to `openapi-typescript@7.13.0` + `typescript@5.9.3` through `npx`, avoiding `--legacy-peer-deps`.
 
 ---
 
-## What changed this session (2026-05-07)
+## What changed this session
 
-### Post-#90 integration follow-up
+### Safe protocol-kit v7
 
-- PR #90 was merged.
-- The admin `/login` Vercel blocker was fixed by wrapping the
-  `useSearchParams()` consumer in `Suspense` and aligning the admin
-  React / React DOM / React types versions.
-- Dependabot low-risk batch shipped through #91: Prettier, BullMQ,
-  Autoprefixer, React Query, Viem, and Jose.
-- Tailwind update shipped through #60.
-- Production dependency group shipped through #92.
-- Merged feature branches and stale remote branches were pruned.
+`packages/backend/src/services/wallet/safe.service.ts` now uses the v7 flow:
 
-### Phase 2 — Revenue snapshots (DB + finalizer)
+- `Safe.init({ predictedSafe })`
+- `createSafeDeploymentTransaction()`
+- broadcast through `viem` wallet client
+- reload the deployed Safe with `Safe.init({ safeAddress })`
+- enable `AgentPolicyModule` post-deployment
 
-Migration `0010_job_revenue_snapshot` adds two nullable columns to
-`Job`:
+CI for #58 passed: lint/typecheck, backend tests, admin tests, foundry, E2E, OpenAPI, and Vercel.
 
-- `rewardUsd` — total USD value of the reward at the moment of payment
-  confirmation.
-- `rewardPriceUsd` — price-per-token-unit at the same moment (e.g.
-  ETH/USD = `2000.000000`). Kept alongside `rewardUsd` for audit /
-  reconstruction.
+### TypeScript 6
 
-Both NULL on non-COMPLETED rows is the normal case. **NULL on a
-COMPLETED row carries semantic weight**: it means the price oracle was
-unresolved at finalization time, NOT "free job". This distinction is
-exactly what the original #71 investigation called out as the silent-
-zero bug — persisting `'0'` on oracle failure indistinguishably from a
-real zero is what causes historical revenue to "vanish". We deliberately
-write NULL instead so PnLService can fall back to live pricing AND
-surface a warning.
+The root and workspace TypeScript versions are now on `^6.0.3`.
 
-The capture happens in `payment-finalizer.service.ts` CONFIRMED branch,
-in the **same `db.job.update(...)` that flips status to COMPLETED**.
-No second round-trip, no observable intermediate state where status is
-COMPLETED but the snapshot hasn't landed yet. Refund-then-flip ordering
-established in #85 is preserved.
+The `openapi-typescript` peer blocker remains real upstream (`typescript: ^5.x`), so it was removed from root `devDependencies`. The codegen scripts now invoke a pinned toolchain only where needed:
 
-### Phase 3 — PnLService refactor
+```bash
+npx --yes --package openapi-typescript@7.13.0 --package typescript@5.9.3 openapi-typescript ...
+```
 
-Both reward loops (earnings as provider, costs as requester) now read
-`rewardUsd` first, falling back to live pricing only when NULL.
-Snapshot/live-fallback/unresolved counts are tracked separately for
-each side and surfaced in the `notes` field:
+Additional TS 6 compatibility fixes:
 
-> "N earning job(s) priced live (no stored snapshot) (M unresolved —
-> counted as $0; figure may understate true revenue)."
+- root `tsconfig.base.json` includes `DOM` lib and Node types for `fetch`, `RequestInit`, and `process` in Node 22 workspaces.
+- admin `tsconfig.json` no longer uses deprecated `baseUrl`.
+- `scripts/check-spec-drift.mjs` shells through `npx` only for the codegen call.
 
-Same response shape (`PnLBreakdown` interface unchanged) — admin
-dashboard reads notes as free-form strings, no frontend change needed.
+CI for #64 passed: lint/typecheck, backend tests, admin tests, foundry, E2E, OpenAPI, and Vercel.
 
-### Shared `resolveRewardUsd` helper
+### P0 diagnostic follow-up
 
-New `services/billing/reward-pricing.ts` returning
-`{ usd, priceUsd, resolved }`. Used by both the finalizer (snapshot
-capture) and PnLService (live fallback). Replaces the in-line
-`rewardToUsd` helper in `pnl.service.ts` that returned the ambiguous
-`'0'` sentinel — the boolean `resolved` field is the whole point.
+After reading `VISION.md`, the active P0s were defined as:
 
-### Tests
+1. Prove the first-run dev experience works.
+2. Keep handoff docs truthful so future agents do not chase stale blockers.
+3. Automate the first-run validation path enough that it can be repeated.
 
-- `pnl.service.test.ts` (+4 cases): snapshot priority overrides live
-  oracle; live-fallback adds a note; oracle-zero produces a visible
-  "unresolved" warning instead of silently zeroing; mixed
-  snapshot+live-fallback in one call aggregates correctly.
-- `payment-finalizer.snapshot.test.ts` (new, 4 cases): snapshot fields
-  land on the same write as `status: 'COMPLETED'`; unresolved oracle
-  ⇒ NULL columns (not `'0'`); FAILED outcome doesn't write snapshot
-  fields; the existing idempotency guard still short-circuits when the
-  Job is already terminal.
-- Both files now include a `vi.hoisted` env stub (mirroring the pattern
-  from `ens.service.test.ts`) so the suite runs locally outside CI.
+Implemented:
 
-All 16 affected tests pass. Backend `tsc --noEmit` clean.
+- `npm run smoke:dev`
+- `scripts/smoke-dev.mjs`
+- `docs/dev-quickstart.md` updated to reference the smoke test.
+- `STATE.md` and `HANDOFF.md` updated for the post-#58/#64 world.
 
-### #71 fully closed
+The smoke test checks:
 
-For the record, sub-issues all closed last session via merged PRs:
-- #73 → #86 (recovery worker)
-- #74 → #84 (idempotency via intentId)
-- #75 → #88 (admin PAYMENT_PENDING/FAILED UI)
-- #81 → #83 (lifecycle driven by on-chain outcome)
-
-#71 itself was closed in 2026-05-05 11:15Z.
+- API health
+- two local agent registrations
+- authenticated `/v1/agents/me`
+- manifest publish
+- agent search
+- no-reward A2A job create/accept/complete
+- trust report and P&L response shapes
 
 ---
 
-## Manual tasks pending on the user
+## Validation
 
-1. **`prisma migrate deploy`** in staging/prod if it has not already
-   run after #90, so the new
-   columns appear. Verify with a fresh A2A job that `Job.rewardUsd` is
-   non-null on the resulting row.
-2. **Smoke check the PnL endpoint** for an agent with mixed pre/post-
-   migration completed jobs — expect a "priced live (no stored
-   snapshot)" note naming the pre-migration row count.
-3. **(Optional)** Force a brief CoinGecko outage (network blackhole on
-   the recovery worker container) and confirm new completions land with
-   NULL snapshot + warn log, and that PnL surfaces the "unresolved"
-   note instead of silently zeroing.
+Completed locally:
 
----
+- `npm ci` passed after #64.
+- `npm run typecheck --workspaces --if-present` passed.
+- `npm run spec:check` passed.
+- `npm run spec:lint` passed.
+- `npm test -w packages/admin` passed.
+- Backend local test run reached 86/90; the remaining 4 need Postgres at `localhost:5432`.
 
-## Open follow-ups (no ticket yet — file when prioritized)
+Not completed locally:
 
-- **Backfill script for pre-migration COMPLETED rows.** Reconstruct
-  `rewardUsd` from a historical price-history feed (CoinGecko has a
-  paid endpoint; otherwise the on-chain timestamp + a daily-close feed
-  is enough for revenue accounting). Out of scope for #90.
-- **Token-registry lookup** to drop the "assume 6 decimals" MVP
-  fallback in non-ETH reward pricing. Same caveat as before #90 — it
-  didn't get worse, but this is the lurking accuracy bug for any
-  future support of 18-decimal ERC-20s.
-- **Safe protocol-kit v7 migration.** PR #58 is blocked until
-  `safe.service.ts` migrates away from `SafeFactory` and adopts the
-  current v7 deployment/init API.
-- **TypeScript 6 adoption.** PR #64 is blocked until
-  `openapi-typescript` supports TypeScript 6 or the spec-generation
-  dependency path changes.
+- `docker compose -f docker-compose.dev.yml up --build`
+- `npm run smoke:dev` against a running dev stack
+- `node examples/a2a-collab/index.mjs`
+- `node examples/swap-planner/index.mjs`
+- `node examples/delegation-chain/index.mjs`
+
+Reason: Docker Desktop was not running on this Windows machine:
+
+```text
+failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine
+```
+
+CI did validate the backend/E2E paths with Postgres/Redis services for the merged PRs, but the first-run Docker quickstart remains a manual validation debt.
 
 ---
 
-## Conventions reaffirmed this session
+## Current P0s
 
-- **NULL ≠ 0 in financial columns.** When a sentinel value (`'0'`,
-  `''`, `0n`) is forced to mean both "real zero" and "unresolved", you
-  get silent data corruption that's invisible until a downstream
-  consumer (dashboard, accounting) misreports something. Use NULL +
-  a `resolved` boolean wrapper. The whole #90 story is a worked
-  example.
-- **Persist USD value at the moment of the event, not at the moment of
-  query.** Same lesson as fee.service already learned — historical
-  values must be locked, not re-derived against current market data.
-- **Hoisted env stubs in unit tests.** `vi.hoisted` to set the env
-  vars `config/env.ts` requires lets the suite run cleanly outside
-  CI. Pattern is in `ens.service.test.ts` and now `pnl.service.test.ts`
-  + `payment-finalizer.snapshot.test.ts`.
-- **`prisma generate` will silently bump `@prisma/client` and
-  `prisma` versions in `package.json`/`package-lock.json`.** Always
-  diff before committing. (Caught and reverted this session.)
+1. **Run the first-run validation on a machine with Docker available.**
+
+   ```bash
+   docker compose -f docker-compose.dev.yml up --build
+   npm run smoke:dev
+   node examples/a2a-collab/index.mjs
+   node examples/swap-planner/index.mjs
+   node examples/delegation-chain/index.mjs
+   ```
+
+2. **If any first-run step fails, fix that before building new features.**
+
+3. **Record the result in this file and `HANDOFF.md`.**
 
 ---
 
-*Last touch: 2026-05-07 (autonomous session). Replace this header with
-the new session date when you update.*
+## Next non-P0 technical work
+
+Only after first-run validation is clean:
+
+- Token registry / decimals lookup for non-ETH rewards. This reduces accounting error risk from the current 6-decimal MVP assumption.
+- Setup-checklist review for `WALLET_PROVIDER=local` and dev-vs-prod credential paths.
+- Demo screencast using Claude Desktop + AgentFi MCP.
+
+Large roadmap work such as GMX/perps, escrow v3, and revenue sharing should still wait for a concrete user/integration signal.
+
+---
+
+_Last touch: 2026-05-08 (P0 diagnostic session)._

@@ -8,9 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed (breaking — mcp-server 0.2.0 → 0.3.0)
-- **MCP tool rename: `request_policy_update` → `update_policy`.** Closes step 6 of [#49](https://github.com/felippeyann/agentfi/issues/49). The old name + description implied an operator-approval workflow; the tool actually wrote the policy immediately. Renamed honestly and rewrote the description: *"applies IMMEDIATELY — there is no operator approval step. The operator can audit and revert via the admin panel."* `reason` field is still required and logged for audit but does not gate the write. `@agent_fi/mcp-server` bumped to **0.3.0** (SemVer breaking); no deprecated alias — pre-1.0 project, clean rename.
+
+- **MCP tool rename: `request_policy_update` → `update_policy`.** Closes step 6 of [#49](https://github.com/felippeyann/agentfi/issues/49). The old name + description implied an operator-approval workflow; the tool actually wrote the policy immediately. Renamed honestly and rewrote the description: _"applies IMMEDIATELY — there is no operator approval step. The operator can audit and revert via the admin panel."_ `reason` field is still required and logged for audit but does not gate the write. `@agent_fi/mcp-server` bumped to **0.3.0** (SemVer breaking); no deprecated alias — pre-1.0 project, clean rename.
 
 ### Added
+
+- **Dev smoke test** — `npm run smoke:dev` runs a zero-dependency first-run validation against the local dev stack: health, agent registration, manifest publish, agent search, no-reward A2A job completion, trust report, and P&L response shape.
 - **A2A handshake — `sign_handshake` / `verify_handshake` implemented.** Closes steps 3–5 of [#49](https://github.com/felippeyann/agentfi/issues/49); previously both returned 501.
   - `POST /v1/agents/me/sign-handshake` now signs an arbitrary message with the agent's wallet via EIP-191 `personal_sign`. `LocalWalletService` uses viem's `signMessage`; `TurnkeyService` uses `signRawPayload` with `HASH_FUNCTION_NO_OP` after pre-hashing with viem's `hashMessage`, then assembles a standard 65-byte r‖s‖v signature.
   - `POST /v1/agents/verify-handshake` (public) accepts `{ message, signature, address }` or `{ message, signature, agentId }`. Tries ECDSA recovery first (works for EOA); falls back to EIP-1271 via the chain's public client for contract wallets (Safe). Returns `{ valid, address, verifiedVia: 'ecdsa' | 'eip1271' }`.
@@ -23,20 +26,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`WalletService` factory** at `packages/backend/src/services/wallet/index.ts` selects Turnkey or Local based on `WALLET_PROVIDER`; all three call sites (agent registration, health check, tx submitter) now go through the factory.
 - **9 unit tests** for `LocalWalletService` — wallet creation, distinct addresses, signing with signature recovery, lookup errors, list, health.
 - **README badges** — npm version, npm monthly downloads.
-- **`STATE.md`** at the repo root — comprehensive, point-in-time project state (purpose, stack, capabilities, phase progress). Sits between VISION.md (the *why*) and HANDOFF.md (live tasks) as required reading.
+- **`STATE.md`** at the repo root — comprehensive, point-in-time project state (purpose, stack, capabilities, phase progress). Sits between VISION.md (the _why_) and HANDOFF.md (live tasks) as required reading.
 - **README.md** refreshed to reflect shipped work: ENS identity, OpenAPI spec, mcp-server v0.2.0 on npm, P&L v2 with gas costs. Getting-Started-for-Operators section now points at the provider-agnostic deployment guide.
 - **HANDOFF.md** "Files to Read First" ordering updated to include STATE.md.
 
 ### Changed
+
 - **Self-hosted deployment posture**: AgentFi has no canonical hosted production instance — every operator runs their own. Docs rewritten to reflect this: `docs/operations/production-deploy.md` is now provider-agnostic (Railway as reference example, Fly.io/Render/Docker documented as alternatives); `release-runbook.md` updated accordingly.
 
 ### Removed
+
 - `.github/workflows/deploy-production.yml` — custom Railway-CLI deploy workflow. Provider-native GitHub integrations (Railway/Fly/Render) auto-deploy on merge to `main` or on tag; the custom workflow added coupling without value.
 - `scripts/check-production-deploy-env.mjs` and `scripts/run-deploy-preflight-scenarios.mjs` — preflight tied to the deleted workflow.
 - `Deploy Preflight Check` CI job (ci.yml) — validated the removed preflight script; not a required status check.
 - Preflight invocation in `scripts/release-v1.mjs`.
 
 ### Added
+
 - **OpenAPI 3.0.3 spec** at [`docs/api/openapi.yaml`](docs/api/openapi.yaml) — machine-readable description of all 47 endpoints, with auth schemes, request/response schemas, and reusable error responses. Enables SDK generation, Postman/Insomnia import, and `openapi-typescript` type generation. Validates clean under `@redocly/cli lint`.
 - **Generated TypeScript types** at `packages/mcp-server/src/api.generated.ts`, produced from the OpenAPI spec by `openapi-typescript`. MCP tools (and any future SDK) can now import `components['schemas']['PnLBreakdown']`, `['Agent']`, etc. instead of re-declaring them.
 - **New npm scripts at repo root**: `spec:lint` (Redocly lint), `spec:types` (regenerate types), `spec:check` (CI drift check — fails if the generated file is stale relative to the spec).
@@ -112,13 +118,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - npm scope changed from `@agentfi` to `@agent_fi`
 
 ### Changed
-- A2A handshake endpoints now return 501 until proper Turnkey/EIP-1271 integration
+
 - Branch consolidation: all development unified on `main` (default), `master` deleted
 - CI workflow triggers updated from `master` to `main`
 - Next.js upgraded from v14 to v16 (admin dashboard)
 - Dockerfiles now run as non-root user (`appuser:1001`)
 
 ### Fixed
+
 - FK constraint violation in test cleanup (Job records blocking Agent deletion)
 - Test cleanup order in agent.search.test.ts and transaction.e2e.ts
 - NODE_ENV validation: added 'test' to accepted enum values
@@ -128,6 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - npm dependency vulnerabilities (path-to-regexp, picomatch, Next.js HIGH severity)
 
 ### Security
+
 - Admin secret comparison now uses `timingSafeEqual` (prevents timing attacks)
 - Daily volume limit check is now atomic (prevents TOCTOU race condition)
 - Agent search endpoint no longer exposes `safeAddress` in public responses
@@ -135,6 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Auth middleware: early return on failed operator secret prevents fall-through
 
 ### Removed
+
 - `desktop.ini` from repository (added to .gitignore)
 - Placeholder A2A signature generation (security risk)
 - Placeholder A2A verification returning `valid: true` unconditionally
@@ -142,6 +151,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2026-03-25
 
 ### Added
+
 - Initial release
 - Agent registration with Turnkey MPC wallets
 - Safe smart wallet deployment per agent
