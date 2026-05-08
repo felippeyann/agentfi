@@ -140,7 +140,6 @@ now been executed and fixed locally.
 ## Next non-P0 technical work
 
 - Token registry / decimals lookup for non-ETH rewards. This reduces accounting error risk from the current 6-decimal MVP assumption.
-- Setup-checklist review for `WALLET_PROVIDER=local` and dev-vs-prod credential paths.
 - Demo screencast using Claude Desktop + AgentFi MCP.
 
 Large roadmap work such as GMX/perps, escrow v3, and revenue sharing should still wait for a concrete user/integration signal.

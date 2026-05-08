@@ -1,283 +1,402 @@
 # AgentFi — Operator Setup Checklist
 
-This is the **third-party accounts + `.env` checklist** for running a real AgentFi instance with production-grade wallet custody (Turnkey MPC) and real chain RPC (Alchemy).
+This checklist is for operators preparing a **real AgentFi instance**: real RPC,
+real wallet custody, real Postgres/Redis, and production-grade secrets.
 
-**If you just want to evaluate or develop locally**, skip this entirely and use the [Dev Quickstart](../dev-quickstart.md) — zero external accounts, `docker compose up` to stack running in ~3 minutes.
-
-**Which steps are required depends on your goal:**
-
-| Goal | Required steps |
-|---|---|
-| Evaluate / develop locally | None — use [dev-quickstart.md](../dev-quickstart.md) |
-| Deploy with real custody but stub simulation | Steps 2, 3, 5, 6, 7 (skip Tenderly) |
-| Full production | All steps |
-
-Each section below links to where to sign up and what to copy into your `.env` file. Work through in order.
+If you only want to evaluate the project or develop locally, do **not** start
+here. Use the [Dev Quickstart](../dev-quickstart.md). It runs the full API,
+admin, MCP, Postgres, and Redis stack with `WALLET_PROVIDER=local` and no
+external accounts.
 
 ---
 
-## STEP 1 — Copy the environment file
+## 0. Choose Your Mode
 
-In the `agentfi/` folder, duplicate `.env.example` and rename it `.env`.
-This is the file you'll fill in as you go through the steps below.
-Never commit this file to git — it's already in .gitignore.
+| Mode | Use when | Wallet provider | External accounts |
+| --- | --- | --- | --- |
+| Dev quickstart | You want to inspect or hack locally | `local` | None |
+| Real-chain local | You want to test with real RPC/custody from your machine | `turnkey` | Alchemy, Turnkey, Postgres, Redis |
+| Production | You operate a self-hosted public/private instance | `turnkey` | Alchemy, Turnkey, Postgres, Redis, optional Tenderly/Stripe |
 
----
-
-## STEP 2 — Alchemy (RPC Provider)
-
-Used to broadcast transactions and read blockchain data.
-
-1. Go to https://alchemy.com and create a free account.
-2. Create a new app for each network you want:
-   - Ethereum Mainnet
-   - Base
-   - Arbitrum One
-   - Polygon
-   (You can use one API key for all of them.)
-3. Copy your API key into `.env`:
-
-   ALCHEMY_API_KEY=your_key_here
+Hard rule: `WALLET_PROVIDER=local` is development-only. The backend refuses to
+boot with `NODE_ENV=production` and `WALLET_PROVIDER=local` because local wallet
+keys live only in process memory and are lost on restart.
 
 ---
 
-## STEP 3 — Turnkey (MPC Wallet Provider)
+## 1. Local Environment File
 
-This is what keeps agent private keys secure in production. Keys are split across MPC shards and never reconstructed anywhere.
+For real-chain local development, copy the example env file:
 
-> **Skip this step** if you only need local development — set `WALLET_PROVIDER=local` in `.env` and the backend uses in-memory viem keys (keys lost on every restart, refused at boot in production). See [dev-quickstart.md](../dev-quickstart.md).
+```bash
+cp .env.example .env
+```
 
-1. Go to https://app.turnkey.com and create an account.
-2. Create an Organization (this is your AgentFi tenant).
-3. Go to API Keys → Create API Key.
-4. You'll get a public/private key pair. Copy them into `.env`:
+Never commit `.env`; it is already ignored.
 
-   WALLET_PROVIDER=turnkey
-   TURNKEY_API_PUBLIC_KEY=your_public_key
-   TURNKEY_API_PRIVATE_KEY=your_private_key
-   TURNKEY_ORGANIZATION_ID=your_org_id
-
-   The org ID is shown on the Organization page.
+For production, configure the same values in your hosting provider's secret/env
+manager. Do not upload a local `.env` file as an artifact.
 
 ---
 
-## STEP 4 — Tenderly (Transaction Simulation)
+## 2. Required Secrets
 
-Every transaction is simulated before being submitted. Tenderly catches reverts before they cost gas.
+Generate strong operator/admin/session secrets:
 
-1. Go to https://tenderly.co and create a free account.
-2. Create a Project.
-3. Go to Settings → API Access → Generate Access Key.
-4. Copy into `.env`:
+```bash
+bash scripts/gen-secrets.sh
+```
 
-   TENDERLY_ACCESS_KEY=your_access_key
-   TENDERLY_ACCOUNT=your_username_or_slug
-   TENDERLY_PROJECT=your_project_slug
+On Windows, run that from Git Bash or WSL. The script requires `openssl`.
 
-   The account slug and project slug are visible in the URL when you're inside a project:
-   app.tenderly.co/YOUR_ACCOUNT/project/YOUR_PROJECT
+Paste the generated values into `.env` for local runs, or into your hosting
+provider for production:
 
----
+```env
+API_SECRET=...
+ADMIN_SECRET=...
+NEXTAUTH_SECRET=...
+```
 
-## STEP 5 — Database (PostgreSQL)
+Also set admin login credentials before exposing the admin UI:
 
-Option A — Local (for testing only):
-   docker-compose up postgres
-   DATABASE_URL=postgresql://agentfi:agentfi@localhost:5432/agentfi
+```env
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=replace-with-a-strong-password
+```
 
-Option B — Hosted (recommended for production):
-   Sign up at https://neon.tech (free tier, no credit card required).
-   Create a database, copy the connection string into `.env`:
-   DATABASE_URL=postgresql://user:pass@host/dbname?sslmode=require
+Production should also set the brute-force lockout variables explicitly:
 
----
-
-## STEP 6 — Redis
-
-Option A — Local:
-   docker-compose up redis
-   REDIS_URL=redis://localhost:6379
-
-Option B — Hosted:
-   Sign up at https://upstash.com (free tier).
-   Create a Redis database, copy the URL into `.env`:
-   REDIS_URL=rediss://default:password@your-endpoint.upstash.io:6379
+```env
+ADMIN_AUTH_MAX_ATTEMPTS=5
+ADMIN_AUTH_WINDOW_MS=600000
+ADMIN_AUTH_LOCKOUT_MS=1800000
+```
 
 ---
 
-## STEP 7 — Your Operator Fee Wallet
+## 3. RPC Provider
 
-This is the Ethereum address where protocol fees land for executor-routed swaps.
-It can be any wallet you control (MetaMask, hardware wallet, anything).
+AgentFi uses chain RPC for reads and broadcasts. Alchemy is the documented
+provider; equivalent RPC providers can be wired by extending config.
 
-1. Open MetaMask (or any wallet) and copy your address.
-2. Add to `.env`:
+1. Create an account at <https://alchemy.com>.
+2. Create an app/key for the networks you will support.
+3. Set:
 
-   OPERATOR_FEE_WALLET=0xYourAddressHere
+```env
+ALCHEMY_API_KEY=your_key_here
+```
 
-When a swap is routed through `AgentExecutor`, the protocol fee
-(0.30% FREE / 0.15% PRO / 0.05% ENTERPRISE) is routed here.
-
----
-
-## STEP 8 — Stripe (for PRO subscriptions — optional but recommended)
-
-This enables agents to pay for the PRO tier ($99/month) and is your subscription revenue stream.
-
-1. Go to https://stripe.com and create an account.
-2. In the Stripe dashboard, go to Products → Create Product.
-   - Name: "AgentFi PRO"
-   - Price: $99.00 / month recurring
-   - Copy the Price ID (starts with price_...)
-3. Go to Developers → API Keys.
-   - Copy the Secret Key (sk_live_...)
-4. Go to Developers → Webhooks → Add Endpoint.
-   - URL: https://agentfi-develop.up.railway.app/v1/billing/webhook
-   - Events to listen for: checkout.session.completed, customer.subscription.deleted, invoice.payment_failed
-   - Copy the Webhook Signing Secret (whsec_...)
-5. Copy into `.env`:
-
-   STRIPE_SECRET_KEY=sk_live_...
-   STRIPE_WEBHOOK_SECRET=whsec_...
-   STRIPE_PRO_PRICE_ID=price_...
-
-For local testing, use Stripe CLI:
-   stripe listen --forward-to localhost:3000/v1/billing/webhook
+The zero-credential dev compose uses `ALCHEMY_API_KEY=stub`; that is enough for
+DB/A2A/P&L flows but not for real transactions.
 
 ---
 
-## STEP 9 — Secrets
+## 4. Wallet Custody
 
-Generate two random secrets (at least 32 characters each).
-You can use: https://generate-secret.vercel.app/64
+Production custody uses Turnkey MPC. Keys are split across shards and are not
+reconstructed in the AgentFi process.
 
-   API_SECRET=random_64_char_string
-   ADMIN_SECRET=another_random_64_char_string
-   NEXTAUTH_SECRET=another_random_64_char_string
+1. Create an account at <https://app.turnkey.com>.
+2. Create an organization.
+3. Create an API key.
+4. Set:
 
----
+```env
+WALLET_PROVIDER=turnkey
+TURNKEY_API_PUBLIC_KEY=your_public_key
+TURNKEY_API_PRIVATE_KEY=your_private_key
+TURNKEY_ORGANIZATION_ID=your_org_id
+```
 
-## STEP 10 — Install dependencies
-
-You need Node.js 20+ and Docker installed.
-
-   node --version   # should be v20+
-   docker --version
-
-Then in the agentfi/ folder:
-
-   npm install
+For local-only hacking, use [Dev Quickstart](../dev-quickstart.md) instead of
+putting Turnkey placeholders in `.env`.
 
 ---
 
-## STEP 11 — Run locally
+## 5. Database
 
-   docker-compose up postgres redis
+AgentFi requires Postgres.
 
-In a second terminal:
+Local real-chain testing:
 
-   cd packages/backend
-   npm run db:generate
-   npm run db:migrate
-   npm run dev
+```bash
+docker compose up postgres
+```
 
-In a third terminal (optional, for the admin panel):
+```env
+DATABASE_URL=postgresql://agentfi:agentfi@localhost:5432/agentfi
+```
 
-   cd packages/admin
-   npm run dev
+Production: use a managed Postgres provider such as Railway Postgres, Neon,
+Supabase, or a self-managed Postgres instance:
 
-The API will be at http://localhost:3000
-The admin panel will be at http://localhost:3001
-The MCP server will be at http://localhost:3002
+```env
+DATABASE_URL=postgresql://user:pass@host/dbname?sslmode=require
+```
 
----
+Migrations are applied with:
 
-## STEP 12 — Install Foundry (for smart contracts)
+```bash
+npx prisma migrate deploy --schema=packages/backend/src/db/schema.prisma
+```
 
-   curl -L https://foundry.paradigm.xyz | bash
-   foundryup
-
-Run the contract tests:
-
-   cd packages/contracts
-   forge test -vvv
+Railway and the backend Docker dev compose already run migrations during start.
 
 ---
 
-## STEP 13 — Deploy smart contracts
+## 6. Redis
 
-You need a funded wallet on each network you want to deploy to.
-ETH/MATIC for gas — a few dollars worth is enough.
+Redis backs queues, rate limiting, and simulation cache.
 
-Add your deployer wallet private key temporarily (do not commit):
+Local real-chain testing:
 
-   PRIVATE_KEY=0x...
-   OPERATOR_ADDRESS=0xYourFeeWalletAddress
+```bash
+docker compose up redis
+```
 
-Then:
+```env
+REDIS_URL=redis://localhost:6379
+```
 
-   cd packages/contracts
-   forge script script/Deploy.s.sol --rpc-url base --broadcast --verify
+Production: use a managed Redis provider such as Railway Redis or Upstash:
 
-Repeat for other networks. The deployed addresses will be printed.
-Copy them into `.env`:
+```env
+REDIS_URL=rediss://default:password@your-endpoint.upstash.io:6379
+```
 
-   POLICY_MODULE_ADDRESS_8453=0x...
-   EXECUTOR_ADDRESS_8453=0x...
+For metered Redis plans, run one dedicated worker process:
 
----
+```env
+# API replicas
+TRANSACTION_WORKER_ENABLED=false
 
-## STEP 14 — Run preflight check before production
+# worker service
+TRANSACTION_WORKER_ENABLED=true
+TRANSACTION_WORKER_STOP_ON_REDIS_QUOTA=true
+```
 
-   npm run preflight
+Worker command:
 
-   npm run preflight:deploy-scenarios
-
-   Optional deeper E2E checks:
-   cd packages/backend
-   npm run test:e2e               # local Anvil + local DB/Redis
-   E2E_ANVIL_FORK_URL=<BASE_MAINNET_RPC_URL> npm run test:e2e:fork
-   E2E_TESTNET_RPC_URL=<BASE_SEPOLIA_RPC_URL> \
-   E2E_TESTNET_POLICY_MODULE_ADDRESS=0x... \
-   E2E_TESTNET_EXECUTOR_ADDRESS=0x... \
-   npm run test:e2e:testnet
-
-The first command checks runtime dependencies (database, redis, RPC, Turnkey, contracts).
-The second command validates deploy-config pass/fail scenarios used by CI.
-Fix any red items before deploying.
+```bash
+cd packages/backend && npm run worker
+```
 
 ---
 
-## STEP 15 — Production hosting
+## 7. Operator Fee Wallet
 
-AgentFi is **self-hosted by design**. There is no canonical hosted production instance; every operator runs their own. See [`production-deploy.md`](production-deploy.md) for the full provider-agnostic guide (Railway used as the reference, Fly.io / Render / Docker documented as alternatives).
+`OPERATOR_FEE_WALLET` is where executor-routed protocol fees land. It can be
+any EVM address you control.
 
-**CI/CD via GitHub Actions (`.github/workflows/`):**
-- `ci.yml` — lint, typecheck, unit tests, contract tests, E2E on every PR and push.
-- `deploy-staging.yml` — informational only; staging (if configured) auto-deploys on push to `develop` via the provider's native GitHub integration.
+```env
+OPERATOR_FEE_WALLET=0xYourAddressHere
+```
 
-**Production deploy:** the project does **not** ship a custom GitHub Action for production. Use the provider's native GitHub integration (auto-deploy on merge to `main` or on tag `v*.*.*`). This keeps the deploy path short enough for any operator — human or agent — to complete by reading the docs.
-
-**Staging reference**: `https://agentfi-develop.up.railway.app` (operated by the project maintainer, for demo only — not an SLA-backed service).
-
-**Recommended for metered Redis (Upstash):**
-- Run one dedicated backend worker process with `TRANSACTION_WORKER_ENABLED=true`
-- Set `TRANSACTION_WORKER_ENABLED=false` on API replicas
-- Keep `TRANSACTION_WORKER_STOP_ON_REDIS_QUOTA=true` to auto-stop on provider quota exhaustion
-- Worker start command: `cd packages/backend && npm run worker`
+If you reuse the maintainer-deployed Base contracts, fees routed through those
+contracts go to the maintainer's configured fee wallet. Deploy your own
+contracts if you want to capture those fees.
 
 ---
 
-## You're live when:
+## 8. Contract Addresses
 
-[ ] .env is fully filled
-[ ] ADMIN_USERNAME, ADMIN_PASSWORD and NEXTAUTH_SECRET are configured
-[ ] ADMIN_AUTH_* brute-force lockout settings are configured
-[ ] npm run preflight shows all green
-[ ] API /health/ready returns {"status":"ready"}
-[ ] At least one agent is registered via POST /v1/agents
-[ ] MCP server is accessible from your agent
+Base Mainnet has maintainer-deployed contracts:
+
+```env
+POLICY_MODULE_ADDRESS_8453=0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d
+EXECUTOR_ADDRESS_8453=0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3
+```
+
+To deploy your own contracts:
+
+1. Install Foundry.
+2. Fund a deployer wallet on each target chain.
+3. Follow [contract-deployment.md](contract-deployment.md).
+4. Set the resulting `POLICY_MODULE_ADDRESS_*` and `EXECUTOR_ADDRESS_*` values.
+
+Optional Safe deployment for new agents:
+
+```env
+SAFE_DEPLOYER_PRIVATE_KEY=0x...
+```
+
+Without `SAFE_DEPLOYER_PRIVATE_KEY`, agent registration falls back to the
+agent's Turnkey EOA address.
 
 ---
 
-Questions? Everything else can be handled in the codebase — ask Claude Code.
+## 9. Tenderly Simulation
+
+Tenderly is optional but recommended before public go-live. If configured,
+AgentFi simulates transactions before broadcast; if omitted, simulation falls
+back where supported.
+
+1. Create a Tenderly account and project at <https://tenderly.co>.
+2. Generate an access key.
+3. Set:
+
+```env
+TENDERLY_ACCESS_KEY=your_access_key
+TENDERLY_ACCOUNT=your_username_or_slug
+TENDERLY_PROJECT=your_project_slug
+```
+
+---
+
+## 10. Stripe Billing
+
+Stripe is optional and only needed if you run paid PRO subscriptions.
+
+```env
+STRIPE_SECRET_KEY=sk_live_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRO_PRICE_ID=price_...
+```
+
+Webhook endpoint:
+
+```text
+https://api.yourdomain.com/v1/billing/webhook
+```
+
+Listen for:
+
+- `checkout.session.completed`
+- `customer.subscription.deleted`
+- `invoice.payment_failed`
+
+For local webhook testing:
+
+```bash
+stripe listen --forward-to localhost:3000/v1/billing/webhook
+```
+
+---
+
+## 11. Install and Run Locally With Real Credentials
+
+Prerequisites:
+
+- Node.js 20+
+- Docker with Compose v2
+
+Install dependencies:
+
+```bash
+npm ci
+```
+
+Start Postgres and Redis:
+
+```bash
+docker compose up postgres redis
+```
+
+Apply migrations and start the backend:
+
+```bash
+npx dotenv -e .env -- npx prisma migrate deploy --schema=packages/backend/src/db/schema.prisma
+npx dotenv -e .env -- npm run dev -w packages/backend
+```
+
+Optional admin UI:
+
+```bash
+npx dotenv -e .env -- npm run dev -w packages/admin
+```
+
+Local URLs:
+
+| Service | URL |
+| --- | --- |
+| API | `http://localhost:3000` |
+| Admin | `http://localhost:3001` |
+| MCP SSE | `http://localhost:3000/mcp/sse` |
+
+If you want the standalone MCP SSE service, run `packages/mcp-server` separately
+or use `docker-compose.dev.yml` for the zero-credential stack.
+
+---
+
+## 12. Production Hosting
+
+AgentFi is self-hosted. There is no canonical hosted production instance.
+
+Use [production-deploy.md](production-deploy.md) for provider-specific steps.
+The short version:
+
+1. Provision Postgres and Redis.
+2. Create a backend service from this repo.
+3. Configure all required env vars from this checklist.
+4. Run migrations before start, or use a provider start command that does it.
+5. Add an admin frontend if desired.
+6. Configure native provider auto-deploy on `main` or release tags.
+
+The repo does not ship a production deploy GitHub Action. Operators should use
+their host's native GitHub integration or their own provider-specific workflow.
+
+---
+
+## 13. Verification
+
+Before exposing the instance:
+
+```bash
+npm run typecheck --workspaces --if-present
+npx dotenv -e .env -- npm run test -w packages/backend
+npx dotenv -e .env -- npm run preflight
+```
+
+Then verify the deployed API:
+
+```bash
+curl https://api.yourdomain.com/health
+curl https://api.yourdomain.com/health/ready
+```
+
+Register the first agent:
+
+```bash
+curl -X POST https://api.yourdomain.com/v1/agents \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: YOUR_API_SECRET" \
+  -d '{
+    "name": "my-first-agent",
+    "chainIds": [8453],
+    "tier": "FREE"
+  }'
+```
+
+Save the returned `apiKey`; it is shown once.
+
+---
+
+## Go-Live Checklist
+
+```text
+[ ] NODE_ENV=production
+[ ] WALLET_PROVIDER=turnkey
+[ ] Turnkey credentials configured
+[ ] ALCHEMY_API_KEY configured
+[ ] DATABASE_URL configured and migrations applied
+[ ] REDIS_URL configured
+[ ] API_SECRET, ADMIN_SECRET, NEXTAUTH_SECRET generated
+[ ] ADMIN_USERNAME and strong ADMIN_PASSWORD configured
+[ ] OPERATOR_FEE_WALLET configured
+[ ] Contract addresses configured or consciously omitted for non-executor flows
+[ ] TRANSACTION_WORKER_ENABLED topology chosen
+[ ] Stripe configured if subscriptions are enabled
+[ ] Tenderly configured or consciously skipped
+[ ] /health returns ok
+[ ] /health/ready returns ready
+[ ] First agent registered successfully
+[ ] MCP reachable from an agent client
+```
+
+See also:
+
+- [Dev Quickstart](../dev-quickstart.md)
+- [Self-Hosted Production Deployment](production-deploy.md)
+- [Release Runbook](release-runbook.md)

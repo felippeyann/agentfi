@@ -43,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Operator setup checklist clarified** — `docs/operations/setup-checklist.md` now separates dev quickstart, real-chain local testing, and production. It documents `WALLET_PROVIDER=local` as dev-only, removes stale deploy/preflight-scenario commands, and makes Turnkey/Alchemy/Postgres/Redis requirements explicit for production operators.
 - **Self-hosted deployment posture**: AgentFi has no canonical hosted production instance — every operator runs their own. Docs rewritten to reflect this: `docs/operations/production-deploy.md` is now provider-agnostic (Railway as reference example, Fly.io/Render/Docker documented as alternatives); `release-runbook.md` updated accordingly.
 
 ### Removed
