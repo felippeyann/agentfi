@@ -102,10 +102,10 @@ async function start() {
     capabilities: ['swap', 'transfer', 'lending', 'balance'],
     networks: [1, 8453, 42161, 137],
     authentication: 'api_key',
-    mcp_endpoint: process.env['MCP_SSE_URL'] ?? 'https://mcp.agentfi.cc/mcp/sse',
+    mcp_endpoint: process.env['MCP_SSE_URL'] ?? 'https://agentfi-backend.fly.dev/mcp/sse',
     openapi: process.env['API_URL']
       ? `${process.env['API_URL']}/openapi.json`
-      : 'https://api.agentfi.cc/openapi.json',
+      : 'https://agentfi-backend.fly.dev/openapi.json',
   }));
 
   // Start BullMQ worker — non-fatal if Redis is temporarily unavailable

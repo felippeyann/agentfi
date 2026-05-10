@@ -13,7 +13,7 @@ export class AgentFiClient {
 
   constructor(config: AgentFiConfig) {
     this.apiKey = config.apiKey;
-    this.apiUrl = config.apiUrl ?? 'https://api.agentfi.xyz';
+    this.apiUrl = config.apiUrl ?? 'https://agentfi-backend.fly.dev';
   }
 
   async call<T>(method: string, path: string, body?: unknown): Promise<T> {

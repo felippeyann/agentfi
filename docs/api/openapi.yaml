@@ -29,8 +29,8 @@ info:
     url: https://github.com/felippeyann/agentfi
 
 servers:
-  - url: https://api.agentfi.cc
-    description: Production
+  - url: https://agentfi-backend.fly.dev
+    description: Staging demo (Fly.io, no SLA)
   - url: http://localhost:3000
     description: Local development
 

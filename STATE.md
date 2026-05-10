@@ -214,7 +214,7 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 | Brand avatar           | `.github/avatar.svg`                                                                                                                                     | live                                                                    |
 | Dev quickstart         | [`docs/dev-quickstart.md`](docs/dev-quickstart.md) + `docker-compose.dev.yml` + `npm run smoke:dev`                                                      | zero-credential stack; first-run Docker + smoke + examples validated locally |
 | Examples (runnable)    | [`examples/a2a-collab`](examples/a2a-collab), [`examples/swap-planner`](examples/swap-planner), [`examples/delegation-chain`](examples/delegation-chain) | zero-dep Node scripts                                                   |
-| Staging demo           | https://agentfi-develop.up.railway.app                                                                                                                   | Running, **no SLA**                                                     |
+| Staging demo           | https://agentfi-backend.fly.dev                                                                                                                          | Running on Fly.io (region `gru`), **no SLA**                            |
 | Docs set               | `VISION.md`, `STATE.md`, `HANDOFF.md`, `docs/`                                                                                                           | live (archive in `docs/_archive/`)                                      |
 
 ---

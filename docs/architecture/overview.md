@@ -69,7 +69,7 @@ Built on top of the transaction pipeline:
 
 ## Deployment posture
 
-AgentFi is **self-hosted by design** (see VISION.md). There is no canonical production instance; operators run their own. A staging demo runs at `https://agentfi-develop.up.railway.app` with no SLA. For self-host deployment see [`docs/operations/production-deploy.md`](../operations/production-deploy.md) (provider-agnostic, Railway reference example).
+AgentFi is **self-hosted by design** (see VISION.md). There is no canonical production instance; operators run their own. A staging demo runs at `https://agentfi-backend.fly.dev` (Fly.io, region `gru`) with no SLA. For self-host deployment see [`docs/operations/production-deploy.md`](../operations/production-deploy.md) (provider-agnostic, Fly.io reference example).
 
 ## Deployed Contracts (Base Mainnet — Chain 8453)
 
