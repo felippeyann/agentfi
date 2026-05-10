@@ -63,8 +63,8 @@ Pending work is split into four buckets. Nothing in `Done` is listed here — th
 
 | Task                               | Blocker  | Notes                                                                                                                                        |
 | ---------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Update mcp.so listing              | External | [Listing](https://mcp.so/server/agentfi-mcp-server/felippeyann) is live, but its config still pointed at `@agent_fi/mcp-server@0.2.0` as of 2026-05-08. Update to `0.4.0`. |
-| Awaiting awesome-mcp-servers merge | External | [PR #5091](https://github.com/punkpeye/awesome-mcp-servers/pull/5091) open. Maintainer requested Glama badge on 2026-04-24 — submit server at https://glama.ai/mcp/servers, then add `[![felippeyann/agentfi MCP server](https://glama.ai/mcp/servers/felippeyann/agentfi/badges/score.svg)](https://glama.ai/mcp/servers/felippeyann/agentfi)` to the PR description. |
+| Update mcp.so listing              | External | Update comment posted on [chatmcp/mcpso Issue #1](https://github.com/chatmcp/mcpso/issues/1#issuecomment-4415526897) on 2026-05-10. Awaiting the registry maintainer to apply. |
+| Awaiting awesome-mcp-servers merge | External | [PR #5091](https://github.com/punkpeye/awesome-mcp-servers/pull/5091) is mergeable. Glama badge and 28-tool count added in commit `f3822064` on 2026-05-10. Awaiting `punkpeye` review. |
 | Demo screencast                    | —        | 2-minute Claude Desktop doing a real swap via MCP. Highest remaining non-code leverage.                                                      |
 
 ### 3.2 Technical — unblocked
