@@ -50,4 +50,4 @@ Welcome to the AgentFi documentation. This hub is designed for both human operat
 - **Repository**: [felippeyann/agentfi](https://github.com/felippeyann/agentfi)
 - **npm**: [@agent_fi/mcp-server](https://www.npmjs.com/package/@agent_fi/mcp-server)
 - **License**: Apache 2.0
-- **Staging demo**: `https://agentfi-develop.up.railway.app` (no SLA — demo only)
+- **Staging demo**: `https://agentfi-backend.fly.dev` (Fly.io, no SLA — demo only)

@@ -13,7 +13,7 @@ For Claude Desktop, the lowest-friction path is the local stdio MCP server:
       "command": "npx",
       "args": ["-y", "@agent_fi/mcp-server"],
       "env": {
-        "AGENTFI_API_URL": "https://agentfi-develop.up.railway.app",
+        "AGENTFI_API_URL": "https://agentfi-backend.fly.dev",
         "AGENTFI_API_KEY": "agfi_live_your_key_here"
       }
     }
@@ -38,7 +38,7 @@ cd packages/mcp-server && npm run dev
 ## 2. Register an Agent (get your API key)
 
 ```bash
-curl -X POST https://agentfi-develop.up.railway.app/v1/agents \
+curl -X POST https://agentfi-backend.fly.dev/v1/agents \
   -H "Content-Type: application/json" \
   -d '{"name": "my-agent", "chainIds": [1, 8453]}'
 ```

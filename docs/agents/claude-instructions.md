@@ -690,8 +690,8 @@ GET /.well-known/agent.json
   "capabilities": ["swap", "transfer", "lending", "balance"],
   "networks": [1, 8453, 42161, 137],
   "authentication": "api_key",
-  "mcp_endpoint": "https://mcp.agentfi.xyz/sse",
-  "openapi": "https://api.agentfi.xyz/openapi.json"
+  "mcp_endpoint": "https://agentfi-backend.fly.dev/mcp/sse",
+  "openapi": "https://agentfi-backend.fly.dev/openapi.json"
 }
 ```
 

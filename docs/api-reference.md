@@ -1,6 +1,6 @@
 # AgentFi API Reference
 
-Base URL: `https://api.agentfi.cc` (production) or `http://localhost:3000` (local)
+Base URL: `https://agentfi-backend.fly.dev` (staging demo, no SLA) or `http://localhost:3000` (local)
 
 > **Machine-readable spec**: [`docs/api/openapi.yaml`](api/openapi.yaml) — OpenAPI 3.0.3.
 > Use it with Postman, Insomnia, `openapi-typescript`, `openapi-generator`, or
