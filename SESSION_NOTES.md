@@ -151,6 +151,31 @@ Closed the remaining demo gap where P&L required a REST fallback:
 `mcp-server-v0.4.0` pushed and [GitHub release](https://github.com/felippeyann/agentfi/releases/tag/mcp-server-v0.4.0)
 created. The previous npm passkey/auth blocker is resolved.
 
+### External distribution unblocked (2026-05-10)
+
+Three distribution surfaces processed in the same session as the publish:
+
+- **Glama listing** (https://glama.ai/mcp/servers/felippeyann/agentfi) is live.
+  Configured via the registry's form (Node 22 base, `mcp-proxy` wrapper spawning
+  `node packages/mcp-server/dist/index.js` over stdio). First build succeeded —
+  `initialize` handshake + `tools/list` returned all 28 tools without credentials.
+  Glama detects License as Apache-2.0 and assigned Quality grade `A`.
+  Two prerequisites landed in [PR #103](https://github.com/felippeyann/agentfi/pull/103):
+  - `LICENSE` — Apache-2.0 APPENDIX block added so license detectors stop falling
+    back to NOASSERTION. GitHub's `licensee` is stricter than Glama's and still
+    classifies the file as `Other`; low-priority follow-up (does not block the
+    listing or any consumer).
+  - `Dockerfile.glama` — stdio-mode reference Dockerfile kept in the repo for any
+    tooling that expects one. Glama itself generates its own image from the form
+    fields, so this file is dormant for that registry's build but harmless.
+- **awesome-mcp-servers PR #5091** updated. Commit `f3822064` adds the Glama
+  score badge to the AgentFi entry per the maintainer's 2026-04-24 request, and
+  bumps the tool count 26 → 28. PR is `MERGEABLE`; awaiting `punkpeye` review.
+- **mcp.so listing** — update comment posted on
+  [chatmcp/mcpso Issue #1](https://github.com/chatmcp/mcpso/issues/1#issuecomment-4415526897)
+  with the new config pointing at `@agent_fi/mcp-server@0.4.0`. Awaiting the
+  registry maintainer (`@idoubi`) to apply.
+
 ---
 
 ## Validation
@@ -187,19 +212,18 @@ Completed locally:
 
 ## Current P0s
 
-No open infrastructure P0 remains from the diagnostic pass. Current practical
-priority is adoption surface polish, not large protocol expansion.
+Distribution is in flight; everything actionable on this side has shipped, and
+the remaining steps wait on external maintainers. No infrastructure P0 remains.
 
-Current map after the latest sweep:
-
-1. **P0 — External distribution**: update mcp.so listing config (still pointed
-   at stale `@agent_fi/mcp-server@0.2.0`) to `0.4.0`; unblock
-   awesome-mcp-servers [PR #5091](https://github.com/punkpeye/awesome-mcp-servers/pull/5091)
-   by submitting the server to https://glama.ai/mcp/servers and adding the
-   Glama score badge to the PR description (maintainer requested 2026-04-24).
+1. **P0 — External distribution (in review)**: awesome-mcp-servers PR #5091 is
+   mergeable with badge + updated tool count, awaiting `punkpeye` review;
+   mcp.so update comment posted on Issue #1, awaiting `@idoubi`.
 2. **P1 — Demo screencast**: record the Claude Desktop flow now that the helper
-   and MCP P&L tool exist.
-3. **P2 — Large roadmap**: GMX/perps, escrow v3, and revenue sharing should
+   and MCP P&L tools exist.
+3. **P2 — License detection follow-up (low)**: GitHub's `licensee` still
+   classifies `LICENSE` as `Other` despite the Apache-2.0 APPENDIX. Glama and
+   manual reading both recognise Apache-2.0, so no consumer is blocked.
+4. **P3 — Large roadmap**: GMX/perps, escrow v3, and revenue sharing should
    wait for concrete user/integration signal.
 
 ---
@@ -212,4 +236,4 @@ Large roadmap work such as GMX/perps, escrow v3, and revenue sharing should stil
 
 ---
 
-_Last touch: 2026-05-10 (mcp-server 0.4.0 publish)._
+_Last touch: 2026-05-10 (mcp-server 0.4.0 publish + Glama listing live + PR #5091 badge)._
