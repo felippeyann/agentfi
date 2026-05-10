@@ -1,0 +1,35 @@
+# Dockerfile dedicated to the Glama MCP registry build.
+#
+# Glama only needs the server to start and respond to MCP introspection
+# (`initialize` + `tools/list`) over stdio, with no credentials.
+# This image runs the published mcp-server in stdio mode — no HTTP, no
+# SSE, no AGENTFI_API_KEY required for the introspection pass.
+#
+# For local SSE / hosted deployments, use Dockerfile.mcp instead.
+
+FROM node:20-alpine AS base
+WORKDIR /app
+
+FROM base AS deps
+COPY package.json package-lock.json* ./
+COPY packages/mcp-server/package.json ./packages/mcp-server/package.json
+RUN npm ci --workspace=packages/mcp-server --include-workspace-root
+
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/packages/mcp-server/node_modules ./packages/mcp-server/node_modules
+COPY tsconfig.base.json ./tsconfig.base.json
+COPY packages/mcp-server ./packages/mcp-server
+RUN cd packages/mcp-server && npm run build
+
+FROM base AS runner
+ENV NODE_ENV=production
+WORKDIR /app/packages/mcp-server
+COPY --from=builder /app/packages/mcp-server/dist ./dist
+COPY --from=builder /app/node_modules ../../node_modules
+COPY --from=builder /app/packages/mcp-server/node_modules ./node_modules
+RUN addgroup -g 1001 appuser && adduser -D -u 1001 -G appuser appuser
+USER appuser
+
+CMD ["node", "dist/index.js"]
