@@ -3,7 +3,7 @@
 > **Read together with [VISION.md](VISION.md) (the _why_) and [HANDOFF.md](HANDOFF.md) (live pending tasks).**
 > This file is the **comprehensive, point-in-time snapshot** of what the project _is_ today — purpose, stack, capabilities, progress. Update it whenever the scope or architecture shifts.
 
-**Last updated**: May 2026 · **main baseline verified** `790c53c` · **npm** `@agent_fi/mcp-server@0.3.0` published; source package `0.4.0` pending publish due npm auth/passkey recovery
+**Last updated**: 2026-05-10 · **main baseline verified** `7270d58` · **npm** `@agent_fi/mcp-server@0.4.0` published
 
 ---
 
@@ -205,8 +205,8 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | Source code            | https://github.com/felippeyann/agentfi                                                                                                                   | Apache 2.0, public                                                      |
 | Release                | https://github.com/felippeyann/agentfi/releases/tag/v0.1.0                                                                                               | v0.1.0 (April 2026)                                                     |
-| mcp-server npm         | https://www.npmjs.com/package/@agent_fi/mcp-server                                                                                                       | **v0.3.0** published; source package is **v0.4.0** pending npm publish; current blocker is npm auth/passkey recovery |
-| mcp-server releases    | https://github.com/felippeyann/agentfi/releases                                                                                                          | v0.1.0, v0.2.0, v0.3.0 published                                        |
+| mcp-server npm         | https://www.npmjs.com/package/@agent_fi/mcp-server                                                                                                       | **v0.4.0** published (2026-05-10), `dist-tags.latest=0.4.0` |
+| mcp-server releases    | https://github.com/felippeyann/agentfi/releases                                                                                                          | v0.1.0, v0.2.0, v0.3.0, mcp-server-v0.4.0 published                     |
 | mcp.so listing         | https://mcp.so/server/agentfi-mcp-server/felippeyann                                                                                                     | live; latest check still showed stale `@agent_fi/mcp-server@0.2.0` config |
 | awesome-mcp-servers PR | https://github.com/punkpeye/awesome-mcp-servers/pull/5091                                                                                                | open (pending maintainer merge)                                         |
 | Base contracts         | `0x03af…6A6d` + `0x5441…24b3`                                                                                                                            | verified on Basescan                                                    |

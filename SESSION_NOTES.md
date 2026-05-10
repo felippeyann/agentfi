@@ -1,4 +1,4 @@
-# Session Notes — 2026-05-08
+# Session Notes — 2026-05-10
 
 > Single-point handoff doc. Update on every substantive session, prune stale
 > sections aggressively. If this file is older than a few days when you read
@@ -143,12 +143,13 @@ Closed the remaining demo gap where P&L required a REST fallback:
   `get_my_agent_profile` and `get_my_pnl`.
 - Backend embedded `/mcp/sse` proxy exposes matching tools.
 - `npm run demo:claude-mcp` now points Claude Desktop at the local workspace MCP
-  server by default, so the demo can use source tools before npm publish.
-- Manual follow-up: publish `@agent_fi/mcp-server@0.4.0` to npm with
-  maintainer credentials. A publish attempt from this machine is blocked by npm
-  auth (`ENEEDAUTH`), and the maintainer's passkey was not accepted. The package
-  is ready; recovery is account-side, documented in
-  `packages/mcp-server/RELEASE.md`.
+  server by default; can switch back to the published package at any time.
+
+### npm publish 0.4.0 (2026-05-10)
+
+`@agent_fi/mcp-server@0.4.0` is live on npm with `dist-tags.latest=0.4.0`. Tag
+`mcp-server-v0.4.0` pushed and [GitHub release](https://github.com/felippeyann/agentfi/releases/tag/mcp-server-v0.4.0)
+created. The previous npm passkey/auth blocker is resolved.
 
 ---
 
@@ -191,16 +192,14 @@ priority is adoption surface polish, not large protocol expansion.
 
 Current map after the latest sweep:
 
-1. **P0 — MCP adoption surface**: keep Claude/MCP demo fully inside MCP tools.
-   `get_my_agent_profile` and `get_my_pnl` are implemented in source; npm
-   publish for `@agent_fi/mcp-server@0.4.0` remains manual and is currently
-   blocked by npm passkey/auth recovery.
-2. **P1 — External distribution**: mcp.so listing is live but still showed an
-   old `@agent_fi/mcp-server@0.2.0` config; awesome-mcp-servers PR #5091 is
-   still open.
-3. **P2 — Demo screencast**: record the Claude Desktop flow now that the helper
+1. **P0 — External distribution**: update mcp.so listing config (still pointed
+   at stale `@agent_fi/mcp-server@0.2.0`) to `0.4.0`; unblock
+   awesome-mcp-servers [PR #5091](https://github.com/punkpeye/awesome-mcp-servers/pull/5091)
+   by submitting the server to https://glama.ai/mcp/servers and adding the
+   Glama score badge to the PR description (maintainer requested 2026-04-24).
+2. **P1 — Demo screencast**: record the Claude Desktop flow now that the helper
    and MCP P&L tool exist.
-4. **P3 — Large roadmap**: GMX/perps, escrow v3, and revenue sharing should
+3. **P2 — Large roadmap**: GMX/perps, escrow v3, and revenue sharing should
    wait for concrete user/integration signal.
 
 ---
@@ -213,4 +212,4 @@ Large roadmap work such as GMX/perps, escrow v3, and revenue sharing should stil
 
 ---
 
-_Last touch: 2026-05-08 (P0 diagnostic session)._
+_Last touch: 2026-05-10 (mcp-server 0.4.0 publish)._

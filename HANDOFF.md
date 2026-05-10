@@ -2,7 +2,7 @@
 
 > Live pending tasks, credentials inventory, and working conventions. For _what the project is_, read [STATE.md](STATE.md). For _why_, read [VISION.md](VISION.md). This file is the shortest path from "resuming work" → "executing something useful."
 
-**Last updated**: May 2026 · **main baseline verified** `790c53c` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0) · **Release**: [v0.1.0](https://github.com/felippeyann/agentfi/releases/tag/v0.1.0) · **npm**: [`@agent_fi/mcp-server@0.3.0`](https://www.npmjs.com/package/@agent_fi/mcp-server) published; source package `0.4.0` pending publish due npm auth/passkey recovery
+**Last updated**: 2026-05-10 · **main baseline verified** `7270d58` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0) · **Release**: [v0.1.0](https://github.com/felippeyann/agentfi/releases/tag/v0.1.0) · **npm**: [`@agent_fi/mcp-server@0.4.0`](https://www.npmjs.com/package/@agent_fi/mcp-server)
 
 ---
 
@@ -63,9 +63,8 @@ Pending work is split into four buckets. Nothing in `Done` is listed here — th
 
 | Task                               | Blocker  | Notes                                                                                                                                        |
 | ---------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Update mcp.so listing              | External | [Listing](https://mcp.so/server/agentfi-mcp-server/felippeyann) is live, but its config still showed `@agent_fi/mcp-server@0.2.0` in the latest check. |
-| Awaiting awesome-mcp-servers merge | External | [PR #5091](https://github.com/punkpeye/awesome-mcp-servers/pull/5091) is still open as of 2026-05-08.                                         |
-| Publish mcp-server v0.4.0          | npm org  | Source package adds `get_my_agent_profile` + `get_my_pnl`; package is ready, but publish is blocked until npm passkey/auth works. See `packages/mcp-server/RELEASE.md`. |
+| Update mcp.so listing              | External | [Listing](https://mcp.so/server/agentfi-mcp-server/felippeyann) is live, but its config still pointed at `@agent_fi/mcp-server@0.2.0` as of 2026-05-08. Update to `0.4.0`. |
+| Awaiting awesome-mcp-servers merge | External | [PR #5091](https://github.com/punkpeye/awesome-mcp-servers/pull/5091) open. Maintainer requested Glama badge on 2026-04-24 — submit server at https://glama.ai/mcp/servers, then add `[![felippeyann/agentfi MCP server](https://glama.ai/mcp/servers/felippeyann/agentfi/badges/score.svg)](https://glama.ai/mcp/servers/felippeyann/agentfi)` to the PR description. |
 | Demo screencast                    | —        | 2-minute Claude Desktop doing a real swap via MCP. Highest remaining non-code leverage.                                                      |
 
 ### 3.2 Technical — unblocked
@@ -100,7 +99,7 @@ The live project state has **completed plumbing but zero users**. Adding more co
 | Tenderly access key                      | Pre-broadcast tx simulation (optional; graceful fallback) | https://dashboard.tenderly.co            |
 | Postgres URL                             | Always                                                    | Local Docker, Neon, Supabase, Railway PG |
 | Redis URL                                | Always                                                    | Local Docker, Upstash, Railway Redis     |
-| npm publish access to `@agent_fi`        | Publishing mcp-server                                     | https://www.npmjs.com (invite-only org; current blocker is passkey/auth recovery) |
+| npm publish access to `@agent_fi`        | Publishing mcp-server                                     | https://www.npmjs.com (invite-only org)                                          |
 | `gh auth login`                          | PR + release ops                                          | GitHub CLI                               |
 | Etherscan-family API keys                | Contract verification                                     | Per-chain block explorer                 |
 | Funded deployer EOA                      | Contract deployment                                       | Hot wallet with gas                      |

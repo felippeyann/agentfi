@@ -4,9 +4,8 @@ This document describes how to publish the standalone AgentFi MCP server to
 npm.
 
 Current source version: **0.4.0**
-Current published npm version: **0.3.0**
-Status: **0.4.0 is ready in source, but publish is blocked until an npm account
-with access to the `@agent_fi` org can authenticate.**
+Current published npm version: **0.4.0**
+Status: **0.4.0 published 2026-05-10. Tag `mcp-server-v0.4.0` and GitHub release live.**
 
 ## Prerequisites
 
