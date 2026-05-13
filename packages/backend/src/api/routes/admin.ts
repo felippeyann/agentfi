@@ -14,9 +14,11 @@ import { logger } from '../middleware/logger.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
 import { PnLService } from '../../services/billing/pnl.service.js';
+import { OperatorService } from '../../services/billing/operator.service.js';
 
 const reputationService = new ReputationService();
 const pnlService = new PnLService();
+const operatorService = new OperatorService(db);
 const ADMIN_SECRET = process.env['ADMIN_SECRET'] ?? '';
 const ADMIN_ALLOW_REMOTE = process.env['ADMIN_ALLOW_REMOTE'] === 'true';
 
@@ -695,6 +697,121 @@ export async function adminRoutes(fastify: FastifyInstance) {
         logger.error({ err, agentId: request.params.id }, 'P&L compute failed');
         return reply.code(500).send({ error: 'Failed to compute P&L' });
       }
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // Operator management & revenue sharing
+  // ---------------------------------------------------------------------------
+
+  const createOperatorSchema = z.object({
+    name: z.string().min(1),
+    walletAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+    contactEmail: z.string().email().optional(),
+    revShareBps: z.number().min(0).max(5000).optional(),
+  });
+
+  fastify.post('/admin/operators', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+    const body = createOperatorSchema.parse(request.body);
+    const operator = await operatorService.createOperator({
+      name: body.name,
+      walletAddress: body.walletAddress,
+      contactEmail: body.contactEmail ?? null,
+      revShareBps: body.revShareBps ?? null,
+    });
+    return reply.code(201).send(operator);
+  });
+
+  fastify.get('/admin/operators', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+    return operatorService.listOperators();
+  });
+
+  fastify.get<{ Params: { id: string } }>('/admin/operators/:id', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+    const stats = await operatorService.getOperatorStats(request.params.id);
+    if (!stats.operator) return reply.code(404).send({ error: 'Operator not found' });
+    return stats;
+  });
+
+  const assignAgentSchema = z.object({ operatorId: z.string() });
+
+  fastify.post<{ Params: { id: string } }>(
+    '/admin/agents/:id/operator',
+    async (request, reply) => {
+      if (!requireAdmin(request, reply)) return;
+      const body = assignAgentSchema.parse(request.body);
+      const agent = await operatorService.assignAgentToOperator(
+        request.params.id,
+        body.operatorId,
+      );
+      return agent;
+    },
+  );
+
+  fastify.delete<{ Params: { id: string } }>(
+    '/admin/agents/:id/operator',
+    async (request, reply) => {
+      if (!requireAdmin(request, reply)) return;
+      const agent = await operatorService.removeAgentFromOperator(request.params.id);
+      return agent;
+    },
+  );
+
+  const createSettlementSchema = z.object({
+    operatorId: z.string(),
+    periodStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    periodEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    chainId: z.number().optional(),
+  });
+
+  fastify.post('/admin/settlements', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+    const body = createSettlementSchema.parse(request.body);
+    const settlement = await operatorService.createSettlement({
+      operatorId: body.operatorId,
+      periodStart: body.periodStart,
+      periodEnd: body.periodEnd,
+      chainId: body.chainId ?? null,
+    });
+    if (!settlement) {
+      return reply.code(404).send({ error: 'No pending revenue for this period' });
+    }
+    return reply.code(201).send(settlement);
+  });
+
+  fastify.get('/admin/settlements', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+    const settlements = await db.operatorSettlement.findMany({
+      include: { operator: { select: { name: true, walletAddress: true } } },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+    return { settlements };
+  });
+
+  const settleSchema = z.object({ txHash: z.string() });
+
+  fastify.patch<{ Params: { id: string } }>(
+    '/admin/settlements/:id/complete',
+    async (request, reply) => {
+      if (!requireAdmin(request, reply)) return;
+      const body = settleSchema.parse(request.body);
+      const settlement = await operatorService.markSettlementComplete(
+        request.params.id,
+        body.txHash,
+      );
+      return settlement;
+    },
+  );
+
+  fastify.patch<{ Params: { id: string } }>(
+    '/admin/settlements/:id/fail',
+    async (request, reply) => {
+      if (!requireAdmin(request, reply)) return;
+      await operatorService.markSettlementFailed(request.params.id);
+      return { ok: true };
     },
   );
 }

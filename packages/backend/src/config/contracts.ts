@@ -10,6 +10,12 @@ interface ChainContracts {
   aavePoolAddressProvider: Address;
   // Compound V3 (Comet) USDC market address. One per chain.
   compoundCometUsdc?: Address | undefined;
+  // GMX V2 Synthetics addresses (Arbitrum-primary)
+  gmxExchangeRouter?: Address | undefined;
+  gmxRouter?: Address | undefined;
+  gmxOrderVault?: Address | undefined;
+  // Escrow v3 — on-chain custody for A2A job payments
+  escrowModule?: Address | undefined;
 }
 
 export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
@@ -17,6 +23,7 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
   1: {
     policyModule: (process.env['POLICY_MODULE_ADDRESS_1'] as Address) || undefined,
     executor: (process.env['EXECUTOR_ADDRESS_1'] as Address) || undefined,
+    escrowModule: (process.env['ESCROW_MODULE_ADDRESS_1'] as Address) || undefined,
     uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
     uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
     aavePoolAddressProvider: '0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e',
@@ -26,6 +33,7 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
   8453: {
     policyModule: (process.env['POLICY_MODULE_ADDRESS_8453'] as Address) || undefined,
     executor: (process.env['EXECUTOR_ADDRESS_8453'] as Address) || undefined,
+    escrowModule: (process.env['ESCROW_MODULE_ADDRESS_8453'] as Address) || undefined,
     uniswapV3Router: '0x2626664c2603336E57B271c5C0b26F421741e481',
     uniswapV3Quoter: '0x3d4e44Eb1374240CE5F1B136CFc5b5e8b4e1b2f7',
     aavePoolAddressProvider: '0xe20fCBdBfFC4Dd138cE8b2E6FBb6CB49777ad64B',
@@ -35,15 +43,20 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
   42161: {
     policyModule: (process.env['POLICY_MODULE_ADDRESS_42161'] as Address) || undefined,
     executor: (process.env['EXECUTOR_ADDRESS_42161'] as Address) || undefined,
+    escrowModule: (process.env['ESCROW_MODULE_ADDRESS_42161'] as Address) || undefined,
     uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
     uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
     aavePoolAddressProvider: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb',
     compoundCometUsdc: '0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf',
+    gmxExchangeRouter: '0x7C68C7866A64FA2160F78EEaE12217FFbf871fa8',
+    gmxRouter: '0x7452c558d45f8006Ce12C56010796DCe2eB24afb',
+    gmxOrderVault: '0x31eF83a530Fde1B38deDA89C0A6c72a85b35CDf6',
   },
   // Base Sepolia (testnet)
   84532: {
     policyModule: (process.env['POLICY_MODULE_ADDRESS_84532'] as Address) || '0x771444Ff5483ef3A62b492a816Cb439e4f017203',
     executor: (process.env['EXECUTOR_ADDRESS_84532'] as Address) || '0x1fE2A4e79899A9cB03bED301f978d2Ce2F91Fc5d',
+    escrowModule: (process.env['ESCROW_MODULE_ADDRESS_84532'] as Address) || undefined,
     uniswapV3Router: '0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4',
     uniswapV3Quoter: '0xC5290058841028F1614F3A6F0F5816cAd0df5E27',
     aavePoolAddressProvider: '0x0000000000000000000000000000000000000000', // not deployed on testnet
@@ -52,6 +65,7 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
   137: {
     policyModule: (process.env['POLICY_MODULE_ADDRESS_137'] as Address) || undefined,
     executor: (process.env['EXECUTOR_ADDRESS_137'] as Address) || undefined,
+    escrowModule: (process.env['ESCROW_MODULE_ADDRESS_137'] as Address) || undefined,
     uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
     uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
     aavePoolAddressProvider: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb',

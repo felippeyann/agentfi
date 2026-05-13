@@ -427,4 +427,180 @@ export class TransactionBuilder {
       value: 0n,
     };
   }
+
+  /**
+   * Builds a GMX V2 createOrder call via ExchangeRouter.
+   * Used for both increase (open/add) and decrease (close/reduce) positions.
+   *
+   * GMX V2 flow: user sends collateral to OrderVault, then calls createOrder.
+   * Keeper executes the order after oracle price update.
+   */
+  buildGmxCreateOrder(params: {
+    exchangeRouter: Address;
+    orderVault: Address;
+    market: Address;
+    initialCollateralToken: Address;
+    sizeDeltaUsd: bigint;
+    initialCollateralDeltaAmount: bigint;
+    acceptablePrice: bigint;
+    executionFee: bigint;
+    isLong: boolean;
+    orderType: 'MarketIncrease' | 'MarketDecrease' | 'LimitIncrease' | 'LimitDecrease';
+    triggerPrice?: bigint;
+    receiver: Address;
+    callbackContract?: Address;
+  }): TransactionData {
+    const orderTypeMap = {
+      MarketIncrease: 2n,
+      LimitIncrease: 3n,
+      MarketDecrease: 4n,
+      LimitDecrease: 5n,
+    };
+
+    const decreasePositionSwapType = 0n; // NoSwap
+
+    const createOrderArgs = {
+      addresses: {
+        receiver: params.receiver,
+        initialCollateralToken: params.initialCollateralToken,
+        callbackContract: params.callbackContract ?? '0x0000000000000000000000000000000000000000' as Address,
+        uiFeeReceiver: '0x0000000000000000000000000000000000000000' as Address,
+        market: params.market,
+        swapPath: [] as Address[],
+      },
+      numbers: {
+        sizeDeltaUsd: params.sizeDeltaUsd,
+        initialCollateralDeltaAmount: params.initialCollateralDeltaAmount,
+        triggerPrice: params.triggerPrice ?? 0n,
+        acceptablePrice: params.acceptablePrice,
+        executionFee: params.executionFee,
+        callbackGasLimit: 0n,
+        minOutputAmount: 0n,
+      },
+      orderType: orderTypeMap[params.orderType],
+      decreasePositionSwapType,
+      isLong: params.isLong,
+      shouldUnwrapNativeToken: false,
+      autoCancel: false,
+      referralCode: '0x0000000000000000000000000000000000000000000000000000000000000000' as `0x${string}`,
+    };
+
+    // ExchangeRouter.createOrder is called via multicall:
+    // 1. sendWnt (execution fee)
+    // 2. sendTokens (collateral to OrderVault) — for increase orders
+    // 3. createOrder
+    const calls: `0x${string}`[] = [];
+
+    // sendWnt — send execution fee to OrderVault
+    calls.push(encodeFunctionData({
+      abi: GMX_EXCHANGE_ROUTER_ABI,
+      functionName: 'sendWnt',
+      args: [params.orderVault, params.executionFee],
+    }));
+
+    // For increase orders, send collateral to OrderVault
+    if (params.orderType === 'MarketIncrease' || params.orderType === 'LimitIncrease') {
+      if (params.initialCollateralDeltaAmount > 0n) {
+        calls.push(encodeFunctionData({
+          abi: GMX_EXCHANGE_ROUTER_ABI,
+          functionName: 'sendTokens',
+          args: [params.initialCollateralToken, params.orderVault, params.initialCollateralDeltaAmount],
+        }));
+      }
+    }
+
+    // createOrder
+    calls.push(encodeFunctionData({
+      abi: GMX_EXCHANGE_ROUTER_ABI,
+      functionName: 'createOrder',
+      args: [createOrderArgs],
+    }));
+
+    return {
+      to: params.exchangeRouter,
+      data: encodeFunctionData({
+        abi: GMX_EXCHANGE_ROUTER_ABI,
+        functionName: 'multicall',
+        args: [calls],
+      }),
+      value: params.executionFee,
+    };
+  }
 }
+
+// GMX V2 ExchangeRouter ABI (minimal — multicall + order creation)
+const GMX_EXCHANGE_ROUTER_ABI = [
+  {
+    name: 'multicall',
+    type: 'function',
+    stateMutability: 'payable',
+    inputs: [{ name: 'data', type: 'bytes[]' }],
+    outputs: [{ name: 'results', type: 'bytes[]' }],
+  },
+  {
+    name: 'sendWnt',
+    type: 'function',
+    stateMutability: 'payable',
+    inputs: [
+      { name: 'receiver', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [],
+  },
+  {
+    name: 'sendTokens',
+    type: 'function',
+    stateMutability: 'payable',
+    inputs: [
+      { name: 'token', type: 'address' },
+      { name: 'receiver', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [],
+  },
+  {
+    name: 'createOrder',
+    type: 'function',
+    stateMutability: 'payable',
+    inputs: [
+      {
+        name: 'params',
+        type: 'tuple',
+        components: [
+          {
+            name: 'addresses',
+            type: 'tuple',
+            components: [
+              { name: 'receiver', type: 'address' },
+              { name: 'initialCollateralToken', type: 'address' },
+              { name: 'callbackContract', type: 'address' },
+              { name: 'uiFeeReceiver', type: 'address' },
+              { name: 'market', type: 'address' },
+              { name: 'swapPath', type: 'address[]' },
+            ],
+          },
+          {
+            name: 'numbers',
+            type: 'tuple',
+            components: [
+              { name: 'sizeDeltaUsd', type: 'uint256' },
+              { name: 'initialCollateralDeltaAmount', type: 'uint256' },
+              { name: 'triggerPrice', type: 'uint256' },
+              { name: 'acceptablePrice', type: 'uint256' },
+              { name: 'executionFee', type: 'uint256' },
+              { name: 'callbackGasLimit', type: 'uint256' },
+              { name: 'minOutputAmount', type: 'uint256' },
+            ],
+          },
+          { name: 'orderType', type: 'uint256' },
+          { name: 'decreasePositionSwapType', type: 'uint256' },
+          { name: 'isLong', type: 'bool' },
+          { name: 'shouldUnwrapNativeToken', type: 'bool' },
+          { name: 'autoCancel', type: 'bool' },
+          { name: 'referralCode', type: 'bytes32' },
+        ],
+      },
+    ],
+    outputs: [{ name: 'key', type: 'bytes32' }],
+  },
+] as const;

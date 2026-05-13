@@ -1438,6 +1438,305 @@ export async function transactionRoutes(fastify: FastifyInstance) {
    *   - value: ETH value in wei (as decimal string, e.g. "0" or "1000000000000000")
    *   - data:  hex-encoded calldata (e.g. "0x" for plain ETH transfers)
    */
+  // -----------------------------------------------------------------------
+  // GMX V2 Perpetuals — open position (MarketIncrease order)
+  // -----------------------------------------------------------------------
+
+  const gmxOpenSchema = z.object({
+    market: z.string().describe('GMX market token address or label like "ETH/USD"'),
+    collateralToken: z.string().describe('Collateral token address (e.g. WETH, USDC)'),
+    sizeDeltaUsd: z.string().describe('Position size in USD with 30 decimals (GMX precision)'),
+    collateralAmount: z.string().describe('Collateral amount in human-readable units'),
+    acceptablePrice: z.string().describe('Max acceptable price in USD with 30 decimals (for longs) or min price (for shorts)'),
+    isLong: z.boolean().describe('true for long, false for short'),
+    chainId: z.number().default(42161).describe('Chain ID. Default: 42161 (Arbitrum One).'),
+    idempotencyKey: z.string().optional(),
+  });
+
+  fastify.post('/v1/transactions/gmx-open', async (request, reply) => {
+    const body = gmxOpenSchema.parse(request.body);
+    const agent = await getAgent(request.agentId);
+    if (!ensureChainAllowed(agent, body.chainId, reply)) return;
+
+    if (body.idempotencyKey) {
+      const idempotent = await getIdempotentTransaction(request.agentId, body.idempotencyKey);
+      if (idempotent.existing) return idempotent.existing;
+      if (idempotent.conflictWithAnotherAgent) {
+        return reply.code(409).send({ error: 'idempotencyKey is already in use by another agent' });
+      }
+    }
+
+    const withinLimit = await feeService.checkTxLimit(request.agentId, request.agentTier);
+    if (!withinLimit) {
+      return reply.code(429).send({ error: `Monthly transaction limit reached for ${request.agentTier} tier.` });
+    }
+
+    const contracts = getContracts(body.chainId);
+    if (!contracts.gmxExchangeRouter || !contracts.gmxOrderVault) {
+      return reply.code(400).send({ error: `GMX V2 not available on chain ${body.chainId}` });
+    }
+
+    // Resolve market address from label if needed
+    const { gmxService } = await import('../../services/defi/gmx.service.js');
+    let marketAddress: Address;
+    if (body.market.startsWith('0x')) {
+      marketAddress = getAddress(body.market);
+    } else {
+      const resolved = gmxService.resolveMarket(body.market);
+      if (!resolved) return reply.code(400).send({ error: `Unknown GMX market: ${body.market}` });
+      marketAddress = resolved;
+    }
+
+    const collateralDecimals = await getTokenDecimals(body.collateralToken, body.chainId);
+    const collateralAmountRaw = parseUnits(body.collateralAmount, collateralDecimals);
+
+    // Get execution fee
+    const { executionFeeWei } = await gmxService.getExecutionFee({ chainId: body.chainId, orderType: 'increase' });
+
+    const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    const policyResult = await policyService.validateTransaction({
+      agentId: request.agentId,
+      targetContract: contracts.gmxExchangeRouter,
+      tokenAddress: getAddress(body.collateralToken),
+      valueEth: weiToEthDecimalString(executionFeeWei),
+      valueUsd: '0',
+      ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
+    });
+    if (!policyResult.allowed) {
+      return reply.code(403).send({ error: policyResult.reason });
+    }
+
+    const txData = builder.buildGmxCreateOrder({
+      exchangeRouter: contracts.gmxExchangeRouter,
+      orderVault: contracts.gmxOrderVault,
+      market: marketAddress,
+      initialCollateralToken: getAddress(body.collateralToken),
+      sizeDeltaUsd: BigInt(body.sizeDeltaUsd),
+      initialCollateralDeltaAmount: collateralAmountRaw,
+      acceptablePrice: BigInt(body.acceptablePrice),
+      executionFee: executionFeeWei,
+      isLong: body.isLong,
+      orderType: 'MarketIncrease',
+      receiver: getAddress(agent.safeAddress),
+    });
+
+    const sim = await simulator.simulate({
+      chainId: body.chainId,
+      from: getAddress(agent.safeAddress),
+      to: txData.to,
+      data: txData.data,
+      value: txData.value,
+    });
+
+    if (!sim.success) {
+      return reply.code(422).send({ error: `Simulation failed: ${sim.error}`, simulationId: sim.simulationId });
+    }
+
+    const feeCalc = feeService.calculateFee({ grossAmountWei: executionFeeWei, tier: request.agentTier });
+
+    const tx = await db.transaction.create({
+      data: {
+        agentId: request.agentId,
+        idempotencyKey: body.idempotencyKey ?? null,
+        chainId: body.chainId,
+        status: policyResult.requiresApproval ? 'PENDING_APPROVAL' : 'QUEUED',
+        type: 'GMX_OPEN',
+        fromToken: body.collateralToken,
+        amountIn: body.collateralAmount,
+        simulation: sim as any,
+        metadata: {
+          market: marketAddress,
+          sizeDeltaUsd: body.sizeDeltaUsd,
+          isLong: body.isLong,
+          acceptablePrice: body.acceptablePrice,
+          executionFee: executionFeeWei.toString(),
+          queuePayload: {
+            to: txData.to,
+            data: txData.data,
+            value: txData.value.toString(),
+            feeAmountWei: feeCalc.feeAmountWei.toString(),
+            feeBps: feeCalc.feeBps,
+            routedViaExecutor: false,
+          },
+        },
+      },
+    });
+
+    if (!policyResult.requiresApproval) {
+      await transactionQueue.add('gmx-open', {
+        transactionId: tx.id,
+        chainId: body.chainId,
+        walletId: agent.walletId,
+        from: getAddress(agent.safeAddress),
+        to: txData.to,
+        data: txData.data,
+        value: txData.value.toString(),
+        agentId: request.agentId,
+        tier: request.agentTier,
+        feeAmountWei: feeCalc.feeAmountWei.toString(),
+        feeUsd: '0',
+        feeBps: feeCalc.feeBps,
+        routedViaExecutor: false,
+      }, { priority: 1 });
+    }
+
+    return reply.code(202).send({
+      transactionId: tx.id,
+      status: tx.status,
+      simulationId: sim.simulationId,
+      market: marketAddress,
+      fee: { bps: feeCalc.feeBps, amountWei: feeCalc.feeAmountWei.toString(), feeWallet: feeCalc.feeWallet },
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // GMX V2 Perpetuals — close position (MarketDecrease order)
+  // -----------------------------------------------------------------------
+
+  const gmxCloseSchema = z.object({
+    market: z.string().describe('GMX market token address or label like "ETH/USD"'),
+    collateralToken: z.string().describe('Collateral token address of the existing position'),
+    sizeDeltaUsd: z.string().describe('Size to close in USD with 30 decimals. Use full position size for complete close.'),
+    acceptablePrice: z.string().describe('Min acceptable price in USD with 30 decimals (for longs) or max price (for shorts)'),
+    isLong: z.boolean().describe('true if closing a long, false if closing a short'),
+    chainId: z.number().default(42161).describe('Chain ID. Default: 42161 (Arbitrum One).'),
+    idempotencyKey: z.string().optional(),
+  });
+
+  fastify.post('/v1/transactions/gmx-close', async (request, reply) => {
+    const body = gmxCloseSchema.parse(request.body);
+    const agent = await getAgent(request.agentId);
+    if (!ensureChainAllowed(agent, body.chainId, reply)) return;
+
+    if (body.idempotencyKey) {
+      const idempotent = await getIdempotentTransaction(request.agentId, body.idempotencyKey);
+      if (idempotent.existing) return idempotent.existing;
+      if (idempotent.conflictWithAnotherAgent) {
+        return reply.code(409).send({ error: 'idempotencyKey is already in use by another agent' });
+      }
+    }
+
+    const withinLimit = await feeService.checkTxLimit(request.agentId, request.agentTier);
+    if (!withinLimit) {
+      return reply.code(429).send({ error: `Monthly transaction limit reached for ${request.agentTier} tier.` });
+    }
+
+    const contracts = getContracts(body.chainId);
+    if (!contracts.gmxExchangeRouter || !contracts.gmxOrderVault) {
+      return reply.code(400).send({ error: `GMX V2 not available on chain ${body.chainId}` });
+    }
+
+    const { gmxService } = await import('../../services/defi/gmx.service.js');
+    let marketAddress: Address;
+    if (body.market.startsWith('0x')) {
+      marketAddress = getAddress(body.market);
+    } else {
+      const resolved = gmxService.resolveMarket(body.market);
+      if (!resolved) return reply.code(400).send({ error: `Unknown GMX market: ${body.market}` });
+      marketAddress = resolved;
+    }
+
+    const { executionFeeWei } = await gmxService.getExecutionFee({ chainId: body.chainId, orderType: 'decrease' });
+
+    const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    const policyResult = await policyService.validateTransaction({
+      agentId: request.agentId,
+      targetContract: contracts.gmxExchangeRouter,
+      tokenAddress: getAddress(body.collateralToken),
+      valueEth: weiToEthDecimalString(executionFeeWei),
+      valueUsd: '0',
+      ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
+    });
+    if (!policyResult.allowed) {
+      return reply.code(403).send({ error: policyResult.reason });
+    }
+
+    const txData = builder.buildGmxCreateOrder({
+      exchangeRouter: contracts.gmxExchangeRouter,
+      orderVault: contracts.gmxOrderVault,
+      market: marketAddress,
+      initialCollateralToken: getAddress(body.collateralToken),
+      sizeDeltaUsd: BigInt(body.sizeDeltaUsd),
+      initialCollateralDeltaAmount: 0n,
+      acceptablePrice: BigInt(body.acceptablePrice),
+      executionFee: executionFeeWei,
+      isLong: body.isLong,
+      orderType: 'MarketDecrease',
+      receiver: getAddress(agent.safeAddress),
+    });
+
+    const sim = await simulator.simulate({
+      chainId: body.chainId,
+      from: getAddress(agent.safeAddress),
+      to: txData.to,
+      data: txData.data,
+      value: txData.value,
+    });
+
+    if (!sim.success) {
+      return reply.code(422).send({ error: `Simulation failed: ${sim.error}`, simulationId: sim.simulationId });
+    }
+
+    const feeCalc = feeService.calculateFee({ grossAmountWei: executionFeeWei, tier: request.agentTier });
+
+    const tx = await db.transaction.create({
+      data: {
+        agentId: request.agentId,
+        idempotencyKey: body.idempotencyKey ?? null,
+        chainId: body.chainId,
+        status: policyResult.requiresApproval ? 'PENDING_APPROVAL' : 'QUEUED',
+        type: 'GMX_CLOSE',
+        fromToken: body.collateralToken,
+        simulation: sim as any,
+        metadata: {
+          market: marketAddress,
+          sizeDeltaUsd: body.sizeDeltaUsd,
+          isLong: body.isLong,
+          acceptablePrice: body.acceptablePrice,
+          executionFee: executionFeeWei.toString(),
+          queuePayload: {
+            to: txData.to,
+            data: txData.data,
+            value: txData.value.toString(),
+            feeAmountWei: feeCalc.feeAmountWei.toString(),
+            feeBps: feeCalc.feeBps,
+            routedViaExecutor: false,
+          },
+        },
+      },
+    });
+
+    if (!policyResult.requiresApproval) {
+      await transactionQueue.add('gmx-close', {
+        transactionId: tx.id,
+        chainId: body.chainId,
+        walletId: agent.walletId,
+        from: getAddress(agent.safeAddress),
+        to: txData.to,
+        data: txData.data,
+        value: txData.value.toString(),
+        agentId: request.agentId,
+        tier: request.agentTier,
+        feeAmountWei: feeCalc.feeAmountWei.toString(),
+        feeUsd: '0',
+        feeBps: feeCalc.feeBps,
+        routedViaExecutor: false,
+      }, { priority: 1 });
+    }
+
+    return reply.code(202).send({
+      transactionId: tx.id,
+      status: tx.status,
+      simulationId: sim.simulationId,
+      market: marketAddress,
+      fee: { bps: feeCalc.feeBps, amountWei: feeCalc.feeAmountWei.toString(), feeWallet: feeCalc.feeWallet },
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Batch Execution via AgentExecutor
+  // -----------------------------------------------------------------------
+
   fastify.post('/v1/transactions/batch', async (request, reply) => {
     const batchSchema = z.object({
       chainId: z.number().default(1),

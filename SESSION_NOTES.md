@@ -1,4 +1,4 @@
-# Session Notes — 2026-05-10
+# Session Notes — 2026-05-13
 
 > Single-point handoff doc. Update on every substantive session, prune stale
 > sections aggressively. If this file is older than a few days when you read
@@ -210,30 +210,73 @@ Completed locally:
 
 ---
 
+### Roadmap implementation (2026-05-13)
+
+All HANDOFF.md §3 pending technical items have been implemented:
+
+**1. Contract deployment runbook expansion**
+- `docs/operations/contract-deployment.md` rewritten: multi-chain deployment
+  checklist, fee configuration per chain, post-deployment verification (manual +
+  automated), address registry, Safe module installation, disaster recovery.
+- `scripts/verify-deployment.sh` created: cast-based automated verification for
+  all three contracts (PolicyModule, Executor, EscrowModule).
+
+**2. GMX/Perp adapter (Phase 3)**
+- `packages/backend/src/services/defi/gmx.service.ts` — GMX V2 Synthetics
+  service: market data, execution fee calculation, market resolution.
+- `buildGmxCreateOrder()` in builder.service.ts — ExchangeRouter multicall
+  encoding for MarketIncrease/Decrease + LimitIncrease/Decrease.
+- `POST /v1/transactions/gmx-open` and `POST /v1/transactions/gmx-close` routes.
+- 3 MCP tools: `list_gmx_markets`, `open_gmx_position`, `close_gmx_position`.
+- Schema: `GMX_OPEN`, `GMX_CLOSE` TxType enum values + migration 0011.
+- Config: GMX contract addresses for Arbitrum (42161).
+
+**3. Escrow v3 on-chain (Phase 3)**
+- `EscrowModule.sol` — on-chain custody for A2A job payments (lock/release/refund).
+- 22 Foundry tests pass (including 3 fuzz tests × 256 runs).
+- `Deploy.s.sol` updated to deploy EscrowModule alongside PolicyModule + Executor.
+- `escrow-onchain.service.ts` — backend wrapper for building lock/release/refund txs.
+- Integration: `escrow.service.ts` conditionally queues on-chain lock at job
+  creation when EscrowModule is deployed; `payment-finalizer.service.ts` queues
+  on-chain release (CONFIRMED) or refund (FAILED).
+- Schema: `ESCROW_LOCK`, `ESCROW_RELEASE`, `ESCROW_REFUND` TxType enum + migration 0012.
+- Config: `ESCROW_MODULE_ADDRESS_<chainId>` env vars for all chains.
+
+**4. Revenue Sharing (Phase 4)**
+- `Operator` model: name, walletAddress, revShareBps (default 20%), active.
+- `Agent.operatorId` — optional link to managing operator.
+- `OperatorRevenue` — per-fee-event accrual with operator/protocol split.
+- `OperatorSettlement` — settlement lifecycle (PENDING → PROCESSING → SETTLED/FAILED).
+- `OperatorService` — CRUD, revenue accrual, settlement creation/completion.
+- `FeeService.recordFeeEvent()` extended to auto-accrue operator share.
+- Admin endpoints: `POST/GET /admin/operators`, `GET /admin/operators/:id`,
+  `POST/DELETE /admin/agents/:id/operator`, `POST/GET /admin/settlements`,
+  `PATCH /admin/settlements/:id/complete|fail`.
+- Migration 0013: Operator, OperatorRevenue, OperatorSettlement tables.
+
+---
+
 ## Current P0s
 
-Distribution is in flight; everything actionable on this side has shipped, and
-the remaining steps wait on external maintainers. No infrastructure P0 remains.
+All previously pending technical items from HANDOFF.md §3 are implemented. No
+blocking P0 remains.
 
-1. **P0 — External distribution (in review)**: awesome-mcp-servers PR #5091 is
-   mergeable with badge + updated tool count, awaiting `punkpeye` review;
-   mcp.so update comment posted on Issue #1, awaiting `@idoubi`.
-2. **P1 — Demo screencast**: record the Claude Desktop flow now that the helper
-   and MCP P&L tools exist.
+1. **P1 — Demo screencast**: record the Claude Desktop flow.
+2. **P1 — Deploy contracts to testnet**: run the deployment runbook on Base Sepolia
+   with the new EscrowModule.
 3. **P2 — License detection follow-up (low)**: GitHub's `licensee` still
-   classifies `LICENSE` as `Other` despite the Apache-2.0 APPENDIX. Glama and
-   manual reading both recognise Apache-2.0, so no consumer is blocked.
-4. **P3 — Large roadmap**: GMX/perps, escrow v3, and revenue sharing should
-   wait for concrete user/integration signal.
+   classifies `LICENSE` as `Other`.
+4. **P2 — External distribution**: awesome-mcp-servers PR #5091 and mcp.so
+   listing still awaiting external maintainer review.
 
 ---
 
-## Next non-P0 technical work
+## Validation (2026-05-13)
 
-- Demo screencast using Claude Desktop + AgentFi MCP.
-
-Large roadmap work such as GMX/perps, escrow v3, and revenue sharing should still wait for a concrete user/integration signal.
+- `npm run typecheck --workspaces --if-present` — all 4 workspaces pass
+- `forge test --match-contract EscrowModuleTest -vv` — 22/22 tests pass (3 fuzz)
+- Foundry v1.7.1 installed via foundryup
 
 ---
 
-_Last touch: 2026-05-10 (mcp-server 0.4.0 publish + Glama listing live + PR #5091 badge)._
+_Last touch: 2026-05-13 (GMX adapter + Escrow v3 + Revenue Sharing implemented)._
