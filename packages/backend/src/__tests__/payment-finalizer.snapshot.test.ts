@@ -65,6 +65,8 @@ vi.mock('../services/policy/reputation.service.js', () => ({
 vi.mock('../services/policy/escrow.service.js', () => ({
   releaseJobEscrow: vi.fn().mockResolvedValue(undefined),
   markEscrowReleased: vi.fn().mockResolvedValue(undefined),
+  queueOnChainEscrowRelease: vi.fn().mockResolvedValue(null),
+  queueOnChainEscrowRefund: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../services/notification.service.js', () => ({
