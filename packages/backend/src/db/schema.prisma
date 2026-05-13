@@ -33,6 +33,10 @@ model Agent {
   // for this operator or subdomain registration failed.
   ensName         String?  @unique
 
+  // Revenue sharing — optional link to the operator that manages this agent
+  operatorId      String?
+  operator        Operator? @relation(fields: [operatorId], references: [id])
+
   transactions Transaction[]
   requestedJobs Job[]      @relation("RequestedJobs")
   providedJobs  Job[]      @relation("ProvidedJobs")
@@ -40,6 +44,64 @@ model Agent {
   billing      AgentBilling?
 
   @@index([apiKeyHash])
+  @@index([operatorId])
+}
+
+model Operator {
+  id               String    @id @default(cuid())
+  name             String
+  walletAddress    String    @unique
+  contactEmail     String?
+  revShareBps      Int       @default(2000)  // 20% of protocol fees
+  active           Boolean   @default(true)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  agents           Agent[]
+  revenueAccruals  OperatorRevenue[]
+  settlements      OperatorSettlement[]
+}
+
+model OperatorRevenue {
+  id               String    @id @default(cuid())
+  operatorId       String
+  operator         Operator  @relation(fields: [operatorId], references: [id])
+  feeEventId       String
+  grossFeeUsd      String
+  operatorShareUsd String
+  protocolShareUsd String
+  shareBps         Int
+  accrualDate      String    // YYYY-MM-DD
+  settled          Boolean   @default(false)
+  createdAt        DateTime  @default(now())
+
+  @@index([operatorId])
+  @@index([accrualDate])
+  @@index([settled])
+}
+
+model OperatorSettlement {
+  id               String    @id @default(cuid())
+  operatorId       String
+  operator         Operator  @relation(fields: [operatorId], references: [id])
+  amountUsd        String
+  txHash           String?
+  chainId          Int?
+  periodStart      String    // YYYY-MM-DD
+  periodEnd        String    // YYYY-MM-DD
+  status           SettlementStatus @default(PENDING)
+  createdAt        DateTime  @default(now())
+  settledAt        DateTime?
+
+  @@index([operatorId])
+  @@index([status])
+}
+
+enum SettlementStatus {
+  PENDING
+  PROCESSING
+  SETTLED
+  FAILED
 }
 
 // A2A Service Request / Job Queue
@@ -224,4 +286,9 @@ enum TxType {
   WITHDRAW
   APPROVE
   BATCH
+  GMX_OPEN
+  GMX_CLOSE
+  ESCROW_LOCK
+  ESCROW_RELEASE
+  ESCROW_REFUND
 }

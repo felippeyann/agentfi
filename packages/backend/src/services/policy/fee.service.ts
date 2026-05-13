@@ -16,6 +16,8 @@
 
 import type { PrismaClient } from '@prisma/client';
 import { parseEther, formatEther, type Address } from 'viem';
+import { OperatorService } from '../billing/operator.service.js';
+import { logger } from '../../api/middleware/logger.js';
 
 export const FEE_BPS = {
   FREE: 30,
@@ -44,11 +46,13 @@ export interface FeeCalculation {
 
 export class FeeService {
   private readonly operatorFeeWallet: Address;
+  private readonly operatorService: OperatorService;
 
   constructor(private db: PrismaClient) {
     const wallet = process.env['OPERATOR_FEE_WALLET'];
     if (!wallet) throw new Error('OPERATOR_FEE_WALLET env var is required');
     this.operatorFeeWallet = wallet as Address;
+    this.operatorService = new OperatorService(db);
   }
 
   /**
@@ -96,7 +100,7 @@ export class FeeService {
       },
     });
 
-    await this.db.feeEvent.create({
+    const feeEvent = await this.db.feeEvent.create({
       data: {
         billingId: billing.id,
         transactionId: params.transactionId,
@@ -105,6 +109,27 @@ export class FeeService {
         feeBps: params.feeBps,
       },
     });
+
+    // Revenue sharing: if the agent has an operator, accrue their share
+    const agent = await this.db.agent.findUnique({
+      where: { id: params.agentId },
+      select: { operatorId: true, operator: { select: { revShareBps: true, active: true } } },
+    });
+    if (agent?.operatorId && agent.operator?.active && parseFloat(params.feeUsd) > 0) {
+      this.operatorService
+        .accrueRevenue({
+          operatorId: agent.operatorId,
+          feeEventId: feeEvent.id,
+          grossFeeUsd: params.feeUsd,
+          revShareBps: agent.operator.revShareBps,
+        })
+        .catch((err) =>
+          logger.warn(
+            { agentId: params.agentId, feeEventId: feeEvent.id, err: (err as Error)?.message },
+            'Operator revenue accrual failed (non-fatal)',
+          ),
+        );
+    }
   }
 
   /**

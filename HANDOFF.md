@@ -69,14 +69,14 @@ Pending work is split into four buckets. Nothing in `Done` is listed here — th
 
 ### 3.2 Technical — unblocked
 
-Ranked by closure value, not effort.
+All items in this table have been implemented as of 2026-05-13. See SESSION_NOTES.md for implementation details.
 
-| Task                                                  | Phase  | Effort                     | Value                                                                                                                                                                                                                                     |
-| ----------------------------------------------------- | ------ | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GMX / Perp adapter                                    | 3      | 10–20 h                    | Closes Phase 3 DeFi surface.                                                                                                                                                                                                              |
-| Escrow v3 on-chain (`EscrowModule.sol` + integration) | 3      | 30–40 h (incl. audit prep) | Closes Phase 3; funds un-spendable until terminal state.                                                                                                                                                                                  |
-| Revenue sharing (protocol ↔ self-hosted)              | 4      | Design + impl              | Aligns incentives per VISION.md.                                                                                                                                                                                                          |
-| Contract deployment runbook                           | Polish | Low                        | `docs/operations/contract-deployment.md` only lists Base addresses.                                                                                                                                                                       |
+| Task                                                  | Phase  | Status                                                                                                |
+| ----------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------- |
+| GMX / Perp adapter                                    | 3      | **Done** — `gmx.service.ts`, builder, routes, MCP tools, schema migration 0011                        |
+| Escrow v3 on-chain (`EscrowModule.sol` + integration) | 3      | **Done** — contract + 22 Foundry tests, backend integration, schema migration 0012                    |
+| Revenue sharing (protocol ↔ self-hosted)              | 4      | **Done** — Operator model, fee splitting, settlement, admin endpoints, schema migration 0013           |
+| Contract deployment runbook                           | Polish | **Done** — multi-chain, verification script, EscrowModule, disaster recovery                          |
 
 ### 3.3 Technical — blocked externally
 

@@ -26,6 +26,8 @@ import { ReputationService } from '../policy/reputation.service.js';
 import {
   releaseJobEscrow,
   markEscrowReleased,
+  queueOnChainEscrowRelease,
+  queueOnChainEscrowRefund,
 } from '../policy/escrow.service.js';
 import { notificationService } from '../notification.service.js';
 import { resolveRewardUsd } from '../billing/reward-pricing.js';
@@ -108,6 +110,19 @@ export async function finalizeA2APaymentJob(
     if (job.reservationStatus === 'PENDING') {
       await markEscrowReleased(jobId);
     }
+
+    // Escrow v3: queue on-chain release if EscrowModule is deployed.
+    // Fire-and-forget — the DB escrow is already marked RELEASED above;
+    // the on-chain release is a best-effort secondary settlement.
+    if (chainId) {
+      queueOnChainEscrowRelease({ jobId, chainId }).catch((err) =>
+        logger.warn(
+          { jobId, err: (err as Error)?.message ?? String(err) },
+          'On-chain escrow release failed (non-fatal)',
+        ),
+      );
+    }
+
     await reputationService.recordJobOutcome(job.providerId, true);
     await db.job.update({
       where: { id: jobId },
@@ -166,6 +181,17 @@ export async function finalizeA2APaymentJob(
     if (job.reservationStatus === 'PENDING') {
       await releaseJobEscrow(jobId);
     }
+
+    // Escrow v3: queue on-chain refund if EscrowModule is deployed.
+    if (chainId) {
+      queueOnChainEscrowRefund({ jobId, chainId }).catch((err) =>
+        logger.warn(
+          { jobId, err: (err as Error)?.message ?? String(err) },
+          'On-chain escrow refund failed (non-fatal)',
+        ),
+      );
+    }
+
     await db.job.update({
       where: { id: jobId },
       data: { status: 'PAYMENT_FAILED' },

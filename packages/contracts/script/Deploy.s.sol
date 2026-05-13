@@ -4,6 +4,7 @@ pragma solidity 0.8.24;
 import {Script, console} from "forge-std/Script.sol";
 import {AgentPolicyModule} from "../src/AgentPolicyModule.sol";
 import {AgentExecutor} from "../src/AgentExecutor.sol";
+import {EscrowModule} from "../src/EscrowModule.sol";
 
 /**
  * @title Deploy
@@ -48,6 +49,10 @@ contract DeployScript is Script {
         );
         console.log("AgentExecutor:    ", address(executor));
 
+        // 3. Deploy escrow module — on-chain custody for A2A job payments
+        EscrowModule escrowModule = new EscrowModule(operator);
+        console.log("EscrowModule:     ", address(escrowModule));
+
         vm.stopBroadcast();
 
         // Output for .env
@@ -55,6 +60,7 @@ contract DeployScript is Script {
         console.log("\n--- Copy to .env ---");
         console.log(string.concat("POLICY_MODULE_ADDRESS_", chainId, "=", vm.toString(address(policyModule))));
         console.log(string.concat("EXECUTOR_ADDRESS_", chainId, "=", vm.toString(address(executor))));
+        console.log(string.concat("ESCROW_MODULE_ADDRESS_", chainId, "=", vm.toString(address(escrowModule))));
         console.log("--------------------");
     }
 }

@@ -9,6 +9,7 @@ import {
   reserveJobEscrow,
   releaseJobEscrow,
   markEscrowReleased,
+  queueOnChainEscrowLock,
 } from '../../services/policy/escrow.service.js';
 import { finalizeA2APaymentJob } from '../../services/job/payment-finalizer.service.js';
 const reputationService = new ReputationService();
@@ -89,6 +90,24 @@ export async function jobRoutes(fastify: FastifyInstance) {
           : {}),
       },
     });
+
+    // Escrow v3: queue on-chain lock if EscrowModule is deployed on the target chain.
+    // Fire-and-forget — the DB reservation is already committed above.
+    if (body.reward?.amount && reservedAt) {
+      queueOnChainEscrowLock({
+        jobId: job.id,
+        requesterId: request.agentId,
+        providerAddress: provider.safeAddress as `0x${string}`,
+        amount: body.reward.amount,
+        token: body.reward.token ?? 'ETH',
+        chainId: body.reward.chainId ?? 1,
+      }).catch((err) =>
+        logger.warn(
+          { jobId: job.id, err: (err as Error)?.message ?? String(err) },
+          'On-chain escrow lock failed (non-fatal, DB reservation still holds)',
+        ),
+      );
+    }
 
     logger.info(
       {
