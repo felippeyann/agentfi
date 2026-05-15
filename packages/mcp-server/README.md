@@ -1,10 +1,10 @@
 # @agent_fi/mcp-server
 
-MCP server that gives AI agents 28 tools for executing on-chain transactions and participating in the Agent-to-Agent economy across Ethereum, Base, Arbitrum, and Polygon.
+MCP server that gives AI agents 31 tools for executing on-chain transactions and participating in the Agent-to-Agent economy across Ethereum, Base, Arbitrum, and Polygon.
 
 Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) standard. Works with Claude, GPT, and any MCP-compatible client.
 
-## Tools (28 total)
+## Tools (31 total)
 
 ### Wallet & Balances
 

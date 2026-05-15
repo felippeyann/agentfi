@@ -34,7 +34,7 @@ All project documentation is organized in our **[Documentation Hub](docs/README.
 
 - **Turnkey MPC Wallets** — keys split across shards and never exposed.
 - **Safe Smart Wallets** — per-agent on-chain policy enforcement (limits, whitelists, kill switch).
-- **Model Context Protocol** — 28 tools in [`@agent_fi/mcp-server`](https://www.npmjs.com/package/@agent_fi/mcp-server): DeFi execution, A2A collaboration, trust, and P&L.
+- **Model Context Protocol** — 31 tools in [`@agent_fi/mcp-server`](https://www.npmjs.com/package/@agent_fi/mcp-server): DeFi execution, GMX perpetuals, A2A collaboration, trust, and P&L.
 - **DeFi coverage** — Uniswap V3 + Curve StableSwap (swaps); Aave V3, Compound V3, and any ERC-4626 vault (yield).
 - **Agent-to-Agent economy** — job queue, atomic payments, DB-level escrow (v2), reputation scoring from real metrics with time-decay.
 - **Agent P&L dashboard** — per-agent breakeven detection, including real gas costs (v2).

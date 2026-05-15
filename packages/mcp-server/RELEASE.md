@@ -3,9 +3,9 @@
 This document describes how to publish the standalone AgentFi MCP server to
 npm.
 
-Current source version: **0.4.0**
+Current source version: **0.5.0**
 Current published npm version: **0.4.0**
-Status: **0.4.0 published 2026-05-10. Tag `mcp-server-v0.4.0` and GitHub release live.**
+Status: **0.5.0 ready to publish. Adds 3 GMX tools (31 total). Tag and release pending.**
 
 ## Prerequisites
 
@@ -23,7 +23,7 @@ If passkey login fails, use npm account recovery in the browser first. Do not
 force a publish from an unauthenticated or unrelated account; the package scope
 must stay `@agent_fi`.
 
-## Publish 0.4.0
+## Publish 0.5.0
 
 From the repo root:
 
@@ -50,19 +50,19 @@ Replace `123456` with the current one-time code from the npm account.
 After npm publish succeeds:
 
 ```bash
-git tag mcp-server-v0.4.0
-git push origin mcp-server-v0.4.0
+git tag mcp-server-v0.5.0
+git push origin mcp-server-v0.5.0
 
-gh release create mcp-server-v0.4.0 \
-  --title "mcp-server v0.4.0" \
-  --notes "Adds get_my_agent_profile and get_my_pnl MCP tools. See CHANGELOG.md for details."
+gh release create mcp-server-v0.5.0 \
+  --title "mcp-server v0.5.0" \
+  --notes "Adds GMX V2 Synthetics tools: list_gmx_markets, open_gmx_position, close_gmx_position. 31 tools total. See CHANGELOG.md for details."
 ```
 
 ## Verify the Publish
 
 ```bash
 npm view @agent_fi/mcp-server version
-# Expected: 0.4.0
+# Expected: 0.5.0
 
 npx @agent_fi/mcp-server --help
 ```
@@ -80,9 +80,9 @@ Also verify the package metadata page:
 For pre-1.0 releases, treat breaking changes as a clean minor bump and keep the
 release focused on that one reason.
 
-## Current Tool Inventory (0.4.0)
+## Current Tool Inventory (0.5.0)
 
-28 tools across DeFi execution, A2A collaboration, trust, policy, and P&L.
+31 tools across DeFi execution, A2A collaboration, trust, policy, and P&L.
 
 **Wallet & balances (2):** `get_wallet_info`, `get_token_price`
 
@@ -95,6 +95,8 @@ release focused on that one reason.
 **Yield - Compound V3 (2):** `supply_compound`, `withdraw_compound`
 
 **Yield - ERC-4626 generic (2):** `deposit_erc4626`, `withdraw_erc4626`
+
+**Perpetuals - GMX V2 (3):** `list_gmx_markets`, `open_gmx_position`, `close_gmx_position`
 
 **Transaction status and policy (2):** `get_transaction_status`, `get_policy`
 
@@ -143,12 +145,11 @@ npm run build -w packages/mcp-server
 
 ## Directory Follow-Ups
 
-After `0.4.0` is published:
+After `0.5.0` is published:
 
-1. Update the mcp.so listing so the install config no longer points at the stale
-   `@agent_fi/mcp-server@0.2.0` package reference.
-2. Check https://github.com/punkpeye/awesome-mcp-servers/pull/5091 and update
-   the PR if maintainers request changes.
+1. Update the mcp.so listing to reference `@agent_fi/mcp-server@0.5.0` and
+   mention the 3 new GMX tools.
+2. Update awesome-mcp-servers PR #5091 tool count: 28 → 31.
 
 Suggested listing:
 
