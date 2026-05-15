@@ -1,4 +1,4 @@
-# Session Notes — 2026-05-13
+# Session Notes — 2026-05-15
 
 > Single-point handoff doc. Update on every substantive session, prune stale
 > sections aggressively. If this file is older than a few days when you read
@@ -9,23 +9,15 @@
 
 ## Where we are right now
 
-`main` and `develop` were verified aligned at baseline `790c53c` before this
-release-state refresh. Use `git rev-parse main develop` for the current exact
-SHAs after subsequent documentation-only merges.
+`main` baseline: `9ce8db6` (post PR #117 — mcp-server 0.5.0 bump).
 
-Open GitHub state after the dependency cleanup:
-
-| Surface                       | Status                                |
-| ----------------------------- | ------------------------------------- |
-| Open PRs                      | 0                                     |
-| Open issues                   | 0                                     |
-| Required CI                   | Green on latest merged PRs            |
-| Remaining Dependabot blockers | None                                  |
-
-The two previously blocked dependency PRs are closed:
-
-- [#58](https://github.com/felippeyann/agentfi/pull/58) — `@safe-global/protocol-kit` 4.1.7 -> 7.1.0 was merged after migrating `safe.service.ts` away from the removed `SafeFactory` named export.
-- [#64](https://github.com/felippeyann/agentfi/pull/64) — TypeScript 5.9.3 -> 6.0.3 was merged after isolating OpenAPI codegen to `openapi-typescript@7.13.0` + `typescript@5.9.3` through `npx`, avoiding `--legacy-peer-deps`.
+| Surface                       | Status                                                      |
+| ----------------------------- | ----------------------------------------------------------- |
+| Open PRs                      | 10 Dependabot (deps only, no feature work)                  |
+| Open issues                   | 0                                                           |
+| npm `@agent_fi/mcp-server`    | **0.5.0 live** (`dist-tags.latest=0.5.0`, 2026-05-15)      |
+| GitHub release                | `mcp-server-v0.5.0` published                               |
+| Worktrees                     | None (phase2-snapshots removed — branch was already merged) |
 
 ---
 
@@ -258,25 +250,25 @@ All HANDOFF.md §3 pending technical items have been implemented:
 
 ## Current P0s
 
-All previously pending technical items from HANDOFF.md §3 are implemented. No
-blocking P0 remains.
+No blocking P0 remains.
 
 1. **P1 — Demo screencast**: record the Claude Desktop flow.
 2. **P1 — Deploy contracts to testnet**: run the deployment runbook on Base Sepolia
    with the new EscrowModule.
 3. **P2 — License detection follow-up (low)**: GitHub's `licensee` still
    classifies `LICENSE` as `Other`.
-4. **P2 — External distribution**: awesome-mcp-servers PR #5091 and mcp.so
-   listing still awaiting external maintainer review.
+4. **P2 — External distribution**: update mcp.so listing to `@0.5.0` (31 tools);
+   update awesome-mcp-servers PR #5091 tool count 28 → 31.
 
 ---
 
-## Validation (2026-05-13)
+## Validation (2026-05-15)
 
+- `npm run build -w packages/mcp-server` — clean
 - `npm run typecheck --workspaces --if-present` — all 4 workspaces pass
-- `forge test --match-contract EscrowModuleTest -vv` — 22/22 tests pass (3 fuzz)
-- Foundry v1.7.1 installed via foundryup
+- `npm publish --dry-run` — 55 files, 60 kB, includes `dist/tools/gmx.js`
+- `npm view @agent_fi/mcp-server dist-tags` → `{ latest: '0.5.0' }` ✓
 
 ---
 
-_Last touch: 2026-05-13 (GMX adapter + Escrow v3 + Revenue Sharing implemented)._
+_Last touch: 2026-05-15 (mcp-server 0.5.0 published — GMX tools, 31 total)._
