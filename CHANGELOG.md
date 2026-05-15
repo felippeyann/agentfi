@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added (2026-05-13 — Phase 3/4 roadmap)
+## [0.5.0] — 2026-05-15
+
+### Added (Phase 3/4 roadmap — merged 2026-05-13)
 
 - **GMX V2 Synthetics adapter** — `gmx.service.ts` with market data, execution fee calculation, and market resolution for Arbitrum. `buildGmxCreateOrder()` in the transaction builder encodes ExchangeRouter multicall for MarketIncrease/Decrease and LimitIncrease/Decrease orders. Two new routes (`POST /v1/transactions/gmx-open`, `POST /v1/transactions/gmx-close`) and three MCP tools (`list_gmx_markets`, `open_gmx_position`, `close_gmx_position`). Schema: `GMX_OPEN`, `GMX_CLOSE` added to `TxType` enum (migration 0011). GMX contract addresses configured for Arbitrum (42161).
 - **EscrowModule.sol** — on-chain custody contract for A2A job payments. Supports ETH and ERC-20 lock/release/refund with operator-only settlement (mirrors AgentPolicyModule trust model). 22 Foundry tests pass including 3 fuzz tests (256 runs each). Deploy.s.sol updated to deploy EscrowModule alongside existing contracts.

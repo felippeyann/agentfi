@@ -36,7 +36,7 @@ const toolRegistry = new Map(ALL_TOOLS.map((t) => [t.name, t]));
 const server = new Server(
   {
     name: 'agentfi',
-    version: '0.4.0',
+    version: '0.5.0',
   },
   {
     capabilities: {
