@@ -1,9 +1,39 @@
 # AgentFi
 
-[![CI](https://github.com/felippeyann/agentfi/actions/workflows/ci.yml/badge.svg)](https://github.com/felippeyann/agentfi/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/@agent_fi/mcp-server.svg)](https://www.npmjs.com/package/@agent_fi/mcp-server)
-[![npm downloads](https://img.shields.io/npm/dm/@agent_fi/mcp-server.svg)](https://www.npmjs.com/package/@agent_fi/mcp-server)
+[![Status: Archived](https://img.shields.io/badge/status-archived-lightgrey.svg)](#-archived-2026-05-17)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![npm version](https://img.shields.io/npm/v/@agent_fi/mcp-server.svg)](https://www.npmjs.com/package/@agent_fi/mcp-server)
+
+> ## 🗄️ Archived — 2026-05-17
+>
+> This project is archived. The code is functional and the npm package
+> remains published, but the project is no longer maintained.
+>
+> **Honest postmortem.** AgentFi reached technical MVP early (agent
+> registration → on-chain transaction with operator fee collection
+> worked) and then accumulated breadth (4 chains, 31 MCP tools, A2A
+> jobs, escrow v3, revenue sharing) without ever finding a user. Over
+> ~50 days the surface area grew while real adoption stayed at zero.
+>
+> **Why archived.** The thesis (AI agents executing autonomous DeFi
+> operations) remains directionally correct, but the market is ~2-3
+> years early — confidence in LLM-driven financial autonomy is the
+> bottleneck, not tooling. When the market opens, well-capitalized
+> incumbents (Coinbase Agent Kit, Safe modules, Anthropic-native
+> primitives) will move in. No defensible moat for a solo OSS
+> protocol in that window.
+>
+> **What's still useful here.**
+> - Reference implementation of an MCP server with 31 DeFi tools.
+> - Working examples of Safe v7 protocol-kit integration, Uniswap
+>   Routing API v2 wrapper, Aave/Compound/GMX adapters.
+> - Apache-2.0 — fork freely.
+>
+> Live infrastructure (Fly.io backend, Upstash Redis) was decommissioned
+> on archive. The maintainer's smart contracts on Base Mainnet remain
+> deployed but unused.
+
+---
 
 **The economic layer for non-human intelligence.**
 
