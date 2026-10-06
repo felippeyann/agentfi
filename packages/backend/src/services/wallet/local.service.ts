@@ -28,9 +28,11 @@ import {
   type Address,
   type Hex,
   type TransactionSerializable,
+  type TypedDataDefinition,
 } from 'viem';
 import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
 import { logger } from '../../api/middleware/logger.js';
+import type { Eip712TypedData } from './signer.js';
 
 interface LocalWalletEntry {
   walletId: string;
@@ -133,6 +135,32 @@ export class LocalWalletService {
     const signature = await entry.account.signMessage({
       message: params.message,
     });
+    return {
+      signature,
+      address: getAddress(entry.account.address),
+    };
+  }
+
+  /**
+   * Signs an EIP-712 typed-data payload (domain + types + message). Used by
+   * the x402 client to authorize ERC-3009 / Permit2 token transfers without
+   * broadcasting a transaction. Returns `0x`-prefixed hex signature.
+   */
+  async signTypedData(params: {
+    walletId: string;
+    typedData: Eip712TypedData;
+  }): Promise<{ signature: `0x${string}`; address: Address }> {
+    const entry = wallets.get(params.walletId);
+    if (!entry) {
+      throw new Error(
+        `[local-wallet] wallet ${params.walletId} not found (in-memory store is cleared on restart)`,
+      );
+    }
+    // The structural x402 payload is a valid viem TypedDataDefinition at
+    // runtime; the cast only bridges the two libraries' generic typings.
+    const signature = await entry.account.signTypedData(
+      params.typedData as unknown as TypedDataDefinition,
+    );
     return {
       signature,
       address: getAddress(entry.account.address),
