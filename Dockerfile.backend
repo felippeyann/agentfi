@@ -15,6 +15,9 @@ COPY packages/mcp-server/package.json ./packages/mcp-server/package.json
 # Slightly bigger deps stage (admin/adapters/mcp-server deps included), but
 # the final runner image only copies /app/node_modules so size unchanged.
 RUN npm ci
+# Same hoisting caveat as Dockerfile.mcp: guarantee the per-workspace folder
+# exists so the COPY --from=deps below cannot fail on a fully hoisted tree.
+RUN mkdir -p packages/backend/node_modules
 
 FROM base AS builder
 WORKDIR /app

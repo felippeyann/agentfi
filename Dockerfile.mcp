@@ -5,6 +5,10 @@ FROM base AS deps
 COPY package.json package-lock.json* ./
 COPY packages/mcp-server/package.json ./packages/mcp-server/package.json
 RUN npm ci --workspace=packages/mcp-server --include-workspace-root
+# npm hoists everything it can to /app/node_modules; the per-workspace folder
+# only exists when a dependency version conflicts. Create it so the COPY in the
+# builder/runner stages never fails when npm happened to hoist everything.
+RUN mkdir -p packages/mcp-server/node_modules
 
 FROM base AS builder
 WORKDIR /app
