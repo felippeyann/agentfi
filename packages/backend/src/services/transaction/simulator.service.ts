@@ -16,6 +16,8 @@
 
 import {
   BaseError,
+  ContractFunctionRevertedError,
+  ExecutionRevertedError,
   HttpRequestError,
   InternalRpcError,
   LimitExceededRpcError,
@@ -28,6 +30,11 @@ import {
 import type { Address } from 'viem';
 import { env } from '../../config/env.js';
 import { createChainPublicClient } from '../../config/chains.js';
+import { isProductionLikeEnv } from '../../config/runtime-env.js';
+
+// Re-exported so existing importers keep working; the implementation moved
+// to config/runtime-env.ts so simulation-guard.ts can share it.
+export { isProductionLikeEnv };
 
 export type SimulationProvider = 'tenderly' | 'eth_call' | 'mock';
 
@@ -69,11 +76,29 @@ interface TenderlySimulationRequest {
   save_if_fails?: boolean;
 }
 
-/** Environments where a mock simulation must never be returned. */
-const PRODUCTION_LIKE_ENVS: ReadonlySet<string> = new Set(['production', 'staging']);
+/** JSON-RPC error code nodes use for "execution reverted" (EIP-1474 / geth). */
+const EXECUTION_REVERTED_RPC_CODE = 3;
 
-export function isProductionLikeEnv(nodeEnv: string): boolean {
-  return PRODUCTION_LIKE_ENVS.has(nodeEnv);
+/**
+ * Finds the execution revert inside a viem error chain, if there is one.
+ *
+ * This MUST be checked before `isRpcTransportFailure`: many RPC providers
+ * wrap a revert in a `-32603 Internal error` envelope, so viem produces
+ * `EstimateGasExecutionError → ExecutionRevertedError → InternalRpcError →
+ * RpcRequestError`. Walking that chain for transport errors first would find
+ * the `InternalRpcError` and misreport a plain revert as "service
+ * unavailable". A revert is a genuine negative simulation result, never an
+ * outage.
+ */
+function findExecutionRevert(err: unknown): BaseError | null {
+  if (!(err instanceof BaseError)) return null;
+  const revert = err.walk(
+    (e) =>
+      e instanceof ExecutionRevertedError ||
+      e instanceof ContractFunctionRevertedError ||
+      (e as { code?: unknown }).code === EXECUTION_REVERTED_RPC_CODE,
+  );
+  return revert instanceof BaseError ? revert : null;
 }
 
 /**
@@ -82,6 +107,8 @@ export function isProductionLikeEnv(nodeEnv: string): boolean {
  * "the RPC answered that the transaction would fail" (a genuine negative
  * simulation result). Anything we cannot classify is treated as a
  * transport failure, which is the conservative choice: unknown risk → block.
+ *
+ * Callers must run `findExecutionRevert` first (see its doc comment).
  */
 function isRpcTransportFailure(err: unknown): boolean {
   if (err instanceof BaseError) {
@@ -188,14 +215,29 @@ export class SimulatorService {
         value: params.value,
       });
     } catch (err) {
+      // 1. The node answered "this would revert" — a failed simulation, with
+      //    the revert reason, even when the RPC wrapped it in -32603.
+      const revert = findExecutionRevert(err);
+      if (revert) {
+        return {
+          success: false,
+          error: describeSimulationError(err),
+          simulationId,
+          gasUsed: '0',
+          gasPrice: '0',
+          provider: 'eth_call',
+        };
+      }
+      // 2. The node could not answer — BLOCK the transaction.
+      //    Never silently approve in production; unknown outcome means unknown risk.
       if (isRpcTransportFailure(err)) {
-        // RPC unreachable / provider error — BLOCK the transaction.
-        // Never silently approve in production; a failed simulation means unknown risk.
         throw new Error(
           `Simulation service unavailable (eth_call RPC failure on chain ${params.chainId}). ` +
           `Transaction blocked for safety. Details: ${describeSimulationError(err).slice(0, 200)}`,
         );
       }
+      // 3. Any other node error (insufficient funds, nonce, gas, fee…) — the
+      //    tx itself is invalid: a failed simulation.
       return {
         success: false,
         error: describeSimulationError(err),

@@ -291,7 +291,14 @@ async function checkSimulation() {
   );
 
   if (!hasKey) {
-    check('Tenderly simulation', false, 'TENDERLY_* env vars not set — simulations will be skipped');
+    // Same wording as packages/backend/src/config/env.ts. Not a failure: in
+    // production/staging the backend simulates via a real estimateGas dry-run
+    // when Tenderly is absent (never a mock — see simulator.service.ts).
+    warn(
+      'Tenderly is not configured (TENDERLY_ACCESS_KEY, TENDERLY_ACCOUNT, TENDERLY_PROJECT); ' +
+        'falling back to eth_call simulation (estimateGas dry-run) for every transaction.',
+    );
+    check('Transaction simulation', true, 'eth_call fallback (estimateGas dry-run) — no trace / state diff');
   } else {
     try {
       const res = await fetch(

@@ -1,10 +1,12 @@
 /**
  * Unit tests — transaction worker pre-submit guard.
  *
- * The BullMQ worker in `queues/transaction.queue.ts` calls
- * `preSubmitGuard(db, transactionId)` before it marks a transaction SUBMITTED
- * and before `submitter.submit(...)`. These tests exercise the guard against
- * a mocked Prisma client and a mocked submitter, without BullMQ or Redis:
+ * The transaction processor (`queues/transaction.processor.ts`) calls
+ * `preSubmitGuard(db, transactionId)` before `submitter.submit(...)`; the tx
+ * stays QUEUED while broadcasting and `{ status: 'SUBMITTED', txHash }` is
+ * written in one update afterwards (see `transaction.worker.test.ts` for the
+ * full processor). These tests exercise the guard against a mocked Prisma
+ * client and a mocked submitter, without BullMQ or Redis:
  *
  *  - QUEUED + active agent + active policy → proceed (submitter called)
  *  - agent inactive                        → FAILED, submitter not called
@@ -69,15 +71,16 @@ function makeSubmitter() {
 }
 
 /**
- * Mirrors the worker's contract around the guard: only a `proceed` decision
- * marks the tx SUBMITTED and reaches the submitter. Anything else returns
- * without touching the submitter.
+ * Mirrors the processor's contract around the guard: only a `proceed`
+ * decision reaches the submitter, and SUBMITTED is written together with the
+ * txHash once the broadcast resolved. Anything else returns without touching
+ * the submitter.
  */
 async function runWorkerStep(db: PrismaClient, submitter: ReturnType<typeof makeSubmitter>) {
   const decision = await preSubmitGuard(db, TX_ID);
   if (decision.action === 'proceed') {
-    await db.transaction.update({ where: { id: TX_ID }, data: { status: 'SUBMITTED' } });
-    await submitter.submit();
+    const { txHash } = await submitter.submit();
+    await db.transaction.update({ where: { id: TX_ID }, data: { status: 'SUBMITTED', txHash } });
   }
   return decision;
 }
@@ -99,7 +102,7 @@ describe('preSubmitGuard — proceeds', () => {
     expect(submitter.submit).toHaveBeenCalledTimes(1);
     expect(update).toHaveBeenCalledWith({
       where: { id: TX_ID },
-      data: { status: 'SUBMITTED' },
+      data: { status: 'SUBMITTED', txHash: TX_HASH },
     });
     expect(update).not.toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'FAILED' }) }),
@@ -211,14 +214,18 @@ describe('preSubmitGuard — blocks and marks FAILED', () => {
 // ── Idempotency guard ──────────────────────────────────────────────────────
 
 describe('preSubmitGuard — skips already-processed transactions', () => {
-  it('status SUBMITTED → skipped, no DB write, submitter not called', async () => {
-    const { db, update } = makeMockDb(snapshot({ status: 'SUBMITTED' }));
+  it('status SUBMITTED (always written with its txHash) → skipped, no DB write, submitter not called', async () => {
+    // The processor writes SUBMITTED and txHash in one update after the
+    // broadcast resolved, so a SUBMITTED row always carries a hash.
+    const { db, update } = makeMockDb(snapshot({ status: 'SUBMITTED', txHash: TX_HASH }));
     const submitter = makeSubmitter();
 
     const decision = await runWorkerStep(db, submitter);
 
     expect(decision.action).toBe('skip');
-    expect(decision).toMatchObject({ reason: expect.stringContaining('SUBMITTED') });
+    expect(decision).toMatchObject({
+      reason: expect.stringMatching(new RegExp(`SUBMITTED.*${TX_HASH}`)),
+    });
     expect(submitter.submit).not.toHaveBeenCalled();
     expect(update).not.toHaveBeenCalled();
   });

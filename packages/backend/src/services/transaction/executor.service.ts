@@ -26,9 +26,19 @@
 
 import { encodeFunctionData, zeroAddress, type Address, type Hex } from 'viem';
 import { AGENT_EXECUTOR_ABI } from '../../abi/AgentExecutor.abi.js';
+import { describeLegacyContract, resolveExecutorAddress } from '../../config/contracts.js';
 import type { TransactionData } from './builder.service.js';
 
 const FEE_BPS = 30n; // mirrors on-chain value — used for pre-estimation only
+
+/** Minimal logger surface (pino-compatible) so this module stays free of env.ts. */
+export interface ExecutorLogger {
+  warn(obj: Record<string, unknown>, msg: string): void;
+}
+
+const consoleLogger: ExecutorLogger = {
+  warn: (obj, msg) => console.warn(msg, obj),
+};
 
 /** Mirrors `AgentExecutor.Action` (packages/contracts/src/AgentExecutor.sol). */
 export interface ExecutorAction {
@@ -61,13 +71,29 @@ export interface WrappedTransaction extends TransactionData {
 }
 
 export class ExecutorService {
+  /** Chains whose legacy executor has already been reported — warn once per process. */
+  private readonly warnedLegacyChains = new Set<number>();
+
+  constructor(private readonly log: ExecutorLogger = consoleLogger) {}
+
   /**
-   * Returns the deployed AgentExecutor address for a chain, or null if not deployed.
+   * Returns the deployed AgentExecutor address for a chain, or null if not
+   * deployed. A configured address that is a known legacy deployment
+   * (pre-October-2026 Action struct — every call through it reverts) is
+   * treated as NOT deployed: transactions go direct, `routedViaExecutor`
+   * is false, and the misconfiguration is logged once per chain. Production
+   * and staging never get here with one (env.ts refuses to boot).
    */
   getExecutorAddress(chainId: number): Address | null {
-    const addr = process.env[`EXECUTOR_ADDRESS_${chainId}`];
-    if (!addr) return null;
-    return addr as Address;
+    const { address, legacy } = resolveExecutorAddress(chainId);
+    if (legacy && !this.warnedLegacyChains.has(chainId)) {
+      this.warnedLegacyChains.add(chainId);
+      this.log.warn(
+        { chainId, executor: legacy.address },
+        `${describeLegacyContract(legacy)} Routing transactions DIRECTLY (no executor, no on-chain fee) until then.`,
+      );
+    }
+    return address;
   }
 
   /**

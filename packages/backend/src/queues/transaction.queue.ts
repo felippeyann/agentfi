@@ -1,35 +1,26 @@
 /**
- * Transaction Queue — BullMQ workers for async tx processing.
+ * Transaction Queue — BullMQ queues + worker wiring for async tx processing.
+ *
+ * The processing logic lives in `transaction.processor.ts`
+ * (`processTransactionJob` / `handleFailedTransactionJob`) with injected
+ * dependencies so it is unit-testable without Redis; this module owns the
+ * queues, the worker lifecycle and the real dependency instances.
  */
 
 import { Queue, Worker, type Job, type WorkerOptions } from 'bullmq';
 import { db } from '../db/client.js';
 import { env } from '../config/env.js';
 import { SubmitterService } from '../services/transaction/submitter.service.js';
-import { preSubmitGuard } from '../services/transaction/pre-submit-guard.js';
 import { MonitorService } from '../services/transaction/monitor.service.js';
 import { FeeService } from '../services/policy/fee.service.js';
-import { weiToUsd } from '../services/transaction/price.service.js';
-import { finalizeA2APaymentJob } from '../services/job/payment-finalizer.service.js';
 import { logger } from '../api/middleware/logger.js';
-import type { Address, Hex } from 'viem';
+import {
+  handleFailedTransactionJob,
+  processTransactionJob,
+  type TransactionJobData,
+} from './transaction.processor.js';
 
-export interface TransactionJobData {
-  transactionId: string;
-  chainId: number;
-  walletId: string;
-  from: Address;
-  to: Address;
-  data: Hex;
-  value: string; // bigint as string
-  agentId: string;
-  tier: 'FREE' | 'PRO' | 'ENTERPRISE';
-  feeAmountWei: string; // bigint as string
-  feeUsd: string;
-  feeBps: number;
-  /** True when transaction was wrapped via AgentExecutor — fee collected on-chain. */
-  routedViaExecutor?: boolean;
-}
+export type { TransactionJobData } from './transaction.processor.js';
 
 const connection = {
   url: env.REDIS_URL,
@@ -58,22 +49,6 @@ export const deadLetterQueue = new Queue('transactions-dlq', {
   },
 });
 
-/**
- * Atomically adds incoming USD volume to today's DailyVolume row.
- * Uses INSERT ... ON CONFLICT ... DO UPDATE to avoid read-then-write
- * race conditions under concurrent worker execution.
- */
-async function addDailyVolumeAtomic(agentId: string, date: string, valueUsd: string): Promise<void> {
-  await db.$executeRaw`
-    INSERT INTO "DailyVolume" ("id", "agentId", "date", "volumeUsd", "updatedAt")
-    VALUES (gen_random_uuid()::text, ${agentId}, ${date}, ${valueUsd}, NOW())
-    ON CONFLICT ("agentId", "date")
-    DO UPDATE SET
-      "volumeUsd" = (("DailyVolume"."volumeUsd"::numeric) + (${valueUsd}::numeric))::text,
-      "updatedAt" = NOW()
-  `;
-}
-
 function isRedisQuotaExceededError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const message = err.message.toLowerCase();
@@ -89,127 +64,11 @@ export function startTransactionWorker(): Worker<TransactionJobData> {
   const workerStalledIntervalMs = env.TRANSACTION_WORKER_STALLED_INTERVAL_MS;
   const stopOnRedisQuota = env.TRANSACTION_WORKER_STOP_ON_REDIS_QUOTA === 'true';
 
+  const processorDeps = { db, submitter, monitor, feeService, logger };
+
   const worker = new Worker<TransactionJobData>(
     'transactions',
-    async (job: Job<TransactionJobData>) => {
-      const { data } = job;
-
-      logger.info({ transactionId: data.transactionId }, 'Processing transaction job');
-
-      // Re-validate against the DB before signing. The job payload is a
-      // snapshot from enqueue time: the admin kill switch, a policy pause or
-      // expiry, or a redelivery of an already-broadcast tx are invisible in
-      // it. Returning (not throwing) keeps BullMQ from retrying a paused tx.
-      const guard = await preSubmitGuard(db, data.transactionId);
-      if (guard.action === 'skip') {
-        logger.warn(
-          { transactionId: data.transactionId, reason: guard.reason },
-          'Transaction job skipped — not resubmitting',
-        );
-        return { txHash: null, outcome: 'skipped', reason: guard.reason };
-      }
-      if (guard.action === 'fail') {
-        logger.warn(
-          {
-            transactionId: data.transactionId,
-            agentId: data.agentId,
-            reason: guard.reason,
-            ...(guard.finalizerError ? { finalizerError: guard.finalizerError } : {}),
-          },
-          'Transaction blocked before submission — marked FAILED',
-        );
-        return { txHash: null, outcome: 'blocked', reason: guard.reason };
-      }
-
-      await db.transaction.update({
-        where: { id: data.transactionId },
-        data: { status: 'SUBMITTED' },
-      });
-
-      const { txHash } = await submitter.submit({
-        chainId: data.chainId,
-        walletId: data.walletId,
-        from: data.from,
-        to: data.to,
-        data: data.data,
-        value: BigInt(data.value),
-      });
-
-      await db.transaction.update({
-        where: { id: data.transactionId },
-        data: { txHash },
-      });
-
-      logger.info({ transactionId: data.transactionId, txHash }, 'Transaction submitted');
-
-      // Monitor confirmation async — resolves feeUsd via price oracle once confirmed
-      monitor.waitForConfirmation({
-        txHash,
-        chainId: data.chainId,
-        transactionId: data.transactionId,
-      }).then(async () => {
-        const tx = await db.transaction.findUnique({
-          where: { id: data.transactionId },
-          select: { status: true, amountIn: true, error: true, metadata: true },
-        });
-        if (tx?.status === 'CONFIRMED') {
-          await feeService.incrementTxUsage(data.agentId);
-
-          // Resolve USD value at time of confirmation
-          const feeUsd = BigInt(data.feeAmountWei) > 0n
-            ? await weiToUsd(BigInt(data.feeAmountWei), data.chainId)
-            : '0';
-
-          // FeeEvent means collected revenue. Only log when fee was collected
-          // atomically on-chain through AgentExecutor.
-          if (data.routedViaExecutor && BigInt(data.feeAmountWei) > 0n) {
-            await feeService.recordFeeEvent({
-              agentId: data.agentId,
-              transactionId: data.transactionId,
-              feeAmountWei: BigInt(data.feeAmountWei),
-              feeUsd,
-              feeBps: data.feeBps,
-            });
-          }
-
-          // Update daily volume — atomic upsert avoids race condition under concurrency: 5
-          const valueUsd = await weiToUsd(BigInt(data.value), data.chainId);
-          if (parseFloat(valueUsd) > 0) {
-            const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-            await addDailyVolumeAtomic(data.agentId, today, valueUsd);
-          }
-        }
-
-        // Issue #81: A2A payment Job lifecycle is driven by the on-chain
-        // outcome here, not by executeA2APayment's resolution. The Transaction
-        // worker is the sole source of truth for finalizing paid jobs.
-        const meta = (tx?.metadata ?? null) as
-          | { jobId?: string; a2aPayment?: boolean }
-          | null;
-        if (meta?.a2aPayment === true && typeof meta.jobId === 'string') {
-          if (tx?.status === 'CONFIRMED') {
-            await finalizeA2APaymentJob({
-              jobId: meta.jobId,
-              transactionId: data.transactionId,
-              outcome: 'CONFIRMED',
-            });
-          } else {
-            // REVERTED, FAILED (timeout), or anything not-CONFIRMED → refund.
-            await finalizeA2APaymentJob({
-              jobId: meta.jobId,
-              transactionId: data.transactionId,
-              outcome: 'FAILED',
-              reason:
-                tx?.error ?? `Transaction ${tx?.status ?? 'unknown'} on-chain`,
-            });
-          }
-        }
-      }).catch((err) => {
-        logger.error({ err, transactionId: data.transactionId }, 'Post-confirmation accounting failed');
-      });
-
-      return { txHash };
-    },
+    (job: Job<TransactionJobData>) => processTransactionJob(job, processorDeps),
     {
       connection,
       concurrency: workerConcurrency,
@@ -257,68 +116,9 @@ export function startTransactionWorker(): Worker<TransactionJobData> {
   });
 
   // On final failure (all retries exhausted), move to dead-letter queue and mark FAILED.
-  worker.on('failed', async (job: Job<TransactionJobData> | undefined, err: Error) => {
-    if (!job) return;
-    const isLastAttempt = (job.attemptsMade ?? 0) >= (job.opts.attempts ?? 1);
-    if (!isLastAttempt) return;
-
-    const { transactionId } = job.data;
-    logger.error(
-      { transactionId, err: err.message, attempts: job.attemptsMade },
-      'Transaction job permanently failed — moving to DLQ',
-    );
-
-    try {
-      // Persist to dead-letter queue for forensics / manual retry
-      await deadLetterQueue.add('dlq', {
-        ...job.data,
-        failedAt: new Date().toISOString(),
-        error: err.message.slice(0, 500),
-        attempts: job.attemptsMade,
-      });
-    } catch (dlqErr) {
-      logger.error({ transactionId, dlqErr }, 'Failed to enqueue to dead-letter queue');
-    }
-
-    try {
-      await db.transaction.update({
-        where: { id: transactionId },
-        data: {
-          status: 'FAILED',
-          error: err.message.slice(0, 500),
-        },
-      });
-    } catch (dbErr) {
-      logger.error({ transactionId, dbErr }, 'Failed to update transaction status to FAILED');
-    }
-
-    // Issue #81: if this tx was an A2A payment, finalize the Job too.
-    // Without this, broadcast-time failures (estimateGas, RPC reject, etc.)
-    // leave the Job stuck in PAYMENT_PENDING forever after BullMQ exhausts
-    // retries. monitor.waitForConfirmation never runs in this path.
-    try {
-      const tx = await db.transaction.findUnique({
-        where: { id: transactionId },
-        select: { metadata: true },
-      });
-      const meta = (tx?.metadata ?? null) as
-        | { jobId?: string; a2aPayment?: boolean }
-        | null;
-      if (meta?.a2aPayment === true && typeof meta.jobId === 'string') {
-        await finalizeA2APaymentJob({
-          jobId: meta.jobId,
-          transactionId,
-          outcome: 'FAILED',
-          reason: err.message.slice(0, 500),
-        });
-      }
-    } catch (finalizeErr) {
-      logger.error(
-        { transactionId, finalizeErr },
-        'Failed to finalize A2A payment job after permanent broadcast failure',
-      );
-    }
-  });
+  worker.on('failed', (job: Job<TransactionJobData> | undefined, err: Error) =>
+    handleFailedTransactionJob(job, err, { db, deadLetterQueue, logger }),
+  );
 
   return worker;
 }

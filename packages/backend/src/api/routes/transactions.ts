@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
-import { getAddress, parseUnits, maxUint256 } from 'viem';
+import { getAddress, parseUnits, maxUint256, zeroAddress } from 'viem';
 import { db } from '../../db/client.js';
 import { TransactionBuilder } from '../../services/transaction/builder.service.js';
 import { SimulatorService } from '../../services/transaction/simulator.service.js';
@@ -24,7 +24,7 @@ import { notificationService } from '../../services/notification.service.js';
 import type { Address } from 'viem';
 const builder = new TransactionBuilder();
 const simulator = new SimulatorService();
-const executor = new ExecutorService();
+const executor = new ExecutorService(logger);
 const policyService = new PolicyService(db);
 const feeService = new FeeService(db);
 
@@ -1454,10 +1454,16 @@ export async function transactionRoutes(fastify: FastifyInstance) {
    * AgentExecutor.executeBatch call — atomic: all succeed or all revert.
    *
    * Body: { chainId, actions: [{ to, value, token?, data }], idempotencyKey? }
-   *   - to:    target contract address
+   *   - to:    target contract address — checked against `allowedContracts`,
+   *            which is the BINDING policy control for raw calldata
    *   - value: ETH value in wei (as decimal string, e.g. "0" or "1000000000000000")
-   *   - token: ERC-20 the action moves (checked against the on-chain token
-   *            whitelist); defaults to the zero address for pure-ETH actions
+   *   - token: CALLER-DECLARED ERC-20 the action moves. The backend does not
+   *            decode `data` to discover which token a call really touches;
+   *            both the off-chain `allowedTokens` whitelist and the on-chain
+   *            policy module check the declared value. Zero address (default)
+   *            means pure ETH / no token. When the agent has a non-empty token
+   *            whitelist, every action with non-empty `data` MUST declare a
+   *            token — otherwise 400.
    *   - data:  hex-encoded calldata (e.g. "0x" for plain ETH transfers)
    */
   // -----------------------------------------------------------------------
@@ -1768,12 +1774,17 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       actions: z.array(z.object({
         to:    z.string(),
         value: z.string().default('0'),
-        token: z.string().default('0x0000000000000000000000000000000000000000'),
+        // Caller-declared ERC-20 (see route doc comment); zero address = none.
+        token: z.string().regex(/^0x[0-9a-fA-F]{40}$/).default(zeroAddress),
         data:  z.string().regex(/^0x[0-9a-fA-F]*$/).default('0x'),
       })).min(1).max(20),
     });
 
-    const body = batchSchema.parse(request.body);
+    const parsedBody = batchSchema.safeParse(request.body);
+    if (!parsedBody.success) {
+      return reply.code(400).send({ error: 'Validation failed', details: parsedBody.error.errors });
+    }
+    const body = parsedBody.data;
     const agent = await getAgent(request.agentId);
     if (!ensureChainAllowed(agent, body.chainId, reply)) return;
 
@@ -1800,13 +1811,29 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       });
     }
 
+    // The off-chain token whitelist can only be applied to what the caller
+    // declares (the backend does not decode raw calldata), so an agent that
+    // HAS a whitelist must declare a token on every action carrying calldata.
+    const policy = await policyService.getPolicy(request.agentId);
+    const hasTokenWhitelist = (policy?.allowedTokens.length ?? 0) > 0;
+
     // Validate each action individually via PolicyService before touching the chain
     for (let i = 0; i < body.actions.length; i++) {
       const action = body.actions[i]!;
       const valueWei = BigInt(action.value);
+      const declaredToken =
+        action.token.toLowerCase() === zeroAddress ? undefined : getAddress(action.token);
+      const hasCalldata = action.data.length > 2; // anything beyond "0x"
+      if (hasTokenWhitelist && hasCalldata && !declaredToken) {
+        return reply.code(400).send({
+          error: 'token is required for this action because the agent has a token whitelist',
+          actionIndex: i,
+        });
+      }
       const policyResult = await policyService.validateTransaction({
         agentId: request.agentId,
         targetContract: getAddress(action.to),
+        ...(declaredToken ? { tokenAddress: declaredToken } : {}),
         valueEth: weiToEthDecimalString(valueWei),
         ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
       });

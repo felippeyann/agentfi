@@ -1,6 +1,7 @@
 import type { PrismaClient, AgentPolicy } from '@prisma/client';
 import { getAddress, type Address } from 'viem';
 import { OnChainPolicyService } from './onchain-policy.service.js';
+import { parsePolicyDecimal } from './policy-numbers.js';
 
 export interface PolicyValidationResult {
   allowed: boolean;
@@ -42,10 +43,14 @@ export class PolicyService {
       };
     }
 
-    // Check max value per tx
+    // Check max value per tx. The limit is read through the same parser the
+    // authority classifier uses (`parsePolicyDecimal`), so a value the API
+    // edge would reject can never mean "0" here and "unlimited" there.
+    // `null` (unparsable stored value) is unlimited â€” identical to the
+    // classifier, which is why an agent can never write such a value.
     const value = parseFloat(params.valueEth);
-    const maxValue = parseFloat(policy.maxValuePerTxEth);
-    if (value > maxValue) {
+    const maxValue = parsePolicyDecimal(policy.maxValuePerTxEth);
+    if (maxValue !== null && value > maxValue) {
       return {
         allowed: false,
         reason: `Transaction value ${params.valueEth} ETH exceeds policy limit of ${policy.maxValuePerTxEth} ETH`,
@@ -54,8 +59,8 @@ export class PolicyService {
 
     // Check human-in-the-loop approval threshold
     let requiresApproval = false;
-    const approvalThreshold = parseFloat(policy.maxValueForAutoApprovalEth);
-    if (value > approvalThreshold) {
+    const approvalThreshold = parsePolicyDecimal(policy.maxValueForAutoApprovalEth);
+    if (approvalThreshold !== null && value > approvalThreshold) {
       requiresApproval = true;
     }
 
@@ -83,8 +88,8 @@ export class PolicyService {
       }
     }
 
-    // Check max daily volume in USD
-    const dailyLimitUsd = parseFloat(policy.maxDailyVolumeUsd);
+    // Check max daily volume in USD (0 or unparsable = no daily limit, same as the classifier)
+    const dailyLimitUsd = parsePolicyDecimal(policy.maxDailyVolumeUsd) ?? 0;
     if (dailyLimitUsd > 0) {
       const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
       const incomingVolumeUsd = parseFloat(params.valueUsd ?? '0');
@@ -104,7 +109,7 @@ export class PolicyService {
       const projectedVolumeUsd = parseFloat(reserved[0]?.volumeUsd ?? '0');
 
       if (projectedVolumeUsd > dailyLimitUsd) {
-        // Rollback the reservation — subtract back
+        // Rollback the reservation ï¿½ subtract back
         await this.db.$executeRaw`
           UPDATE "DailyVolume"
           SET "volumeUsd" = (("volumeUsd"::numeric) - (${incomingVolumeUsd}::numeric))::text,

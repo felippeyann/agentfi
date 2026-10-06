@@ -281,3 +281,81 @@ describe('PolicyService.validateTransaction', () => {
     expect(result.allowed).toBe(true);
   });
 });
+
+// ── Stored limit parsing (shared with the authority classifier) ────────────
+
+describe('PolicyService.validateTransaction — stored limit parsing', () => {
+  // Values the API edge rejects, but which could sit in a hand-edited row.
+  // Both the classifier and the enforcer must read them the same way
+  // (unlimited); the enforcer must never turn one into "0" (`parseFloat("0x10")`)
+  // or compare against NaN.
+  const UNPARSABLE = ['', '   ', '1e3', '0x10', '5abc', 'unlimited'];
+
+  it.each(UNPARSABLE)(
+    'maxValuePerTxEth %j is unlimited for enforcement — and loosening for the classifier',
+    async (raw) => {
+      const svc = new PolicyService(makeMockDb(basePolicy({ maxValuePerTxEth: raw })));
+      const result = await svc.validateTransaction({
+        agentId: 'agent-1',
+        targetContract: UNISWAP_ROUTER,
+        valueEth: '0.5',
+      });
+      expect(result.allowed).toBe(true);
+
+      // Same string, same parser: an agent could never have written it.
+      const { classifyPolicyChange } = await import('../services/policy/policy-authority.js');
+      expect(classifyPolicyChange(basePolicy(), { maxValuePerTxEth: raw }).tightens).toBe(false);
+    },
+  );
+
+  it('"0x10" no longer blocks everything (parseFloat read it as 0)', async () => {
+    const svc = new PolicyService(makeMockDb(basePolicy({ maxValuePerTxEth: '0x10' })));
+    const result = await svc.validateTransaction({
+      agentId: 'agent-1',
+      targetContract: UNISWAP_ROUTER,
+      valueEth: '0.001',
+    });
+    expect(result.allowed).toBe(true);
+  });
+
+  it('a well-formed limit is still enforced exactly', async () => {
+    const svc = new PolicyService(makeMockDb(basePolicy({ maxValuePerTxEth: '0.5' })));
+    const blocked = await svc.validateTransaction({
+      agentId: 'agent-1',
+      targetContract: UNISWAP_ROUTER,
+      valueEth: '0.6',
+    });
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.reason).toMatch(/exceeds policy limit of 0.5 ETH/);
+
+    const allowed = await svc.validateTransaction({
+      agentId: 'agent-1',
+      targetContract: UNISWAP_ROUTER,
+      valueEth: '0.5',
+    });
+    expect(allowed.allowed).toBe(true);
+  });
+
+  it.each(UNPARSABLE)('maxDailyVolumeUsd %j means no daily limit (no reservation attempted)', async (raw) => {
+    const db = makeMockDb(basePolicy({ maxDailyVolumeUsd: raw }));
+    const svc = new PolicyService(db);
+    const result = await svc.validateTransaction({
+      agentId: 'agent-1',
+      targetContract: UNISWAP_ROUTER,
+      valueEth: '0.1',
+      valueUsd: '1000000',
+    });
+    expect(result.allowed).toBe(true);
+    expect((db as unknown as { $queryRaw: ReturnType<typeof vi.fn> }).$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('an unparsable auto-approval threshold never requires approval (unchanged behaviour, shared parser)', async () => {
+    const svc = new PolicyService(makeMockDb(basePolicy({ maxValueForAutoApprovalEth: '' })));
+    const result = await svc.validateTransaction({
+      agentId: 'agent-1',
+      targetContract: UNISWAP_ROUTER,
+      valueEth: '0.9',
+    });
+    expect(result).toEqual({ allowed: true, requiresApproval: false });
+  });
+});

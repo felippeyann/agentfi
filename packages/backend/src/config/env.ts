@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import 'dotenv/config';
+import { describeLegacyContract, findLegacyContractConfig } from './contracts.js';
 
 const transactionWorkerEnabledDefault: 'true' | 'false' =
   process.env['TRANSACTION_WORKER_ENABLED'] === 'true' ||
@@ -141,6 +142,24 @@ if (parsed.data.NODE_ENV === 'production') {
       'WARN: Tenderly is not configured (TENDERLY_ACCESS_KEY, TENDERLY_ACCOUNT, TENDERLY_PROJECT); ' +
       'falling back to eth_call simulation (estimateGas dry-run) for every transaction.',
     );
+  }
+}
+
+// Refuse to boot a production-like deployment with a known legacy executor
+// (pre-October-2026 AgentExecutor.Action struct). Every transaction routed
+// through it reverts, so a warning is not enough where real funds move. In
+// development the API only warns (index.ts) and ExecutorService routes around
+// it (config/contracts.ts `resolveExecutorAddress`).
+if (parsed.data.NODE_ENV === 'production' || parsed.data.NODE_ENV === 'staging') {
+  const legacyExecutors = findLegacyContractConfig(process.env).filter(
+    (hit) => hit.contract === 'executor',
+  );
+  if (legacyExecutors.length > 0) {
+    console.error(
+      `FATAL: NODE_ENV=${parsed.data.NODE_ENV} cannot run with a legacy AgentExecutor configured. ` +
+        legacyExecutors.map(describeLegacyContract).join(' '),
+    );
+    process.exit(1);
   }
 }
 

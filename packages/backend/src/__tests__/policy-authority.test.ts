@@ -16,6 +16,13 @@ import {
   changedPolicyFields,
   toPolicyPatch,
 } from '../services/policy/policy-authority.js';
+import { parsePolicyDecimal, isPolicyDecimal } from '../services/policy/policy-numbers.js';
+
+/**
+ * Strings `Number()` and `parseFloat()` disagree on (or both mis-handle).
+ * None may ever be classified as a tightening — the S1 bypass sent `""`.
+ */
+const UNPARSABLE_LIMITS = ['', '   ', '\n', '1e3', ' 5', '0x10', '5abc', 'unlimited'];
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -65,9 +72,24 @@ describe('classifyPolicyChange', () => {
     });
 
     it('treats a non-numeric limit as unlimited (loosening)', () => {
-      // PolicyService compares `value > parseFloat(limit)`; NaN never blocks.
+      // PolicyService reads the limit through the same parser; null = no limit.
       const result = classifyPolicyChange(basePolicy(), { maxValuePerTxEth: 'unlimited' });
       expect(result.loosenedFields).toEqual(['maxValuePerTxEth']);
+    });
+
+    it.each(UNPARSABLE_LIMITS)(
+      'treats %j as unlimited (loosening) — never as a tightening to 0 (S1 bypass)',
+      (raw) => {
+        const result = classifyPolicyChange(basePolicy(), { maxValuePerTxEth: raw });
+        expect(result).toEqual({ tightens: false, loosenedFields: ['maxValuePerTxEth'] });
+      },
+    );
+
+    it('still loosens against a tighter current limit, and against no policy row it is neutral-free: always loosening', () => {
+      // Infinity > any finite limit, and Infinity > Infinity is false — so against
+      // no policy row a bad value is "unchanged", exactly like the no-row baseline.
+      expect(classifyPolicyChange(basePolicy({ maxValuePerTxEth: '0.01' }), { maxValuePerTxEth: '' }).tightens).toBe(false);
+      expect(classifyPolicyChange(null, { maxValuePerTxEth: '' }).tightens).toBe(true);
     });
   });
 
@@ -75,6 +97,11 @@ describe('classifyPolicyChange', () => {
     it('loosens when the limit increases', () => {
       const result = classifyPolicyChange(basePolicy(), { maxDailyVolumeUsd: '20000' });
       expect(result.loosenedFields).toEqual(['maxDailyVolumeUsd']);
+    });
+
+    it.each(UNPARSABLE_LIMITS)('treats %j as no daily limit (loosening)', (raw) => {
+      const result = classifyPolicyChange(basePolicy(), { maxDailyVolumeUsd: raw });
+      expect(result).toEqual({ tightens: false, loosenedFields: ['maxDailyVolumeUsd'] });
     });
 
     it('tightens when the limit decreases', () => {
@@ -339,5 +366,41 @@ describe('changedPolicyFields', () => {
 
   it('returns an empty list for an empty patch', () => {
     expect(changedPolicyFields({})).toEqual([]);
+  });
+});
+
+// ── Shared limit parser (used by classifier AND PolicyService) ─────────────
+
+describe('parsePolicyDecimal / isPolicyDecimal', () => {
+  it('accepts plain non-negative decimals', () => {
+    expect(parsePolicyDecimal('0')).toBe(0);
+    expect(parsePolicyDecimal('0.5')).toBe(0.5);
+    expect(parsePolicyDecimal('10000')).toBe(10000);
+    expect(parsePolicyDecimal('1.00')).toBe(1);
+    expect(isPolicyDecimal('123.456')).toBe(true);
+  });
+
+  it.each(UNPARSABLE_LIMITS)('rejects %j (null = unlimited for every reader)', (raw) => {
+    expect(isPolicyDecimal(raw)).toBe(false);
+    expect(parsePolicyDecimal(raw)).toBeNull();
+  });
+
+  it('rejects signs, trailing dots, and non-strings', () => {
+    expect(parsePolicyDecimal('-1')).toBeNull();
+    expect(parsePolicyDecimal('+1')).toBeNull();
+    expect(parsePolicyDecimal('1.')).toBeNull();
+    expect(parsePolicyDecimal('.5')).toBeNull();
+    expect(parsePolicyDecimal(null)).toBeNull();
+    expect(parsePolicyDecimal(undefined)).toBeNull();
+    expect(isPolicyDecimal(5)).toBe(false);
+  });
+
+  it('replaces the Number() / parseFloat() split that produced the S1 bypass', () => {
+    expect(Number('')).toBe(0);
+    expect(Number.isNaN(parseFloat(''))).toBe(true);
+    expect(Number('0x10')).toBe(16);
+    expect(parseFloat('0x10')).toBe(0);
+    expect(parsePolicyDecimal('')).toBeNull();
+    expect(parsePolicyDecimal('0x10')).toBeNull();
   });
 });

@@ -18,74 +18,14 @@ interface ChainContracts {
   escrowModule?: Address | undefined;
 }
 
-export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
-  // Ethereum Mainnet
-  1: {
-    policyModule: (process.env['POLICY_MODULE_ADDRESS_1'] as Address) || undefined,
-    executor: (process.env['EXECUTOR_ADDRESS_1'] as Address) || undefined,
-    escrowModule: (process.env['ESCROW_MODULE_ADDRESS_1'] as Address) || undefined,
-    uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
-    uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
-    aavePoolAddressProvider: '0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e',
-    compoundCometUsdc: '0xc3d688B66703497DAA19211EEdff47f25384cdc3',
-  },
-  // Base
-  8453: {
-    policyModule: (process.env['POLICY_MODULE_ADDRESS_8453'] as Address) || undefined,
-    executor: (process.env['EXECUTOR_ADDRESS_8453'] as Address) || undefined,
-    escrowModule: (process.env['ESCROW_MODULE_ADDRESS_8453'] as Address) || undefined,
-    uniswapV3Router: '0x2626664c2603336E57B271c5C0b26F421741e481',
-    uniswapV3Quoter: '0x3d4e44Eb1374240CE5F1B136CFc5b5e8b4e1b2f7',
-    aavePoolAddressProvider: '0xe20fCBdBfFC4Dd138cE8b2E6FBb6CB49777ad64B',
-    compoundCometUsdc: '0xb125E6687d4313864e53df431d5425969c15Eb2F',
-  },
-  // Arbitrum One
-  42161: {
-    policyModule: (process.env['POLICY_MODULE_ADDRESS_42161'] as Address) || undefined,
-    executor: (process.env['EXECUTOR_ADDRESS_42161'] as Address) || undefined,
-    escrowModule: (process.env['ESCROW_MODULE_ADDRESS_42161'] as Address) || undefined,
-    uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
-    uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
-    aavePoolAddressProvider: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb',
-    compoundCometUsdc: '0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf',
-    gmxExchangeRouter: '0x7C68C7866A64FA2160F78EEaE12217FFbf871fa8',
-    gmxRouter: '0x7452c558d45f8006Ce12C56010796DCe2eB24afb',
-    gmxOrderVault: '0x31eF83a530Fde1B38deDA89C0A6c72a85b35CDf6',
-  },
-  // Base Sepolia (testnet)
-  // No hard-coded defaults: the former testnet pair (policy 0x771444Ff…7203,
-  // executor 0x1fE2A4e7…Fc5d) was compiled from the pre-October-2026 Action
-  // struct and is listed in LEGACY_CONTRACT_ADDRESSES below. Set the
-  // *_ADDRESS_84532 env vars after redeploying — same contract as other chains.
-  84532: {
-    policyModule: (process.env['POLICY_MODULE_ADDRESS_84532'] as Address) || undefined,
-    executor: (process.env['EXECUTOR_ADDRESS_84532'] as Address) || undefined,
-    escrowModule: (process.env['ESCROW_MODULE_ADDRESS_84532'] as Address) || undefined,
-    uniswapV3Router: '0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4',
-    uniswapV3Quoter: '0xC5290058841028F1614F3A6F0F5816cAd0df5E27',
-    aavePoolAddressProvider: '0x0000000000000000000000000000000000000000', // not deployed on testnet
-  },
-  // Polygon
-  137: {
-    policyModule: (process.env['POLICY_MODULE_ADDRESS_137'] as Address) || undefined,
-    executor: (process.env['EXECUTOR_ADDRESS_137'] as Address) || undefined,
-    escrowModule: (process.env['ESCROW_MODULE_ADDRESS_137'] as Address) || undefined,
-    uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
-    uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
-    aavePoolAddressProvider: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb',
-    compoundCometUsdc: '0xF25212E676D1F7F89Cd72fFEe66158f541246445',
-  },
-};
-
-export function getContracts(chainId: number): ChainContracts {
-  const contracts = CONTRACT_ADDRESSES[chainId];
-  if (!contracts) throw new Error(`No contract addresses for chain ${chainId}`);
-  return contracts;
-}
+/** `process.env`-shaped lookup; injectable so the helpers below are unit-testable. */
+export type ContractEnvSource = Readonly<Record<string, string | undefined>>;
 
 // ---------------------------------------------------------------------------
 // ABI versioning guard (October 2026)
 // ---------------------------------------------------------------------------
+// Declared BEFORE CONTRACT_ADDRESSES: the executor resolution below consults
+// this list while the address table is being built.
 
 export type LegacyContractKind = 'policyModule' | 'executor';
 
@@ -124,18 +64,137 @@ export function isLegacyContractAddress(chainId: number, address: string): boole
   );
 }
 
+/** Name of the env var that configures `contract` on `chainId`. */
+export function contractEnvVar(chainId: number, contract: LegacyContractKind): string {
+  return contract === 'executor'
+    ? `EXECUTOR_ADDRESS_${chainId}`
+    : `POLICY_MODULE_ADDRESS_${chainId}`;
+}
+
+/** One-line operator-facing explanation of a legacy hit, shared by boot, preflight and the executor. */
+export function describeLegacyContract(legacy: LegacyContractAddress): string {
+  return (
+    `${contractEnvVar(legacy.chainId, legacy.contract)}=${legacy.address} is a pre-October-2026 ` +
+    'deployment compiled from the old AgentExecutor.Action struct (no token field). ' +
+    (legacy.contract === 'executor'
+      ? 'Transactions routed through this executor WILL revert. '
+      : 'It is paired with a legacy executor. ') +
+    'Redeploy from packages/contracts and update the env var — see ' +
+    'docs/operations/contract-deployment.md ("ABI versioning").'
+  );
+}
+
 /**
- * Scans the env-configured policyModule/executor addresses and returns the
- * ones that are known legacy deployments. Used for the startup WARN.
+ * Resolves the executor to route through on `chainId`.
+ *
+ *  - not configured            → `{ address: null, legacy: null }`
+ *  - configured, current ABI   → `{ address, legacy: null }`
+ *  - configured, known legacy  → `{ address: null, legacy }` — treated as
+ *    "not configured" so callers send transactions directly instead of
+ *    through an executor whose selectors do not exist (every call reverts).
+ *
+ * `env.ts` refuses to boot `production`/`staging` with a legacy executor at
+ * all; this helper is what keeps development usable with a warning.
  */
-export function findLegacyContractConfig(): LegacyContractAddress[] {
+export function resolveExecutorAddress(
+  chainId: number,
+  source: ContractEnvSource = process.env,
+): { address: Address | null; legacy: LegacyContractAddress | null } {
+  const raw = source[contractEnvVar(chainId, 'executor')];
+  if (!raw) return { address: null, legacy: null };
+  const address = raw as Address;
+  if (isLegacyContractAddress(chainId, address)) {
+    return { address: null, legacy: { chainId, contract: 'executor', address } };
+  }
+  return { address, legacy: null };
+}
+
+/** `getContracts(chainId).executor` — undefined when unset OR a known legacy deployment. */
+function executorFromEnv(chainId: number): Address | undefined {
+  return resolveExecutorAddress(chainId).address ?? undefined;
+}
+
+export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
+  // Ethereum Mainnet
+  1: {
+    policyModule: (process.env['POLICY_MODULE_ADDRESS_1'] as Address) || undefined,
+    executor: executorFromEnv(1),
+    escrowModule: (process.env['ESCROW_MODULE_ADDRESS_1'] as Address) || undefined,
+    uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
+    uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
+    aavePoolAddressProvider: '0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e',
+    compoundCometUsdc: '0xc3d688B66703497DAA19211EEdff47f25384cdc3',
+  },
+  // Base
+  8453: {
+    policyModule: (process.env['POLICY_MODULE_ADDRESS_8453'] as Address) || undefined,
+    executor: executorFromEnv(8453),
+    escrowModule: (process.env['ESCROW_MODULE_ADDRESS_8453'] as Address) || undefined,
+    uniswapV3Router: '0x2626664c2603336E57B271c5C0b26F421741e481',
+    uniswapV3Quoter: '0x3d4e44Eb1374240CE5F1B136CFc5b5e8b4e1b2f7',
+    aavePoolAddressProvider: '0xe20fCBdBfFC4Dd138cE8b2E6FBb6CB49777ad64B',
+    compoundCometUsdc: '0xb125E6687d4313864e53df431d5425969c15Eb2F',
+  },
+  // Arbitrum One
+  42161: {
+    policyModule: (process.env['POLICY_MODULE_ADDRESS_42161'] as Address) || undefined,
+    executor: executorFromEnv(42161),
+    escrowModule: (process.env['ESCROW_MODULE_ADDRESS_42161'] as Address) || undefined,
+    uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
+    uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
+    aavePoolAddressProvider: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb',
+    compoundCometUsdc: '0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf',
+    gmxExchangeRouter: '0x7C68C7866A64FA2160F78EEaE12217FFbf871fa8',
+    gmxRouter: '0x7452c558d45f8006Ce12C56010796DCe2eB24afb',
+    gmxOrderVault: '0x31eF83a530Fde1B38deDA89C0A6c72a85b35CDf6',
+  },
+  // Base Sepolia (testnet)
+  // No hard-coded defaults: the former testnet pair (policy 0x771444Ff…7203,
+  // executor 0x1fE2A4e7…Fc5d) was compiled from the pre-October-2026 Action
+  // struct and is listed in LEGACY_CONTRACT_ADDRESSES above. Set the
+  // *_ADDRESS_84532 env vars after redeploying — same contract as other chains.
+  84532: {
+    policyModule: (process.env['POLICY_MODULE_ADDRESS_84532'] as Address) || undefined,
+    executor: executorFromEnv(84532),
+    escrowModule: (process.env['ESCROW_MODULE_ADDRESS_84532'] as Address) || undefined,
+    uniswapV3Router: '0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4',
+    uniswapV3Quoter: '0xC5290058841028F1614F3A6F0F5816cAd0df5E27',
+    aavePoolAddressProvider: '0x0000000000000000000000000000000000000000', // not deployed on testnet
+  },
+  // Polygon
+  137: {
+    policyModule: (process.env['POLICY_MODULE_ADDRESS_137'] as Address) || undefined,
+    executor: executorFromEnv(137),
+    escrowModule: (process.env['ESCROW_MODULE_ADDRESS_137'] as Address) || undefined,
+    uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
+    uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
+    aavePoolAddressProvider: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb',
+    compoundCometUsdc: '0xF25212E676D1F7F89Cd72fFEe66158f541246445',
+  },
+};
+
+export function getContracts(chainId: number): ChainContracts {
+  const contracts = CONTRACT_ADDRESSES[chainId];
+  if (!contracts) throw new Error(`No contract addresses for chain ${chainId}`);
+  return contracts;
+}
+
+/**
+ * Scans the env-configured policyModule/executor addresses of every supported
+ * chain and returns the ones that are known legacy deployments. Reads the raw
+ * env (not `CONTRACT_ADDRESSES`, which already hides legacy executors) so the
+ * boot FATAL / WARN can name what the operator actually configured.
+ */
+export function findLegacyContractConfig(
+  source: ContractEnvSource = process.env,
+): LegacyContractAddress[] {
   const hits: LegacyContractAddress[] = [];
-  for (const [chainIdStr, contracts] of Object.entries(CONTRACT_ADDRESSES)) {
+  for (const chainIdStr of Object.keys(CONTRACT_ADDRESSES)) {
     const chainId = Number(chainIdStr);
     for (const contract of ['policyModule', 'executor'] as const) {
-      const address = contracts[contract];
+      const address = source[contractEnvVar(chainId, contract)];
       if (address && isLegacyContractAddress(chainId, address)) {
-        hits.push({ chainId, contract, address });
+        hits.push({ chainId, contract, address: address as Address });
       }
     }
   }

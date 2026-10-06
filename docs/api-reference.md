@@ -11,7 +11,7 @@ Base URL: `https://agentfi-backend.fly.dev` (staging demo, no SLA) or `http://lo
 | Method | Header | Used By |
 |--------|--------|---------|
 | Agent API Key | `x-api-key: agfi_live_<hex>` | Agent endpoints |
-| Operator Secret | `x-api-key: <API_SECRET>` | Agent registration |
+| Operator Secret | `x-api-key: <API_SECRET>` | Agent registration; also accepted on `PATCH /v1/agents/:id/policy` (the only credential that may loosen a policy) |
 | Admin Secret | `x-admin-secret: <ADMIN_SECRET>` | Admin endpoints |
 
 Rate limits are tier-based (FREE / PRO / ENTERPRISE) and keyed by `agentId` or IP.
@@ -99,7 +99,7 @@ Open self-registration for autonomous agents. No operator `API_SECRET` required.
 - **Auth**: none
 - **Rate limit**: `PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR` per IP (default 5/hour; operator-configurable; set to 0 to disable)
 - **Tier**: forced to `FREE` regardless of request body
-- **Policy**: defaults applied if omitted — `maxValuePerTxEth=1.0`, `maxDailyVolumeUsd=10000`, `cooldownSeconds=60`
+- **Policy**: forced to the server defaults — `maxValuePerTxEth=1.0`, `maxDailyVolumeUsd=10000`, empty whitelists, `cooldownSeconds=60`. Any `policy` in the request body is **ignored**: an unauthenticated caller cannot pick its own limits. Loosening afterwards requires the operator credential on `PATCH /v1/agents/:id/policy`.
 
 ```json
 // Request (no auth headers)
@@ -168,6 +168,13 @@ The operator sends the same request with `x-api-key: <API_SECRET>` and may set
 any policy on any agent (returns `404` for an unknown agent id). Every policy
 write is logged with the agent id, caller kind (`agent` / `operator`) and the
 changed fields.
+
+`maxValuePerTxEth` and `maxDailyVolumeUsd` must be plain decimal strings
+(`^\d+(\.\d+)?$` — e.g. `"0.5"`, `"10000"`). Empty strings, whitespace,
+exponents (`"1e3"`), hex (`"0x10"`) and words are rejected with `400`, for both
+callers, so a value can never mean "0" to the tighten-only check and "no limit"
+to enforcement. An optional `reason` (string, max 500 chars) is appended to the
+audit log line; it is not stored and does not gate the change.
 
 ---
 

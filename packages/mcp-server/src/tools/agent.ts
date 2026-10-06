@@ -99,12 +99,16 @@ export const agentTools = [
       '(raising max_value_per_tx_eth; adding an address that is not already whitelisted, or clearing a whitelist). ' +
       'Loosening requires the operator credential (API_SECRET) — if you need higher limits or new whitelisted ' +
       'tokens/contracts to complete a mission, ask the operator instead of retrying. ' +
-      'Provide a `reason` for audit — it is logged but does not gate the change.',
+      'Provide a `reason` for audit — the backend writes it to its policy audit log line (it is not stored ' +
+      'and does not gate the change).',
     inputSchema: z.object({
       max_value_per_tx_eth: z
         .string()
+        // Same strict pattern as the backend (`POLICY_DECIMAL_PATTERN`): plain
+        // decimal only — no "", "1e3", "0x10", " 5" or words; those are 400.
+        .regex(/^\d+(\.\d+)?$/, 'must be a plain decimal string such as "0.5"')
         .optional()
-        .describe('New max ETH per transaction. Must be <= the current limit.'),
+        .describe('New max ETH per transaction as a plain decimal string (e.g. "0.5"). Must be <= the current limit.'),
       allowed_tokens: z
         .array(z.string())
         .optional()
@@ -117,7 +121,10 @@ export const agentTools = [
         .describe(
           'Replacement contract whitelist. Must be a subset of the current whitelist; adding new contracts or clearing a non-empty whitelist requires the operator.',
         ),
-      reason: z.string().describe('Justification for the change — recorded in audit log, does not gate the write.'),
+      reason: z
+        .string()
+        .max(500)
+        .describe('Justification for the change — sent to the backend and written to its policy audit log; does not gate the write.'),
     }),
     handler: async (input: {
       max_value_per_tx_eth?: string;
@@ -132,6 +139,7 @@ export const agentTools = [
         maxValuePerTxEth: input.max_value_per_tx_eth,
         allowedTokens: input.allowed_tokens,
         allowedContracts: input.allowed_contracts,
+        reason: input.reason,
       });
 
       return {
