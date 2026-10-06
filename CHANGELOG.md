@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Admin kill switch now stops transactions that were already queued.** The BullMQ transaction worker used to mark a job SUBMITTED and sign/broadcast it without re-reading the agent, policy or transaction state, so a tx enqueued seconds before `POST /admin/agents/:id/pause` was still broadcast. New `services/transaction/pre-submit-guard.ts` re-reads the transaction (`status`, `txHash`), its agent (`active`) and policy (`active`, `expiresAt`) in one Prisma query before submission: a tx that is no longer `QUEUED` or already has a `txHash` is skipped (idempotency guard for retries/redelivery); a tx whose agent is inactive, whose policy is inactive, or whose policy has expired is marked `FAILED` (`error: "Agent paused before submission"` / `"Agent policy expired before submission"`) and the worker returns without throwing so BullMQ does not retry it. Blocked A2A payments are finalized as `PAYMENT_FAILED` through the existing finalizer, which refunds the escrow reservation. 14 unit tests in `transaction.worker.guard.test.ts`.
+
+### Changed
+
+- **`POST /admin/agents/:id/pause` is honest about its on-chain effect.** The handler claimed to "also pause the on-chain policy" but only flipped the DB flags. The comment is gone; the route now accepts an optional body `{ "syncOnChain": true }` and, when the agent's chain has a policy module, returns `onChainSync: { to, chainId, actions, notice }` carrying `AgentPolicyModule.emergencyPause(safe)` (or `resume(safe)` when toggling back) calldata for the operator to broadcast via `/admin/transactions/batch` — same contract as `PATCH /v1/agents/:id/policy`. The backend still never broadcasts. `OnChainPolicyService` gained `buildEmergencyPauseCalldata` / `buildResumeCalldata`; the ABI now includes both functions. OpenAPI spec + generated types updated.
+
 ## [0.5.0] — 2026-05-15
 
 ### Added (Phase 3/4 roadmap — merged 2026-05-13)

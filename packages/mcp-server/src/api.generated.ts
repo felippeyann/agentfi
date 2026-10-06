@@ -1869,7 +1869,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Emergency kill switch (toggle) */
+        /**
+         * Emergency kill switch (toggle)
+         * @description Flips `agent.active`. When pausing, also sets the DB policy inactive so policy checks fail closed and the transaction worker rejects (marks FAILED) any transaction that was already queued but not yet broadcast. The backend performs NO on-chain call. Pass `syncOnChain: true` to receive `AgentPolicyModule.emergencyPause(safe)` (or `resume(safe)`) calldata in `onChainSync` for the operator to broadcast via `POST /admin/transactions/batch`.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -1880,10 +1883,23 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["PauseAgentRequest"];
+                };
+            };
             responses: {
-                /** @description Pause toggled. */
+                /** @description Pause toggled. When `syncOnChain=true` and the agent's chain has a policy module, `onChainSync` carries the calldata. */
                 200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PauseAgentResponse"];
+                    };
+                };
+                /** @description Agent not found. */
+                404: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -2418,17 +2434,31 @@ export interface components {
              */
             syncOnChain: boolean;
         };
-        UpdatePolicyResponse: components["schemas"]["Policy"] & {
-            onChainSync?: {
+        /** @description Calldata for the operator to broadcast. The backend never broadcasts it. */
+        OnChainSync: {
+            to?: string;
+            chainId?: number;
+            actions?: {
                 to?: string;
-                chainId?: number;
-                actions?: {
-                    to?: string;
-                    value?: string;
-                    data?: string;
-                }[];
-                notice?: string;
-            } | null;
+                value?: string;
+                data?: string;
+            }[];
+            notice?: string;
+        } | null;
+        UpdatePolicyResponse: components["schemas"]["Policy"] & {
+            onChainSync?: components["schemas"]["OnChainSync"];
+        };
+        PauseAgentRequest: {
+            /**
+             * @description If true, response includes `emergencyPause(safe)` / `resume(safe)` calldata for on-chain sync.
+             * @default false
+             */
+            syncOnChain: boolean;
+        };
+        PauseAgentResponse: {
+            /** @description The agent's new `active` state after the toggle. */
+            active: boolean;
+            onChainSync: components["schemas"]["OnChainSync"];
         };
         TrustReport: {
             id?: string;

@@ -864,10 +864,28 @@ paths:
     post:
       tags: [Admin]
       summary: Emergency kill switch (toggle)
+      description: >-
+        Flips `agent.active`. When pausing, also sets the DB policy inactive so
+        policy checks fail closed and the transaction worker rejects (marks
+        FAILED) any transaction that was already queued but not yet broadcast.
+        The backend performs NO on-chain call. Pass `syncOnChain: true` to
+        receive `AgentPolicyModule.emergencyPause(safe)` (or `resume(safe)`)
+        calldata in `onChainSync` for the operator to broadcast via
+        `POST /admin/transactions/batch`.
       security:
         - adminSecret: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PauseAgentRequest' }
       responses:
-        '200': { description: Pause toggled. }
+        '200':
+          description: Pause toggled. When `syncOnChain=true` and the agent's chain has a policy module, `onChainSync` carries the calldata.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PauseAgentResponse' }
+        '404': { description: Agent not found. }
 
   /admin/agents/{id}/pnl:
     parameters:
@@ -1257,26 +1275,48 @@ components:
               default: false
               description: If true, response includes calldata for on-chain policy sync.
 
+    OnChainSync:
+      type: object
+      nullable: true
+      description: Calldata for the operator to broadcast. The backend never broadcasts it.
+      properties:
+        to: { type: string }
+        chainId: { type: integer }
+        actions:
+          type: array
+          items:
+            type: object
+            properties:
+              to: { type: string }
+              value: { type: string }
+              data: { type: string }
+        notice: { type: string }
+
     UpdatePolicyResponse:
       allOf:
         - $ref: '#/components/schemas/Policy'
         - type: object
           properties:
             onChainSync:
-              type: object
-              nullable: true
-              properties:
-                to: { type: string }
-                chainId: { type: integer }
-                actions:
-                  type: array
-                  items:
-                    type: object
-                    properties:
-                      to: { type: string }
-                      value: { type: string }
-                      data: { type: string }
-                notice: { type: string }
+              $ref: '#/components/schemas/OnChainSync'
+
+    PauseAgentRequest:
+      type: object
+      properties:
+        syncOnChain:
+          type: boolean
+          default: false
+          description: If true, response includes `emergencyPause(safe)` / `resume(safe)` calldata for on-chain sync.
+
+    PauseAgentResponse:
+      type: object
+      required: [active, onChainSync]
+      properties:
+        active:
+          type: boolean
+          description: The agent's new `active` state after the toggle.
+        onChainSync:
+          $ref: '#/components/schemas/OnChainSync'
 
     TrustReport:
       type: object
