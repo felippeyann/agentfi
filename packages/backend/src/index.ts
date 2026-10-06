@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import { env } from './config/env.js';
+import { findLegacyContractConfig } from './config/contracts.js';
 import { logger } from './api/middleware/logger.js';
 import { authMiddleware } from './api/middleware/auth.js';
 import { registerRateLimit } from './api/middleware/rateLimit.js';
@@ -162,6 +163,20 @@ async function start() {
 
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
+
+  // ABI versioning guard (October 2026): AgentExecutor.Action gained a `token`
+  // field. Contracts deployed from the old struct expose different selectors,
+  // so every transaction routed through them reverts. Warn loudly at boot —
+  // the operator must redeploy before enabling executor routing on that chain.
+  for (const legacy of findLegacyContractConfig()) {
+    logger.warn(
+      legacy,
+      `${legacy.contract} for chain ${legacy.chainId} (${legacy.address}) is a pre-October-2026 deployment ` +
+        'compiled from the old AgentExecutor.Action struct (no token field). Transactions routed through the ' +
+        'executor WILL revert. Redeploy from packages/contracts and update *_ADDRESS_<chainId> — see ' +
+        'docs/operations/contract-deployment.md ("ABI versioning").',
+    );
+  }
 
   await fastify.listen({ port: env.API_PORT, host: '0.0.0.0' });
   logger.info(`AgentFi API running on port ${env.API_PORT}`);

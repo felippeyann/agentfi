@@ -81,16 +81,18 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 | Chain            | ID    | Supported Protocols                                                                   |
 | ---------------- | ----- | ------------------------------------------------------------------------------------- |
 | Ethereum Mainnet | 1     | Uniswap V3, Aave V3, Compound V3, Curve StableSwap, ERC-4626                          |
-| Base             | 8453  | Uniswap V3, Aave V3, Compound V3, Curve StableSwap, ERC-4626 (**contracts deployed**) |
+| Base             | 8453  | Uniswap V3, Aave V3, Compound V3, Curve StableSwap, ERC-4626 (**contracts deployed — legacy, redeploy pending**) |
 | Arbitrum One     | 42161 | Uniswap V3, Aave V3, Compound V3, Curve StableSwap, ERC-4626                          |
 | Polygon          | 137   | Uniswap V3, Aave V3, Compound V3, Curve StableSwap, ERC-4626                          |
 
-**Base Mainnet** is the only chain with contracts deployed by the maintainers:
+**Base Mainnet** is the only chain with contracts deployed by the maintainers. The current pair is **legacy (old `Action` struct, do not route through executor)** pending redeploy:
 
-- `AgentPolicyModule` `0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d`
-- `AgentExecutor` `0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3`
+- `AgentPolicyModule` `0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d` — **legacy** (2026-03 deployment set; its ABI is unchanged but it is paired with the legacy executor)
+- `AgentExecutor` `0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3` — **legacy, ABI-incompatible** (compiled from `Action{target,value,data}`; the backend now encodes `Action{target,value,token,data}`, so `executeSingle`/`executeBatch` selectors differ and every routed tx reverts)
 
-Self-hosted operators can reuse these addresses (in which case the protocol fee on swaps routed through `AgentExecutor` goes to the maintainer's `OPERATOR_FEE_WALLET`) or deploy their own to capture the fee themselves.
+Redeploy order: Base Sepolia → Base mainnet (human-run; see `docs/operations/contract-deployment.md`, "ABI versioning"). Until then leave `POLICY_MODULE_ADDRESS_8453` / `EXECUTOR_ADDRESS_8453` unset — the backend falls back to direct sends (`routedViaExecutor=false`), logs a WARN at boot if a legacy address is configured, and `npm run preflight` fails on a legacy executor. The former Base Sepolia defaults (`0x771444Ff…7203` / `0x1fE2A4e7…Fc5d`) are legacy too and are no longer hard-coded; set `*_ADDRESS_84532` after redeploying.
+
+Once redeployed, self-hosted operators can reuse the maintainer addresses (in which case the protocol fee on swaps routed through `AgentExecutor` goes to the maintainer's `OPERATOR_FEE_WALLET`) or deploy their own to capture the fee themselves.
 
 ---
 

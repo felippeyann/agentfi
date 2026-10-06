@@ -9,6 +9,7 @@
  */
 
 import 'dotenv/config';
+import { isLegacyContractAddress } from '../packages/backend/src/config/contracts.js';
 
 interface CheckResult {
   name: string;
@@ -50,7 +51,25 @@ const CHAIN_CONFIGS: ChainContractConfig[] = [
     executorEnv: 'EXECUTOR_ADDRESS_137',
     rpcUrl: `https://polygon-mainnet.g.alchemy.com/v2/${process.env['ALCHEMY_API_KEY']}`,
   },
+  {
+    chainId: 84532,
+    policyEnv: 'POLICY_MODULE_ADDRESS_84532',
+    executorEnv: 'EXECUTOR_ADDRESS_84532',
+    rpcUrl: `https://base-sepolia.g.alchemy.com/v2/${process.env['ALCHEMY_API_KEY']}`,
+  },
 ];
+
+/**
+ * 4-byte selectors the CURRENT AgentExecutor exposes (Action = (target, value,
+ * token, data)). Bytecode compiled from the pre-October-2026 struct carries
+ * 0xa60e5271 / 0x34fcd5be instead. solc's dispatcher embeds each selector as a
+ * PUSH4 immediate, so a substring search on the runtime code is reliable.
+ * Keep in sync with packages/backend/src/__tests__/executor.service.test.ts.
+ */
+const EXECUTOR_SELECTORS = {
+  executeSingle: '596e8b81',
+  executeBatch: '672093df',
+} as const;
 
 function check(name: string, passed: boolean, detail?: string) {
   results.push({ name, passed, detail });
@@ -58,6 +77,22 @@ function check(name: string, passed: boolean, detail?: string) {
   const color = passed ? '\x1b[32m' : '\x1b[31m';
   const reset = '\x1b[0m';
   console.log(`  ${color}${icon}${reset} ${name}${detail ? ` — ${detail}` : ''}`);
+}
+
+function warn(message: string) {
+  console.log(`  \x1b[33m!\x1b[0m WARN ${message}`);
+}
+
+async function ethGetCode(rpcUrl: string, address: string): Promise<string> {
+  const res = await fetch(rpcUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getCode', params: [address, 'latest'] }),
+    signal: AbortSignal.timeout(8000),
+  });
+  const data = (await res.json()) as { result?: string; error?: { message?: string } };
+  if (data.error) throw new Error(data.error.message ?? 'eth_getCode failed');
+  return (data.result ?? '0x').toLowerCase();
 }
 
 function resolvePreflightChainIds(): number[] {
@@ -179,6 +214,12 @@ async function checkTurnkey() {
 
 async function checkContracts() {
   console.log('\n[7/9] Smart Contracts');
+  warn(
+    'AgentExecutor.Action gained a `token` field in October 2026. Deployments made before that ' +
+      '(e.g. Base 0x54415F0B…24b3, Base Sepolia 0x1fE2A4e7…Fc5d) use the old struct and MUST be ' +
+      'redeployed before routing through the executor — see docs/operations/contract-deployment.md ' +
+      '("ABI versioning").',
+  );
   const targetChainIds = resolvePreflightChainIds();
   const chainConfigById = new Map(CHAIN_CONFIGS.map((cfg) => [cfg.chainId, cfg]));
 
@@ -191,8 +232,48 @@ async function checkContracts() {
 
     for (const env of [cfg.policyEnv, cfg.executorEnv]) {
       const addr = process.env[env];
-      const isValid = addr?.startsWith('0x') && addr.length === 42;
-      check(env, !!isValid, addr ?? 'not set');
+      const isValid = !!addr && addr.startsWith('0x') && addr.length === 42;
+      check(env, isValid, addr ?? 'not set');
+
+      // Known legacy deployment. The executor is ABI-incompatible (old Action
+      // struct) — fail hard, routing would revert. The policy module's own ABI
+      // did not change, so only warn: it is still paired with a legacy executor.
+      if (isValid && isLegacyContractAddress(chainId, addr)) {
+        if (env === cfg.executorEnv) {
+          check(
+            `${env} is not a legacy deployment`,
+            false,
+            `${addr} was compiled from the pre-October-2026 Action struct — redeploy and update ${env}`,
+          );
+        } else {
+          warn(`${env}=${addr} belongs to the pre-October-2026 deployment set; pair it only with a redeployed executor`);
+        }
+      }
+    }
+
+    // On-chain probe: the executor bytecode must dispatch the token-aware selectors.
+    // Catches old deployments that are not in the known-legacy list.
+    const executorAddr = process.env[cfg.executorEnv];
+    if (executorAddr && executorAddr.startsWith('0x') && executorAddr.length === 42) {
+      try {
+        const code = await ethGetCode(cfg.rpcUrl, executorAddr);
+        if (code === '0x') {
+          check(`${cfg.executorEnv} has bytecode`, false, 'no code at address');
+        } else {
+          const missing = Object.entries(EXECUTOR_SELECTORS)
+            .filter(([, selector]) => !code.includes(selector))
+            .map(([name, selector]) => `${name}(0x${selector})`);
+          check(
+            `${cfg.executorEnv} exposes token-aware Action selectors`,
+            missing.length === 0,
+            missing.length === 0
+              ? 'executeSingle 0x596e8b81, executeBatch 0x672093df'
+              : `missing ${missing.join(', ')} — old Action struct, redeploy`,
+          );
+        }
+      } catch (err) {
+        check(`${cfg.executorEnv} exposes token-aware Action selectors`, false, String(err));
+      }
     }
   }
 

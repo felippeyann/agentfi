@@ -202,11 +202,15 @@ contracts if you want to capture those fees.
 
 ## 8. Contract Addresses
 
-Base Mainnet has maintainer-deployed contracts:
+Base Mainnet has maintainer-deployed contracts, but they are **legacy (old
+`AgentExecutor.Action` struct, no `token` field) — redeploy pending**. The current
+backend encodes the new struct, so routing through them reverts. Do **not** set
+these with this backend version (the API warns at boot, `npm run preflight` fails):
 
 ```env
-POLICY_MODULE_ADDRESS_8453=0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d
-EXECUTOR_ADDRESS_8453=0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3
+# LEGACY — kept for reference only, see contract-deployment.md → "ABI versioning"
+# POLICY_MODULE_ADDRESS_8453=0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d
+# EXECUTOR_ADDRESS_8453=0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3
 ```
 
 To deploy your own contracts:

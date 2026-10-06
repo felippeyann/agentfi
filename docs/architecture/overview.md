@@ -73,12 +73,12 @@ AgentFi is **self-hosted by design** (see VISION.md). There is no canonical prod
 
 ## Deployed Contracts (Base Mainnet — Chain 8453)
 
-| Contract | Address |
-|----------|---------|
-| AgentPolicyModule | `0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d` |
-| AgentExecutor | `0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3` |
+| Contract | Address | Status |
+|----------|---------|--------|
+| AgentPolicyModule | `0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d` | **legacy (old `Action` struct, do not route through executor)** — redeploy pending |
+| AgentExecutor | `0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3` | **legacy (old `Action` struct, do not route through executor)** — redeploy pending |
 
-Operators can reuse these (fee goes to the maintainer `OPERATOR_FEE_WALLET`) or deploy their own to capture the fee themselves. See [`docs/operations/contract-deployment.md`](../operations/contract-deployment.md).
+These were compiled before `AgentExecutor.Action` gained its `token` field (October 2026); the current backend encodes the new struct, so transactions routed through this executor revert. Leave `*_ADDRESS_8453` unset until the maintainers redeploy (Base Sepolia first, then mainnet) — see [`docs/operations/contract-deployment.md` → ABI versioning](../operations/contract-deployment.md#abi-versioning). Once redeployed, operators can reuse the maintainer addresses (fee goes to the maintainer `OPERATOR_FEE_WALLET`) or deploy their own to capture the fee themselves.
 
 ## Diagrams
 

@@ -58,6 +58,12 @@ const envSchema = z.object({
   EXECUTOR_ADDRESS_8453: z.string().optional(),
   EXECUTOR_ADDRESS_42161: z.string().optional(),
   EXECUTOR_ADDRESS_137: z.string().optional(),
+  // Base Sepolia (testnet). No hard-coded defaults any more: the former
+  // testnet deployment used the pre-October-2026 AgentExecutor.Action struct
+  // (see docs/operations/contract-deployment.md, "ABI versioning").
+  POLICY_MODULE_ADDRESS_84532: z.string().optional(),
+  EXECUTOR_ADDRESS_84532: z.string().optional(),
+  ESCROW_MODULE_ADDRESS_84532: z.string().optional(),
 
   // Revenue — fee collection wallet (0x Ethereum address)
   OPERATOR_FEE_WALLET: z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'Must be a valid 0x Ethereum address'),

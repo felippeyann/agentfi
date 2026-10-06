@@ -53,9 +53,13 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
     gmxOrderVault: '0x31eF83a530Fde1B38deDA89C0A6c72a85b35CDf6',
   },
   // Base Sepolia (testnet)
+  // No hard-coded defaults: the former testnet pair (policy 0x771444Ff…7203,
+  // executor 0x1fE2A4e7…Fc5d) was compiled from the pre-October-2026 Action
+  // struct and is listed in LEGACY_CONTRACT_ADDRESSES below. Set the
+  // *_ADDRESS_84532 env vars after redeploying — same contract as other chains.
   84532: {
-    policyModule: (process.env['POLICY_MODULE_ADDRESS_84532'] as Address) || '0x771444Ff5483ef3A62b492a816Cb439e4f017203',
-    executor: (process.env['EXECUTOR_ADDRESS_84532'] as Address) || '0x1fE2A4e79899A9cB03bED301f978d2Ce2F91Fc5d',
+    policyModule: (process.env['POLICY_MODULE_ADDRESS_84532'] as Address) || undefined,
+    executor: (process.env['EXECUTOR_ADDRESS_84532'] as Address) || undefined,
     escrowModule: (process.env['ESCROW_MODULE_ADDRESS_84532'] as Address) || undefined,
     uniswapV3Router: '0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4',
     uniswapV3Quoter: '0xC5290058841028F1614F3A6F0F5816cAd0df5E27',
@@ -77,4 +81,63 @@ export function getContracts(chainId: number): ChainContracts {
   const contracts = CONTRACT_ADDRESSES[chainId];
   if (!contracts) throw new Error(`No contract addresses for chain ${chainId}`);
   return contracts;
+}
+
+// ---------------------------------------------------------------------------
+// ABI versioning guard (October 2026)
+// ---------------------------------------------------------------------------
+
+export type LegacyContractKind = 'policyModule' | 'executor';
+
+export interface LegacyContractAddress {
+  chainId: number;
+  contract: LegacyContractKind;
+  address: Address;
+}
+
+/**
+ * Deployments compiled from the pre-October-2026 `AgentExecutor.Action` struct
+ * `(target, value, data)`. The current source — and the backend encoder in
+ * `abi/AgentExecutor.abi.ts` — use `(target, value, token, data)`, so
+ * `executeSingle`/`executeBatch` on these addresses have different selectors
+ * and every transaction routed through them reverts. The policy module from
+ * the same deployment is listed too: its own ABI did not change
+ * (`validateTransaction` already took a token), but it is the pair the
+ * legacy executor is bound to and Deploy.s.sol always ships a fresh pair.
+ * Redeploy from `packages/contracts/src` and update the `*_ADDRESS_<chainId>`
+ * env vars. See docs/operations/contract-deployment.md ("ABI versioning").
+ */
+export const LEGACY_CONTRACT_ADDRESSES: readonly LegacyContractAddress[] = [
+  // Base Mainnet — maintainer deployment, 2026-03
+  { chainId: 8453,  contract: 'policyModule', address: '0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d' },
+  { chainId: 8453,  contract: 'executor',     address: '0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3' },
+  // Base Sepolia — former hard-coded testnet defaults
+  { chainId: 84532, contract: 'policyModule', address: '0x771444Ff5483ef3A62b492a816Cb439e4f017203' },
+  { chainId: 84532, contract: 'executor',     address: '0x1fE2A4e79899A9cB03bED301f978d2Ce2F91Fc5d' },
+];
+
+/** True when `address` is a known pre-October-2026 (old Action struct) deployment on `chainId`. */
+export function isLegacyContractAddress(chainId: number, address: string): boolean {
+  const needle = address.toLowerCase();
+  return LEGACY_CONTRACT_ADDRESSES.some(
+    (legacy) => legacy.chainId === chainId && legacy.address.toLowerCase() === needle,
+  );
+}
+
+/**
+ * Scans the env-configured policyModule/executor addresses and returns the
+ * ones that are known legacy deployments. Used for the startup WARN.
+ */
+export function findLegacyContractConfig(): LegacyContractAddress[] {
+  const hits: LegacyContractAddress[] = [];
+  for (const [chainIdStr, contracts] of Object.entries(CONTRACT_ADDRESSES)) {
+    const chainId = Number(chainIdStr);
+    for (const contract of ['policyModule', 'executor'] as const) {
+      const address = contracts[contract];
+      if (address && isLegacyContractAddress(chainId, address)) {
+        hits.push({ chainId, contract, address });
+      }
+    }
+  }
+  return hits;
 }

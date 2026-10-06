@@ -10,6 +10,7 @@ import { timingSafeEqual } from 'crypto';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { getAddress, type Address } from 'viem';
+import { AGENT_EXECUTOR_ABI } from '../../abi/AgentExecutor.abi.js';
 import { logger } from '../middleware/logger.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
 import { getContracts } from '../../config/contracts.js';
@@ -131,23 +132,9 @@ export async function adminRoutes(fastify: FastifyInstance) {
     }
 
     const { encodeFunctionData } = await import('viem');
-    const EXECUTOR_ABI = [{
-      name: 'executeBatch',
-      type: 'function',
-      stateMutability: 'payable',
-      inputs: [{
-        name: 'actions',
-        type: 'tuple[]',
-        components: [
-          { name: 'target', type: 'address' },
-          { name: 'value',  type: 'uint256' },
-          { name: 'token',  type: 'address' },
-          { name: 'data',   type: 'bytes'   },
-        ],
-      }],
-      outputs: [],
-    }] as const;
 
+    // Matches AgentExecutor.Action (target, value, token, data) — ABI generated
+    // from the Solidity source (`npm run abi:executor`).
     const onChainActions = body.actions.map(a => ({
       target: getAddress(a.to) as `0x${string}`,
       value: BigInt(a.value),
@@ -156,7 +143,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
     }));
 
     const batchCalldata = encodeFunctionData({
-      abi: EXECUTOR_ABI,
+      abi: AGENT_EXECUTOR_ABI,
       functionName: 'executeBatch',
       args: [onChainActions],
     });

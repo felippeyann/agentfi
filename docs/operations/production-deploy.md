@@ -56,12 +56,19 @@ Every variable below must be configured on the **backend service** of your host.
 
 ### Contract addresses (per chain you support)
 
-Populate after Step 2. The project maintainers have already deployed these on Base Mainnet — you can reuse them or redeploy your own.
+Populate after Step 2.
+
+> **Legacy warning (October 2026):** the maintainer-deployed Base Mainnet pair below was
+> compiled from the old `AgentExecutor.Action` struct (no `token` field). The current
+> backend encodes the new struct, so routing through that executor **reverts**. Do not set
+> these until the maintainers redeploy — see
+> [contract-deployment.md → ABI versioning](contract-deployment.md#abi-versioning).
+> The backend logs a WARN at boot and `npm run preflight` fails if they are configured.
 
 | Variable | Chain | Maintainer-deployed (Base) |
 |---|---|---|
-| `POLICY_MODULE_ADDRESS_8453` | Base | `0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d` |
-| `EXECUTOR_ADDRESS_8453` | Base | `0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3` |
+| `POLICY_MODULE_ADDRESS_8453` | Base | `0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d` — **legacy, redeploy pending** |
+| `EXECUTOR_ADDRESS_8453` | Base | `0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3` — **legacy (old Action struct), redeploy pending** |
 | `POLICY_MODULE_ADDRESS_1` | Ethereum | — |
 | `EXECUTOR_ADDRESS_1` | Ethereum | — |
 | `POLICY_MODULE_ADDRESS_42161` | Arbitrum | — |
