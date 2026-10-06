@@ -90,4 +90,33 @@ session did and what the next one should pick up.
    #115 Turnkey 6 is a deliberate task), interviews (WS7), `.env`
    credentials, Base Sepolia deployer key, open questions in plan §5.
 
-_Last touch: 2026-10-06 evening (reactivation session; C2 and P1 agents still running when this was written)._
+## Adversarial review of the merged work (2026-10-06, late) — IN PROGRESS
+
+Three independent reviewers (backend, Solidity, x402) went over everything
+merged today. Full CI reproduction on `main` was green first (typecheck 4/4,
+backend 227 unit, E2E 3 pass / 4 skipped by design, Foundry 224, admin 8,
+spec:check/lint, MCP build, dev stack from clean volumes). Findings and their
+fix PRs (opened by agents; **review each diff before merging**):
+
+| Review | P1 | Fix branch / PR |
+|---|---|---|
+| Backend (A1/A2/A3/S1) | (1) empty/whitespace `maxValuePerTxEth` bypasses tighten-only and disables the per-tx limit (`Number("")` = 0 vs `parseFloat("")` = NaN); (2) A3 regression: tx marked SUBMITTED before `submit()`, so a broadcast failure leaves it stuck forever and the DLQ path is unreachable. Plus P2 batch-route token whitelist, P3s (RPC revert classification order, staging guard, legacy executor warn-only, preflight wording, CHANGELOG/OpenAPI gaps, public registration accepts arbitrary policy) | `fix/review-r1-backend` (F1–F9) |
+| Solidity (C2) | reputation feedback forgeable for free: self-evaluated dust job + `setProviderAgentId(victim)` → hook writes feedback as trusted client. Fix = pin `trustedEvaluator`, verify identity ownership via ERC-8004 Identity Registry, minimum budget. P2: `setProvider` must revert when already set (spec); push-paid immutable `feeWallet` can brick every `complete` → pull-based fees + rotatable wallet. P3s: blacklist docs/tests, fee overflow, ERC-165 strictness, expiry race docs, revoke path, deploy script checks | `fix/review-r2-contracts` (F1–F10) |
+| x402 (P1) | blank `X402_FACILITATOR_URL=` in `.env.example` makes the backend exit at boot (`z.string().url().optional()` rejects `""`). P2: unbounded EIP-3009 validity window + nonce never surfaced; `allowedNetworks` defaults to `eip155:*`; idempotency overstated; test gaps (gates 2/3 masked, v-byte). P3s: receipt wording, URL hygiene, Turnkey v, timeout | `fix/review-r3-x402` → [#137](https://github.com/felippeyann/agentfi/pull/137) (F1–F9) |
+
+**Escrowed funds were found safe in all reviews**; the P1s are about policy
+bypass, stuck transactions, forgeable reputation and first-run boot.
+
+### Next session (do this first)
+1. `gh pr list` — the three `fix/review-*` PRs may be complete or `wip:`
+   drafts (the session hit its usage limit while agents were working). Read
+   each diff against the finding list above; finish what is marked wip;
+   rebase R1/R3 onto each other where `config/env.ts`/`CHANGELOG.md` overlap.
+2. Re-run the full CI reproduction locally after merging (commands in this
+   file's "What this session did" and in `docs/project/execution-plan-2026-10.md`
+   Appendix); `docker compose -f docker-compose.dev.yml up -d postgres redis`
+   is still running from this session — reuse or `down`.
+3. Update the plan rows (A1/A2/A3/S1/C2/P1 get a "hardened by review" note;
+   R3b is closed by R2), then continue with C3, C4, P2.
+
+_Last touch: 2026-10-06 ~16:45 (session cut by usage limit; review-fix agents were still running)._
