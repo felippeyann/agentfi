@@ -17,7 +17,7 @@ session did and what the next one should pick up.
 
 | Surface | Status |
 |---|---|
-| `main` | `fcc24bd` after #128 (docs), #129 (A2), #130 (A3), #131 (S1), #132 (A1) + Dependabot #108/#112/#114/#121/#122/#126 |
+| `main` | `fbd0e93` after #128 (docs), #129 (A2), #130 (A3), #131 (S1), #132 (A1), #133 (plan status), #134 (P1), #135 (C2) + Dependabot #108/#112/#114/#121/#122/#126 |
 | GitHub repo | un-archived 2026-10-06 (needs the `felippeyann` gh account for admin actions) |
 | npm `@agent_fi/mcp-server` | 0.5.0 (unchanged); 0.6.0 planned in WS6 |
 | Live infra | none (decommissioned in May; none planned during validation) |
@@ -49,10 +49,19 @@ session did and what the next one should pick up.
    operator credential may loosen; 54 tests), A1 #132 (executor ABI generated
    from the Foundry artifact with the `token` field; legacy deployments
    detected at boot and in preflight; 20 tests).
-7. Still in flight in worktrees: C2 (`AgentJobEscrow` ERC-8183 +
-   `ReputationHook` ERC-8004, Solidity + Foundry tests) and P1 (x402 client
-   service with spend controls). Their PRs land as `feat/c2-*` and `feat/p1-*`.
+7. Also merged after review: **C2** #135 (`AgentJobEscrow.sol` ERC-8183
+   published interface, USDC-only, `platformFeeBP`, hooks; `ReputationHook.sol`
+   writing ERC-8004 feedback atomically on complete/reject; `DeployEscrow.s.sol`;
+   224 Foundry tests, 100% line coverage) and **P1** #134 (`X402ClientService`
+   with spend caps, payment-identifier idempotency, receipt verification;
+   `signTypedData` on local + Turnkey wallets; 27 tests; `@x402/*` 2.28.0).
 8. `graphify update .` run after the merges (1902 nodes, 2966 edges).
+9. Dev stack re-validated from clean volumes on the merged `main`. First run
+   failed: after the Dependabot bumps npm hoists every mcp-server dependency,
+   so `packages/mcp-server/node_modules` no longer exists in the Docker deps
+   stage and the `COPY --from=deps` in `Dockerfile.mcp` broke. Both
+   Dockerfiles now `mkdir -p` the per-workspace folder after `npm ci`. Second
+   run: 5/5 healthy in ~15 s, `npm run smoke:dev` and the three examples green.
 
 ## Dependabot notes
 
@@ -68,12 +77,12 @@ session did and what the next one should pick up.
 
 ## Next session
 
-1. Review C2 (contracts) and P1 (x402 client) PRs if still open; after C2
-   merges, prepare the Base Sepolia deployment command for the owner (C4).
-2. Re-run the dev stack from clean volumes (`docker compose -f
-   docker-compose.dev.yml down -v && up --build -d`, `npm run smoke:dev`,
-   three examples) on the merged `main` — CI E2E passed on every PR, but the
-   first-run path should be exercised locally after four backend merges.
+1. C3 (backend speaks the ERC-8183 escrow: `escrow-onchain.service.ts`,
+   finalizer, migration 0014) and C4 (Base Sepolia deployment with
+   `DeployEscrow.s.sol`; the owner runs it with the deployer key). Then P2
+   (`pay_for_resource` route + MCP tool + `ResourcePayment` rows).
+2. Dev stack already re-validated on the merged `main` (see item 9 above);
+   re-run it again after C3/P2 land.
 3. Follow-ups found during the fixes, now in the plan: A3b (resume does not
    re-activate the policy), A6 (DailyVolume reserved but never released on
    FAILED), bullmq scheduler API migration (#111), S2 (MCP annotations).
