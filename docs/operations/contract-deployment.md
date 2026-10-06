@@ -138,10 +138,12 @@ The deploy script prints env-ready output:
 ```
 AgentPolicyModule: 0xABCD...
 AgentExecutor:     0xEFGH...
+EscrowModule:      0xIJKL...
 
 --- Copy to .env ---
 POLICY_MODULE_ADDRESS_8453=0xABCD...
 EXECUTOR_ADDRESS_8453=0xEFGH...
+ESCROW_MODULE_ADDRESS_8453=0xIJKL...
 --------------------
 ```
 
@@ -158,6 +160,7 @@ When expanding beyond a single chain, deploy to each chain separately and track 
 ```
 [ ] Deployer wallet funded with gas on chain
 [ ] Explorer API key obtained
+[ ] Backend ABI matches the source: `npm run abi:executor` produces no git diff (see "ABI versioning")
 [ ] forge test passes
 [ ] forge script Deploy.s.sol --rpc-url <alias> --broadcast --verify
 [ ] Output addresses recorded (see Address Registry below)
@@ -259,18 +262,111 @@ echo "=== All checks passed ==="
 
 ---
 
+## ABI versioning
+
+### What changed (October 2026)
+
+`AgentExecutor.Action` gained a `token` field (commit `e0c8025`, 2026-04-06) so that
+`executeSingle`/`executeBatch` forward the ERC-20 involved in each action to
+`AgentPolicyModule.validateTransaction` for token-whitelist enforcement:
+
+```solidity
+struct Action {
+    address target;
+    uint256 value;
+    address token; // NEW — ERC-20 involved (address(0) for pure ETH)
+    bytes   data;
+}
+```
+
+Because the struct is part of the function signature, the 4-byte selectors changed:
+
+| Function | Old selector (`(target,value,data)`) | Current selector (`(target,value,token,data)`) |
+|----------|--------------------------------------|-----------------------------------------------|
+| `executeSingle` | `0xa60e5271` | `0x596e8b81` |
+| `executeBatch`  | `0x34fcd5be` | `0x672093df` |
+
+The backend encodes the **current** struct (as of October 2026). A contract compiled
+from the old struct does not dispatch the new selectors, so every transaction routed
+through it reverts. `AgentPolicyModule`'s own ABI is unchanged (`validateTransaction`
+already took a token — the old executor passed `address(0)`), but `Deploy.s.sol`
+always ships a fresh policy module + executor + escrow set, and the backend treats the
+old policy module as part of the legacy pair.
+
+### Backend ABI — single source of truth
+
+The backend never hand-writes the executor ABI. It is generated from the Solidity
+source into `packages/backend/src/abi/AgentExecutor.abi.ts` and imported by
+`executor.service.ts`, the `/v1/transactions/batch` route and the admin batch route.
+
+Regenerate after **any** change to `AgentExecutor.sol` (Foundry in `PATH`):
+
+```bash
+npm run abi:executor          # = node scripts/gen-executor-abi.mjs → forge inspect AgentExecutor abi --json
+git diff packages/backend/src/abi/AgentExecutor.abi.ts   # commit alongside the Solidity change
+```
+
+`packages/backend/src/__tests__/executor.service.test.ts` pins the selectors above and,
+when `packages/contracts/out/` exists locally, asserts the checked-in ABI equals the
+Foundry artifact. Run `npx vitest run src/__tests__/executor.service.test.ts` from
+`packages/backend`.
+
+What the backend sends as `Action.token`: `tokenIn` for Uniswap/Curve swaps, the asset
+for Aave/Compound/ERC-4626 deposits and withdrawals, the token for ERC-20 transfers and
+approvals, the collateral token for GMX orders, and `address(0)` for pure-ETH transfers.
+Raw `/v1/transactions/batch` actions carry their own `token` (default `address(0)`).
+
+### Legacy deployments (old `Action` struct) — do not route through
+
+| Chain | Contract | Address | Status |
+|-------|----------|---------|--------|
+| Base (8453) | AgentPolicyModule | `0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d` | legacy pair — redeploy pending |
+| Base (8453) | AgentExecutor | `0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3` | **ABI-incompatible** — redeploy pending |
+| Base Sepolia (84532) | AgentPolicyModule | `0x771444Ff5483ef3A62b492a816Cb439e4f017203` | legacy pair — was hard-coded in `contracts.ts`, now env-only |
+| Base Sepolia (84532) | AgentExecutor | `0x1fE2A4e79899A9cB03bED301f978d2Ce2F91Fc5d` | **ABI-incompatible** — was hard-coded in `contracts.ts`, now env-only |
+
+Guards in place:
+
+- `packages/backend/src/config/contracts.ts` lists these in `LEGACY_CONTRACT_ADDRESSES`;
+  the API logs a **WARN at boot** for every configured legacy address.
+- `npm run preflight` **fails** if `EXECUTOR_ADDRESS_<chainId>` is a legacy address or if
+  the on-chain bytecode does not contain the current selectors, and warns on a legacy
+  policy module.
+- Base Sepolia no longer has hard-coded defaults — set `POLICY_MODULE_ADDRESS_84532`,
+  `EXECUTOR_ADDRESS_84532`, `ESCROW_MODULE_ADDRESS_84532` after redeploying.
+
+Redeploy order: **Base Sepolia first, then Base mainnet** (standard flow above). Until
+the new addresses land, leave `*_ADDRESS_8453` / `*_ADDRESS_84532` unset: the backend
+then skips executor routing (`routedViaExecutor=false`, fee recorded off-chain only).
+
+---
+
 ## Address registry
 
-### Base Mainnet (Chain 8453) — DEPLOYED
+### Base Mainnet (Chain 8453) — DEPLOYED, **LEGACY (old `Action` struct) — redeploy pending**
+
+Do not point `EXECUTOR_ADDRESS_8453` at this pair with the current backend; see
+[ABI versioning](#abi-versioning). Kept here for history and for fee-event queries.
 
 | Contract | Address |
 |----------|---------|
-| AgentPolicyModule | [`0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d`](https://basescan.org/address/0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d) |
-| AgentExecutor | [`0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3`](https://basescan.org/address/0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3) |
+| AgentPolicyModule | [`0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d`](https://basescan.org/address/0x03afE9c56331EE6A795C873a5e7E23308F6f6A6d) — legacy pair |
+| AgentExecutor | [`0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3`](https://basescan.org/address/0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3) — **legacy, ABI-incompatible** |
 
 **Deployer:** `0x2530c24Be25100C3f313D3F6BF36557a7b02A41b`
 **Fee Wallet:** `0xD73d0cBF9C3fa2932eA54b6dfe70fa7e45bF8646`
 **Fee BPS:** 30 (0.30%)
+
+### Base Sepolia (Chain 84532) — **LEGACY (old `Action` struct) — redeploy pending**
+
+| Contract | Address |
+|----------|---------|
+| AgentPolicyModule | `0x771444Ff5483ef3A62b492a816Cb439e4f017203` — legacy pair |
+| AgentExecutor | `0x1fE2A4e79899A9cB03bED301f978d2Ce2F91Fc5d` — **legacy, ABI-incompatible** |
+
+These were the hard-coded defaults in `packages/backend/src/config/contracts.ts` until
+October 2026. The testnet now reads `POLICY_MODULE_ADDRESS_84532` /
+`EXECUTOR_ADDRESS_84532` / `ESCROW_MODULE_ADDRESS_84532` from env like every other chain.
 
 ### Arbitrum One (Chain 42161) — NOT DEPLOYED
 

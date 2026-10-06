@@ -10,6 +10,7 @@ import {
   ensureSimulationUsable,
 } from '../../services/transaction/simulation-guard.js';
 import { ExecutorService } from '../../services/transaction/executor.service.js';
+import { AGENT_EXECUTOR_ABI } from '../../abi/AgentExecutor.abi.js';
 import { PolicyService } from '../../services/policy/policy.service.js';
 import { FeeService } from '../../services/policy/fee.service.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
@@ -1105,6 +1106,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       vaultAddress: getAddress(body.vault),
       assetAmount: amountWei,
       receiver: getAddress(agent.safeAddress),
+      asset: getAddress(body.asset),
     });
 
     const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
@@ -1219,6 +1221,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       assetAmount: amountWei,
       receiver: getAddress(agent.safeAddress),
       owner: getAddress(agent.safeAddress),
+      asset: getAddress(body.asset),
     });
 
     const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
@@ -1346,6 +1349,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       j: BigInt(body.toTokenIndex),
       amountIn: amountInWei,
       minAmountOut: minAmountOutWei,
+      tokenIn: getAddress(body.fromTokenAddress),
     });
 
     const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
@@ -1445,13 +1449,15 @@ export async function transactionRoutes(fastify: FastifyInstance) {
   /**
    * POST /v1/transactions/batch — execute multiple raw calldata actions atomically.
    *
-   * Each action maps directly to AgentExecutor.Action: { to, value, data }.
+   * Each action maps directly to AgentExecutor.Action: { to, value, token, data }.
    * Actions are validated individually via PolicyService, then encoded into a single
    * AgentExecutor.executeBatch call — atomic: all succeed or all revert.
    *
-   * Body: { chainId, actions: [{ to, value, data }], idempotencyKey? }
+   * Body: { chainId, actions: [{ to, value, token?, data }], idempotencyKey? }
    *   - to:    target contract address
    *   - value: ETH value in wei (as decimal string, e.g. "0" or "1000000000000000")
+   *   - token: ERC-20 the action moves (checked against the on-chain token
+   *            whitelist); defaults to the zero address for pure-ETH actions
    *   - data:  hex-encoded calldata (e.g. "0x" for plain ETH transfers)
    */
   // -----------------------------------------------------------------------
@@ -1824,26 +1830,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     }));
     const totalValueWei = onChainActions.reduce((sum, a) => sum + a.value, 0n);
 
-    // AgentExecutor.executeBatch ABI
-    const EXECUTOR_ABI = [{
-      name: 'executeBatch',
-      type: 'function',
-      stateMutability: 'payable',
-      inputs: [{
-        name: 'actions',
-        type: 'tuple[]',
-        components: [
-          { name: 'target', type: 'address' },
-          { name: 'value',  type: 'uint256' },
-          { name: 'token',  type: 'address' },
-          { name: 'data',   type: 'bytes'   },
-        ],
-      }],
-      outputs: [],
-    }] as const;
-
+    // AgentExecutor.executeBatch — ABI generated from the Solidity source
+    // (packages/backend/src/abi/AgentExecutor.abi.ts, `npm run abi:executor`).
     const batchCalldata = encodeFunctionData({
-      abi: EXECUTOR_ABI,
+      abi: AGENT_EXECUTOR_ABI,
       functionName: 'executeBatch',
       args: [onChainActions],
     });

@@ -8,6 +8,7 @@ import {
   parseUnits,
   parseEther,
   getAddress,
+  zeroAddress,
   type Address,
   type Hex,
 } from 'viem';
@@ -30,6 +31,14 @@ export interface TransactionData {
   to: Address;
   data: Hex;
   value: bigint;
+  /**
+   * ERC-20 involved in the action, when known: tokenIn for swaps, the asset for
+   * deposits/withdrawals, the token for transfers/approvals. Forwarded as
+   * `AgentExecutor.Action.token` so the on-chain policy can enforce its token
+   * whitelist. Omit (or pass the zero address) for pure-ETH actions — the
+   * executor wrapper defaults a missing token to address(0).
+   */
+  token?: Address;
 }
 
 // ERC-20 ABI (minimal)
@@ -203,6 +212,7 @@ export class TransactionBuilder {
       to: getAddress(params.to),
       data: '0x',
       value: parseEther(params.amountEth),
+      token: zeroAddress, // pure ETH — nothing for the token whitelist to check
     };
   }
 
@@ -223,6 +233,7 @@ export class TransactionBuilder {
         args: [getAddress(params.to), parseUnits(params.amount, params.decimals)],
       }),
       value: 0n,
+      token: getAddress(params.tokenAddress),
     };
   }
 
@@ -259,6 +270,9 @@ export class TransactionBuilder {
       }),
       // SwapRouter02 wraps native ETH automatically when tokenIn is WETH
       value: isNativeWeth(params.chainId, params.tokenIn) ? params.amountIn : 0n,
+      // tokenIn is what the agent spends — same address the off-chain policy
+      // check receives (`tokenAddress: fromToken`), WETH included.
+      token: params.tokenIn,
     };
   }
 
@@ -279,6 +293,7 @@ export class TransactionBuilder {
         args: [params.asset, params.amount, params.onBehalfOf, 0], // referralCode = 0
       }),
       value: 0n,
+      token: params.asset,
     };
   }
 
@@ -299,6 +314,7 @@ export class TransactionBuilder {
         args: [params.asset, params.amount, params.to],
       }),
       value: 0n,
+      token: params.asset,
     };
   }
 
@@ -319,6 +335,7 @@ export class TransactionBuilder {
         args: [params.asset, params.amount],
       }),
       value: 0n,
+      token: params.asset,
     };
   }
 
@@ -339,17 +356,22 @@ export class TransactionBuilder {
         args: [params.asset, params.amount],
       }),
       value: 0n,
+      token: params.asset,
     };
   }
 
   /**
    * Builds an ERC-4626 vault deposit.
    * The vault internally converts assets to shares; receiver gets the shares.
+   *
+   * `asset` (the vault's underlying ERC-20) is not part of the calldata, so it
+   * is only tagged as the action token when the caller supplies it.
    */
   buildErc4626Deposit(params: {
     vaultAddress: Address;
     assetAmount: bigint;
     receiver: Address;
+    asset?: Address;
   }): TransactionData {
     return {
       to: params.vaultAddress,
@@ -359,18 +381,23 @@ export class TransactionBuilder {
         args: [params.assetAmount, params.receiver],
       }),
       value: 0n,
+      ...(params.asset ? { token: params.asset } : {}),
     };
   }
 
   /**
    * Builds an ERC-4626 vault withdraw (assets-denominated).
    * Use `redeem` if you want to burn a specific share amount instead.
+   *
+   * `asset` (the vault's underlying ERC-20) is only tagged as the action token
+   * when the caller supplies it — it cannot be derived from the calldata.
    */
   buildErc4626Withdraw(params: {
     vaultAddress: Address;
     assetAmount: bigint;
     receiver: Address;
     owner: Address;
+    asset?: Address;
   }): TransactionData {
     return {
       to: params.vaultAddress,
@@ -380,6 +407,7 @@ export class TransactionBuilder {
         args: [params.assetAmount, params.receiver, params.owner],
       }),
       value: 0n,
+      ...(params.asset ? { token: params.asset } : {}),
     };
   }
 
@@ -397,6 +425,9 @@ export class TransactionBuilder {
     j: bigint; // to token index
     amountIn: bigint;
     minAmountOut: bigint;
+    /** Address of coin `i` — Curve calldata only carries the index, so the
+     *  token is tagged on the action only when the caller supplies it. */
+    tokenIn?: Address;
   }): TransactionData {
     return {
       to: params.poolAddress,
@@ -406,6 +437,7 @@ export class TransactionBuilder {
         args: [params.i, params.j, params.amountIn, params.minAmountOut],
       }),
       value: 0n, // Curve pools never receive ETH
+      ...(params.tokenIn ? { token: params.tokenIn } : {}),
     };
   }
 
@@ -425,6 +457,7 @@ export class TransactionBuilder {
         args: [params.spender, params.amount],
       }),
       value: 0n,
+      token: getAddress(params.tokenAddress),
     };
   }
 
@@ -524,6 +557,9 @@ export class TransactionBuilder {
         args: [calls],
       }),
       value: params.executionFee,
+      // Collateral token is the ERC-20 the position is funded with (increase)
+      // or settled in (decrease); the ETH value is only the keeper fee.
+      token: params.initialCollateralToken,
     };
   }
 }
