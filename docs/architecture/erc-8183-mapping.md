@@ -81,6 +81,9 @@ Events: `JobCreated, ProviderSet, BudgetSet, JobFunded, JobSubmitted, JobComplet
 4. **No native ETH.** New jobs are USDC-only (plan §5.6). The legacy `EscrowModule` stays deployed for ETH until retired.
 5. **Reference deployments to interoperate/test against:** Virtuals ACP Base `0x238E541BfefD82238730D00a2208E5497F1832E0`, Base Sepolia `0x0b93793923CD5De81850aF8604a233f3f24d461e` (from `acp-node-v2/src/core/constants.ts`; hook addresses differ between changelog and code, unverified).
 
-## 5. Decisions needed before C2 starts
+## 5. Decisions (owner, 2026-10-06)
 
-See execution plan §5: evaluator default (1), fee model (2), native ETH policy (6).
+- Evaluator default = operator/backend signer (plan D5).
+- Protocol fee = `platformFeeBP` in USDC on `Completed`, default 30 bps (plan D6).
+- New jobs are USDC-only; legacy `EscrowModule` kept for ETH until retired (plan D8).
+- Fee bps tiering during validation is still open (plan §5.3).

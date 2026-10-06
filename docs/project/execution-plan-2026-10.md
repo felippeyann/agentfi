@@ -14,6 +14,10 @@
 | D2 | **Adopt the current Solidity source (Action struct with `token`) and redeploy.** Base Sepolia first (test gas), Base mainnet later with the owner's deployer key. | Backend ABI updated (A1). Existing Base/Base Sepolia deployments are legacy and must not be routed through. Addresses in STATE.md change after redeploy. |
 | D3 | **README banner → "Reactivated (exploratory)" now.** The postmortem stays, collapsed. | Public signal; also lets us resubmit directory listings. |
 | D4 | **Credentials the owner will put in local `.env`:** Base Sepolia deployer key with test ETH, Alchemy (Base + Base Sepolia), Turnkey, Tenderly. | Real-chain testnet flows are in scope. Values are never pasted in chat; the owner edits `.env`. |
+| D5 | **Evaluator default = operator/backend signer.** Same trust model as today's operator-only release; requester may contest via API. Third-party evaluator agents come after validation. | `AgentJobEscrow` jobs are created with `evaluator = OPERATOR_EVALUATOR_ADDRESS`; the backend signs `complete`/`reject`. |
+| D6 | **Protocol fee moves to the escrow, in USDC** (`platformFeeBP`, default 30 bps, taken from the budget on `Completed`). The executor's ETH-only fee is no longer advertised as the revenue path for ERC-20 flows. | A5 resolved: docs/STATE say "fee on settled A2A jobs"; executor fee stays for ETH-value DeFi flows as is. |
+| D7 | **ERC-8004 identity is minted on the first funded job**, not at registration. | R2: `erc8004AgentId` set lazily inside the fund flow; agents that never transact cost no gas. |
+| D8 | **New jobs are USDC-only.** Legacy `EscrowModule` (ETH + ERC-20, operator-settled) stays in the repo for ETH but is not used for new jobs and is retired at the go/no-go. | C2 scope is ERC-20 only, matching ERC-8183. |
 | A1 | **Assumption (not a decision, flagged):** for the 90 days AgentFi stays **software only**: no custody by the maintainer, no fiat, no BRL on/off-ramp, no hosted production instance. This keeps it outside the PSAV/eFX perimeter of BCB Resolutions 519/520/561. The owner must revisit this before any hosted or custodial offering. | Nothing in this plan builds a hosted service or touches fiat. |
 
 ---
@@ -162,12 +166,13 @@ Status legend: `todo` · `in-progress` · `pr` (open PR) · `done` · `blocked (
 
 ## 5. Open questions (ask the owner, do not assume)
 
-1. **Evaluator role (C1):** ERC-8183 requires one non-zero evaluator per job, who alone decides after `Submitted`. Default proposed: the operator backend signer (same trust model as today's operator-only release). Alternatives: the requester agent itself (allowed by the standard), or a third evaluator agent later. Which default?
-2. **Fee model (A5):** ERC-8183 allows `platformFeeBP` + `evaluatorFeeBP` taken from the budget on `Completed`. Proposed: move the protocol fee to the escrow (`platformFeeBP`, in USDC, on settled jobs) and stop pretending the executor collects fees on ERC-20 flows. Confirm, and pick the bps (current tiers 30/15/5).
-3. **ERC-8004 identity (R2):** register every AgentFi agent on-chain at creation (gas per agent, ~ERC-721 mint) or only on opt-in / first job?
-4. **Mainnet redeploy (C6):** after C5, redeploy on Base mainnet, and with which fee wallet / operator / evaluator addresses?
-5. **Brazil (A1 assumption):** confirm "software only, no custody, no fiat" for the 90 days.
-6. **Native ETH jobs (C2):** ERC-8183 is ERC-20 only. Proposed: new jobs are USDC-only; the legacy `EscrowModule` (ETH + ERC-20, operator-settled) stays deployed but is not used for new jobs and is retired at the go/no-go. Confirm.
+Resolved on 2026-10-06 (now decisions D5–D8 in §0): evaluator default, fee model, ERC-8004 identity timing, native-ETH policy.
+
+Still open:
+
+1. **Mainnet redeploy (C6):** after C5, redeploy on Base mainnet, and with which fee wallet / operator / evaluator addresses?
+2. **Brazil (A1 assumption):** confirm "software only, no custody, no fiat" for the 90 days.
+3. **Fee bps (D6):** 30 bps flat during validation, or keep the FREE/PRO/ENTERPRISE tiers (30/15/5) mapped to operators?
 
 ---
 

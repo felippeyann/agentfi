@@ -81,6 +81,7 @@ The settlement tx itself cannot be referenced inside the file it hashes; consume
 - No reads of unfiltered `getSummary` (Sybil-dominated); always pass trusted writer addresses.
 - No Validation Registry usage until its interface stabilises.
 
-## 6. Decisions needed
+## 6. Decisions (owner, 2026-10-06)
 
-Plan §5.3 (identity registration policy). Everything else here is a proposal for the owner's review.
+- Identity is minted on the **first funded job** (plan D7); `erc8004AgentId` is set lazily in the fund flow.
+- Feedback writer = `ReputationHook` attached to every AgentFi job, as described in §4.
