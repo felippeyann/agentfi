@@ -5,6 +5,10 @@ import { getAddress, parseUnits, maxUint256 } from 'viem';
 import { db } from '../../db/client.js';
 import { TransactionBuilder } from '../../services/transaction/builder.service.js';
 import { SimulatorService } from '../../services/transaction/simulator.service.js';
+import {
+  assertSimulationUsable,
+  ensureSimulationUsable,
+} from '../../services/transaction/simulation-guard.js';
 import { ExecutorService } from '../../services/transaction/executor.service.js';
 import { PolicyService } from '../../services/policy/policy.service.js';
 import { FeeService } from '../../services/policy/fee.service.js';
@@ -216,6 +220,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       value: txData.value,
     });
 
+    // A mock result must never be cached as a usable simulation in production.
+    if (!ensureSimulationUsable(sim, reply)) return;
+
     // Cache server-side so /swap can verify the simulationId was issued here
     if (sim.simulationId) {
       await cacheSimulation(sim.simulationId, {
@@ -342,6 +349,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       value: wrapped.value,
     });
 
+    if (!ensureSimulationUsable(sim, reply)) return;
     if (!sim.success) {
       return reply.code(422).send({
         error: `Simulation failed: ${sim.error}`,
@@ -494,6 +502,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       value: txData.value,
     });
 
+    if (!ensureSimulationUsable(sim, reply)) return;
     if (!sim.success) {
       return reply.code(422).send({ error: `Simulation failed: ${sim.error}` });
     }
@@ -632,6 +641,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       value: supplyTx.value,
     });
 
+    if (!ensureSimulationUsable(sim, reply)) return;
     if (!sim.success) {
       return reply.code(422).send({ error: `Simulation failed: ${sim.error}` });
     }
@@ -765,6 +775,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       value: withdrawTx.value,
     });
 
+    if (!ensureSimulationUsable(sim, reply)) return;
     if (!sim.success) {
       return reply.code(422).send({ error: `Simulation failed: ${sim.error}` });
     }
@@ -880,6 +891,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       data: supplyTx.data,
       value: supplyTx.value,
     });
+    if (!ensureSimulationUsable(sim, reply)) return;
     if (!sim.success) {
       return reply.code(422).send({ error: `Simulation failed: ${sim.error}` });
     }
@@ -999,6 +1011,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       data: withdrawTx.data,
       value: withdrawTx.value,
     });
+    if (!ensureSimulationUsable(sim, reply)) return;
     if (!sim.success) {
       return reply.code(422).send({ error: `Simulation failed: ${sim.error}` });
     }
@@ -1115,6 +1128,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       data: depositTx.data,
       value: depositTx.value,
     });
+    if (!ensureSimulationUsable(sim, reply)) return;
     if (!sim.success) {
       return reply.code(422).send({ error: `Simulation failed: ${sim.error}` });
     }
@@ -1231,6 +1245,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       data: withdrawTx.data,
       value: withdrawTx.value,
     });
+    if (!ensureSimulationUsable(sim, reply)) return;
     if (!sim.success) {
       return reply.code(422).send({ error: `Simulation failed: ${sim.error}` });
     }
@@ -1359,6 +1374,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       data: swapTx.data,
       value: swapTx.value,
     });
+    if (!ensureSimulationUsable(sim, reply)) return;
     if (!sim.success) {
       return reply.code(422).send({
         error: `Simulation failed: ${sim.error}. Verify pool exists, indices are correct, and fromToken is approved to the pool.`,
@@ -1528,6 +1544,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       value: txData.value,
     });
 
+    if (!ensureSimulationUsable(sim, reply)) return;
     if (!sim.success) {
       return reply.code(422).send({ error: `Simulation failed: ${sim.error}`, simulationId: sim.simulationId });
     }
@@ -1673,6 +1690,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       value: txData.value,
     });
 
+    if (!ensureSimulationUsable(sim, reply)) return;
     if (!sim.success) {
       return reply.code(422).send({ error: `Simulation failed: ${sim.error}`, simulationId: sim.simulationId });
     }
@@ -1839,6 +1857,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       value: totalValueWei,
     });
 
+    if (!ensureSimulationUsable(sim, reply)) return;
     if (!sim.success) {
       return reply.code(422).send({
         error: `Batch simulation failed: ${sim.error}`,
@@ -2155,6 +2174,9 @@ export async function executeA2APayment(params: {
     data: txData.data,
     value: txData.value,
   });
+  // No HTTP reply in this context — throws SimulationUnavailableError (503),
+  // which jobs.ts records as the PAYMENT_FAILED reason.
+  assertSimulationUsable(sim);
   if (!sim.success) {
     throw new Error(`Simulation failed: ${sim.error}`);
   }

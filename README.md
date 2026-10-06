@@ -94,7 +94,7 @@ All project documentation is organized in our **[Documentation Hub](docs/README.
 ## 🛡️ Security
 
 AgentFi is built for security-first autonomy. 
-- **Simulations**: Every transaction is simulated via Tenderly before submission.
+- **Simulations**: Every transaction is simulated before submission — via Tenderly when configured, otherwise an `eth_call`/`estimateGas` dry-run against the chain RPC. A mock simulation is never used in production.
 - **Guardrails**: On-chain policies prevent agents from exceeding predefined limits.
 - **Kill Switch**: Operators can pause any agent's transaction ability instantly.
 
