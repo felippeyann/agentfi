@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { env } from '../../config/env.js';
@@ -11,6 +11,10 @@ import {
   classifyPolicyChange,
   toPolicyPatch,
 } from '../../services/policy/policy-authority.js';
+import {
+  POLICY_DECIMAL_MESSAGE,
+  POLICY_DECIMAL_PATTERN,
+} from '../../services/policy/policy-numbers.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
 import { PnLService } from '../../services/billing/pnl.service.js';
 import { EnsService } from '../../services/identity/ens.service.js';
@@ -22,20 +26,37 @@ const reputationService = new ReputationService();
 const pnlService = new PnLService();
 const ensService = new EnsService();
 
+/**
+ * Decimal policy limits are validated with the same strict pattern
+ * `parsePolicyDecimal` accepts, so nothing that reaches storage can be read
+ * two different ways by the authority classifier and the enforcer
+ * (`""`, `"1e3"`, `"0x10"`, `" 5"`, `"unlimited"` are all 400 here).
+ */
+const policyDecimal = z.string().regex(POLICY_DECIMAL_PATTERN, POLICY_DECIMAL_MESSAGE);
+
+/** Initial policy for a new agent. `parse({})` yields the server defaults. */
+const initialPolicySchema = z.object({
+  maxValuePerTxEth: policyDecimal.default('1.0'),
+  maxDailyVolumeUsd: policyDecimal.default('10000'),
+  allowedContracts: z.array(z.string()).default([]),
+  allowedTokens: z.array(z.string()).default([]),
+  cooldownSeconds: z.number().default(60),
+});
+
 const createAgentSchema = z.object({
   name: z.string().min(1).max(100),
   chainIds: z.array(z.number()).min(1).default([1]),
   tier: z.enum(['FREE', 'PRO', 'ENTERPRISE']).default('FREE'),
-  policy: z
-    .object({
-      maxValuePerTxEth: z.string().default('1.0'),
-      maxDailyVolumeUsd: z.string().default('10000'),
-      allowedContracts: z.array(z.string()).default([]),
-      allowedTokens: z.array(z.string()).default([]),
-      cooldownSeconds: z.number().default(60),
-    })
-    .optional(),
+  policy: initialPolicySchema.optional(),
 });
+
+/** `POST /v1/public/agents` body: `tier` and `policy` are stripped and forced server-side. */
+const publicRegistrationSchema = createAgentSchema.omit({ tier: true, policy: true });
+
+/** 400 body for a zod failure — mirrors `GET /v1/agents/search`. */
+function validationFailed(reply: FastifyReply, error: z.ZodError) {
+  return reply.code(400).send({ error: 'Validation failed', details: error.errors });
+}
 
 /**
  * Shared agent provisioning logic — called by both the operator-gated
@@ -144,8 +165,8 @@ async function provisionAgent(
 }
 
 const updatePolicySchema = z.object({
-  maxValuePerTxEth: z.string().optional(),
-  maxDailyVolumeUsd: z.string().optional(),
+  maxValuePerTxEth: policyDecimal.optional(),
+  maxDailyVolumeUsd: policyDecimal.optional(),
   allowedContracts: z.array(z.string()).optional(),
   allowedTokens: z.array(z.string()).optional(),
   cooldownSeconds: z.number().optional(),
@@ -154,6 +175,8 @@ const updatePolicySchema = z.object({
   expiresAt: z.string().datetime().nullish(),
   /// If true, returns calldata to sync this policy to the on-chain module
   syncOnChain: z.boolean().default(false),
+  /// Free-text justification. Written to the policy audit log line only — never stored.
+  reason: z.string().max(500).optional(),
 });
 
 export async function agentRoutes(fastify: FastifyInstance) {
@@ -162,8 +185,9 @@ export async function agentRoutes(fastify: FastifyInstance) {
    * The API key plaintext is returned ONCE. It cannot be recovered.
    */
   fastify.post('/v1/agents', async (request, reply) => {
-    const body = createAgentSchema.parse(request.body);
-    const result = await provisionAgent(body);
+    const parsed = createAgentSchema.safeParse(request.body);
+    if (!parsed.success) return validationFailed(reply, parsed.error);
+    const result = await provisionAgent(parsed.data);
     return reply.code(201).send(result);
   });
 
@@ -178,7 +202,11 @@ export async function agentRoutes(fastify: FastifyInstance) {
    *   - Per-IP rate limit (env `PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR`,
    *     default 5). Operators can tighten via env.
    *   - Tier forced to FREE regardless of request body.
-   *   - Policy defaults enforced even if caller omits them.
+   *   - Policy forced to the server defaults (`maxValuePerTxEth=1.0`,
+   *     `maxDailyVolumeUsd=10000`, empty whitelists, `cooldownSeconds=60`).
+   *     Any `policy` in the body is IGNORED — an unauthenticated caller must
+   *     not pick its own limits. Loosening afterwards requires the operator
+   *     credential on `PATCH /v1/agents/:id/policy`.
    *   - Wallet provisioning cost is real (when WALLET_PROVIDER=turnkey);
    *     rate limit caps operator's exposure.
    */
@@ -198,9 +226,16 @@ export async function agentRoutes(fastify: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const body = createAgentSchema.parse(request.body);
-      // Force FREE tier — caller cannot self-assign PRO/ENTERPRISE.
-      const result = await provisionAgent({ ...body, tier: 'FREE' });
+      // `tier` and `policy` are not part of the public contract: zod strips
+      // them, then both are forced server-side — an unauthenticated caller
+      // cannot self-assign PRO/ENTERPRISE or choose its own limits.
+      const parsed = publicRegistrationSchema.safeParse(request.body);
+      if (!parsed.success) return validationFailed(reply, parsed.error);
+      const result = await provisionAgent({
+        ...parsed.data,
+        tier: 'FREE',
+        policy: initialPolicySchema.parse({}),
+      });
       return reply.code(201).send(result);
     },
   );
@@ -320,6 +355,10 @@ export async function agentRoutes(fastify: FastifyInstance) {
    * The policy will be automatically rejected after that timestamp.
    * Pass `expiresAt: null` to clear a previous expiry and make the policy permanent
    * (loosening — operator only once an expiry exists).
+   *
+   * `maxValuePerTxEth` / `maxDailyVolumeUsd` must match `POLICY_DECIMAL_PATTERN`
+   * (plain decimal string); anything else is 400. An optional `reason` (<= 500
+   * chars) is appended to the audit log line and is NOT stored.
    */
   fastify.patch<{ Params: { id: string } }>('/v1/agents/:id/policy', async (request, reply) => {
     const agentId = request.params.id;
@@ -329,7 +368,9 @@ export async function agentRoutes(fastify: FastifyInstance) {
       return reply.code(403).send({ error: 'Access denied' });
     }
 
-    const { expiresAt, syncOnChain, ...policyFields } = updatePolicySchema.parse(request.body);
+    const parsed = updatePolicySchema.safeParse(request.body);
+    if (!parsed.success) return validationFailed(reply, parsed.error);
+    const { expiresAt, syncOnChain, reason, ...policyFields } = parsed.data;
 
     // Convert ISO 8601 → Date for Prisma; undefined means field not touched
     const patch = toPolicyPatch({
@@ -341,11 +382,11 @@ export async function agentRoutes(fastify: FastifyInstance) {
     const current = await policyService.getPolicy(agentId);
     const { tightens, loosenedFields } = classifyPolicyChange(current, patch);
 
+    // `reason` is audit-only: it goes on the log line and is never persisted.
+    const audit = { agentId, caller, changedFields, loosenedFields, ...(reason ? { reason } : {}) };
+
     if (!request.isOperator && !tightens) {
-      logger.warn(
-        { agentId, caller, changedFields, loosenedFields },
-        'Policy change rejected: agent attempted to loosen its own policy',
-      );
+      logger.warn(audit, 'Policy change rejected: agent attempted to loosen its own policy');
       return reply.code(403).send({
         error:
           'Policy can only be tightened by the agent. Loosening requires the operator credential.',
@@ -361,7 +402,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
     }
 
     const policy = await policyService.setPolicy(agentId, patch);
-    logger.info({ agentId, caller, changedFields, loosenedFields }, 'Policy updated');
+    logger.info(audit, 'Policy updated');
 
     let onChainSync = null;
     if (syncOnChain) {

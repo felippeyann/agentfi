@@ -293,6 +293,151 @@ describe('PATCH /v1/agents/:id/policy — operator caller', () => {
   });
 });
 
+// ── Strict decimal validation (S1 bypass) ──────────────────────────────────
+
+describe('PATCH /v1/agents/:id/policy — strict decimal limits', () => {
+  // The original repro was `{"maxValuePerTxEth": ""}` from the agent's own
+  // key: classified as tightening (Number("") === 0) and enforced as no
+  // limit (parseFloat("") is NaN). None of these may ever be 200.
+  const BAD_LIMITS = ['', '   ', '\n', '1e3', ' 5', '0x10', '5abc', 'unlimited'];
+
+  it.each(BAD_LIMITS)('agent: maxValuePerTxEth %j → 400, nothing written', async (raw) => {
+    const app = await buildApp({ agentId: 'agent-1' });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/agents/agent-1/policy',
+      payload: { maxValuePerTxEth: raw },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({
+      error: 'Validation failed',
+      details: [expect.objectContaining({ path: ['maxValuePerTxEth'] })],
+    });
+    expect(mockDb.agentPolicy.findUnique).not.toHaveBeenCalled();
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it.each(BAD_LIMITS)('operator: maxDailyVolumeUsd %j → 400 too (bad values never reach storage)', async (raw) => {
+    const app = await buildApp({ isOperator: true });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/agents/agent-1/policy',
+      payload: { maxDailyVolumeUsd: raw },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it('rejects a numeric (non-string) limit with 400', async () => {
+    const app = await buildApp({ agentId: 'agent-1' });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/agents/agent-1/policy',
+      payload: { maxValuePerTxEth: 0.5 },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it.each(['0', '0.5', '1', '1.00'])('agent: accepts the plain decimal %j (tightens or neutral vs 1.0)', async (raw) => {
+    const app = await buildApp({ agentId: 'agent-1' });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/agents/agent-1/policy',
+      payload: { maxValuePerTxEth: raw },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDb.agentPolicy.upsert.mock.calls[0][0].update).toEqual({ maxValuePerTxEth: raw });
+
+    await app.close();
+  });
+
+  it('operator: accepts plain decimals for both limits, including the loosening "0" daily limit', async () => {
+    const app = await buildApp({ isOperator: true });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/agents/agent-1/policy',
+      payload: { maxValuePerTxEth: '10000', maxDailyVolumeUsd: '0' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDb.agentPolicy.upsert.mock.calls[0][0].update).toEqual({
+      maxValuePerTxEth: '10000',
+      maxDailyVolumeUsd: '0',
+    });
+
+    await app.close();
+  });
+
+  it('with an unparsable value stored, the agent may still tighten to a real limit', async () => {
+    mockDb.agentPolicy.findUnique.mockResolvedValue(basePolicy({ maxValuePerTxEth: '' }));
+    const app = await buildApp({ agentId: 'agent-1' });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/agents/agent-1/policy',
+      payload: { maxValuePerTxEth: '0.5' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDb.agentPolicy.upsert).toHaveBeenCalledTimes(1);
+
+    await app.close();
+  });
+});
+
+// ── Audit `reason` ─────────────────────────────────────────────────────────
+
+describe('PATCH /v1/agents/:id/policy — reason', () => {
+  it('accepts an optional reason and never stores it', async () => {
+    const app = await buildApp({ agentId: 'agent-1' });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/agents/agent-1/policy',
+      payload: { maxValuePerTxEth: '0.5', reason: 'mission-scoped limit' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const call = mockDb.agentPolicy.upsert.mock.calls[0][0];
+    expect(Object.keys(call.update)).toEqual(['maxValuePerTxEth']);
+    expect(Object.keys(call.create)).not.toContain('reason');
+    expect(res.json()).not.toHaveProperty('reason');
+
+    await app.close();
+  });
+
+  it('rejects a reason longer than 500 characters', async () => {
+    const app = await buildApp({ agentId: 'agent-1' });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/agents/agent-1/policy',
+      payload: { maxValuePerTxEth: '0.5', reason: 'x'.repeat(501) },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+});
+
 // ── Auth middleware integration ────────────────────────────────────────────
 
 describe('PATCH /v1/agents/:id/policy — through the auth middleware', () => {

@@ -10,7 +10,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   decodeFunctionData,
   toFunctionSelector,
@@ -187,6 +187,40 @@ describe('ExecutorService', () => {
 
   it('estimateFee mirrors the on-chain 30 bps', () => {
     expect(svc.estimateFee(1_000_000n)).toBe(3_000n);
+  });
+
+  describe('legacy executor (pre-October-2026 Action struct)', () => {
+    const LEGACY_EXECUTOR_8453 = '0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3';
+
+    it('is treated as not configured: routes direct, never wraps, warns once per chain', () => {
+      process.env[envKey] = LEGACY_EXECUTOR_8453;
+      const warn = vi.fn();
+      const legacySvc = new ExecutorService({ warn });
+      const tx = { to: TARGET, data: '0xdeadbeef' as Hex, value: 10_000n, token: WETH };
+
+      expect(legacySvc.getExecutorAddress(CHAIN_ID)).toBeNull();
+      expect(legacySvc.wrapSingle(CHAIN_ID, tx)).toEqual({ ...tx, feeWei: 0n, routedViaExecutor: false });
+      expect(() => legacySvc.wrapBatch(CHAIN_ID, [tx])).toThrow(/No AgentExecutor deployed/);
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]![0]).toMatchObject({ chainId: CHAIN_ID, executor: LEGACY_EXECUTOR_8453 });
+      expect(warn.mock.calls[0]![1]).toMatch(/pre-October-2026[\s\S]*DIRECTLY/);
+    });
+
+    it('the same legacy address on another chain is not legacy there', () => {
+      const otherChain = 137;
+      const otherKey = `EXECUTOR_ADDRESS_${otherChain}`;
+      const prev = process.env[otherKey];
+      process.env[otherKey] = LEGACY_EXECUTOR_8453;
+      try {
+        const warn = vi.fn();
+        expect(new ExecutorService({ warn }).getExecutorAddress(otherChain)).toBe(LEGACY_EXECUTOR_8453);
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        if (prev === undefined) delete process.env[otherKey];
+        else process.env[otherKey] = prev;
+      }
+    });
   });
 });
 

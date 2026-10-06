@@ -12,6 +12,7 @@
 
 import type { FastifyReply } from 'fastify';
 import { env } from '../../config/env.js';
+import { isProductionLikeEnv } from '../../config/runtime-env.js';
 import type { SimulationResult } from './simulator.service.js';
 
 export const SIMULATION_UNAVAILABLE_MESSAGE = 'Simulation unavailable in production';
@@ -27,10 +28,12 @@ export class SimulationUnavailableError extends Error {
 
 /**
  * A simulation result may authorise a transaction unless it is a mock and
- * the process runs with NODE_ENV=production.
+ * the process runs in a production-like environment (`production` or
+ * `staging` — the same set `SimulatorService` refuses to mock in, via
+ * `isProductionLikeEnv`, so guard and simulator can never disagree).
  */
 export function isSimulationUsable(sim: Pick<SimulationResult, '_isMock'>): boolean {
-  return !(sim._isMock === true && env.NODE_ENV === 'production');
+  return !(sim._isMock === true && isProductionLikeEnv(env.NODE_ENV));
 }
 
 /** Throws SimulationUnavailableError (statusCode 503) for an unusable result. */

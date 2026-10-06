@@ -155,6 +155,13 @@ export interface paths {
          *     (default 5/hour; operator-configurable via
          *     `PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR`).
          *
+         *     The initial policy is forced to the server defaults
+         *     (`maxValuePerTxEth=1.0`, `maxDailyVolumeUsd=10000`, empty whitelists,
+         *     `cooldownSeconds=60`). Any `policy` in the request body is **ignored**
+         *     — an unauthenticated caller cannot choose its own limits; loosening
+         *     afterwards requires the operator credential on
+         *     `PATCH /v1/agents/{id}/policy`.
+         *
          *     Response shape is identical to `POST /v1/agents`.
          */
         post: {
@@ -599,6 +606,11 @@ export interface paths {
          *     Pass `expiresAt` (ISO 8601) to create a temporary task-scoped policy; the
          *     policy rejects transactions after that timestamp. `expiresAt: null` clears
          *     the expiry (operator only once an expiry exists).
+         *
+         *     `maxValuePerTxEth` / `maxDailyVolumeUsd` must be plain decimal strings
+         *     (`^\d+(\.\d+)?$`); anything else — empty, whitespace, exponent, hex, words —
+         *     is `400` for every caller. An optional `reason` is written to the audit log
+         *     line and is not stored.
          */
         patch: {
             parameters: {
@@ -625,6 +637,7 @@ export interface paths {
                         "application/json": components["schemas"]["UpdatePolicyResponse"];
                     };
                 };
+                400: components["responses"]["BadRequest"];
                 /**
                  * @description Access denied. Either the agent key does not belong to `{id}`, or the agent
                  *     attempted to loosen its own policy — in that case `loosenedFields` lists the
@@ -770,6 +783,7 @@ export interface paths {
                     };
                 };
                 422: components["responses"]["SimulationFailed"];
+                503: components["responses"]["SimulationUnavailable"];
             };
         };
         delete?: never;
@@ -806,6 +820,7 @@ export interface paths {
                 409: components["responses"]["IdempotencyConflict"];
                 422: components["responses"]["SimulationFailed"];
                 429: components["responses"]["RateLimited"];
+                503: components["responses"]["SimulationUnavailable"];
             };
         };
         delete?: never;
@@ -842,6 +857,7 @@ export interface paths {
                 409: components["responses"]["IdempotencyConflict"];
                 422: components["responses"]["SimulationFailed"];
                 429: components["responses"]["RateLimited"];
+                503: components["responses"]["SimulationUnavailable"];
             };
         };
         delete?: never;
@@ -878,6 +894,7 @@ export interface paths {
                 409: components["responses"]["IdempotencyConflict"];
                 422: components["responses"]["SimulationFailed"];
                 429: components["responses"]["RateLimited"];
+                503: components["responses"]["SimulationUnavailable"];
             };
         };
         delete?: never;
@@ -912,6 +929,7 @@ export interface paths {
                 202: components["responses"]["TransactionAccepted"];
                 403: components["responses"]["PolicyViolation"];
                 429: components["responses"]["RateLimited"];
+                503: components["responses"]["SimulationUnavailable"];
             };
         };
         delete?: never;
@@ -947,6 +965,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["PolicyViolation"];
                 429: components["responses"]["RateLimited"];
+                503: components["responses"]["SimulationUnavailable"];
             };
         };
         delete?: never;
@@ -980,6 +999,7 @@ export interface paths {
             responses: {
                 202: components["responses"]["TransactionAccepted"];
                 429: components["responses"]["RateLimited"];
+                503: components["responses"]["SimulationUnavailable"];
             };
         };
         delete?: never;
@@ -1014,6 +1034,7 @@ export interface paths {
                 202: components["responses"]["TransactionAccepted"];
                 403: components["responses"]["PolicyViolation"];
                 429: components["responses"]["RateLimited"];
+                503: components["responses"]["SimulationUnavailable"];
             };
         };
         delete?: never;
@@ -1047,6 +1068,7 @@ export interface paths {
             responses: {
                 202: components["responses"]["TransactionAccepted"];
                 429: components["responses"]["RateLimited"];
+                503: components["responses"]["SimulationUnavailable"];
             };
         };
         delete?: never;
@@ -1082,6 +1104,7 @@ export interface paths {
                 403: components["responses"]["PolicyViolation"];
                 422: components["responses"]["SimulationFailed"];
                 429: components["responses"]["RateLimited"];
+                503: components["responses"]["SimulationUnavailable"];
             };
         };
         delete?: never;
@@ -1117,6 +1140,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 403: components["responses"]["PolicyViolation"];
                 429: components["responses"]["RateLimited"];
+                503: components["responses"]["SimulationUnavailable"];
             };
         };
         delete?: never;
@@ -2462,9 +2486,15 @@ export interface components {
             } | null;
         };
         Policy: {
-            /** @example 1.0 */
+            /**
+             * @description Plain decimal string. Empty, whitespace, exponent, hex or non-numeric values are rejected (400).
+             * @example 1.0
+             */
             maxValuePerTxEth?: string;
-            /** @example 10000 */
+            /**
+             * @description Plain decimal string; `"0"` means no daily limit. Same validation as `maxValuePerTxEth`.
+             * @example 10000
+             */
             maxDailyVolumeUsd?: string;
             allowedContracts?: string[];
             allowedTokens?: string[];
@@ -2481,6 +2511,12 @@ export interface components {
              * @default false
              */
             syncOnChain: boolean;
+            /**
+             * @description Free-text justification. Written to the backend's policy audit log line
+             *     (together with agent id, caller kind and changed fields). Not stored and
+             *     does not gate the change.
+             */
+            reason?: string;
         };
         /** @description Calldata for the operator to broadcast. The backend never broadcasts it. */
         OnChainSync: {
@@ -2598,15 +2634,31 @@ export interface components {
             chainId: number;
             idempotencyKey?: string;
         };
+        /**
+         * @description Up to 20 raw calldata actions executed atomically through
+         *     `AgentExecutor.executeBatch`. Each action's `token` is **caller-declared**:
+         *     the backend does not decode `data` to discover which ERC-20 a call really
+         *     touches, so both the off-chain `allowedTokens` whitelist and the on-chain
+         *     policy module check the declared value. `allowedContracts` (checked against
+         *     `to`) is the binding policy control for raw calldata.
+         */
         BatchRequest: {
             /** @default 1 */
             chainId: number;
             idempotencyKey?: string;
             actions: {
+                /** @description Target contract. Checked against the agent's `allowedContracts` whitelist. */
                 to: string;
                 /** @default 0 */
                 value: string;
-                /** @default 0x0000000000000000000000000000000000000000 */
+                /**
+                 * @description Caller-declared ERC-20 the action moves; the zero address means pure ETH /
+                 *     no token. Checked against `allowedTokens` when the agent has a whitelist.
+                 *     When the agent has a non-empty `allowedTokens` whitelist, every action
+                 *     with non-empty `data` must declare a token — otherwise `400`
+                 *     `{ "error": "token is required for this action because the agent has a token whitelist", "actionIndex": n }`.
+                 * @default 0x0000000000000000000000000000000000000000
+                 */
                 token: string;
                 /** @default 0x */
                 data: string;
@@ -2811,6 +2863,23 @@ export interface components {
         };
         /** @description On-chain simulation reverted or produced an error before broadcast. */
         SimulationFailed: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /**
+         * @description No usable simulation could authorise the transaction, so it was refused.
+         *     Body: `{ "error": "Simulation unavailable in production" }`.
+         *
+         *     In `production`/`staging` the backend never acts on a development mock
+         *     simulation: Tenderly is used when configured, otherwise a real `eth_call`
+         *     (`estimateGas`) dry-run. This response is the defense-in-depth guard for
+         *     the case where only a mock result exists in such an environment.
+         */
+        SimulationUnavailable: {
             headers: {
                 [name: string]: unknown;
             };

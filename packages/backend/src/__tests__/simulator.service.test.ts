@@ -12,11 +12,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { FastifyReply } from 'fastify';
 import {
+  ContractFunctionRevertedError,
   EstimateGasExecutionError,
   ExecutionRevertedError,
   HttpRequestError,
   InsufficientFundsError,
+  InternalRpcError,
+  RpcRequestError,
   TimeoutError,
+  UnknownRpcError,
 } from 'viem';
 
 // ── Module mocks ───────────────────────────────────────────────────────────
@@ -146,6 +150,84 @@ describe('SimulatorService.simulate without Tenderly', () => {
     expect(sim.gasPrice).toBe('0');
     expect(sim.simulationId).toMatch(/^ethcall_\d+$/);
     expect(sim._isMock).toBeUndefined();
+  });
+
+  it('(b) production: a revert the RPC wrapped in -32603 is a failed simulation, NOT "unavailable"', async () => {
+    // Real viem chain for providers that answer a revert with an Internal
+    // error envelope: EstimateGasExecutionError → ExecutionRevertedError →
+    // InternalRpcError → RpcRequestError. Walking for transport errors first
+    // used to find the InternalRpcError and throw "service unavailable".
+    setEnv('production');
+    const rpcError = new RpcRequestError({
+      body: { method: 'eth_estimateGas', params: [] },
+      error: { code: -32603, message: 'execution reverted: SafeMath: subtraction overflow' },
+      url: 'https://rpc.example',
+    });
+    const chain = new EstimateGasExecutionError(
+      new ExecutionRevertedError({
+        cause: new InternalRpcError(rpcError),
+        message: 'execution reverted: SafeMath: subtraction overflow',
+      }),
+      {},
+    );
+    // Sanity: the chain really contains the transport-looking error.
+    expect(chain.walk((e) => e instanceof InternalRpcError)).toBeInstanceOf(InternalRpcError);
+    estimateGasMock.mockRejectedValue(chain);
+
+    const sim = await new SimulatorService().simulate(PARAMS);
+
+    expect(sim.success).toBe(false);
+    expect(sim.error).toMatch(/subtraction overflow/);
+    expect(sim.provider).toBe('eth_call');
+    expect(sim.gasUsed).toBe('0');
+  });
+
+  it('(b) production: JSON-RPC error code 3 under an UnknownRpcError wrapper is a revert', async () => {
+    setEnv('production');
+    const rpcError = new RpcRequestError({
+      body: { method: 'eth_estimateGas', params: [] },
+      error: { code: 3, message: 'execution reverted', data: '0x08c379a0' },
+      url: 'https://rpc.example',
+    });
+    estimateGasMock.mockRejectedValue(
+      new EstimateGasExecutionError(new UnknownRpcError(rpcError), {}),
+    );
+
+    const sim = await new SimulatorService().simulate(PARAMS);
+
+    expect(sim.success).toBe(false);
+    expect(sim.provider).toBe('eth_call');
+  });
+
+  it('(b) production: ContractFunctionRevertedError is a failed simulation', async () => {
+    setEnv('production');
+    estimateGasMock.mockRejectedValue(
+      new EstimateGasExecutionError(
+        new ContractFunctionRevertedError({ abi: [], functionName: 'swap', message: 'STF' }),
+        {},
+      ),
+    );
+
+    const sim = await new SimulatorService().simulate(PARAMS);
+
+    expect(sim.success).toBe(false);
+    expect(sim.error).toMatch(/swap/);
+  });
+
+  it('(c) production: a bare InternalRpcError (no revert anywhere in the chain) still throws', async () => {
+    setEnv('production');
+    const rpcError = new RpcRequestError({
+      body: { method: 'eth_estimateGas', params: [] },
+      error: { code: -32603, message: 'internal error: backend overloaded' },
+      url: 'https://rpc.example',
+    });
+    estimateGasMock.mockRejectedValue(
+      new EstimateGasExecutionError(new InternalRpcError(rpcError), {}),
+    );
+
+    await expect(new SimulatorService().simulate(PARAMS)).rejects.toThrow(
+      /Simulation service unavailable/,
+    );
   });
 
   it('(b) production: insufficient-funds node error → success false (not a throw)', async () => {
@@ -283,10 +365,31 @@ describe('simulation guard', () => {
     }
   });
 
+  it('rejects a mock result in staging too — same production-like set as the simulator', () => {
+    setEnv('staging');
+
+    expect(isSimulationUsable(mockSim)).toBe(false);
+    expect(() => assertSimulationUsable(mockSim)).toThrow(SimulationUnavailableError);
+
+    const send = vi.fn();
+    const code = vi.fn(() => ({ send }));
+    expect(ensureSimulationUsable(mockSim, { code } as unknown as FastifyReply)).toBe(false);
+    expect(code).toHaveBeenCalledWith(503);
+    expect(send).toHaveBeenCalledWith({ error: SIMULATION_UNAVAILABLE_MESSAGE });
+  });
+
+  it('accepts real results in staging', () => {
+    setEnv('staging');
+    expect(isSimulationUsable(realSim)).toBe(true);
+    expect(() => assertSimulationUsable(realSim)).not.toThrow();
+  });
+
   it('accepts a mock result outside production (dev stack keeps working)', () => {
     setEnv('development');
     expect(isSimulationUsable(mockSim)).toBe(true);
     expect(() => assertSimulationUsable(mockSim)).not.toThrow();
+    setEnv('test');
+    expect(isSimulationUsable(mockSim)).toBe(true);
   });
 
   it('accepts real (eth_call / tenderly) results in production', () => {

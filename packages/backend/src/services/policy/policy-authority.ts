@@ -11,6 +11,7 @@
  * and reusable by any code path that writes to `AgentPolicy`.
  */
 import type { AgentPolicy } from '@prisma/client';
+import { parsePolicyDecimal } from './policy-numbers.js';
 
 /** Fields of `AgentPolicy` an API caller may patch, in canonical order. */
 export const POLICY_PATCH_FIELDS = [
@@ -47,19 +48,24 @@ export interface PolicyChangeClassification {
 // actually enforces, so "more permissive" can be decided with a plain `>`/`<`.
 // `undefined` means "no policy row exists", which PolicyService treats as
 // "no restrictions" — the fully open baseline.
+//
+// Both decimal limits go through `parsePolicyDecimal` — the SAME parser
+// PolicyService enforces with — so the classifier and the enforcer can never
+// disagree about what a string means. A value the parser rejects (`""`,
+// `"  "`, `"1e3"`, `"0x10"`, `"unlimited"`, …) is unlimited here, i.e. it
+// always counts as loosening and an agent can never write it.
 
-/** A non-numeric limit never blocks anything (`value > NaN` is false), so it is unlimited. */
+/** A limit that does not parse never blocks anything, so it is unlimited. */
 function effectiveMaxValuePerTx(raw: string | undefined): number {
   if (raw === undefined) return Number.POSITIVE_INFINITY;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY;
+  return parsePolicyDecimal(raw) ?? Number.POSITIVE_INFINITY;
 }
 
-/** PolicyService only enforces the daily limit when it is > 0, so 0 / negative / NaN = unlimited. */
+/** PolicyService only enforces the daily limit when it is > 0, so 0 / unparsable = unlimited. */
 function effectiveDailyLimit(raw: string | undefined): number {
   if (raw === undefined) return Number.POSITIVE_INFINITY;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : Number.POSITIVE_INFINITY;
+  const n = parsePolicyDecimal(raw);
+  return n !== null && n > 0 ? n : Number.POSITIVE_INFINITY;
 }
 
 /** Cooldowns <= 0 are not enforced, so they are equivalent to 0. */
