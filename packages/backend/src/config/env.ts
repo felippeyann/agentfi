@@ -85,8 +85,10 @@ const envSchema = z.object({
   SAFE_DEPLOYER_PRIVATE_KEY: z.string().optional(),
 
   // x402 facilitator override — optional. Defaults per chain live in
-  // config/x402.ts (x402.org for Base Sepolia, CDP for Base).
-  X402_FACILITATOR_URL: z.string().url().optional(),
+  // config/x402.ts (x402.org for Base Sepolia, CDP for Base). A blank value
+  // (`X402_FACILITATOR_URL=` from dotenv/env_file) means "unset": `.optional()`
+  // alone would reject "" against `.url()` and abort boot.
+  X402_FACILITATOR_URL: z.preprocess((v) => (v === '' ? undefined : v), z.string().url().optional()),
 
   // Rate-limit overrides (requests/minute per tier)
   RATE_LIMIT_FREE: z.coerce.number().int().positive().default(30),

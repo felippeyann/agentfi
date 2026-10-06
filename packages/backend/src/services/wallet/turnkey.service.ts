@@ -192,9 +192,16 @@ export class TurnkeyService {
       hashFunction: 'HASH_FUNCTION_NO_OP',
     });
 
-    // Turnkey returns r, s as 64-hex strings and v as "00"/"01". Assemble
-    // a standard 65-byte Ethereum signature (r || s || v+27).
-    const vByte = (parseInt(v, 16) + 27).toString(16).padStart(2, '0');
+    // Turnkey returns r, s as 64-hex strings and v as the recovery id: "00"/"01"
+    // in the documented wire format, but "1b"/"1c" (already offset by 27) must
+    // not be offset twice. Normalise to 27/28 — `ecrecover`-based verifiers such
+    // as USDC's `transferWithAuthorization` reject v ∈ {0, 1}, which viem's
+    // `recoverTypedDataAddress` would silently accept.
+    const recoveryId = parseInt(v, 16);
+    if (![0, 1, 27, 28].includes(recoveryId)) {
+      throw new Error(`Turnkey returned an unexpected recovery id for ${address}: ${JSON.stringify(v)}`);
+    }
+    const vByte = (recoveryId >= 27 ? recoveryId : recoveryId + 27).toString(16).padStart(2, '0');
     return `0x${r.padStart(64, '0')}${s.padStart(64, '0')}${vByte}` as `0x${string}`;
   }
 

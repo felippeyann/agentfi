@@ -30,6 +30,10 @@ const { envState, turnkeyMock } = vi.hoisted(() => {
     turnkeyMock: {
       signingKey,
       calls: [] as Array<Record<string, unknown>>,
+      /** How the mocked Turnkey encodes `v`: documented "00"/"01", or already-offset "1b"/"1c". */
+      vFormat: 'yParity' as 'yParity' | 'recid27',
+      /** When set, returned verbatim as `v` (garbage-in cases). */
+      vOverride: undefined as string | undefined,
     },
   };
 });
@@ -46,12 +50,16 @@ vi.mock('@turnkey/sdk-server', () => {
         getWalletAccounts: async () => ({ accounts: [{ address: account.address }] }),
         signRawPayload: async (params: Record<string, unknown>) => {
           turnkeyMock.calls.push(params);
-          // Turnkey's wire format: r and s as bare 64-hex strings, v as "00"/"01".
+          // Turnkey's wire format: r and s as bare 64-hex strings, v as "00"/"01"
+          // (recovery id) — "1b"/"1c" has been observed too, hence the toggle.
           const signature = await sign({ hash: params['payload'] as `0x${string}`, privateKey: turnkeyMock.signingKey });
+          const yParity = signature.yParity === 1 ? 1 : 0;
           return {
             r: signature.r.slice(2),
             s: signature.s.slice(2),
-            v: signature.yParity === 1 ? '01' : '00',
+            v:
+              turnkeyMock.vOverride ??
+              (turnkeyMock.vFormat === 'recid27' ? (27 + yParity).toString(16) : yParity.toString(16).padStart(2, '0')),
           };
         },
       };
@@ -95,6 +103,16 @@ const typedData: Eip712TypedData = {
 
 const asViem = typedData as unknown as TypedDataDefinition;
 
+/**
+ * The last byte must be 27/28 (`1b`/`1c`): viem's `recoverTypedDataAddress`
+ * also accepts 0/1, but USDC's `transferWithAuthorization` runs `ecrecover`
+ * on-chain, which does not — a 0/1 signature recovers here and fails there.
+ */
+function expectEcrecoverV(signature: `0x${string}`): void {
+  expect(signature).toMatch(/^0x[0-9a-f]{130}$/);
+  expect(signature.slice(-2)).toMatch(/^1[bc]$/);
+}
+
 describe('LocalWalletService.signTypedData', () => {
   beforeEach(() => __clearLocalWallets());
 
@@ -107,6 +125,7 @@ describe('LocalWalletService.signTypedData', () => {
 
     expect(signer).toBe(address);
     expect(recovered.toLowerCase()).toBe(address.toLowerCase());
+    expectEcrecoverV(signature);
   });
 
   it('throws for an unknown walletId', async () => {
@@ -115,10 +134,14 @@ describe('LocalWalletService.signTypedData', () => {
   });
 });
 
+// The Turnkey mock is module-level state shared by every describe below.
+beforeEach(() => {
+  turnkeyMock.calls.length = 0;
+  turnkeyMock.vFormat = 'yParity';
+  turnkeyMock.vOverride = undefined;
+});
+
 describe('TurnkeyService.signTypedData', () => {
-  beforeEach(() => {
-    turnkeyMock.calls.length = 0;
-  });
 
   it('sends the EIP-712 digest with HASH_FUNCTION_NO_OP and assembles a recoverable signature', async () => {
     const svc = new TurnkeyService();
@@ -134,10 +157,29 @@ describe('TurnkeyService.signTypedData', () => {
       encoding: 'PAYLOAD_ENCODING_HEXADECIMAL',
       hashFunction: 'HASH_FUNCTION_NO_OP',
     });
-    expect(signature).toMatch(/^0x[0-9a-f]{130}$/);
+    expectEcrecoverV(signature);
 
     const recovered = await recoverTypedDataAddress({ ...asViem, signature });
     expect(recovered.toLowerCase()).toBe(expectedSigner.toLowerCase());
+  });
+
+  it('does not offset v twice when Turnkey already returns "1b"/"1c"', async () => {
+    turnkeyMock.vFormat = 'recid27';
+    const svc = new TurnkeyService();
+    const expectedSigner = privateKeyToAccount(turnkeyMock.signingKey).address;
+
+    const { signature } = await svc.signTypedData({ walletId: 'wallet-1', typedData });
+
+    expectEcrecoverV(signature);
+    const recovered = await recoverTypedDataAddress({ ...asViem, signature });
+    expect(recovered.toLowerCase()).toBe(expectedSigner.toLowerCase());
+  });
+
+  it('rejects a recovery id outside {0, 1, 27, 28}', async () => {
+    turnkeyMock.vOverride = '05';
+    const svc = new TurnkeyService();
+
+    await expect(svc.signTypedData({ walletId: 'wallet-1', typedData })).rejects.toThrow(/unexpected recovery id/);
   });
 });
 
@@ -154,6 +196,7 @@ describe('toClientSigner', () => {
     const signature = await signer.signTypedData(typedData);
     const recovered = await recoverTypedDataAddress({ ...asViem, signature });
     expect(recovered.toLowerCase()).toBe(address.toLowerCase());
+    expectEcrecoverV(signature);
   });
 
   it('binds a Turnkey wallet the same way', async () => {
@@ -164,6 +207,7 @@ describe('toClientSigner', () => {
     const signature = await signer.signTypedData(typedData);
     const recovered = await recoverTypedDataAddress({ ...asViem, signature });
     expect(recovered.toLowerCase()).toBe(expectedSigner.toLowerCase());
+    expectEcrecoverV(signature);
   });
 
   it('rejects a provider that returns a non-address', async () => {
