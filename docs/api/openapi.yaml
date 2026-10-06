@@ -932,9 +932,14 @@ paths:
       tags: [Admin]
       summary: Emergency kill switch (toggle)
       description: >-
-        Flips `agent.active`. When pausing, also sets the DB policy inactive so
-        policy checks fail closed and the transaction worker rejects (marks
-        FAILED) any transaction that was already queued but not yet broadcast.
+        Flips `agent.active`. When pausing, also sets the DB policy inactive
+        (and records that the operator pause did it) so policy checks fail
+        closed and the transaction worker rejects (marks FAILED) any
+        transaction that was already queued but not yet broadcast. When the
+        toggle resumes an agent it behaves exactly like
+        `POST /admin/agents/{id}/resume`: the DB policy is re-activated only
+        if the operator pause deactivated it, and the response says what
+        happened (`policyReactivated`, `policyNote`).
         The backend performs NO on-chain call. Pass `syncOnChain: true` to
         receive `AgentPolicyModule.emergencyPause(safe)` (or `resume(safe)`)
         calldata in `onChainSync` for the operator to broadcast via
@@ -948,10 +953,48 @@ paths:
             schema: { $ref: '#/components/schemas/PauseAgentRequest' }
       responses:
         '200':
-          description: Pause toggled. When `syncOnChain=true` and the agent's chain has a policy module, `onChainSync` carries the calldata.
+          description: >-
+            Pause toggled. `{ active: false, onChainSync }` when the agent was
+            paused; the `ResumeAgentResponse` shape when it was resumed. When
+            `syncOnChain=true` and the agent's chain has a policy module,
+            `onChainSync` carries the calldata.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PauseAgentResponse' }
+        '404': { description: Agent not found. }
+
+  /admin/agents/{id}/resume:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdPath'
+    post:
+      tags: [Admin]
+      summary: Resume a paused agent (idempotent)
+      description: >-
+        Explicit, non-toggling counterpart of the pause route. Sets
+        `agent.active = true` and re-activates the DB policy **only if the
+        operator pause deactivated it** (tracked by
+        `AgentPolicy.pausedByOperatorAt`). A policy that was already inactive
+        before the pause — agent soft-delete, `PATCH active=false`, or a pause
+        that predates the marker — stays inactive and `policyNote` says to use
+        `PATCH /v1/agents/{id}/policy`. Calling it on an agent that is not
+        paused is a no-op (`agentReactivated: false`).
+        The backend performs NO on-chain call. Pass `syncOnChain: true` to
+        receive `AgentPolicyModule.resume(safe)` calldata in `onChainSync` for
+        the operator to broadcast via `POST /admin/transactions/batch`
+        (returned even on a no-op, so the chain can be re-synced on its own).
+      security:
+        - adminSecret: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PauseAgentRequest' }
+      responses:
+        '200':
+          description: Agent is active. The body says whether the agent and its policy were actually changed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResumeAgentResponse' }
         '404': { description: Agent not found. }
 
   /admin/agents/{id}/pnl:
@@ -1372,6 +1415,12 @@ components:
           type: string
           format: date-time
           nullable: true
+        pausedByOperatorAt:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+          description: Set while the policy is inactive because `POST /admin/agents/{id}/pause` deactivated it; the admin resume re-activates the policy only while this is set. Cleared by any explicit `active` write.
 
     UpdatePolicyRequest:
       allOf:
@@ -1423,15 +1472,42 @@ components:
           default: false
           description: If true, response includes `emergencyPause(safe)` / `resume(safe)` calldata for on-chain sync.
 
-    PauseAgentResponse:
+    PausedAgentResponse:
       type: object
       required: [active, onChainSync]
       properties:
         active:
           type: boolean
-          description: The agent's new `active` state after the toggle.
+          enum: [false]
+          description: Always `false` — the toggle paused the agent.
         onChainSync:
           $ref: '#/components/schemas/OnChainSync'
+
+    ResumeAgentResponse:
+      type: object
+      required: [active, agentReactivated, policyReactivated, policyNote, onChainSync]
+      properties:
+        active:
+          type: boolean
+          enum: [true]
+          description: Always `true` after a resume.
+        agentReactivated:
+          type: boolean
+          description: "`true` when `agent.active` was flipped from false to true; `false` when the agent was not paused (no-op)."
+        policyReactivated:
+          type: boolean
+          description: "`true` when the DB policy was re-activated because the operator pause had deactivated it."
+        policyNote:
+          type: string
+          description: Why the policy was or was not re-activated (already active, no policy row, or deactivated independently of the pause — use `PATCH /v1/agents/{id}/policy`).
+        onChainSync:
+          $ref: '#/components/schemas/OnChainSync'
+
+    PauseAgentResponse:
+      description: "`PausedAgentResponse` when the toggle paused the agent, `ResumeAgentResponse` when it resumed it."
+      oneOf:
+        - $ref: '#/components/schemas/PausedAgentResponse'
+        - $ref: '#/components/schemas/ResumeAgentResponse'
 
     TrustReport:
       type: object

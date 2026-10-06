@@ -276,7 +276,8 @@ All admin routes require `x-admin-secret` header. Local-only by default.
 | GET | `/admin/agents/:id/transactions` | Agent transaction history |
 | GET | `/admin/transactions` | Global transaction log |
 | POST | `/admin/transactions/batch` | Operator batch execution |
-| POST | `/admin/agents/:id/pause` | Emergency kill switch (toggle). Off-chain only; already-queued txs are rejected by the worker. Body `{ "syncOnChain": true }` returns `emergencyPause`/`resume` calldata in `onChainSync` for the operator to broadcast |
+| POST | `/admin/agents/:id/pause` | Emergency kill switch (toggle). Off-chain only; already-queued txs are rejected by the worker. Pausing deactivates the DB policy and records that the pause did it; when the toggle resumes, it behaves like `/resume` below. Body `{ "syncOnChain": true }` returns `emergencyPause`/`resume` calldata in `onChainSync` for the operator to broadcast |
+| POST | `/admin/agents/:id/resume` | Idempotent resume. Sets `agent.active = true` and re-activates the DB policy **only if the pause deactivated it** (`AgentPolicy.pausedByOperatorAt`); a policy that was inactive before the pause stays inactive. Response: `{ active: true, agentReactivated, policyReactivated, policyNote, onChainSync }`. Body `{ "syncOnChain": true }` returns `resume(safe)` calldata |
 | POST | `/admin/transactions/:id/approve` | Approve PENDING_APPROVAL tx |
 | POST | `/admin/transactions/:id/reject` | Reject PENDING_APPROVAL tx |
 | GET | `/admin/volume` | Daily volume chart (7 days) |
