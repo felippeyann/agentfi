@@ -6,6 +6,11 @@ import { getWalletService } from '../../services/wallet/index.js';
 import { SafeService } from '../../services/wallet/safe.service.js';
 import { generateApiKey } from '../middleware/auth.js';
 import { PolicyService } from '../../services/policy/policy.service.js';
+import {
+  changedPolicyFields,
+  classifyPolicyChange,
+  toPolicyPatch,
+} from '../../services/policy/policy-authority.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
 import { PnLService } from '../../services/billing/pnl.service.js';
 import { EnsService } from '../../services/identity/ens.service.js';
@@ -303,29 +308,65 @@ export async function agentRoutes(fastify: FastifyInstance) {
   /**
    * PATCH /v1/agents/:id/policy — update operational policy.
    *
+   * Authority model ("tighten-only for agents, operator may loosen"):
+   *   - The agent itself (its own `agfi_` key) may only TIGHTEN its policy.
+   *     Any patch that loosens a field is rejected with 403 so a compromised
+   *     or prompt-injected agent cannot raise its own limits.
+   *   - The operator (`x-api-key: <API_SECRET>`, see auth middleware) may set
+   *     any policy on any agent, including loosening.
+   *   See `classifyPolicyChange` for the per-field loosening rules.
+   *
    * Pass `expiresAt` (ISO 8601) to create a temporary task-scoped policy.
    * The policy will be automatically rejected after that timestamp.
-   * Pass `expiresAt: null` to clear a previous expiry and make the policy permanent.
+   * Pass `expiresAt: null` to clear a previous expiry and make the policy permanent
+   * (loosening — operator only once an expiry exists).
    */
   fastify.patch<{ Params: { id: string } }>('/v1/agents/:id/policy', async (request, reply) => {
-    if (request.agentId !== request.params.id) {
+    const agentId = request.params.id;
+    const caller = request.isOperator ? 'operator' : 'agent';
+
+    if (!request.isOperator && request.agentId !== agentId) {
       return reply.code(403).send({ error: 'Access denied' });
     }
 
     const { expiresAt, syncOnChain, ...policyFields } = updatePolicySchema.parse(request.body);
 
     // Convert ISO 8601 → Date for Prisma; undefined means field not touched
-    const policyData: Record<string, unknown> = { ...policyFields };
-    if (expiresAt !== undefined) {
-      policyData['expiresAt'] = expiresAt ? new Date(expiresAt) : null;
+    const patch = toPolicyPatch({
+      ...policyFields,
+      ...(expiresAt !== undefined ? { expiresAt: expiresAt ? new Date(expiresAt) : null } : {}),
+    });
+    const changedFields = changedPolicyFields(patch);
+
+    const current = await policyService.getPolicy(agentId);
+    const { tightens, loosenedFields } = classifyPolicyChange(current, patch);
+
+    if (!request.isOperator && !tightens) {
+      logger.warn(
+        { agentId, caller, changedFields, loosenedFields },
+        'Policy change rejected: agent attempted to loosen its own policy',
+      );
+      return reply.code(403).send({
+        error:
+          'Policy can only be tightened by the agent. Loosening requires the operator credential.',
+        loosenedFields,
+      });
     }
 
-    const policy = await policyService.setPolicy(request.params.id, policyData as any);
-    
+    // An agent caller always exists (auth resolved it) and an existing policy
+    // row implies its agent exists; only the operator can target an unknown id.
+    if (request.isOperator && !current) {
+      const exists = await db.agent.findUnique({ where: { id: agentId }, select: { id: true } });
+      if (!exists) return reply.code(404).send({ error: 'Agent not found' });
+    }
+
+    const policy = await policyService.setPolicy(agentId, patch);
+    logger.info({ agentId, caller, changedFields, loosenedFields }, 'Policy updated');
+
     let onChainSync = null;
     if (syncOnChain) {
       const agent = await db.agent.findUniqueOrThrow({
-        where: { id: request.params.id },
+        where: { id: agentId },
         select: { safeAddress: true, chainIds: true },
       });
       const chainId = agent.chainIds[0] ?? 1;
@@ -346,22 +387,22 @@ export async function agentRoutes(fastify: FastifyInstance) {
         actions.push({ to: contracts.policyModule, value: '0', data: coreCalldata });
 
         // 2. Sync whitelists if they were updated
-        if (policyFields.allowedContracts) {
+        if (patch.allowedContracts) {
           const contractCalldata = await policyService.onChain.buildUpdateWhitelistCalldata({
             type: 'contract',
             safeAddress: agent.safeAddress as `0x${string}`,
-            addresses: policyFields.allowedContracts,
-            allowed: new Array(policyFields.allowedContracts.length).fill(true),
+            addresses: patch.allowedContracts,
+            allowed: new Array(patch.allowedContracts.length).fill(true),
           });
           actions.push({ to: contracts.policyModule, value: '0', data: contractCalldata });
         }
 
-        if (policyFields.allowedTokens) {
+        if (patch.allowedTokens) {
           const tokenCalldata = await policyService.onChain.buildUpdateWhitelistCalldata({
             type: 'token',
             safeAddress: agent.safeAddress as `0x${string}`,
-            addresses: policyFields.allowedTokens,
-            allowed: new Array(policyFields.allowedTokens.length).fill(true),
+            addresses: patch.allowedTokens,
+            allowed: new Array(patch.allowedTokens.length).fill(true),
           });
           actions.push({ to: contracts.policyModule, value: '0', data: tokenCalldata });
         }

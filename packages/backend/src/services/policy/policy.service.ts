@@ -133,7 +133,15 @@ export class PolicyService {
     return { allowed: true, requiresApproval };
   }
 
-  async setPolicy(agentId: string, policy: Omit<AgentPolicy, 'id' | 'agentId' | 'updatedAt'>): Promise<AgentPolicy> {
+  /**
+   * Upserts the agent's policy. Omitted fields keep their current value (or the
+   * schema default when the row is created). Authority checks (who may loosen
+   * what) live in `policy-authority.ts` and the route handler — this is a raw write.
+   */
+  async setPolicy(
+    agentId: string,
+    policy: Partial<Omit<AgentPolicy, 'id' | 'agentId' | 'updatedAt'>>,
+  ): Promise<AgentPolicy> {
     return this.db.agentPolicy.upsert({
       where: { agentId },
       create: { agentId, ...policy },

@@ -6,13 +6,18 @@
 
 import type { FastifyRequest, FastifyReply, FastifyPluginCallback } from 'fastify';
 import fp from 'fastify-plugin';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { db } from '../../db/client.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
     agentId: string;
     agentTier: 'FREE' | 'PRO' | 'ENTERPRISE';
+    /**
+     * `true` when the request was authenticated with the operator `API_SECRET`
+     * rather than an agent key. Operator requests have no `agentId`.
+     */
+    isOperator: boolean;
   }
 }
 
@@ -20,9 +25,26 @@ function hashApiKey(key: string): string {
   return createHash('sha256').update(key).digest('hex');
 }
 
+/**
+ * Routes (`METHOD /route/pattern`) that accept the operator `API_SECRET` as an
+ * alternative to an agent key. Keep this list short and explicit — operator
+ * authority is only granted where a handler checks `request.isOperator`.
+ */
+const OPERATOR_CAPABLE_ROUTES: ReadonlySet<string> = new Set(['PATCH /v1/agents/:id/policy']);
+
+/** Constant-time comparison of a presented `x-api-key` against the operator `API_SECRET`. */
+export function isOperatorKey(presented: unknown): boolean {
+  const expected = process.env['API_SECRET'] ?? '';
+  if (typeof presented !== 'string' || expected.length === 0) return false;
+  const a = Buffer.from(presented, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 const authPlugin: FastifyPluginCallback = (fastify, _opts, done) => {
   fastify.decorateRequest('agentId', '');
   fastify.decorateRequest('agentTier', 'FREE');
+  fastify.decorateRequest('isOperator', false);
 
   fastify.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
     // Skip auth for public / separately-authenticated endpoints
@@ -39,13 +61,24 @@ const authPlugin: FastifyPluginCallback = (fastify, _opts, done) => {
     if (routeUrl?.startsWith('/mcp')) return;
 
     // Agent registration uses the operator API_SECRET, not an agent key
-    if (request.routeOptions?.url === '/v1/agents' && request.method === 'POST') {
-      const operatorSecret = request.headers['x-api-key'];
-      const expectedSecret = process.env['API_SECRET'] ?? '';
-      if (!operatorSecret || operatorSecret !== expectedSecret) {
+    if (routeUrl === '/v1/agents' && request.method === 'POST') {
+      if (!isOperatorKey(request.headers['x-api-key'])) {
         reply.code(401).send({ error: 'Agent registration requires operator API_SECRET' });
         return;
       }
+      request.isOperator = true;
+      return;
+    }
+
+    // A few routes accept EITHER an agent key or the operator API_SECRET
+    // (e.g. loosening an agent's policy). Anything else presented with the
+    // operator secret falls through to the agent-key checks below and is rejected.
+    if (
+      routeUrl &&
+      OPERATOR_CAPABLE_ROUTES.has(`${request.method} ${routeUrl}`) &&
+      isOperatorKey(request.headers['x-api-key'])
+    ) {
+      request.isOperator = true;
       return;
     }
 

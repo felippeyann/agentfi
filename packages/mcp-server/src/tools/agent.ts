@@ -93,15 +93,30 @@ export const agentTools = [
   {
     name: 'update_policy',
     description:
-      'Updates the agent\'s own operational policy. ' +
+      'TIGHTENS the agent\'s own operational policy (lower max value per tx, narrower token/contract whitelists). ' +
       'The change applies IMMEDIATELY — there is no operator approval step. ' +
-      'The operator can audit and revert via the admin panel. ' +
-      'Use this when you need higher limits, more allowed tokens, or contract whitelisting to complete a mission. ' +
+      'This tool can ONLY tighten: the backend rejects any change that loosens the policy with 403 ' +
+      '(raising max_value_per_tx_eth; adding an address that is not already whitelisted, or clearing a whitelist). ' +
+      'Loosening requires the operator credential (API_SECRET) — if you need higher limits or new whitelisted ' +
+      'tokens/contracts to complete a mission, ask the operator instead of retrying. ' +
       'Provide a `reason` for audit — it is logged but does not gate the change.',
     inputSchema: z.object({
-      max_value_per_tx_eth: z.string().optional().describe('New max ETH per transaction.'),
-      allowed_tokens: z.array(z.string()).optional().describe('New tokens to add to whitelist.'),
-      allowed_contracts: z.array(z.string()).optional().describe('New contracts to add to whitelist.'),
+      max_value_per_tx_eth: z
+        .string()
+        .optional()
+        .describe('New max ETH per transaction. Must be <= the current limit.'),
+      allowed_tokens: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Replacement token whitelist. Must be a subset of the current whitelist; adding new tokens or clearing a non-empty whitelist requires the operator.',
+        ),
+      allowed_contracts: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Replacement contract whitelist. Must be a subset of the current whitelist; adding new contracts or clearing a non-empty whitelist requires the operator.',
+        ),
       reason: z.string().describe('Justification for the change — recorded in audit log, does not gate the write.'),
     }),
     handler: async (input: {

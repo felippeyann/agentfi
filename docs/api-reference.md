@@ -36,7 +36,7 @@ Rate limits are tier-based (FREE / PRO / ENTERPRISE) and keyed by `agentId` or I
 | GET | `/v1/agents/search?q=` | Public | Search by name or address (min 2 chars) |
 | GET | `/v1/agents/me` | Agent | Current agent info (from API key) |
 | GET | `/v1/agents/:id` | Agent (owner) | Agent details |
-| PATCH | `/v1/agents/:id/policy` | Agent (owner) | Update policy (limits, whitelist, cooldown) |
+| PATCH | `/v1/agents/:id/policy` | Agent (owner, tighten-only) or Operator | Update policy (limits, whitelist, cooldown). Agents may only tighten; loosening requires `API_SECRET` |
 | GET | `/v1/agents/:id/manifest` | Public | Service manifest for A2A discovery |
 | PATCH | `/v1/agents/me/manifest` | Agent | Update own service manifest |
 | GET | `/v1/agents/:id/trust-report` | Public | Reputation score, A2A tx count |
@@ -143,6 +143,31 @@ an ENS identity. See `.env.example` for configuration details.
   "syncOnChain": true
 }
 ```
+
+**Tighten-only for agents, operator may loosen.** With its own API key an
+agent can only make its policy *stricter*. A patch that loosens any field is
+rejected so a compromised or prompt-injected agent cannot raise its own limits:
+
+```json
+// 403
+{
+  "error": "Policy can only be tightened by the agent. Loosening requires the operator credential.",
+  "loosenedFields": ["maxValuePerTxEth", "allowedContracts"]
+}
+```
+
+A field loosens when: `maxValuePerTxEth` or `maxDailyVolumeUsd` increases
+(`maxDailyVolumeUsd: "0"` means *no daily limit*, so it loosens any positive
+limit); `allowedContracts` / `allowedTokens` go from non-empty to empty or gain
+an address not already in the list (case-insensitive); `cooldownSeconds`
+decreases; `active` goes `false → true`; `expiresAt` is cleared or moved later
+while one existed. With no policy row yet, any patch that sets a limit is a
+tightening.
+
+The operator sends the same request with `x-api-key: <API_SECRET>` and may set
+any policy on any agent (returns `404` for an unknown agent id). Every policy
+write is logged with the agent id, caller kind (`agent` / `operator`) and the
+changed fields.
 
 ---
 
