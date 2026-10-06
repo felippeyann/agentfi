@@ -40,7 +40,7 @@ Verify:
 
 ```bash
 forge --version
-# Should show: forge 0.2.x (...)
+# Should show: forge Version: 1.7.1 (or a newer 1.x); 0.2.x is too old for this repo
 ```
 
 ### Install contract dependencies
@@ -161,33 +161,45 @@ Copy those lines to your `.env` (local) or hosting provider's secret manager (pr
 
 | Contract | Constructor | Role |
 |----------|-------------|------|
-| `AgentJobEscrow` | `(token, feeWallet, operator, evaluatorFeeBP, platformFeeBP)` | Implements the published ERC-8183 interface verbatim (`createJob`, `setProvider`, `setBudget`, `fund`, `submit`, `complete`, `reject`, `claimRefund`, `getJob` + events). One ERC-20 per contract (USDC). On `complete` the provider receives `budget − platformFee − evaluatorFee`; rejection after funding and expiry refund the client in full. AgentFi extensions outside the standard: `setProviderAgentId` / `providerAgentId(jobId)` (ERC-8004 id read by the hook), `submittedAt(jobId)`, `pause()` / `unpause()` by `operator` (blocks `createJob` and `fund` only, never settlement or refunds), `jobCount()`. |
-| `ReputationHook` | `(acp, reputationRegistry)` | `IACPHook` attached per job at `createJob(..., hook)`. On `afterAction` for `complete` it calls `giveFeedback(providerAgentId, 100, 0, "agentfi.job", "completed", "", feedbackURI, feedbackHash)`; on `reject` of a job that had been `Submitted` it writes value `0` with tag `"rejected"`. `optParams` of `complete`/`reject` must be `abi.encode(string feedbackURI, bytes32 feedbackHash)`. Empty/malformed params, a missing agent id or a registry revert emit `FeedbackSkipped` / `FeedbackFailed` and never block settlement. Only the escrow may call it (`onlyACP`). |
+| `AgentJobEscrow` | `(token, feeWallet, operator, evaluatorFeeBP, platformFeeBP)` | Implements the published ERC-8183 interface verbatim (`createJob`, `setProvider`, `setBudget`, `fund`, `submit`, `complete`, `reject`, `claimRefund`, `getJob` + events). One ERC-20 per contract (USDC). `setProvider` works once only (reverts `ProviderAlreadySet` if a provider is already named). On `complete` the provider receives `budget − platformFee − evaluatorFee`; the platform fee is **accrued** in `pendingPlatformFees` (pull-based) and swept with `withdrawPlatformFees()` by `feeWallet` or `operator`; rejection after funding and expiry refund the client in full. AgentFi extensions outside the standard: `setProviderAgentId` / `providerAgentId(jobId)` (ERC-8004 id, set by the client or the provider, verified by the hook), `submittedAt(jobId)`, `pendingPlatformFees()`, `withdrawPlatformFees()`, `setFeeWallet()` (operator), `pause()` / `unpause()` by `operator` (blocks `createJob` and `fund` only, never settlement, refunds or fee withdrawal), `jobCount()`. |
+| `ReputationHook` | `(acp, reputationRegistry, identityRegistry, trustedEvaluator, minFeedbackBudget)` | `IACPHook` attached per job at `createJob(..., hook)`. On `afterAction` for `complete` it calls `giveFeedback(providerAgentId, 100, 0, "agentfi.job", "completed", "", feedbackURI, feedbackHash)`; on `reject` of a job that had been `Submitted` it writes value `0` with tag `"rejected"`. It writes **only** when `job.evaluator == trustedEvaluator`, the Identity Registry reports `ownerOf(agentId)` or `getAgentWallet(agentId)` equal to `job.provider`, and `job.budget >= minFeedbackBudget`; otherwise it emits `FeedbackSkipped(reason)`. `optParams` of `complete`/`reject` must be `abi.encode(string feedbackURI, bytes32 feedbackHash)`. A `reject` with reason `REASON_PAYOUT_BLOCKED = keccak256("agentfi.payout-blocked")` writes nothing. Registry failures emit `FeedbackFailed` and never block settlement. `revokeFeedback(agentId, feedbackIndex)` (trusted evaluator only) forwards to the registry. Only the escrow may call the hook entry points (`onlyACP`). |
 
-Both contracts are non-upgradeable and all constructor parameters are immutable. Changing the fee or the token means redeploying the escrow (and the hook, since it is bound to the escrow address).
+Both contracts are non-upgradeable and every constructor parameter is immutable **except the escrow's `feeWallet`**, which the operator can rotate with `setFeeWallet`. Changing the fee bps, the token, the trusted evaluator or the registries means redeploying the escrow (and the hook, since it is bound to the escrow address).
 
 ### Environment variables
 
 ```bash
-export PRIVATE_KEY="0x..."            # deployer EOA (needs ETH for gas)
-export OPERATOR_ADDRESS="0x..."       # may pause/unpause createJob + fund; cannot move funds
-export FEE_WALLET="0x..."             # receives platformFeeBP of every completed job, in USDC
+export OPERATOR_ADDRESS="0x..."       # may pause/unpause createJob + fund, rotate the fee wallet and sweep fees; cannot move escrowed budgets
+export FEE_WALLET="0x..."             # initial receiver of accrued platform fees (withdrawPlatformFees); rotatable later
+export TRUSTED_EVALUATOR="0x..."      # backend signer that calls complete/reject (D5); the only evaluator whose jobs write ERC-8004 feedback
 
 # Optional — defaults shown
 export FEE_BPS="30"                   # platformFeeBP (D6: 30 bps during validation)
 export EVALUATOR_FEE_BPS="0"          # evaluatorFeeBP (D5: evaluator = backend signer, no fee)
+export MIN_FEEDBACK_BUDGET="1000000"  # smallest job budget (token units, 1 USDC) that may write feedback
 export USDC_ADDRESS="0x..."           # defaults per chain, see table
 export REPUTATION_REGISTRY_ADDRESS="0x..."  # defaults per chain, see table
+export IDENTITY_REGISTRY_ADDRESS="0x..."    # defaults per chain, see table
+# export PRIVATE_KEY="0x..."          # discouraged: prefer `--account <keystore>` / `--ledger` on the forge command (see below)
 ```
 
-Defaults resolved from `block.chainid` when the variable is unset (any other chain requires both to be set explicitly):
+Defaults resolved from `block.chainid` when the variable is unset (any other chain requires all three to be set explicitly):
 
-| Chain | `USDC_ADDRESS` | `REPUTATION_REGISTRY_ADDRESS` (ERC-8004) |
-|-------|----------------|------------------------------------------|
-| Base (8453) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `0x8004BAa17C55a88189AE136b182e5fdA19dE9b63` |
-| Base Sepolia (84532) | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | `0x8004B663056A597Dffe9eCcC1965A193B7388713` |
+| Chain | `USDC_ADDRESS` | `REPUTATION_REGISTRY_ADDRESS` (ERC-8004) | `IDENTITY_REGISTRY_ADDRESS` (ERC-8004) |
+|-------|----------------|------------------------------------------|----------------------------------------|
+| Base (8453) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `0x8004BAa17C55a88189AE136b182e5fdA19dE9b63` | `0x8004A169FB4a3325136EB29fA0ceB6D2e539a432` |
+| Base Sepolia (84532) | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | `0x8004B663056A597Dffe9eCcC1965A193B7388713` | `0x8004A818BFB912233c491871b3d84c89A494BD9e` |
 
-`FEE_BPS + EVALUATOR_FEE_BPS` must be below 10 000 or the constructor reverts. The escrow constructor also reverts if `USDC_ADDRESS` has no code on the target chain.
+The script validates everything **before** broadcasting: `FEE_BPS + EVALUATOR_FEE_BPS` must be below 10 000 (`InvalidFees`), and the token and both registries must have code on the target chain (`NotAContract`). `TRUSTED_EVALUATOR`, `OPERATOR_ADDRESS` and `FEE_WALLET` must be non-zero (constructor `ZeroAddress`).
+
+**Signer.** Import the deployer key once into Foundry's encrypted keystore and pass `--account` instead of exporting `PRIVATE_KEY`:
+
+```bash
+cast wallet import agentfi-deployer --interactive     # prompts for the key, stores it encrypted under ~/.foundry/keystores
+forge script script/DeployEscrow.s.sol --rpc-url base_sepolia --account agentfi-deployer --broadcast --verify --etherscan-api-key $BASESCAN_API_KEY
+```
+
+`--ledger` / `--trezor` / `--private-key` work the same way. When `PRIVATE_KEY` is unset (or `0`) the script calls `vm.startBroadcast()` without a key and Foundry uses the CLI signer; when it is set, the script broadcasts with it (kept for backwards compatibility).
 
 ### Deployment order
 
@@ -203,6 +215,7 @@ forge test -vvv                                   # must be green
 
 forge script script/DeployEscrow.s.sol \
   --rpc-url base_sepolia \
+  --account agentfi-deployer \
   --broadcast \
   --verify \
   --etherscan-api-key $BASESCAN_API_KEY
@@ -229,19 +242,28 @@ cast call $ESCROW "operator()(address)"         --rpc-url $RPC   # == OPERATOR_A
 cast call $ESCROW "platformFeeBP()(uint256)"    --rpc-url $RPC   # == FEE_BPS
 cast call $ESCROW "evaluatorFeeBP()(uint256)"   --rpc-url $RPC   # == EVALUATOR_FEE_BPS
 cast call $ESCROW "paused()(bool)"              --rpc-url $RPC   # false
+cast call $ESCROW "pendingPlatformFees()(uint256)" --rpc-url $RPC # 0
 cast call $HOOK   "acp()(address)"              --rpc-url $RPC   # == ESCROW
 cast call $HOOK   "reputationRegistry()(address)" --rpc-url $RPC # == REPUTATION_REGISTRY_ADDRESS
+cast call $HOOK   "identityRegistry()(address)" --rpc-url $RPC   # == IDENTITY_REGISTRY_ADDRESS
+cast call $HOOK   "trustedEvaluator()(address)" --rpc-url $RPC   # == TRUSTED_EVALUATOR
+cast call $HOOK   "minFeedbackBudget()(uint256)" --rpc-url $RPC  # == MIN_FEEDBACK_BUDGET (1000000)
 cast call $HOOK   "supportsInterface(bytes4)(bool)" 0x7ff6bc9e --rpc-url $RPC  # true (IACPHook id)
+cast call $HOOK   "supportsInterface(bytes4)(bool)" 0xffffffff --rpc-url $RPC  # false (the escrow probes this too)
 ```
 
-Note: `0x7ff6bc9e` is the `IACPHook` ERC-165 id (`beforeAction.selector 0xdc08fb1d ^ afterAction.selector 0xa3fe4783`). The escrow checks it at `createJob`, so a successful `createJob(..., hook)` on testnet is the simplest end-to-end check.
+Note: `0x7ff6bc9e` is the `IACPHook` ERC-165 id (`beforeAction.selector 0xdc08fb1d ^ afterAction.selector 0xa3fe4783`; `IACPHook is IERC165` does not change it). The escrow checks it (and that `0xffffffff` answers `false`) at `createJob`, so a successful `createJob(..., hook)` on testnet is the simplest end-to-end check.
 
 ### Operational notes
 
-- **Emergency path.** `pause()` (operator) stops new jobs and new funding. Jobs already funded can still be submitted, completed, rejected and refunded; the operator can never redirect escrowed USDC.
-- **Expiry.** `claimRefund(jobId)` is permissionless once `block.timestamp >= expiredAt` for `Funded`/`Submitted` jobs and is never hooked, so no hook failure can trap funds.
-- **Reputation writes** are only as good as `providerAgentId`: the backend must call `setProviderAgentId(jobId, erc8004AgentId)` (client-only, while `Open`/`Funded`) before settlement, and pass `abi.encode(feedbackURI, feedbackHash)` as `optParams` to `complete`/`reject`.
-- **Reading reputation:** `getSummary(agentId, [REPUTATION_HOOK_ADDRESS], "agentfi.job", "")` on the registry returns only feedback written by the hook, i.e. backed by a settled escrow payment.
+- **Emergency path.** `pause()` (operator) stops new jobs and new funding. Jobs already funded can still be submitted, completed, rejected and refunded, and fees can still be withdrawn; the operator can never redirect escrowed USDC.
+- **Platform fees are pull-based.** `complete` accrues the fee (`PlatformFeeAccrued`); `withdrawPlatformFees()` (by `feeWallet` or the operator) sweeps `pendingPlatformFees()` to the current `feeWallet`. If the fee wallet is frozen by the USDC blacklist or its key is lost, `complete` is unaffected: rotate with `setFeeWallet(new)` (operator, `FeeWalletUpdated`) and withdraw again. The evaluator fee (default 0) is still push-paid inside `complete`; keep `EVALUATOR_FEE_BPS = 0` unless the evaluator address is guaranteed to accept USDC.
+- **Blacklisted client or provider (no escape hatch by design).** A blacklisted client makes `reject` (after funding) and `claimRefund` revert; `complete` (pay the provider) is the only exit and the budget otherwise stays escrowed until the client is cleared. A blacklisted provider makes `complete` revert; the evaluator unwinds with `reject(jobId, keccak256("agentfi.payout-blocked"), …)`, which refunds the client and makes the hook skip the negative feedback (`payout-blocked`), or anyone calls `claimRefund` after expiry.
+- **Expiry.** `claimRefund(jobId)` is permissionless once `block.timestamp >= expiredAt` for `Funded`/`Submitted` jobs and is never hooked, so no hook failure can trap funds. On a `Submitted` job it **races** the evaluator's `complete`/`reject` once expired (first mined tx wins, the other reverts `InvalidStatus`): the backend must settle before `expiredAt`.
+- **Single provider.** `setProvider` only works while `job.provider == address(0)`; a job created with a provider cannot have it changed (`ProviderAlreadySet`).
+- **Reputation writes** happen only when all gates pass: the job's evaluator is `TRUSTED_EVALUATOR`, `providerAgentId` is set (by the client **or** the provider, while `Open`/`Funded`; cleared by `setProvider`) **and** the Identity Registry reports that id as owned by, or agent-wallet-bound to, `job.provider`, the budget is at least `MIN_FEEDBACK_BUDGET`, and `optParams` is `abi.encode(feedbackURI, feedbackHash)`. Anything else emits `FeedbackSkipped(jobId, reason)` (`untrusted-evaluator`, `no-params`, `not-submitted`, `payout-blocked`, `no-agent-id`, `budget-too-small`, `bad-params`, `agent-not-provider`) and settlement proceeds. Alert on `FeedbackFailed` (registry revert / no code / out of gas).
+- **Correcting a wrong entry.** `ReputationHook.revokeFeedback(agentId, feedbackIndex)` from the `TRUSTED_EVALUATOR` key forwards to the registry (`FeedbackRevoked`). Feedback is otherwise immutable; keep the `feedbackIndex` from the registry's `NewFeedback` event.
+- **Reading reputation:** `getSummary(agentId, [REPUTATION_HOOK_ADDRESS], "agentfi.job", "")` on the registry returns only feedback written by the hook, i.e. backed by a settled escrow payment decided by the operator signer for an identity the paid provider controls.
 
 ---
 
@@ -252,14 +274,18 @@ When expanding beyond a single chain, deploy to each chain separately and track 
 ### Per-chain checklist
 
 ```
-[ ] Deployer wallet funded with gas on chain
+[ ] Deployer wallet funded with gas on chain (imported into the Foundry keystore: `cast wallet import`)
 [ ] Explorer API key obtained
 [ ] Backend ABI matches the source: `npm run abi:executor` produces no git diff (see "ABI versioning")
 [ ] forge test passes
-[ ] forge script Deploy.s.sol --rpc-url <alias> --broadcast --verify
+[ ] forge script Deploy.s.sol --rpc-url <alias> --account <keystore> --broadcast --verify
+[ ] USDC_ADDRESS / REPUTATION_REGISTRY_ADDRESS / IDENTITY_REGISTRY_ADDRESS known for the chain (defaults exist for Base + Base Sepolia only)
+[ ] TRUSTED_EVALUATOR, OPERATOR_ADDRESS, FEE_WALLET exported
+[ ] forge script DeployEscrow.s.sol --rpc-url <alias> --account <keystore> --broadcast --verify
 [ ] Output addresses recorded (see Address Registry below)
-[ ] .env / hosting secrets updated with POLICY_MODULE_ADDRESS_<chainId> and EXECUTOR_ADDRESS_<chainId>
-[ ] Post-deploy verification passed (see Verification section)
+[ ] .env / hosting secrets updated with POLICY_MODULE_ADDRESS_<chainId>, EXECUTOR_ADDRESS_<chainId>,
+    AGENT_JOB_ESCROW_ADDRESS_<chainId> and REPUTATION_HOOK_ADDRESS_<chainId>
+[ ] Post-deploy verification passed (see Verification section and the escrow/hook cast checks above)
 [ ] Backend restarted to pick up new addresses
 ```
 
@@ -519,7 +545,7 @@ cast call <SAFE_ADDRESS> \
 
 ### Wrong parameters at deploy time
 
-Contract constructor parameters (`operator`, `feeWallet`, `feeBps`) are **immutable** — they cannot be changed after deployment. If deployed with wrong values:
+Contract constructor parameters (`operator`, `feeWallet`, `feeBps`) are **immutable** — they cannot be changed after deployment. The one exception is `AgentJobEscrow.feeWallet`, which the operator can rotate with `setFeeWallet` (accrued fees then flow to the new wallet). If deployed with wrong values:
 
 1. **Do not** attempt to interact with the misconfigured contracts
 2. Update `.env` to remove the incorrect addresses

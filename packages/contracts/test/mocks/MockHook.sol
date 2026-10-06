@@ -6,9 +6,10 @@ import {IERC20} from "forge-std/interfaces/IERC20.sol";
 import {IACPHook} from "../../src/IACPHook.sol";
 import {AgentJobEscrow} from "../../src/AgentJobEscrow.sol";
 
-/// @dev Records every hook call in order, with the job status and a watched token balance at call time.
-///      Can be told to revert in `beforeAction` and/or `afterAction`.
-contract MockHook is IACPHook, IERC165 {
+/// @dev Records every hook call in order, with the job status, a watched token balance, the escrow
+///      balance and the accrued platform fees at call time. Can be told to revert in `beforeAction`
+///      and/or `afterAction`.
+contract MockHook is IACPHook {
     struct Call {
         bool isBefore;
         uint256 jobId;
@@ -17,6 +18,7 @@ contract MockHook is IACPHook, IERC165 {
         AgentJobEscrow.JobStatus status;
         uint256 watchedBalance;
         uint256 escrowBalance;
+        uint256 pendingFees;
     }
 
     AgentJobEscrow public immutable escrow;
@@ -82,11 +84,12 @@ contract MockHook is IACPHook, IERC165 {
         c.status = escrow.getJob(jobId).status;
         c.watchedBalance = watched == address(0) ? 0 : token.balanceOf(watched);
         c.escrowBalance = token.balanceOf(address(escrow));
+        c.pendingFees = escrow.pendingPlatformFees();
     }
 }
 
 /// @dev Implements the hook functions but denies the interface via ERC-165.
-contract NoERC165Hook is IACPHook, IERC165 {
+contract NoERC165Hook is IACPHook {
     function beforeAction(uint256, bytes4, bytes calldata) external {}
     function afterAction(uint256, bytes4, bytes calldata) external {}
 
@@ -95,14 +98,15 @@ contract NoERC165Hook is IACPHook, IERC165 {
     }
 }
 
-/// @dev Implements the hook functions but has no `supportsInterface` at all.
-contract NoSupportsInterfaceHook is IACPHook {
+/// @dev Implements the hook functions but has no `supportsInterface` at all (cannot inherit
+///      `IACPHook`, which now requires it).
+contract NoSupportsInterfaceHook {
     function beforeAction(uint256, bytes4, bytes calldata) external {}
     function afterAction(uint256, bytes4, bytes calldata) external {}
 }
 
 /// @dev Returns a non-boolean word from `supportsInterface` (malformed ERC-165).
-contract GarbageERC165Hook is IACPHook {
+contract GarbageERC165Hook {
     function beforeAction(uint256, bytes4, bytes calldata) external {}
     function afterAction(uint256, bytes4, bytes calldata) external {}
 
@@ -111,9 +115,40 @@ contract GarbageERC165Hook is IACPHook {
     }
 }
 
+/// @dev "Yes-man": claims to support every interface, including `0xffffffff` (invalid per ERC-165).
+contract YesManHook is IACPHook {
+    function beforeAction(uint256, bytes4, bytes calldata) external {}
+    function afterAction(uint256, bytes4, bytes calldata) external {}
+
+    function supportsInterface(bytes4) external pure returns (bool) {
+        return true;
+    }
+}
+
+/// @dev Returns two words from `supportsInterface` (oversized return data).
+contract WideReturnERC165Hook {
+    function beforeAction(uint256, bytes4, bytes calldata) external {}
+    function afterAction(uint256, bytes4, bytes calldata) external {}
+
+    function supportsInterface(bytes4) external pure returns (bool, bool) {
+        return (true, false);
+    }
+}
+
+/// @dev Returns `true` for `IACPHook` but reverts on the mandatory `0xffffffff` probe.
+contract RevertsOnInvalidIdHook is IACPHook {
+    function beforeAction(uint256, bytes4, bytes calldata) external {}
+    function afterAction(uint256, bytes4, bytes calldata) external {}
+
+    function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
+        require(interfaceId != 0xffffffff, "unsupported");
+        return interfaceId == type(IACPHook).interfaceId;
+    }
+}
+
 /// @dev Malicious hook: re-enters the escrow with `attackData` from `beforeAction` or `afterAction`
 ///      (whichever is selected) and records the result instead of bubbling the revert.
-contract ReentrantHook is IACPHook, IERC165 {
+contract ReentrantHook is IACPHook {
     address public target;
     bytes public attackData;
     bool public attackInBefore;

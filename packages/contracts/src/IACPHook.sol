@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
+import {IERC165} from "forge-std/interfaces/IERC165.sol";
+
 /**
  * @title IACPHook
  * @notice ERC-8183 (Agentic Commerce) per-job hook interface, verbatim from the published EIP
- *         text (2026-03-13 revision).
+ *         text (2026-03-13 revision), including its `is IERC165` inheritance.
  *
  * @dev A hook is fixed per job at `createJob` and is invoked by the escrow around exactly six
  *      actions: `setProvider`, `setBudget`, `fund`, `submit`, `complete` and `reject`.
@@ -23,14 +25,15 @@ pragma solidity 0.8.24;
  *        - `complete`    → `abi.encode(bytes32 reason, bytes optParams)`
  *        - `reject`      → `abi.encode(bytes32 reason, bytes optParams)`
  *
- *      ERC-165 expectation: implementations MUST also expose
- *      `supportsInterface(bytes4 interfaceId) external view returns (bool)` and return `true`
- *      for `type(IACPHook).interfaceId` (the XOR of the two selectors below). The escrow
- *      checks this at `createJob` and rejects hooks that do not advertise the interface.
+ *      ERC-165: `type(IACPHook).interfaceId` is the XOR of the two selectors declared below
+ *      (`0x7ff6bc9e`); inherited functions are excluded by definition, so declaring `is IERC165`
+ *      does not change it. Implementations MUST return `true` from `supportsInterface` for that
+ *      id and `false` for `0xffffffff`. The escrow checks both at `createJob` with strict
+ *      decoding and rejects hooks that do not comply.
  *      Hooks SHOULD restrict both functions to the escrow (`onlyACP`) and SHOULD be
  *      non-upgradeable so that the behaviour attached to a job cannot change after funding.
  */
-interface IACPHook {
+interface IACPHook is IERC165 {
     /**
      * @notice Called by the escrow before the state change of a hookable action.
      * @param jobId The job the action applies to.

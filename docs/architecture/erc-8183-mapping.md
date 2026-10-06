@@ -63,15 +63,19 @@ Events: `JobCreated, ProviderSet, BudgetSet, JobFunded, JobSubmitted, JobComplet
 | `result` | `deliverable` (bytes32) | hash of result JSON |
 | `reason` field on job updates | `reason` (bytes32) on `complete`/`reject` | hash of the human-readable reason |
 
-## 3. Proposed contract: `AgentJobEscrow.sol`
+## 3. Contract: `AgentJobEscrow.sol` (as implemented, review R2 applied 2026-10-06)
 
-- Implements the interface above verbatim (so third-party ERC-8183 tooling and indexers work).
-- `token` = USDC per contract (constructor), with an allowlist for later tokens; fee-on-transfer tokens rejected (as in base-contracts).
-- Stores `providerAgentId` (ERC-8004 id) per job in a side mapping, set via `optParams` on `setProvider`/`fund`, as in the revised draft (see §4). Emitted in `JobCreated`/`ProviderSet` extension events.
-- `platformFeeBP` optional and immutable; fee goes to `feeWallet` on `Completed` only (replaces the executor's ETH-only fee for A2A flows if the owner agrees, plan §5.2).
-- Operator **emergency path** (pause new jobs; no ability to redirect funds) kept outside the standard surface.
-- Hook per job = AgentFi's `ReputationHook` (see [erc-8004-integration.md](erc-8004-integration.md)) by default; any ERC-165 `IACPHook` accepted.
-- Non-upgradeable for the validation period (simpler audit surface); base-contracts' UUPS is not adopted.
+- Implements the interface above verbatim (so third-party ERC-8183 tooling and indexers work). `IACPHook is IERC165` as in the reference; interface id `0x7ff6bc9e` unchanged.
+- `token` = USDC per contract (constructor); fee-on-transfer tokens rejected (as in base-contracts). Native ETH is not supported (§4).
+- **Single provider assignment.** `setProvider` follows the published text literally: it reverts (`ProviderAlreadySet`) when `job.provider != address(0)`, so a provider is assigned exactly once, either at `createJob` or by one `setProvider` while `Open`. A provider can never be swapped after being named.
+- Stores `providerAgentId` (ERC-8004 id) per job in a side mapping, set with the extension function `setProviderAgentId(jobId, agentId)` by the **client or the provider** while `Open`/`Funded`, cleared by `setProvider`, and emitted as `ProviderAgentIdSet`. The escrow does not validate the id: `ReputationHook` checks ownership against the Identity Registry before writing (see [erc-8004-integration.md](erc-8004-integration.md) §4).
+- **Fees are pull-based.** `complete` pays `budget − platformFee − evaluatorFee` to the provider, pushes `evaluatorFee` to the evaluator (AgentFi default 0 bps) and **accrues** `platformFee` in `pendingPlatformFees` (`PlatformFeeAccrued`). `withdrawPlatformFees()` (callable by `feeWallet` or the operator) sweeps the accrual to the *current* `feeWallet`, which the operator can rotate with `setFeeWallet` (`FeeWalletUpdated`). A frozen or lost fee wallet therefore never blocks `complete`. The evaluator fee stays push-paid because the evaluator is the operator signer; if a non-zero evaluator fee is ever configured and that address cannot receive USDC, `complete` reverts and `reject`/`claimRefund` are the exits (documented liveness caveat). Fee math uses a split multiplication and never overflows for any `uint256` budget.
+- **Blacklisted parties (no escape hatch, on purpose).** Refunds are pushed to `job.client`: if the client is blacklisted by the token, `reject` (after funding) and `claimRefund` revert and `complete` is the only exit; funds stay in the escrow until the client is cleared. If the provider is blacklisted, `complete` reverts and the evaluator unwinds with `reject(jobId, REASON_PAYOUT_BLOCKED, …)` (the hook then writes no negative feedback) or anyone calls `claimRefund` after expiry. The operator can never redirect escrowed budgets, which is the point.
+- **Expiry race (spec-permitted).** Once `block.timestamp >= expiredAt`, a `Submitted` job can still be settled by the evaluator (`complete`/`reject`) *and* expired by anyone (`claimRefund`); the first transaction mined wins and the other reverts with `InvalidStatus`. The backend evaluator must settle before `expiredAt`; the reference implementations behave the same way.
+- **Hook detection is strict.** At `createJob` the escrow requires `supportsInterface(0x7ff6bc9e)` to return exactly `true` and `supportsInterface(0xffffffff)` to return exactly `false` (one 32-byte word each, gas-capped static calls). "Yes-man" contracts, garbage words, reverts and oversized returns are rejected with `UnsupportedHook` instead of panicking.
+- Operator **emergency path** (pause `createJob`/`fund`; settlement and refunds never pausable; no ability to redirect funds) kept outside the standard surface.
+- Hook per job = AgentFi's `ReputationHook` by default; any strict ERC-165 `IACPHook` accepted.
+- Non-upgradeable for the validation period (simpler audit surface); base-contracts' UUPS is not adopted. The only mutable parameter is `feeWallet`.
 
 ## 4. Known pitfalls and version drift
 

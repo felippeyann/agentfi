@@ -47,14 +47,29 @@ Facts that shape the design:
 
 ## 4. AgentFi design: feedback written by the escrow hook
 
-**Writer = `ReputationHook.sol`**, an ERC-8183 `IACPHook` attached to every AgentFi job:
+**Writer = `ReputationHook.sol`**, an ERC-8183 `IACPHook` attached to every AgentFi job. Constructor: `(acp, reputationRegistry, identityRegistry, trustedEvaluator, minFeedbackBudget)`, all immutable.
 
-- `afterAction(jobId, selector, data)` with `selector ∈ {complete, reject}` decodes `(bytes32 reason, bytes optParams)`, reads the job's `providerAgentId` from `AgentJobEscrow`, and calls `giveFeedback(providerAgentId, value, 0, "agentfi.job", status, "", feedbackURI, feedbackHash)` in the **same transaction** as settlement.
+- `afterAction(jobId, selector, data)` with `selector ∈ {complete, reject}` decodes `(bytes32 reason, bytes optParams)`, reads the job (`provider`, `evaluator`, `budget`) and its `providerAgentId` from `AgentJobEscrow`, and calls `giveFeedback(providerAgentId, value, 0, "agentfi.job", status, "", feedbackURI, feedbackHash)` in the **same transaction** as settlement.
   - `value`: `100` for `Completed`, `0` for `Rejected` by evaluator after `Submitted`; no feedback for client rejections while `Open` (no work happened) and none on `claimRefund` (not hookable by the standard).
   - `tag1 = "agentfi.job"`, `tag2 = "completed" | "rejected"`.
   - `feedbackURI = https://<backend>/v1/jobs/<jobId>/feedback.json`; `feedbackHash = keccak256(file)`. The hook receives both in `optParams` (built by the backend when it calls `complete`/`reject` as evaluator).
-- Because the hook is `msg.sender`, it can never be the agent's owner/operator (gate satisfied) and it becomes the canonical `clientAddress`: any consumer can call `getSummary(agentId, [hookAddress], "agentfi.job", "")` and obtain only feedback backed by a real settlement.
 - `onlyACP` (only `AgentJobEscrow` may call), non-upgradeable, ERC-165.
+
+**Gates (review R2, 2026-10-06).** Being the escrow's hook is not enough on its own: any client may name itself evaluator of its own job, set a dust budget (fee rounds to zero) and attach *anyone's* `providerAgentId`, which would let it forge hook-signed entries for free. The hook therefore writes only when **all** of the following hold, and otherwise emits `FeedbackSkipped(jobId, reason)` without touching settlement:
+
+| Gate | Skip reason | What it guarantees |
+|---|---|---|
+| `job.evaluator == trustedEvaluator` (operator / backend signer, decision D5) | `untrusted-evaluator` | The settlement decision was taken by the operator, not by the client rating itself or a competitor. Third-party evaluators (post-validation) will need a new hook deployment. |
+| `providerAgentId` set and `ownerOf(agentId) == job.provider` **or** `getAgentWallet(agentId) == job.provider` on the Identity Registry (static calls, strict decoding: revert, no code or malformed data all count as "no") | `no-agent-id`, `agent-not-provider` | An identity can only be rated through a job that its own owner / agent wallet delivered and was paid for. Nobody can attach somebody else's id. Either the client or the provider may call `setProviderAgentId`; `setProvider` clears it. |
+| `job.budget >= minFeedbackBudget` (deploy default `1_000_000` = 1 USDC) | `budget-too-small` | Every written entry paid a real platform fee (30 bps of ≥ 1 USDC); dust jobs cannot farm reputation. |
+| `optParams` non-empty and well-formed | `no-params`, `bad-params` | The backend committed a feedback file hash. |
+| on `reject`: the job had been `Submitted` and `reason != REASON_PAYOUT_BLOCKED` | `not-submitted`, `payout-blocked` | Negative feedback only for rejected *delivered* work; unwinding a job whose provider cannot receive USDC (blacklist) is not a quality signal. |
+
+A failing registry (no code, revert, out of gas) emits `FeedbackFailed` instead; settlement never depends on the registries.
+
+**Proof of interaction, restated.** Because the hook is `msg.sender`, it can never be the agent's owner/operator (anti-self-feedback gate satisfied) and it becomes the canonical `clientAddress`. A consumer calling `getSummary(agentId, [hookAddress], "agentfi.job", "")` therefore reads only entries for which, on-chain and in one transaction: (1) USDC was escrowed and settled through `AgentJobEscrow`, (2) the operator signer took the decision, (3) the rated identity is owned by (or has its agent wallet set to) the address that delivered and was paid, (4) the budget was at least `minFeedbackBudget`, so a platform fee was collected. Sybil feedback now costs at least the fee of a 1 USDC job *and* requires control of the rated identity, which makes self-rating pointless (an agent can only raise the score of an id it already controls, at a cost) and smearing impossible.
+
+**Corrections.** Feedback is otherwise immutable. `ReputationHook.revokeFeedback(agentId, feedbackIndex)` (callable by `trustedEvaluator` only, the same key that triggers the writes) forwards to the registry's `revokeFeedback`, which only accepts the original writer, i.e. the hook. The backend keeps the `feedbackIndex` from `NewFeedback` for this purpose. Revoked entries stay readable with `includeRevoked = true`.
 
 **Feedback file** (served by the backend, hash committed on-chain):
 
@@ -83,5 +98,6 @@ The settlement tx itself cannot be referenced inside the file it hashes; consume
 
 ## 6. Decisions (owner, 2026-10-06)
 
-- Identity is minted on the **first funded job** (plan D7); `erc8004AgentId` is set lazily in the fund flow.
-- Feedback writer = `ReputationHook` attached to every AgentFi job, as described in §4.
+- Identity is minted on the **first funded job** (plan D7); `erc8004AgentId` is set lazily in the fund flow. Because the hook verifies `ownerOf` / `getAgentWallet` against `job.provider`, the minted identity must be owned by (or have its agent wallet set to) the address that calls `submit`, i.e. the agent's Safe/EOA used as `provider`.
+- Feedback writer = `ReputationHook` attached to every AgentFi job, as described in §4, gated on the trusted evaluator (D5), identity ownership and `minFeedbackBudget` (review R2, 2026-10-06).
+- Revocation authority = `trustedEvaluator` (not the escrow `operator`): one key both writes and corrects, and the escrow operator keeps a pause-only role.

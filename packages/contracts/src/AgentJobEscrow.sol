@@ -31,9 +31,28 @@ import {IACPHook} from "./IACPHook.sol";
  *      Native ETH is not supported by the standard; legacy ETH jobs stay on `EscrowModule`.
  *
  *      Fees: on `complete` the provider receives `budget - platformFee - evaluatorFee`, where
- *      `platformFee = budget * platformFeeBP / 10_000` goes to `feeWallet` and
- *      `evaluatorFee = budget * evaluatorFeeBP / 10_000` goes to the evaluator. Both bps are
- *      immutable and their sum is below 10_000. No fee is taken on rejection or expiry.
+ *      `platformFee = budget * platformFeeBP / 10_000` and `evaluatorFee = budget * evaluatorFeeBP / 10_000`.
+ *      Both bps are immutable and their sum is below 10_000. No fee is taken on rejection or expiry.
+ *      Fee math never overflows: the multiplication is split so any `uint256` budget settles.
+ *
+ *      Platform fee (pull-based): `complete` does NOT transfer the platform fee. It is accrued in
+ *      `pendingPlatformFees` and swept later with `withdrawPlatformFees()` (by `feeWallet` or the
+ *      operator) to the current `feeWallet`, which the operator may rotate with `setFeeWallet`.
+ *      A frozen or lost fee wallet therefore never blocks settlement. The evaluator fee stays
+ *      push-paid inside `complete` (AgentFi default 0 bps; the evaluator is the operator signer):
+ *      if a non-zero evaluator fee is configured and the evaluator cannot receive the token
+ *      (e.g. USDC blacklist), `complete` reverts and `reject`/`claimRefund` are the only exits.
+ *
+ *      Blacklisted parties (by design, no escape hatch): `reject` after funding and `claimRefund`
+ *      push the refund to `job.client`; if the client cannot receive the token both revert and
+ *      `complete` (which pays the provider) is the only exit. If the provider cannot receive the
+ *      token, `complete` reverts and `reject` (reason `REASON_PAYOUT_BLOCKED`, see `ReputationHook`)
+ *      or `claimRefund` return the budget to the client. No operator-driven redirection exists.
+ *
+ *      Expiry race (spec-permitted): once `block.timestamp >= expiredAt` a `Submitted` job can be
+ *      settled by `complete`/`reject` (evaluator) OR expired by `claimRefund` (anyone); the first
+ *      transaction mined wins and the other reverts with `InvalidStatus`. The evaluator SHOULD
+ *      settle before `expiredAt`.
  *
  *      Hooks: one optional `IACPHook` per job, fixed at `createJob` and checked via ERC-165.
  *      `beforeAction` runs before the state change and `afterAction` after the transfers for
@@ -42,7 +61,8 @@ import {IACPHook} from "./IACPHook.sol";
  *
  *      Security: every state-changing function is non-reentrant; token transfers tolerate
  *      missing or `false` return values; the operator can only pause job creation and funding
- *      (never settlement or refunds) and can never move funds.
+ *      (never settlement or refunds), rotate the fee wallet and sweep accrued platform fees to
+ *      it. It can never move escrowed budgets.
  */
 contract AgentJobEscrow {
     // =========================================================================
@@ -119,10 +139,15 @@ contract AgentJobEscrow {
     // AgentFi extension — events
     // =========================================================================
 
-    /// @notice Emitted when the client attaches an ERC-8004 agent id to the job's provider.
+    /// @notice Emitted when the client or provider attaches an ERC-8004 agent id to the job's provider
+    ///         (also with `agentId == 0` when `setProvider` clears a previously set id).
     event ProviderAgentIdSet(uint256 indexed jobId, uint256 indexed agentId);
-    /// @notice Emitted when a non-zero platform fee is paid to `feeWallet` on completion.
-    event PlatformFeePaid(uint256 indexed jobId, address indexed feeWallet, uint256 amount);
+    /// @notice Emitted when a non-zero platform fee is accrued to `pendingPlatformFees` on completion.
+    event PlatformFeeAccrued(uint256 indexed jobId, uint256 amount);
+    /// @notice Emitted when accrued platform fees are swept to the fee wallet.
+    event PlatformFeesWithdrawn(address indexed to, uint256 amount);
+    /// @notice Emitted when the operator rotates the fee wallet.
+    event FeeWalletUpdated(address indexed previousFeeWallet, address indexed newFeeWallet);
     /// @notice Emitted when the operator pauses job creation and funding.
     event Paused(address indexed by);
     /// @notice Emitted when the operator lifts the pause.
@@ -146,6 +171,10 @@ contract AgentJobEscrow {
     error Unauthorized();
     /// @notice The provider is zero, equal to the client, or equal to the evaluator.
     error InvalidProvider(address provider);
+    /// @notice `setProvider` is only allowed while `job.provider == address(0)` (ERC-8183).
+    error ProviderAlreadySet(uint256 jobId);
+    /// @notice `withdrawPlatformFees` was called with nothing accrued.
+    error NothingToWithdraw();
     /// @notice The evaluator must be a non-zero address.
     error InvalidEvaluator();
     /// @notice `expiredAt` must be strictly in the future at creation.
@@ -187,9 +216,8 @@ contract AgentJobEscrow {
 
     /// @notice The single ERC-20 token this escrow accepts (USDC on Base).
     address public immutable token;
-    /// @notice Receiver of the platform fee on completion.
-    address public immutable feeWallet;
-    /// @notice Address allowed to pause/unpause job creation and funding. Cannot move funds.
+    /// @notice Address allowed to pause/unpause job creation and funding, rotate `feeWallet` and
+    ///         sweep accrued platform fees. Cannot move escrowed budgets.
     address public immutable operator;
     /// @notice Platform fee in basis points, taken from the budget on completion only.
     uint256 public immutable platformFeeBP;
@@ -204,12 +232,17 @@ contract AgentJobEscrow {
     uint256 private _jobCount;
     /// @dev Job records by id.
     mapping(uint256 jobId => Job) private _jobs;
-    /// @notice AgentFi extension: ERC-8004 agent id of the provider, set by the client (0 = none).
+    /// @notice AgentFi extension: ERC-8004 agent id of the provider, set by the client or the
+    ///         provider (0 = none). `ReputationHook` verifies on-chain that the id belongs to the provider.
     mapping(uint256 jobId => uint256 agentId) public providerAgentId;
     /// @notice AgentFi extension: timestamp of `submit` (0 = the job was never submitted).
     mapping(uint256 jobId => uint256 timestamp) public submittedAt;
     /// @notice AgentFi extension: whether job creation and funding are paused.
     bool public paused;
+    /// @notice Receiver of accrued platform fees (`withdrawPlatformFees`). Rotatable by the operator.
+    address public feeWallet;
+    /// @notice AgentFi extension: platform fees accrued on completion and not yet withdrawn.
+    uint256 public pendingPlatformFees;
     /// @dev Reentrancy guard.
     uint256 private _reentrancyStatus = NOT_ENTERED;
 
@@ -237,8 +270,9 @@ contract AgentJobEscrow {
 
     /**
      * @param token_ ERC-20 token escrowed by this contract (must have code).
-     * @param feeWallet_ Receiver of the platform fee.
-     * @param operator_ Address that may pause/unpause creation and funding.
+     * @param feeWallet_ Initial receiver of accrued platform fees (rotatable via `setFeeWallet`).
+     * @param operator_ Address that may pause/unpause creation and funding, rotate the fee wallet
+     *                  and sweep accrued platform fees.
      * @param evaluatorFeeBP_ Evaluator fee in basis points (AgentFi default 0).
      * @param platformFeeBP_ Platform fee in basis points (AgentFi default 30).
      */
@@ -307,8 +341,12 @@ contract AgentJobEscrow {
     }
 
     /**
-     * @notice Sets the provider of an `Open` job. Only the client may call.
-     * @dev Hook data: `abi.encode(address provider, bytes optParams)` with empty optParams.
+     * @notice Sets the provider of an `Open` job whose provider is still unset. Only the client may call.
+     * @dev ERC-8183: "SHALL revert if job is not Open, current `job.provider != address(0)`, or
+     *      `provider == address(0)`". A provider is therefore assigned exactly once (at `createJob`
+     *      or here) and can never be swapped. Any `providerAgentId` set before the provider was
+     *      known is cleared (it belonged to nobody). Hook data: `abi.encode(address provider, bytes optParams)`
+     *      with empty optParams.
      * @param jobId The job.
      * @param provider_ New provider (non-zero, not the client, not the evaluator).
      */
@@ -316,6 +354,7 @@ contract AgentJobEscrow {
         Job storage job = _getJob(jobId);
         if (job.status != JobStatus.Open) revert InvalidStatus(jobId, job.status);
         if (msg.sender != job.client) revert Unauthorized();
+        if (job.provider != address(0)) revert ProviderAlreadySet(jobId);
         if (provider_ == address(0) || provider_ == job.client || provider_ == job.evaluator) {
             revert InvalidProvider(provider_);
         }
@@ -325,6 +364,10 @@ contract AgentJobEscrow {
 
         job.provider = provider_;
         emit ProviderSet(jobId, provider_);
+        if (providerAgentId[jobId] != 0) {
+            delete providerAgentId[jobId];
+            emit ProviderAgentIdSet(jobId, 0);
+        }
 
         _hookAfter(job.hook, jobId, this.setProvider.selector, data);
     }
@@ -404,8 +447,14 @@ contract AgentJobEscrow {
 
     /**
      * @notice Accepts a `Submitted` job (Submitted → Completed) and releases the budget. Only the evaluator may call.
-     * @dev Pays `budget - platformFee - evaluatorFee` to the provider, `platformFee` to `feeWallet`
-     *      and `evaluatorFee` to the evaluator. Hook data: `abi.encode(bytes32 reason, bytes optParams)`.
+     * @dev Pays `budget - platformFee - evaluatorFee` to the provider and `evaluatorFee` to the
+     *      evaluator; `platformFee` is accrued to `pendingPlatformFees` (pull-based, see
+     *      `withdrawPlatformFees`) so the fee wallet can never block settlement. Reverts if the
+     *      provider (or, with a non-zero evaluator fee, the evaluator) cannot receive the token;
+     *      `reject`/`claimRefund` are then the only exits. Allowed after `expiredAt` as long as the
+     *      job is still `Submitted` (it races `claimRefund`, first tx wins).
+     *      Hook data: `abi.encode(bytes32 reason, bytes optParams)`; `afterAction` runs after the
+     *      provider and evaluator transfers and after the fee accrual.
      * @param jobId The job.
      * @param reason Hash of the human-readable reason.
      * @param optParams Opaque parameters forwarded to the hook (AgentFi: feedback URI and hash).
@@ -422,16 +471,16 @@ contract AgentJobEscrow {
         emit JobCompleted(jobId, msg.sender, reason);
 
         uint256 budget = job.budget;
-        uint256 platformFee = (budget * platformFeeBP) / BPS_DENOMINATOR;
-        uint256 evaluatorFee = (budget * evaluatorFeeBP) / BPS_DENOMINATOR;
+        uint256 platformFee = _feeOf(budget, platformFeeBP);
+        uint256 evaluatorFee = _feeOf(budget, evaluatorFeeBP);
         uint256 payout = budget - platformFee - evaluatorFee;
 
         _safeTransfer(job.provider, payout);
         emit PaymentReleased(jobId, job.provider, payout);
 
         if (platformFee > 0) {
-            _safeTransfer(feeWallet, platformFee);
-            emit PlatformFeePaid(jobId, feeWallet, platformFee);
+            pendingPlatformFees += platformFee;
+            emit PlatformFeeAccrued(jobId, platformFee);
         }
         if (evaluatorFee > 0) {
             _safeTransfer(job.evaluator, evaluatorFee);
@@ -444,7 +493,10 @@ contract AgentJobEscrow {
     /**
      * @notice Rejects a job. The client may reject while `Open` (no funds involved); the evaluator
      *         may reject while `Funded` or `Submitted`, which refunds the client in full.
-     * @dev Hook data: `abi.encode(bytes32 reason, bytes optParams)`.
+     * @dev Hook data: `abi.encode(bytes32 reason, bytes optParams)`. The refund is pushed to
+     *      `job.client`: if the client cannot receive the token (e.g. USDC blacklist) this reverts
+     *      and `complete` is the only exit. Allowed after `expiredAt` while the job is still
+     *      `Funded`/`Submitted` (races `claimRefund`, first tx wins).
      * @param jobId The job.
      * @param reason Hash of the human-readable reason.
      * @param optParams Opaque parameters forwarded to the hook (AgentFi: feedback URI and hash).
@@ -478,6 +530,9 @@ contract AgentJobEscrow {
     /**
      * @notice Expires a `Funded` or `Submitted` job once `block.timestamp >= expiredAt` and refunds
      *         the client in full. Anyone may call. Never hooked and never pausable.
+     * @dev The refund is pushed to `job.client`; if the client cannot receive the token this reverts
+     *      (no escape hatch by design). On a `Submitted` job this races the evaluator's
+     *      `complete`/`reject` once expired: whichever transaction is mined first wins.
      * @param jobId The job.
      */
     function claimRefund(uint256 jobId) external nonReentrant {
@@ -508,18 +563,52 @@ contract AgentJobEscrow {
 
     /**
      * @notice Attaches the provider's ERC-8004 agent id to a job so settlement outcomes can be
-     *         attributed to an on-chain identity (read by `ReputationHook`). Only the client may
-     *         call, while the job is `Open` or `Funded`. Not hooked.
+     *         attributed to an on-chain identity (read by `ReputationHook`). The client or the
+     *         provider may call, while the job is `Open` or `Funded`. Not hooked.
+     * @dev The escrow does not validate the id: `ReputationHook` checks against the ERC-8004
+     *      Identity Registry that the id is owned by (or has its agent wallet set to) `job.provider`
+     *      before writing feedback, so a wrong id only results in a skipped write. Cleared by
+     *      `setProvider`.
      * @param jobId The job.
      * @param agentId ERC-8004 identity id (0 clears it).
      */
     function setProviderAgentId(uint256 jobId, uint256 agentId) external nonReentrant {
         Job storage job = _getJob(jobId);
         if (job.status != JobStatus.Open && job.status != JobStatus.Funded) revert InvalidStatus(jobId, job.status);
-        if (msg.sender != job.client) revert Unauthorized();
+        if (msg.sender != job.client && (msg.sender != job.provider || job.provider == address(0))) {
+            revert Unauthorized();
+        }
 
         providerAgentId[jobId] = agentId;
         emit ProviderAgentIdSet(jobId, agentId);
+    }
+
+    /**
+     * @notice Sweeps every accrued platform fee to the current `feeWallet`. Callable by `feeWallet`
+     *         or the operator. Never pausable.
+     * @dev Pull-based so that a fee wallet that cannot receive the token (blacklist, lost key)
+     *      never blocks `complete`; rotate it with `setFeeWallet` and withdraw again.
+     */
+    function withdrawPlatformFees() external nonReentrant {
+        address to = feeWallet;
+        if (msg.sender != to && msg.sender != operator) revert Unauthorized();
+        uint256 amount = pendingPlatformFees;
+        if (amount == 0) revert NothingToWithdraw();
+
+        pendingPlatformFees = 0;
+        _safeTransfer(to, amount);
+        emit PlatformFeesWithdrawn(to, amount);
+    }
+
+    /**
+     * @notice Rotates the receiver of accrued platform fees. Only the operator may call.
+     * @param newFeeWallet New fee wallet (non-zero).
+     */
+    function setFeeWallet(address newFeeWallet) external {
+        if (msg.sender != operator) revert Unauthorized();
+        if (newFeeWallet == address(0)) revert ZeroAddress();
+        emit FeeWalletUpdated(feeWallet, newFeeWallet);
+        feeWallet = newFeeWallet;
     }
 
     /**
@@ -571,10 +660,30 @@ contract AgentJobEscrow {
     }
 
     /// @dev ERC-165 probe for `IACPHook`, tolerant of EOAs and contracts without `supportsInterface`.
+    ///      Strict on purpose (stricter than OpenZeppelin's `ERC165Checker`): the hook must return
+    ///      exactly `true` (one 32-byte word equal to 1) for `type(IACPHook).interfaceId` and exactly
+    ///      `false` (one word equal to 0) for `0xffffffff`. A revert, empty or oversized return data
+    ///      or a non-boolean word on either probe rejects the hook with `UnsupportedHook` instead of
+    ///      panicking, and "yes-man" contracts that answer `true` to everything are rejected.
     function _supportsHookInterface(address hook) internal view returns (bool) {
-        (bool ok, bytes memory ret) =
-            hook.staticcall{gas: ERC165_GAS}(abi.encodeCall(IERC165.supportsInterface, (type(IACPHook).interfaceId)));
-        return ok && ret.length >= 32 && abi.decode(ret, (bool));
+        (bool okHook, uint256 hookWord) = _probeInterface(hook, type(IACPHook).interfaceId);
+        if (!okHook || hookWord != 1) return false;
+        (bool okAll, uint256 allWord) = _probeInterface(hook, 0xffffffff);
+        return okAll && allWord == 0;
+    }
+
+    /// @dev Gas-capped `supportsInterface` staticcall; `ok` only when the call succeeded and returned exactly one word.
+    function _probeInterface(address hook, bytes4 interfaceId) internal view returns (bool ok, uint256 word) {
+        (bool success, bytes memory ret) =
+            hook.staticcall{gas: ERC165_GAS}(abi.encodeCall(IERC165.supportsInterface, (interfaceId)));
+        if (!success || ret.length != 32) return (false, 0);
+        return (true, abi.decode(ret, (uint256)));
+    }
+
+    /// @dev `budget * bps / 10_000` without intermediate overflow (valid for any `uint256` budget
+    ///      because `bps < 10_000`): `floor(q*BPS + r) * bps / BPS == q*bps + floor(r*bps/BPS)`.
+    function _feeOf(uint256 budget, uint256 bps) internal pure returns (uint256) {
+        return (budget / BPS_DENOMINATOR) * bps + ((budget % BPS_DENOMINATOR) * bps) / BPS_DENOMINATOR;
     }
 
     /// @dev Pulls exactly `amount` of `token` from `from`; rejects fee-on-transfer behaviour.

@@ -9,9 +9,9 @@ Solidity contracts for on-chain policy enforcement and fee collection. Built wit
 | **AgentPolicyModule** | Safe module that enforces per-agent transaction policies (value limits, contract whitelists, daily volume caps). Operator-managed. |
 | **AgentExecutor** | Proxy that executes batched transactions on behalf of agents, collecting protocol fees atomically. |
 | **EscrowModule** | Legacy escrow (ETH + ERC-20, operator-settled). Kept for ETH jobs until retired. |
-| **AgentJobEscrow** | ERC-8183 (Agentic Commerce) job escrow, USDC only. Client funds → provider submits → evaluator completes/rejects; `platformFeeBP` taken on completion; permissionless `claimRefund` after expiry; per-job `IACPHook`. Operator can only pause creation/funding. |
-| **ReputationHook** | ERC-8183 `IACPHook` that writes ERC-8004 reputation feedback (`giveFeedback`) for the provider in the same tx as `complete`/`reject`. Never blocks settlement. |
-| **IACPHook** / **IReputationRegistry** | Interfaces: the ERC-8183 hook surface (with ERC-165 expectation) and the ERC-8004 Reputation Registry call used by the hook. |
+| **AgentJobEscrow** | ERC-8183 (Agentic Commerce) job escrow, USDC only. Client funds → provider submits → evaluator completes/rejects; `platformFeeBP` accrued on completion and pulled with `withdrawPlatformFees()` (fee wallet rotatable by the operator); permissionless `claimRefund` after expiry; per-job `IACPHook` with strict ERC-165 detection. Operator can only pause creation/funding, rotate the fee wallet and sweep fees. |
+| **ReputationHook** | ERC-8183 `IACPHook` that writes ERC-8004 reputation feedback (`giveFeedback`) for the provider in the same tx as `complete`/`reject`, only for jobs settled by the trusted evaluator, for an agent id the Identity Registry attributes to the provider, above a minimum budget. Never blocks settlement; `revokeFeedback` for corrections. |
+| **IACPHook** / **IReputationRegistry** / **IIdentityRegistry** | Interfaces: the ERC-8183 hook surface (`is IERC165`), and the ERC-8004 Reputation (`giveFeedback`, `revokeFeedback`) and Identity (`ownerOf`, `getAgentWallet`) Registry calls used by the hook. |
 
 ## Development
 
