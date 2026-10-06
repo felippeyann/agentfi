@@ -1,13 +1,35 @@
 # AgentFi
 
-[![Status: Archived](https://img.shields.io/badge/status-archived-lightgrey.svg)](#-archived-2026-05-17)
+[![Status: Reactivated (exploratory)](https://img.shields.io/badge/status-reactivated%20(exploratory)-orange.svg)](#-reactivated-exploratory--2026-10-06)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![npm version](https://img.shields.io/npm/v/@agent_fi/mcp-server.svg)](https://www.npmjs.com/package/@agent_fi/mcp-server)
 
-> ## 🗄️ Archived — 2026-05-17
+> ## 🔁 Reactivated (exploratory) — 2026-10-06
 >
-> This project is archived. The code is functional and the npm package
-> remains published, but the project is no longer maintained.
+> AgentFi was archived on 2026-05-17 after ~50 days of development
+> without finding a user (the postmortem is kept below for honesty).
+> It is being reactivated in **exploratory mode**: a 90-day validation
+> with explicit go/no-go gates, not a relaunch.
+>
+> **What changed.** Between May and October 2026 the market converged on
+> the thesis: x402 became a Linux Foundation standard backed by Visa,
+> Mastercard, Stripe, Google and AWS; AWS, Cloudflare and Circle shipped
+> agent payment rails; ERC-8004 (agent identity/reputation) is on
+> mainnet and ERC-8183 (agent-to-agent job escrow) is a draft standard.
+> Generic agent wallets with spending limits are now a commodity.
+>
+> **New direction.** AgentFi is repositioning as a **trust layer** for
+> agents that hire agents: ERC-8183-compatible escrow, ERC-8004
+> reputation anchored in settled payments, and an MCP server so
+> Claude/Codex agents can execute, all on top of third-party wallets
+> and rails (Coinbase CDP, MetaMask, x402, MPP). Not another wallet.
+>
+> Plan and status: [`docs/project/execution-plan-2026-10.md`](docs/project/execution-plan-2026-10.md) ·
+> Review that led here: [`docs/project/reactivation-2026-10.md`](docs/project/reactivation-2026-10.md) ·
+> Market evidence: [`docs/project/market-signals-2026-10.md`](docs/project/market-signals-2026-10.md)
+>
+> <details>
+> <summary>Original postmortem (2026-05-17)</summary>
 >
 > **Honest postmortem.** AgentFi reached technical MVP early (agent
 > registration → on-chain transaction with operator fee collection
@@ -23,15 +45,10 @@
 > primitives) will move in. No defensible moat for a solo OSS
 > protocol in that window.
 >
-> **What's still useful here.**
-> - Reference implementation of an MCP server with 31 DeFi tools.
-> - Working examples of Safe v7 protocol-kit integration, Uniswap
->   Routing API v2 wrapper, Aave/Compound/GMX adapters.
-> - Apache-2.0 — fork freely.
->
 > Live infrastructure (Fly.io backend, Upstash Redis) was decommissioned
 > on archive. The maintainer's smart contracts on Base Mainnet remain
-> deployed but unused.
+> deployed.
+> </details>
 
 ---
 

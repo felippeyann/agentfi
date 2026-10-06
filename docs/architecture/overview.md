@@ -79,3 +79,15 @@ AgentFi is **self-hosted by design** (see VISION.md). There is no canonical prod
 | AgentExecutor | `0x54415F0Bc61436193D2a8dD00e356eD9EBfd24b3` |
 
 Operators can reuse these (fee goes to the maintainer `OPERATOR_FEE_WALLET`) or deploy their own to capture the fee themselves. See [`docs/operations/contract-deployment.md`](../operations/contract-deployment.md).
+
+## Diagrams
+
+Rendered views of the code graph (September 2026), grouped by subsystem:
+
+| Diagram | What it shows |
+|---|---|
+| [full-map.png](diagrams/full-map.png) | All four subsystems and the edges between them |
+| [execution-and-defi.png](diagrams/execution-and-defi.png) | Transaction builder → policy/escrow → DeFi assemblers → simulation gate → submitter → monitor → wallet providers |
+| [onchain-and-operator-surfaces.png](diagrams/onchain-and-operator-surfaces.png) | Chain registry, Solidity contracts, external infra, plus the admin UI, MCP server and framework adapters |
+| [backend-runtime.png](diagrams/backend-runtime.png) | Fastify API → auth/payment middleware → transaction queue → worker |
+| [jobs-and-persistence.png](diagrams/jobs-and-persistence.png) | Job payment finalizer, recovery/reputation queues and the Prisma persistence layer |

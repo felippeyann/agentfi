@@ -3,7 +3,7 @@
 > **Read together with [VISION.md](VISION.md) (the _why_) and [HANDOFF.md](HANDOFF.md) (live pending tasks).**
 > This file is the **comprehensive, point-in-time snapshot** of what the project _is_ today — purpose, stack, capabilities, progress. Update it whenever the scope or architecture shifts.
 
-**Last updated**: 2026-05-15 · **main baseline verified** `5f181fc` · **npm** `@agent_fi/mcp-server@0.4.0` published · **0.5.0 pending publish** (31 tools)
+**Last updated**: 2026-10-06 · **main baseline verified** `c9954e1` · **npm** `@agent_fi/mcp-server@0.5.0` published 2026-05-15 (31 tools) · **Status**: reactivated in exploratory mode on 2026-10-06 (archived 2026-05-17 → 2026-10-06); live plan in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md)
 
 ---
 
@@ -192,10 +192,11 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 | **1 — Bootstrap**                    | Registry, wallets, basic swap                                       | 100%     | Shipped                                                                                                  |
 | **2 — HITL + Transparency**          | Policy, kill switch, audit log                                      | 100%     | Shipped                                                                                                  |
 | **2.5 — Go-Live Hardening**          | Security, CI 6/6, Next.js 16, Fastify 5, npm audit zero-HIGH        | 100%     | Shipped                                                                                                  |
-| **3 — A2A Economy + DeFi expansion** | Jobs, escrow, reputation, handshake, Compound V3 / ERC-4626 / Curve | **~90%** | Remaining: GMX adapter, escrow v3 (on-chain)                                                             |
-| **4 — Self-Sustaining Agents**       | P&L, identity, self-funding, revenue share                          | **~40%** | Shipped: P&L v1 + v2 (with gas), ENS identity. Remaining: self-funding (legal decision), revenue sharing |
-| **5 — Adoption model evolution**     | SaaS-as-a-service pricing                                           | 0%       | Not started                                                                                              |
-| **6 — Frontier**                     | Agent-to-agent economy at scale                                     | 0%       | Not started                                                                                              |
+| **3 — A2A Economy + DeFi expansion** | Jobs, escrow, reputation, handshake, Compound V3 / ERC-4626 / Curve, GMX | 100%     | Shipped (GMX adapter, escrow v3 contract + integration, handshake all landed May 2026)                  |
+| **4 — Self-Sustaining Agents**       | P&L, identity, self-funding, revenue share                          | **~70%** | Shipped: P&L v1 + v2 (with gas), ENS identity, revenue sharing (Operator model). Remaining: self-funding (legal decision) |
+| **Reactivation Q4 2026 — trust layer** | ERC-8183 escrow, ERC-8004 reputation with proof, x402/MPP client, wallet adapters, demo | started 2026-10-06 | Task-level status in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md); go/no-go 2027-01-05 |
+| ~~5 — Adoption model evolution~~     | ~~SaaS-as-a-service pricing~~                                       | —        | Superseded by the reactivation plan (no hosted SaaS during validation)                                   |
+| ~~6 — Frontier~~                     | ~~Agent-to-agent economy at scale~~                                 | —        | Superseded by the reactivation plan                                                                      |
 
 ---
 
@@ -205,16 +206,18 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | Source code            | https://github.com/felippeyann/agentfi                                                                                                                   | Apache 2.0, public                                                      |
 | Release                | https://github.com/felippeyann/agentfi/releases/tag/v0.1.0                                                                                               | v0.1.0 (April 2026)                                                     |
-| mcp-server npm         | https://www.npmjs.com/package/@agent_fi/mcp-server                                                                                                       | **v0.4.0** published (2026-05-10); **v0.5.0 pending publish** (31 tools) |
-| mcp-server releases    | https://github.com/felippeyann/agentfi/releases                                                                                                          | v0.1.0, v0.2.0, v0.3.0, mcp-server-v0.4.0 published; v0.5.0 pending    |
-| mcp.so listing         | https://mcp.so/server/agentfi-mcp-server/felippeyann                                                                                                     | live; latest check still showed stale `@agent_fi/mcp-server@0.2.0` config |
-| awesome-mcp-servers PR | https://github.com/punkpeye/awesome-mcp-servers/pull/5091                                                                                                | open (pending maintainer merge)                                         |
-| Base contracts         | `0x03af…6A6d` + `0x5441…24b3`                                                                                                                            | verified on Basescan                                                    |
+| mcp-server npm         | https://www.npmjs.com/package/@agent_fi/mcp-server                                                                                                       | **v0.5.0** published 2026-05-15 (31 tools); ~75 downloads/month residual (registry bots) |
+| mcp-server releases    | https://github.com/felippeyann/agentfi/releases                                                                                                          | v0.1.0, mcp-server-v0.2.0 … v0.5.0 published                           |
+| Glama listing          | https://glama.ai/mcp/servers/felippeyann/agentfi                                                                                                         | live (checked 2026-10-06)                                               |
+| mcp.so listing         | https://mcp.so/server/agentfi-mcp-server/felippeyann                                                                                                     | **404** on 2026-10-06; resubmit (plan X3)                               |
+| awesome-mcp-servers    | https://github.com/punkpeye/awesome-mcp-servers/pull/5091                                                                                                | merged 2026-05-27, **entry pruned afterwards** (archived repo); resubmit (plan X3) |
+| Base contracts         | `0x03af…6A6d` + `0x5441…24b3`                                                                                                                            | verified on Basescan; **legacy ABI** (old `Action` struct) — redeploy planned (plan C4/C6) |
+| Execution plan         | [`docs/project/execution-plan-2026-10.md`](docs/project/execution-plan-2026-10.md)                                                                        | live task tracker for the Q4 2026 reactivation                          |
 | OpenAPI spec           | `docs/api/openapi.yaml`                                                                                                                                  | 3.0.3, clean under Redocly lint                                         |
 | Brand avatar           | `.github/avatar.svg`                                                                                                                                     | live                                                                    |
 | Dev quickstart         | [`docs/dev-quickstart.md`](docs/dev-quickstart.md) + `docker-compose.dev.yml` + `npm run smoke:dev`                                                      | zero-credential stack; first-run Docker + smoke + examples validated locally |
 | Examples (runnable)    | [`examples/a2a-collab`](examples/a2a-collab), [`examples/swap-planner`](examples/swap-planner), [`examples/delegation-chain`](examples/delegation-chain) | zero-dep Node scripts                                                   |
-| Staging demo           | https://agentfi-backend.fly.dev                                                                                                                          | Running on Fly.io (region `gru`), **no SLA**                            |
+| Staging demo           | ~~https://agentfi-backend.fly.dev~~                                                                                                                      | **Decommissioned 2026-05-17.** No hosted instance during the validation |
 | Docs set               | `VISION.md`, `STATE.md`, `HANDOFF.md`, `docs/`                                                                                                           | live (archive in `docs/_archive/`)                                      |
 
 ---
@@ -229,17 +232,18 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 
 ---
 
-## 9. Current pending work (details in HANDOFF.md)
+## 9. Current pending work
 
-- **GMX / Perp adapter** (Phase 3 close)
-- **On-chain escrow v3** (Phase 3, requires Safe module deploy + audit prep)
-- **Self-funding sub-wallets** (Phase 4, blocked on legal structure decision)
-- **Revenue sharing protocol ↔ self-hosted** (Phase 4, economic design)
-- **Demo screencast** — 2-minute Claude Desktop doing a real swap via MCP
-- **Contract deployment runbook** — update with Mainnet / Arbitrum / Polygon addresses once deployed
+All pending work is tracked task by task in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md). Summary of the reactivation (Q4 2026):
+
+- **Week 0:** fix A1 (backend ABI vs contract source), A2 (mock simulation in production), A3 (pause not re-validated before signing), S1 (agent can relax its own policy); docs consolidation.
+- **Days 1–30:** ERC-8183-compatible escrow (`AgentJobEscrow`), redeploy on Base Sepolia, x402 payment client inside job budgets, owner's demand interviews.
+- **Days 31–60:** ERC-8004 reputation anchored in settled escrow, CDP wallet provider, demo screencast, mcp-server 0.6.0.
+- **Days 61–90:** external operator runs the flow; go/no-go on 2027-01-05.
 
 **Externally blocked:**
 
+- Self-funding sub-wallets — legal structure decision
 - Legal personhood — society-wide, not this repo
 
 ---

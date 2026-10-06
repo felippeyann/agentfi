@@ -2,7 +2,9 @@
 
 > Live pending tasks, credentials inventory, and working conventions. For _what the project is_, read [STATE.md](STATE.md). For _why_, read [VISION.md](VISION.md). This file is the shortest path from "resuming work" → "executing something useful."
 
-**Last updated**: 2026-05-15 · **main baseline verified** `5f181fc` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0) · **Release**: [v0.1.0](https://github.com/felippeyann/agentfi/releases/tag/v0.1.0) · **npm**: [`@agent_fi/mcp-server@0.4.0`](https://www.npmjs.com/package/@agent_fi/mcp-server) → **0.5.0 pending publish**
+**Last updated**: 2026-10-06 · **main baseline verified** `c9954e1` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0, **reactivated in exploratory mode on 2026-10-06** after being archived 2026-05-17) · **Release**: [mcp-server-v0.5.0](https://github.com/felippeyann/agentfi/releases/tag/mcp-server-v0.5.0) · **npm**: [`@agent_fi/mcp-server@0.5.0`](https://www.npmjs.com/package/@agent_fi/mcp-server) (published 2026-05-15)
+
+> **Resuming work?** Read, in order: [VISION.md](VISION.md) → [STATE.md](STATE.md) → [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md) (the live plan with task status) → this file. The review that led to reactivation is [docs/project/reactivation-2026-10.md](docs/project/reactivation-2026-10.md) and the market evidence is [docs/project/market-signals-2026-10.md](docs/project/market-signals-2026-10.md) (both in Portuguese).
 
 ---
 
@@ -23,19 +25,20 @@
 | Item                   | Value                                                              |
 | ---------------------- | ------------------------------------------------------------------ |
 | Default branch         | `main` (protected; required checks: Lint, Admin, Backend, Foundry) |
-| Active branches        | `main`, `develop` (mirrors main post-merge)                        |
-| Open PRs               | 0                                                                  |
+| Active branches        | `main`, `develop` (mirrors main post-merge); task branches `<type>/<task-id>-<slug>` per the execution plan |
+| Open PRs               | Dependabot bumps (see execution plan WS8) + task PRs in flight     |
 | Open issues            | 0                                                                  |
-| CI                     | 6/6 green (5 required + OpenAPI Spec)                              |
+| CI                     | green on `main` (6 jobs: 5 required + OpenAPI Spec)                |
 | npm vulnerabilities    | 0 critical, 0 high                                                 |
 | Secrets in git history | None                                                               |
+| Live infrastructure    | **None.** Fly.io backend and Upstash Redis were decommissioned on 2026-05-17. No hosted instance is planned for the 90-day validation. |
 
 **Phase progress** (see [STATE.md §6](STATE.md#6-phase-progress) for detail):
 
 - Phase 1–2.5: complete.
-- Phase 3 — A2A economy + DeFi expansion: ~90%. Remaining: GMX adapter, escrow v3 (on-chain).
-- Phase 4 — Self-sustaining agents: ~40%. Shipped: P&L v1+v2 (with gas), ENS identity. Remaining: self-funding (legal decision), revenue sharing.
-- Phase 5–6: not started.
+- Phase 3 — A2A economy + DeFi expansion: complete (GMX adapter, escrow v3 on-chain and the sign/verify handshake all shipped in May 2026).
+- Phase 4 — Self-sustaining agents: ~70%. Shipped: P&L v1+v2 (with gas), ENS identity, revenue sharing (Operator model). Remaining: self-funding sub-wallets (legal decision).
+- **Reactivation (Q4 2026) — "trust layer":** ERC-8183-compatible escrow, ERC-8004 reputation anchored in settled payments, x402/MPP payment client, wallet providers as adapters. Tracked task by task in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md). The old Phases 5–6 (hosted SaaS, "frontier") are superseded by that plan.
 
 ---
 
@@ -57,28 +60,23 @@
 
 ## 3. Pending work
 
-Pending work is split into four buckets. Nothing in `Done` is listed here — those live in [CHANGELOG.md](CHANGELOG.md) under `[Unreleased]`.
+**All pending work lives in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md)** (workstreams WS0–WS8, one row per task, with status and PR links). Do not maintain a second list here. Nothing in `Done` is listed there — those live in [CHANGELOG.md](CHANGELOG.md).
 
-### 3.1 Manual tasks (user-only)
+### 3.1 Owner-only items (summary; details in the plan)
 
-| Task                               | Blocker  | Notes                                                                                                                                        |
-| ---------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Update mcp.so listing              | External | Update comment posted on [chatmcp/mcpso Issue #1](https://github.com/chatmcp/mcpso/issues/1#issuecomment-4415526897) on 2026-05-10. Awaiting the registry maintainer to apply. |
-| Awaiting awesome-mcp-servers merge | External | [PR #5091](https://github.com/punkpeye/awesome-mcp-servers/pull/5091) is mergeable. Glama badge and 28-tool count added in commit `f3822064` on 2026-05-10. Awaiting `punkpeye` review. |
-| Demo screencast                    | —        | 2-minute Claude Desktop doing a real swap via MCP. Highest remaining non-code leverage.                                                      |
+| Task | Plan ID | Notes |
+|---|---|---|
+| Demand validation interviews | WS7 V1–V3 | Three operator interviews by Day 30; the Day-30 checkpoint can stop the technical workstreams. |
+| Deploy contracts on Base Sepolia (then mainnet) | WS2 C4, C6 | Needs the deployer key in local `.env`; agents prepare the exact `forge script` command. |
+| Record the demo screencast | WS6 X2 | Agents prepare the script and prompts. |
+| Directory listings | WS6 X3 | mcp.so listing returns 404; the awesome-mcp-servers entry (PR #5091, merged 2026-05-27) was pruned after the archive and must be resubmitted. |
+| Answer the open questions | Plan §5 | Evaluator role, fee model, ERC-8004 identity opt-in, mainnet redeploy, Brazil "software only" assumption, native-ETH jobs. |
 
-### 3.2 Technical — unblocked
+### 3.2 Known defects being fixed (Week 0)
 
-All items in this table have been implemented as of 2026-05-13. See SESSION_NOTES.md for implementation details.
+A1 (backend ABI vs contract source), A2 (mock simulation accepted in production), A3 (pause not re-validated before signing), S1 (agent can relax its own policy). Each has a task row and PR in the plan. Until they merge, **do not route real funds through the executor or demo the policy flow.**
 
-| Task                                                  | Phase  | Status                                                                                                |
-| ----------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------- |
-| GMX / Perp adapter                                    | 3      | **Done** — `gmx.service.ts`, builder, routes, MCP tools, schema migration 0011                        |
-| Escrow v3 on-chain (`EscrowModule.sol` + integration) | 3      | **Done** — contract + 22 Foundry tests, backend integration, schema migration 0012                    |
-| Revenue sharing (protocol ↔ self-hosted)              | 4      | **Done** — Operator model, fee splitting, settlement, admin endpoints, schema migration 0013           |
-| Contract deployment runbook                           | Polish | **Done** — multi-chain, verification script, EscrowModule, disaster recovery                          |
-
-### 3.3 Technical — blocked externally
+### 3.3 Blocked externally
 
 | Task                     | Blocked by                                                           |
 | ------------------------ | -------------------------------------------------------------------- |
@@ -86,7 +84,7 @@ All items in this table have been implemented as of 2026-05-13. See SESSION_NOTE
 
 ### 3.4 The meta-guidance
 
-The live project state has **completed plumbing but zero users**. Adding more code without adoption signal is drift. Before starting anything in §3.2 beyond the "verify examples" task, confirm there is either (a) a specific user asking, or (b) a specific integration depending on it. Otherwise the leverage is in distribution, which is §3.1.
+The project reached complete plumbing with zero external users in May 2026. The reactivation plan is explicitly a **validation**, gated on demand (plan §1). "Adoption signal gates code" (§6.1 below) still applies to anything that is not a task in the plan. If the Day-30 checkpoint shows no demand, stop the technical workstreams rather than adding more code.
 
 ---
 
@@ -169,9 +167,9 @@ These are session-level lessons captured so future agents don't repeat the same 
 1. Responding to issue #49 (three PRs #50/#51/#52, clean delivery, issue closed)
 2. Reducing adoption wall after explicit agreement that distribution was the bottleneck (dev-quickstart, 3 examples)
 
-Large features that were in the roadmap but had no external demand (GMX adapter, escrow v3) were deferred _by design_. Shipping them would have consumed context budget without validating any hypothesis.
+Large features that were in the roadmap but had no external demand (GMX adapter, escrow v3, revenue sharing) were deferred _by design_ for weeks, then shipped anyway on 2026-05-13 (PR #116) without an external trigger, and the project was archived four days later. That sequence is the drift this rule warns about.
 
-**How to apply:** before starting anything in §3.2, ask "what happens if I don't build this?" If the answer is "nothing specific breaks and no one is waiting," stop. Work on §3.1 (distribution / manual tasks) or pause.
+**How to apply:** before starting anything that is not a task in the execution plan, ask "what happens if I don't build this?" If the answer is "nothing specific breaks and no one is waiting," stop. Work on distribution or demand validation (plan WS6/WS7) or pause.
 
 ### 6.2 CI green ≠ functionally validated
 
@@ -213,7 +211,7 @@ Large features that were in the roadmap but had no external demand (GMX adapter,
 
 - Migrations are **never auto-generated** — write them manually in `packages/backend/src/db/migrations/NNNN_name/migration.sql`.
 - After editing `schema.prisma`, run `npx prisma generate --schema=packages/backend/src/db/schema.prisma`.
-- Latest migration: `0010_job_revenue_snapshot` (adds `rewardUsd` and `rewardPriceUsd` to Job).
+- Latest migration: `0013_operator_revenue_sharing` (Operator, OperatorRevenue, OperatorSettlement). The reactivation plan reserves 0014 (ERC-8183 job fields), 0015 (ERC-8004 agent id) and 0016 (ResourcePayment).
 
 ### Dependency quirks
 
@@ -234,10 +232,11 @@ Large features that were in the roadmap but had no external demand (GMX adapter,
 
 ### Repo layout — landing site lives outside this monorepo
 
-The `agentfi.cc` landing site is a **separate repository**, not a workspace
-in this monorepo. The Vercel project `agentfi-landing` deploys from
-`felippeyann/agentfi-landing` (or the standalone repo connected at the
-time you read this — check the Vercel dashboard for the exact source).
+The `agentfi.cc` landing site was a **separate repository**, not a workspace
+in this monorepo. As of 2026-10-06 the `felippeyann/agentfi-landing` repo no
+longer exists on GitHub and `agentfi.cc` only returns a redirect; the Vercel
+project `agentfi-admin` returns 403. Treat the landing as gone until the owner
+decides otherwise.
 
 Don't add a `packages/landing/` workspace here. An earlier attempt did
 exactly that and produced redundant deploys + brittle Vercel config that
