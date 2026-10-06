@@ -7,7 +7,14 @@ Welcome to the AgentFi documentation. This hub is designed for both human operat
 ### 🌟 Start here (required reading, in order)
 - **[VISION](../VISION.md)** — *why* the project exists. Every technical decision derives from here.
 - **[STATE](../STATE.md)** — *what* the project is today: purpose, stack, capabilities, phase progress.
-- **[HANDOFF](../HANDOFF.md)** — *live* pending tasks + credentials + new-machine setup.
+- **[Execution Plan (Q4 2026)](project/execution-plan-2026-10.md)** — *live* task tracker for the reactivation: workstreams, gates, calendar, open questions.
+- **[HANDOFF](../HANDOFF.md)** — credentials, working conventions, lessons learned, new-machine setup.
+
+### 🔁 Reactivation (2026-10-06)
+- **[Reactivation review](project/reactivation-2026-10.md)** (pt-BR) — state of the repo, known defects, options and the 90-day plan that was adopted.
+- **[Market signals](project/market-signals-2026-10.md)** (pt-BR) — what the market did between May and October 2026, with sources.
+- **[ERC-8183 mapping](architecture/erc-8183-mapping.md)** — how AgentFi jobs map onto the Agentic Commerce escrow standard.
+- **[ERC-8004 integration](architecture/erc-8004-integration.md)** — identity and settlement-anchored reputation design.
 
 ### 🚀 Run the thing (fastest path)
 - **[Dev Quickstart](dev-quickstart.md)** — `docker compose up` → stack running in ~3 minutes, **zero external accounts**.
@@ -50,4 +57,4 @@ Welcome to the AgentFi documentation. This hub is designed for both human operat
 - **Repository**: [felippeyann/agentfi](https://github.com/felippeyann/agentfi)
 - **npm**: [@agent_fi/mcp-server](https://www.npmjs.com/package/@agent_fi/mcp-server)
 - **License**: Apache 2.0
-- **Staging demo**: `https://agentfi-backend.fly.dev` (Fly.io, no SLA — demo only)
+- **Staging demo**: none (the Fly.io instance was decommissioned on 2026-05-17; run the [Dev Quickstart](dev-quickstart.md) locally)

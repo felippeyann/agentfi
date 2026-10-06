@@ -7,10 +7,13 @@ Forward-looking development plan. For current state + what's done, see [STATE.md
 | 1 — Bootstrap | 100% | Shipped |
 | 2 — HITL + Transparency | 100% | Shipped |
 | 2.5 — Go-Live Hardening | 100% | Shipped |
-| 3 — A2A Economy + DeFi expansion | ~85% | Remaining: GMX adapter, escrow v3, handshake (Turnkey-blocked) |
-| 4 — Self-Sustaining Agents | ~40% | Shipped: P&L v1+v2, ENS. Remaining: self-funding, revenue sharing |
-| 5 — Adoption model evolution | 0% | Not started |
-| 6 — Frontier / autonomous volume | 0% | Not started |
+| 3 — A2A Economy + DeFi expansion | 100% | GMX adapter, escrow v3 and the sign/verify handshake shipped in May 2026 |
+| 4 — Self-Sustaining Agents | ~70% | Shipped: P&L v1+v2, ENS, revenue sharing. Remaining: self-funding (legal decision) |
+| **Reactivation Q4 2026 — trust layer** | in progress | ERC-8183 escrow, ERC-8004 reputation with proof, x402/MPP client, wallet adapters. **Live plan: [execution-plan-2026-10.md](execution-plan-2026-10.md)** |
+| ~~5 — Adoption model evolution~~ | superseded | No hosted SaaS during the 90-day validation |
+| ~~6 — Frontier / autonomous volume~~ | superseded | Revisit only after the go/no-go of 2027-01-05 |
+
+> **History.** The project was archived on 2026-05-17 (zero external adoption after ~50 days) and reactivated in exploratory mode on 2026-10-06 after the market converged on the thesis (see [market-signals-2026-10.md](market-signals-2026-10.md)). Phases 5–6 below are kept for provenance only.
 
 ---
 
@@ -75,13 +78,12 @@ These items bridge the gap between the current product (agent-to-DeFi) and the v
   - [x] Released on CANCELLED/FAILED (returns daily volume credit)
   - [x] Marked RELEASED on COMPLETED (payment consumes the reservation)
   - [x] Migration 0005 adds reservedAmount/reservedToken/reservationStatus to Job
-  - [ ] On-chain escrow contract (v3 — requires new Safe module deploy)
-  - [ ] Automatic cleanup of stale ACCEPTED jobs (v3)
+  - [x] On-chain escrow contract (v3 — `EscrowModule.sol`, May 2026; not yet deployed; being replaced by the ERC-8183-compatible `AgentJobEscrow` in the reactivation plan)
+  - [ ] Automatic cleanup of stale ACCEPTED jobs
 
-- **A2A Identity & Trust (Sign/Verify Handshake):**
-  - Implement `sign-handshake` via Turnkey MPC message signing
-  - Implement `verify-handshake` via EIP-1271 (Safe wallets) + ECDSA recovery (EOA fallback)
-  - Enable agents to cryptographically prove identity to peers
+- [x] **A2A Identity & Trust (Sign/Verify Handshake)** (April 2026, PR #51):
+  - [x] `sign-handshake` via EIP-191 `personal_sign` (Turnkey `signRawPayload` or local viem)
+  - [x] `verify-handshake` via ECDSA recovery + EIP-1271 fallback for Safe wallets
 
 - [x] **Reputation Scoring v2 + time-decay** (April 2026):
   - [x] Weighted score derived from: tx success rate (40%), job completion rate (30%), volume (20%), consistency (10%)
@@ -94,7 +96,7 @@ These items bridge the gap between the current product (agent-to-DeFi) and the v
   - [x] Compound V3 (supply/withdraw) — Mainnet, Base, Arbitrum, Polygon
   - [x] ERC-4626 vault standard (generic yield — any compliant vault works)
   - [x] Curve Finance StableSwap (classic pools — 3pool, tri-pool, etc.)
-  - [ ] GMX / Perp DEXes (for advanced agents)
+  - [x] GMX V2 perpetuals on Arbitrum (May 2026, PR #116)
   - More earning paths = closer to self-sustaining agents
 
 - [x] **Fastify v4 to v5 Migration** (April 2026):
@@ -131,9 +133,8 @@ These items bridge the gap between the current product (agent-to-DeFi) and the v
   - Agent pays for own compute/inference via on-chain payment to provider
   - Blocker: who owns the sub-wallet? Regulatory implications.
 
-- **Revenue Sharing for Self-Hosted Operators** (not started):
-  - Fee distribution mechanism between protocol and self-hosted deployments
-  - Aligned incentives at every layer (as described in VISION.md)
+- [x] **Revenue Sharing for Self-Hosted Operators** (May 2026, PR #116):
+  - [x] `Operator` model, per-fee-event split (`OperatorRevenue`), settlement lifecycle (`OperatorSettlement`), admin endpoints (migration 0013)
 
 ---
 
