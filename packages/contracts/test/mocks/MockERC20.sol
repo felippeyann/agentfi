@@ -61,6 +61,20 @@ contract FeeOnTransferERC20 is MockERC20 {
     }
 }
 
+/// @dev USDC-style token with an operator blacklist: any transfer from or to a blacklisted address reverts.
+contract BlacklistERC20 is MockERC20 {
+    mapping(address => bool) public blacklisted;
+
+    function setBlacklisted(address account, bool value) external {
+        blacklisted[account] = value;
+    }
+
+    function _move(address from, address to, uint256 amount) internal override {
+        require(!blacklisted[from] && !blacklisted[to], "Blacklistable: account is blacklisted");
+        super._move(from, to, amount);
+    }
+}
+
 /// @dev USDT-style token: `transfer`/`transferFrom` return nothing.
 contract NoReturnERC20 {
     uint8 public decimals = 6;

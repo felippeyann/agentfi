@@ -1,12 +1,28 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {IERC165} from "forge-std/interfaces/IERC165.sol";
 import {AgentJobEscrow} from "../src/AgentJobEscrow.sol";
 import {IACPHook} from "../src/IACPHook.sol";
-import {MockERC20, FeeOnTransferERC20, NoReturnERC20, FalseReturnERC20, ReentrantERC20} from "./mocks/MockERC20.sol";
-import {MockHook, NoERC165Hook, NoSupportsInterfaceHook, GarbageERC165Hook, ReentrantHook} from "./mocks/MockHook.sol";
+import {
+    MockERC20,
+    FeeOnTransferERC20,
+    NoReturnERC20,
+    FalseReturnERC20,
+    ReentrantERC20,
+    BlacklistERC20
+} from "./mocks/MockERC20.sol";
+import {
+    MockHook,
+    NoERC165Hook,
+    NoSupportsInterfaceHook,
+    GarbageERC165Hook,
+    YesManHook,
+    WideReturnERC165Hook,
+    RevertsOnInvalidIdHook,
+    ReentrantHook
+} from "./mocks/MockHook.sol";
 
 contract AgentJobEscrowTest is Test {
     // -------------------------------------------------------------------------
@@ -73,10 +89,37 @@ contract AgentJobEscrowTest is Test {
         jobId = escrow.createJob(provider, evaluator, _expiry(), "task", hook_);
     }
 
+    /// @dev Job created without a provider (the only state in which `setProvider` is valid).
+    function _createNoProvider(address hook_) internal returns (uint256 jobId) {
+        vm.prank(client);
+        jobId = escrow.createJob(address(0), evaluator, _expiry(), "task", hook_);
+    }
+
     function _open(address hook_) internal returns (uint256 jobId) {
         jobId = _create(hook_);
         vm.prank(client);
         escrow.setBudget(jobId, BUDGET, "");
+    }
+
+    function _openNoProvider() internal returns (uint256 jobId) {
+        jobId = _createNoProvider(address(0));
+        vm.prank(client);
+        escrow.setBudget(jobId, BUDGET, "");
+    }
+
+    /// @dev Escrow on a blacklist-capable token with one submitted job, ready for settlement.
+    function _blacklistSetup() internal returns (AgentJobEscrow e, BlacklistERC20 bl, uint256 jobId) {
+        bl = new BlacklistERC20();
+        e = new AgentJobEscrow(address(bl), feeWallet, operator, 0, PLATFORM_BPS);
+        bl.mint(client, BUDGET);
+        vm.startPrank(client);
+        bl.approve(address(e), BUDGET);
+        jobId = e.createJob(provider, evaluator, _expiry(), "task", address(0));
+        e.setBudget(jobId, BUDGET, "");
+        e.fund(jobId, BUDGET, "");
+        vm.stopPrank();
+        vm.prank(provider);
+        e.submit(jobId, DELIVERABLE, "");
     }
 
     function _funded(address hook_) internal returns (uint256 jobId) {
@@ -141,6 +184,7 @@ contract AgentJobEscrowTest is Test {
         assertEq(escrow.platformFeeBP(), PLATFORM_BPS);
         assertEq(escrow.evaluatorFeeBP(), EVAL_BPS);
         assertEq(escrow.jobCount(), 0);
+        assertEq(escrow.pendingPlatformFees(), 0);
         assertFalse(escrow.paused());
     }
 
@@ -271,10 +315,36 @@ contract AgentJobEscrowTest is Test {
         escrow.createJob(provider, evaluator, _expiry(), "task", stranger);
     }
 
-    function test_CreateJob_GarbageERC165Hook_Reverts() public {
+    function test_CreateJob_GarbageERC165Hook_RevertsUnsupportedHook() public {
+        // A non-boolean word must be rejected with the typed error, not with an abi-decoding panic.
         GarbageERC165Hook bad = new GarbageERC165Hook();
         vm.prank(client);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(AgentJobEscrow.UnsupportedHook.selector, address(bad)));
+        escrow.createJob(provider, evaluator, _expiry(), "task", address(bad));
+    }
+
+    function test_CreateJob_YesManHook_Reverts() public {
+        // Claims every interface including 0xffffffff: invalid ERC-165, must be rejected.
+        YesManHook bad = new YesManHook();
+        assertTrue(bad.supportsInterface(0xffffffff));
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(AgentJobEscrow.UnsupportedHook.selector, address(bad)));
+        escrow.createJob(provider, evaluator, _expiry(), "task", address(bad));
+    }
+
+    function test_CreateJob_WideReturnHook_Reverts() public {
+        WideReturnERC165Hook bad = new WideReturnERC165Hook();
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(AgentJobEscrow.UnsupportedHook.selector, address(bad)));
+        escrow.createJob(provider, evaluator, _expiry(), "task", address(bad));
+    }
+
+    function test_CreateJob_HookRevertingOnInvalidIdProbe_Reverts() public {
+        // Strict: the 0xffffffff probe must answer `false`, a revert is not accepted.
+        RevertsOnInvalidIdHook bad = new RevertsOnInvalidIdHook();
+        assertTrue(bad.supportsInterface(type(IACPHook).interfaceId));
+        vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(AgentJobEscrow.UnsupportedHook.selector, address(bad)));
         escrow.createJob(provider, evaluator, _expiry(), "task", address(bad));
     }
 
@@ -310,37 +380,62 @@ contract AgentJobEscrowTest is Test {
         assertEq(after_.data, before.data);
     }
 
-    function test_SetProvider_CanBeChangedWhileOpen() public {
+    function test_SetProvider_AlreadySetAtCreation_Reverts() public {
+        // ERC-8183: "SHALL revert if ... current job.provider != address(0)".
         uint256 jobId = _create(address(0));
         address other = makeAddr("otherProvider");
         vm.prank(client);
+        vm.expectRevert(abi.encodeWithSelector(AgentJobEscrow.ProviderAlreadySet.selector, jobId));
         escrow.setProvider(jobId, other);
-        assertEq(escrow.getJob(jobId).provider, other);
+        assertEq(escrow.getJob(jobId).provider, provider);
+    }
+
+    function test_SetProvider_Twice_Reverts() public {
+        uint256 jobId = _createNoProvider(address(0));
+        vm.startPrank(client);
+        escrow.setProvider(jobId, provider);
+        vm.expectRevert(abi.encodeWithSelector(AgentJobEscrow.ProviderAlreadySet.selector, jobId));
+        escrow.setProvider(jobId, makeAddr("otherProvider"));
+        vm.stopPrank();
+        assertEq(escrow.getJob(jobId).provider, provider);
+    }
+
+    function test_SetProvider_ClearsProviderAgentId() public {
+        uint256 jobId = _createNoProvider(address(0));
+        vm.startPrank(client);
+        escrow.setProviderAgentId(jobId, 4242);
+        vm.expectEmit(true, true, true, true, address(escrow));
+        emit AgentJobEscrow.ProviderSet(jobId, provider);
+        vm.expectEmit(true, true, true, true, address(escrow));
+        emit AgentJobEscrow.ProviderAgentIdSet(jobId, 0);
+        escrow.setProvider(jobId, provider);
+        vm.stopPrank();
+        assertEq(escrow.providerAgentId(jobId), 0);
     }
 
     function test_SetProvider_NotClient_Reverts() public {
-        uint256 jobId = _create(address(0));
+        uint256 jobId = _createNoProvider(address(0));
         vm.prank(provider);
         vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
         escrow.setProvider(jobId, provider);
     }
 
     function test_SetProvider_Zero_Reverts() public {
-        uint256 jobId = _create(address(0));
+        uint256 jobId = _createNoProvider(address(0));
         vm.prank(client);
         vm.expectRevert(abi.encodeWithSelector(AgentJobEscrow.InvalidProvider.selector, address(0)));
         escrow.setProvider(jobId, address(0));
     }
 
     function test_SetProvider_Client_Reverts() public {
-        uint256 jobId = _create(address(0));
+        uint256 jobId = _createNoProvider(address(0));
         vm.prank(client);
         vm.expectRevert(abi.encodeWithSelector(AgentJobEscrow.InvalidProvider.selector, client));
         escrow.setProvider(jobId, client);
     }
 
     function test_SetProvider_Evaluator_Reverts() public {
-        uint256 jobId = _create(address(0));
+        uint256 jobId = _createNoProvider(address(0));
         vm.prank(client);
         vm.expectRevert(abi.encodeWithSelector(AgentJobEscrow.InvalidProvider.selector, evaluator));
         escrow.setProvider(jobId, evaluator);
@@ -549,6 +644,11 @@ contract AgentJobEscrowTest is Test {
 
         uint256 fee = _platformFee(BUDGET);
         assertEq(usdt.balanceOf(provider), BUDGET - fee);
+        assertEq(usdt.balanceOf(address(e)), fee);
+        assertEq(e.pendingPlatformFees(), fee);
+
+        vm.prank(feeWallet);
+        e.withdrawPlatformFees();
         assertEq(usdt.balanceOf(feeWallet), fee);
         assertEq(usdt.balanceOf(address(e)), 0);
     }
@@ -607,16 +707,18 @@ contract AgentJobEscrowTest is Test {
         vm.expectEmit(true, true, true, true, address(escrow));
         emit AgentJobEscrow.PaymentReleased(jobId, provider, BUDGET - fee);
         vm.expectEmit(true, true, true, true, address(escrow));
-        emit AgentJobEscrow.PlatformFeePaid(jobId, feeWallet, fee);
+        emit AgentJobEscrow.PlatformFeeAccrued(jobId, fee);
 
         vm.prank(evaluator);
         escrow.complete(jobId, REASON, hex"cafe");
 
         assertEq(uint8(_status(jobId)), uint8(AgentJobEscrow.JobStatus.Completed));
         assertEq(token.balanceOf(provider), BUDGET - fee);
-        assertEq(token.balanceOf(feeWallet), fee);
+        // pull-based: the fee stays in the escrow until withdrawn
+        assertEq(token.balanceOf(feeWallet), 0);
         assertEq(token.balanceOf(evaluator), 0);
-        assertEq(token.balanceOf(address(escrow)), 0);
+        assertEq(token.balanceOf(address(escrow)), fee);
+        assertEq(escrow.pendingPlatformFees(), fee);
 
         // hook ordering: before = Submitted and provider unpaid; after = Completed and provider paid
         MockHook.Call memory before = hook.getCall(n);
@@ -625,8 +727,178 @@ contract AgentJobEscrowTest is Test {
         assertEq(before.data, abi.encode(REASON, bytes(hex"cafe")));
         assertEq(uint8(before.status), uint8(AgentJobEscrow.JobStatus.Submitted));
         assertEq(before.watchedBalance, 0);
+        assertEq(before.pendingFees, 0);
         assertEq(uint8(after_.status), uint8(AgentJobEscrow.JobStatus.Completed));
         assertEq(after_.watchedBalance, BUDGET - fee);
+        assertEq(after_.pendingFees, fee);
+    }
+
+    function test_Complete_AfterActionRunsAfterPayoutsAndFeeAccrual() public {
+        uint256 evalBps = 100;
+        AgentJobEscrow e = new AgentJobEscrow(address(token), feeWallet, operator, evalBps, PLATFORM_BPS);
+        MockHook h = new MockHook(e, address(token));
+        h.setWatched(evaluator);
+        vm.startPrank(client);
+        token.approve(address(e), BUDGET);
+        uint256 jobId = e.createJob(provider, evaluator, _expiry(), "task", address(h));
+        e.setBudget(jobId, BUDGET, "");
+        e.fund(jobId, BUDGET, "");
+        vm.stopPrank();
+        vm.prank(provider);
+        e.submit(jobId, DELIVERABLE, "");
+        uint256 n = h.callCount();
+
+        vm.prank(evaluator);
+        e.complete(jobId, REASON, "");
+
+        uint256 platformFee = _platformFee(BUDGET);
+        uint256 evaluatorFee = (BUDGET * evalBps) / BPS;
+        MockHook.Call memory before = h.getCall(n);
+        MockHook.Call memory after_ = h.getCall(n + 1);
+        // before: nothing moved yet
+        assertEq(before.escrowBalance, BUDGET);
+        assertEq(before.watchedBalance, 0);
+        assertEq(before.pendingFees, 0);
+        // after: provider and evaluator already paid, platform fee already accrued and still held
+        assertEq(after_.escrowBalance, platformFee);
+        assertEq(after_.watchedBalance, evaluatorFee);
+        assertEq(after_.pendingFees, platformFee);
+        assertEq(token.balanceOf(provider), BUDGET - platformFee - evaluatorFee);
+    }
+
+    function test_Complete_DustBudget_FeeRoundsToZero_NoAccrual() public {
+        // 333 * 30 / 10_000 == 0: no fee, no accrual event, provider receives everything.
+        uint256 dust = 333;
+        uint256 jobId = _create(address(0));
+        vm.startPrank(client);
+        escrow.setBudget(jobId, dust, "");
+        escrow.fund(jobId, dust, "");
+        vm.stopPrank();
+        vm.prank(provider);
+        escrow.submit(jobId, DELIVERABLE, "");
+
+        vm.recordLogs();
+        vm.prank(evaluator);
+        escrow.complete(jobId, REASON, "");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(logs[i].topics[0] != AgentJobEscrow.PlatformFeeAccrued.selector, "fee accrued on dust");
+        }
+        assertEq(token.balanceOf(provider), dust);
+        assertEq(escrow.pendingPlatformFees(), 0);
+        assertEq(token.balanceOf(address(escrow)), 0);
+        vm.prank(feeWallet);
+        vm.expectRevert(AgentJobEscrow.NothingToWithdraw.selector);
+        escrow.withdrawPlatformFees();
+    }
+
+    function test_Complete_MinimumFeeBudget_Accrues() public {
+        // 334 * 30 / 10_000 == 1: the smallest budget that pays a fee.
+        uint256 jobId = _create(address(0));
+        vm.startPrank(client);
+        escrow.setBudget(jobId, 334, "");
+        escrow.fund(jobId, 334, "");
+        vm.stopPrank();
+        vm.prank(provider);
+        escrow.submit(jobId, DELIVERABLE, "");
+        vm.prank(evaluator);
+        escrow.complete(jobId, REASON, "");
+        assertEq(escrow.pendingPlatformFees(), 1);
+        assertEq(token.balanceOf(provider), 333);
+    }
+
+    function test_Complete_MaxUint256Budget_NoOverflow() public {
+        MockERC20 big = new MockERC20();
+        AgentJobEscrow e = new AgentJobEscrow(address(big), feeWallet, operator, 100, PLATFORM_BPS);
+        uint256 budget = type(uint256).max;
+        big.mint(client, budget);
+        vm.startPrank(client);
+        big.approve(address(e), budget);
+        uint256 jobId = e.createJob(provider, evaluator, _expiry(), "task", address(0));
+        e.setBudget(jobId, budget, "");
+        e.fund(jobId, budget, "");
+        vm.stopPrank();
+        vm.prank(provider);
+        e.submit(jobId, DELIVERABLE, "");
+
+        vm.prank(evaluator);
+        e.complete(jobId, REASON, "");
+
+        uint256 platformFee = (budget / BPS) * PLATFORM_BPS + ((budget % BPS) * PLATFORM_BPS) / BPS;
+        uint256 evaluatorFee = (budget / BPS) * 100 + ((budget % BPS) * 100) / BPS;
+        assertEq(e.pendingPlatformFees(), platformFee);
+        assertEq(big.balanceOf(evaluator), evaluatorFee);
+        assertEq(big.balanceOf(provider), budget - platformFee - evaluatorFee);
+        assertEq(big.balanceOf(provider) + big.balanceOf(evaluator) + e.pendingPlatformFees(), budget);
+    }
+
+    function test_EvaluatorIsClient_CompletePaysProvider() public {
+        vm.startPrank(client);
+        uint256 jobId = escrow.createJob(provider, client, _expiry(), "task", address(hook));
+        escrow.setBudget(jobId, BUDGET, "");
+        escrow.fund(jobId, BUDGET, "");
+        vm.stopPrank();
+        vm.prank(provider);
+        escrow.submit(jobId, DELIVERABLE, "");
+
+        // the evaluator role is exercised by the client's address
+        vm.prank(evaluator);
+        vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
+        escrow.complete(jobId, REASON, "");
+
+        uint256 fee = _platformFee(BUDGET);
+        vm.expectEmit(true, true, true, true, address(escrow));
+        emit AgentJobEscrow.JobCompleted(jobId, client, REASON);
+        vm.prank(client);
+        escrow.complete(jobId, REASON, "");
+        assertEq(token.balanceOf(provider), BUDGET - fee);
+        assertEq(escrow.pendingPlatformFees(), fee);
+        assertEq(hook.lastCall().selector, AgentJobEscrow.complete.selector);
+    }
+
+    function test_EvaluatorIsClient_RejectAfterSubmitRefundsClient() public {
+        vm.startPrank(client);
+        uint256 jobId = escrow.createJob(provider, client, _expiry(), "task", address(0));
+        escrow.setBudget(jobId, BUDGET, "");
+        escrow.fund(jobId, BUDGET, "");
+        vm.stopPrank();
+        uint256 clientBefore = token.balanceOf(client);
+        vm.prank(provider);
+        escrow.submit(jobId, DELIVERABLE, "");
+
+        vm.prank(client);
+        escrow.reject(jobId, REASON, "");
+        assertEq(uint8(_status(jobId)), uint8(AgentJobEscrow.JobStatus.Rejected));
+        assertEq(token.balanceOf(client), clientBefore + BUDGET);
+        assertEq(token.balanceOf(provider), 0);
+    }
+
+    function test_EvaluatorIsClient_RejectWhileFundedRefundsClient() public {
+        vm.startPrank(client);
+        uint256 jobId = escrow.createJob(provider, client, _expiry(), "task", address(0));
+        escrow.setBudget(jobId, BUDGET, "");
+        escrow.fund(jobId, BUDGET, "");
+        uint256 clientBefore = token.balanceOf(client);
+        escrow.reject(jobId, REASON, "");
+        vm.stopPrank();
+        assertEq(uint8(_status(jobId)), uint8(AgentJobEscrow.JobStatus.Rejected));
+        assertEq(token.balanceOf(client), clientBefore + BUDGET);
+    }
+
+    function test_EvaluatorIsClient_ProviderStillCannotSettle() public {
+        vm.startPrank(client);
+        uint256 jobId = escrow.createJob(provider, client, _expiry(), "task", address(0));
+        escrow.setBudget(jobId, BUDGET, "");
+        escrow.fund(jobId, BUDGET, "");
+        vm.stopPrank();
+        vm.startPrank(provider);
+        escrow.submit(jobId, DELIVERABLE, "");
+        vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
+        escrow.complete(jobId, REASON, "");
+        vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
+        escrow.reject(jobId, REASON, "");
+        vm.stopPrank();
     }
 
     function test_Complete_WithEvaluatorFee_PaysEvaluator() public {
@@ -650,9 +922,10 @@ contract AgentJobEscrowTest is Test {
         e.complete(jobId, REASON, "");
 
         assertEq(token.balanceOf(provider), BUDGET - platformFee - evaluatorFee);
-        assertEq(token.balanceOf(feeWallet), platformFee);
+        assertEq(token.balanceOf(feeWallet), 0);
         assertEq(token.balanceOf(evaluator), evaluatorFee);
-        assertEq(token.balanceOf(address(e)), 0);
+        assertEq(token.balanceOf(address(e)), platformFee);
+        assertEq(e.pendingPlatformFees(), platformFee);
     }
 
     function test_Complete_ZeroFees_NoFeeTransfers() public {
@@ -671,6 +944,7 @@ contract AgentJobEscrowTest is Test {
         assertEq(token.balanceOf(provider), BUDGET);
         assertEq(token.balanceOf(feeWallet), 0);
         assertEq(token.balanceOf(evaluator), 0);
+        assertEq(e.pendingPlatformFees(), 0);
     }
 
     function test_Complete_NotEvaluator_Reverts() public {
@@ -762,6 +1036,31 @@ contract AgentJobEscrowTest is Test {
         escrow.reject(jobId, REASON, "");
     }
 
+    function test_Reject_HookRevertInBefore_BlocksRejectAndRefund() public {
+        uint256 jobId = _submitted(address(hook));
+        uint256 clientBefore = token.balanceOf(client);
+        hook.setRevertBefore(true);
+        vm.prank(evaluator);
+        vm.expectRevert(abi.encodeWithSelector(MockHook.HookRevert.selector, "before"));
+        escrow.reject(jobId, REASON, "");
+        assertEq(uint8(_status(jobId)), uint8(AgentJobEscrow.JobStatus.Submitted));
+        assertEq(token.balanceOf(client), clientBefore);
+        assertEq(token.balanceOf(address(escrow)), BUDGET);
+    }
+
+    function test_Reject_HookRevertInAfter_RevertsWholeReject() public {
+        uint256 jobId = _funded(address(hook));
+        uint256 clientBefore = token.balanceOf(client);
+        hook.setRevertAfter(true);
+        vm.prank(evaluator);
+        vm.expectRevert(abi.encodeWithSelector(MockHook.HookRevert.selector, "after"));
+        escrow.reject(jobId, REASON, "");
+        // the refund transfer happened inside the reverted frame: nothing moved
+        assertEq(uint8(_status(jobId)), uint8(AgentJobEscrow.JobStatus.Funded));
+        assertEq(token.balanceOf(client), clientBefore);
+        assertEq(token.balanceOf(address(escrow)), BUDGET);
+    }
+
     // =========================================================================
     // claimRefund
     // =========================================================================
@@ -818,6 +1117,43 @@ contract AgentJobEscrowTest is Test {
         vm.warp(escrow.getJob(jobId).expiredAt);
         escrow.claimRefund(jobId);
         assertEq(uint8(_status(jobId)), uint8(AgentJobEscrow.JobStatus.Expired));
+    }
+
+    // =========================================================================
+    // Expiry race on Submitted jobs (spec-permitted: first tx wins)
+    // =========================================================================
+
+    function test_ExpiryRace_CompleteFirst_ThenClaimRefundReverts() public {
+        uint256 jobId = _submitted(address(0));
+        vm.warp(escrow.getJob(jobId).expiredAt);
+
+        vm.prank(evaluator);
+        escrow.complete(jobId, REASON, "");
+        assertEq(uint8(_status(jobId)), uint8(AgentJobEscrow.JobStatus.Completed));
+        assertEq(token.balanceOf(provider), BUDGET - _platformFee(BUDGET));
+
+        vm.prank(stranger);
+        vm.expectRevert(_invalidStatus(jobId, AgentJobEscrow.JobStatus.Completed));
+        escrow.claimRefund(jobId);
+    }
+
+    function test_ExpiryRace_ClaimRefundFirst_ThenCompleteReverts() public {
+        uint256 jobId = _submitted(address(0));
+        uint256 clientBefore = token.balanceOf(client);
+        vm.warp(escrow.getJob(jobId).expiredAt);
+
+        vm.prank(stranger);
+        escrow.claimRefund(jobId);
+        assertEq(uint8(_status(jobId)), uint8(AgentJobEscrow.JobStatus.Expired));
+        assertEq(token.balanceOf(client), clientBefore + BUDGET);
+
+        vm.prank(evaluator);
+        vm.expectRevert(_invalidStatus(jobId, AgentJobEscrow.JobStatus.Expired));
+        escrow.complete(jobId, REASON, "");
+        vm.prank(evaluator);
+        vm.expectRevert(_invalidStatus(jobId, AgentJobEscrow.JobStatus.Expired));
+        escrow.reject(jobId, REASON, "");
+        assertEq(token.balanceOf(provider), 0);
     }
 
     // =========================================================================
@@ -884,7 +1220,11 @@ contract AgentJobEscrowTest is Test {
             for (uint8 ai = 0; ai <= uint8(Action.SetProviderAgentId); ai++) {
                 AgentJobEscrow.JobStatus s = AgentJobEscrow.JobStatus(si);
                 Action a = Action(ai);
-                uint256 jobId = _jobInStatus(s, address(0));
+                // setProvider is only valid while Open AND unset (ERC-8183); every other status
+                // rejects it with InvalidStatus regardless of the provider.
+                uint256 jobId = (s == AgentJobEscrow.JobStatus.Open && a == Action.SetProvider)
+                    ? _openNoProvider()
+                    : _jobInStatus(s, address(0));
                 assertEq(uint8(_status(jobId)), si, "setup status");
 
                 if (a == Action.ClaimRefund) vm.warp(escrow.getJob(jobId).expiredAt);
@@ -902,13 +1242,18 @@ contract AgentJobEscrowTest is Test {
     }
 
     function test_TransitionTable_FundsAlwaysSettle() public {
-        // Funds never get stuck: after every terminal transition the escrow holds nothing for that job.
+        // Funds never get stuck: after every terminal transition the escrow holds nothing for that
+        // job except the accrued platform fee, which the fee wallet can always pull.
         uint256 completed = _completed(address(0));
         uint256 rejected = _rejected(address(0));
         uint256 expired = _expired(address(0));
         assertEq(uint8(_status(completed)), uint8(AgentJobEscrow.JobStatus.Completed));
         assertEq(uint8(_status(rejected)), uint8(AgentJobEscrow.JobStatus.Rejected));
         assertEq(uint8(_status(expired)), uint8(AgentJobEscrow.JobStatus.Expired));
+        assertEq(token.balanceOf(address(escrow)), _platformFee(BUDGET));
+        assertEq(token.balanceOf(address(escrow)), escrow.pendingPlatformFees());
+        vm.prank(feeWallet);
+        escrow.withdrawPlatformFees();
         assertEq(token.balanceOf(address(escrow)), 0);
     }
 
@@ -971,11 +1316,34 @@ contract AgentJobEscrowTest is Test {
         assertEq(hook.callCount(), 0);
     }
 
+    function test_Hook_FlipsAfterFund_SettlementBlocked_ClaimRefundStillWorks() public {
+        // A hook that starts behaving after funding can block submit/complete/reject but never the refund.
+        uint256 jobId = _funded(address(hook));
+        uint256 clientBefore = token.balanceOf(client);
+        hook.setRevertBefore(true);
+
+        vm.prank(provider);
+        vm.expectRevert(abi.encodeWithSelector(MockHook.HookRevert.selector, "before"));
+        escrow.submit(jobId, DELIVERABLE, "");
+        vm.prank(evaluator);
+        vm.expectRevert(abi.encodeWithSelector(MockHook.HookRevert.selector, "before"));
+        escrow.reject(jobId, REASON, "");
+        assertEq(uint8(_status(jobId)), uint8(AgentJobEscrow.JobStatus.Funded));
+
+        vm.warp(escrow.getJob(jobId).expiredAt);
+        vm.prank(stranger);
+        escrow.claimRefund(jobId);
+        assertEq(uint8(_status(jobId)), uint8(AgentJobEscrow.JobStatus.Expired));
+        assertEq(token.balanceOf(client), clientBefore + BUDGET);
+    }
+
     function test_Hook_InterfaceId_MatchesSpec() public pure {
         bytes4 expected = IACPHook.beforeAction.selector ^ IACPHook.afterAction.selector;
         assertEq(type(IACPHook).interfaceId, expected);
         // Pinned so a signature drift in IACPHook.sol (which would break third-party hooks) is caught.
         assertEq(type(IACPHook).interfaceId, bytes4(0x7ff6bc9e));
+        // `is IERC165` does not change the id: inherited functions are excluded by definition.
+        assertTrue(type(IACPHook).interfaceId != (expected ^ IERC165.supportsInterface.selector));
     }
 
     // =========================================================================
@@ -1021,7 +1389,30 @@ contract AgentJobEscrowTest is Test {
         assertFalse(evil.lastReentryOk());
         assertEq(evil.lastReentryData(), abi.encodeWithSelector(AgentJobEscrow.ReentrantCall.selector));
         assertEq(evil.balanceOf(provider), BUDGET - _platformFee(BUDGET));
-        assertEq(evil.balanceOf(address(e)), 0);
+        assertEq(evil.balanceOf(address(e)), _platformFee(BUDGET));
+        assertEq(e.pendingPlatformFees(), _platformFee(BUDGET));
+    }
+
+    function test_Reentrancy_TokenDuringWithdrawPlatformFees_Blocked() public {
+        (AgentJobEscrow e, ReentrantERC20 evil, uint256 jobId) = _escrowWithReentrantToken();
+        vm.prank(client);
+        e.fund(jobId, BUDGET, "");
+        vm.prank(provider);
+        e.submit(jobId, DELIVERABLE, "");
+        evil.setAttack(address(0), "");
+        vm.prank(evaluator);
+        e.complete(jobId, REASON, "");
+
+        // from inside the fee transfer try to withdraw again
+        evil.setAttack(address(e), abi.encodeCall(AgentJobEscrow.withdrawPlatformFees, ()));
+        vm.prank(feeWallet);
+        e.withdrawPlatformFees();
+
+        assertTrue(evil.attacked());
+        assertFalse(evil.lastReentryOk());
+        assertEq(evil.lastReentryData(), abi.encodeWithSelector(AgentJobEscrow.ReentrantCall.selector));
+        assertEq(evil.balanceOf(feeWallet), _platformFee(BUDGET));
+        assertEq(e.pendingPlatformFees(), 0);
     }
 
     function test_Reentrancy_TokenDuringClaimRefund_Blocked() public {
@@ -1198,11 +1589,34 @@ contract AgentJobEscrowTest is Test {
         escrow.setProviderAgentId(jobId, 1);
     }
 
-    function test_SetProviderAgentId_NotClient_Reverts() public {
-        uint256 jobId = _open(address(0));
+    function test_SetProviderAgentId_ByProvider_Succeeds() public {
+        uint256 jobId = _funded(address(0));
+        vm.expectEmit(true, true, true, true, address(escrow));
+        emit AgentJobEscrow.ProviderAgentIdSet(jobId, 1);
         vm.prank(provider);
+        escrow.setProviderAgentId(jobId, 1);
+        assertEq(escrow.providerAgentId(jobId), 1);
+    }
+
+    function test_SetProviderAgentId_ByStrangerOrEvaluator_Reverts() public {
+        uint256 jobId = _open(address(0));
+        vm.prank(stranger);
         vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
         escrow.setProviderAgentId(jobId, 1);
+        vm.prank(evaluator);
+        vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
+        escrow.setProviderAgentId(jobId, 1);
+    }
+
+    function test_SetProviderAgentId_NoProviderYet_OnlyClient() public {
+        // With provider == address(0) nobody but the client may set it (no "anyone" hole).
+        uint256 jobId = _createNoProvider(address(0));
+        vm.prank(stranger);
+        vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
+        escrow.setProviderAgentId(jobId, 1);
+        vm.prank(client);
+        escrow.setProviderAgentId(jobId, 1);
+        assertEq(escrow.providerAgentId(jobId), 1);
     }
 
     function test_SetProviderAgentId_UnknownJob_Reverts() public {
@@ -1212,18 +1626,230 @@ contract AgentJobEscrowTest is Test {
     }
 
     // =========================================================================
+    // Platform fees: pull-based accrual, withdrawal and fee wallet rotation
+    // =========================================================================
+
+    function test_WithdrawPlatformFees_ByFeeWallet() public {
+        _completed(address(0));
+        uint256 fee = _platformFee(BUDGET);
+        vm.expectEmit(true, true, true, true, address(escrow));
+        emit AgentJobEscrow.PlatformFeesWithdrawn(feeWallet, fee);
+        vm.prank(feeWallet);
+        escrow.withdrawPlatformFees();
+        assertEq(token.balanceOf(feeWallet), fee);
+        assertEq(escrow.pendingPlatformFees(), 0);
+        assertEq(token.balanceOf(address(escrow)), 0);
+    }
+
+    function test_WithdrawPlatformFees_ByOperator_PaysFeeWallet() public {
+        _completed(address(0));
+        uint256 fee = _platformFee(BUDGET);
+        vm.prank(operator);
+        escrow.withdrawPlatformFees();
+        assertEq(token.balanceOf(feeWallet), fee);
+        assertEq(token.balanceOf(operator), 0);
+    }
+
+    function test_WithdrawPlatformFees_AccumulatesAcrossJobs() public {
+        _completed(address(0));
+        _completed(address(0));
+        _rejected(address(0));
+        assertEq(escrow.pendingPlatformFees(), 2 * _platformFee(BUDGET));
+        vm.prank(feeWallet);
+        escrow.withdrawPlatformFees();
+        assertEq(token.balanceOf(feeWallet), 2 * _platformFee(BUDGET));
+    }
+
+    function test_WithdrawPlatformFees_ByStranger_Reverts() public {
+        _completed(address(0));
+        vm.prank(stranger);
+        vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
+        escrow.withdrawPlatformFees();
+        vm.prank(evaluator);
+        vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
+        escrow.withdrawPlatformFees();
+    }
+
+    function test_WithdrawPlatformFees_NothingAccrued_Reverts() public {
+        vm.prank(feeWallet);
+        vm.expectRevert(AgentJobEscrow.NothingToWithdraw.selector);
+        escrow.withdrawPlatformFees();
+    }
+
+    function test_WithdrawPlatformFees_WorksWhilePaused() public {
+        _completed(address(0));
+        vm.prank(operator);
+        escrow.pause();
+        vm.prank(feeWallet);
+        escrow.withdrawPlatformFees();
+        assertEq(token.balanceOf(feeWallet), _platformFee(BUDGET));
+    }
+
+    function test_WithdrawPlatformFees_NeverTouchesEscrowedBudgets() public {
+        _completed(address(0));
+        uint256 live = _submitted(address(0));
+        vm.prank(feeWallet);
+        escrow.withdrawPlatformFees();
+        assertEq(token.balanceOf(address(escrow)), BUDGET);
+        assertEq(uint8(_status(live)), uint8(AgentJobEscrow.JobStatus.Submitted));
+    }
+
+    function test_SetFeeWallet_OnlyOperator() public {
+        address next = makeAddr("nextFeeWallet");
+        vm.prank(feeWallet);
+        vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
+        escrow.setFeeWallet(next);
+        vm.prank(stranger);
+        vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
+        escrow.setFeeWallet(next);
+    }
+
+    function test_SetFeeWallet_Zero_Reverts() public {
+        vm.prank(operator);
+        vm.expectRevert(AgentJobEscrow.ZeroAddress.selector);
+        escrow.setFeeWallet(address(0));
+    }
+
+    function test_SetFeeWallet_RotatesAndEmits() public {
+        address next = makeAddr("nextFeeWallet");
+        vm.expectEmit(true, true, true, true, address(escrow));
+        emit AgentJobEscrow.FeeWalletUpdated(feeWallet, next);
+        vm.prank(operator);
+        escrow.setFeeWallet(next);
+        assertEq(escrow.feeWallet(), next);
+
+        _completed(address(0));
+        // the old wallet lost its withdrawal right, the new one withdraws to itself
+        vm.prank(feeWallet);
+        vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
+        escrow.withdrawPlatformFees();
+        vm.prank(next);
+        escrow.withdrawPlatformFees();
+        assertEq(token.balanceOf(next), _platformFee(BUDGET));
+        assertEq(token.balanceOf(feeWallet), 0);
+    }
+
+    function test_FeeWalletBlacklisted_CompleteStillPaysProvider_RotateThenWithdraw() public {
+        (AgentJobEscrow e, BlacklistERC20 bl, uint256 jobId) = _blacklistSetup();
+        bl.setBlacklisted(feeWallet, true);
+        uint256 fee = _platformFee(BUDGET);
+
+        // settlement is unaffected by the frozen fee wallet
+        vm.prank(evaluator);
+        e.complete(jobId, REASON, "");
+        assertEq(uint8(e.getJob(jobId).status), uint8(AgentJobEscrow.JobStatus.Completed));
+        assertEq(bl.balanceOf(provider), BUDGET - fee);
+        assertEq(e.pendingPlatformFees(), fee);
+
+        // the frozen wallet cannot pull, the accrual is kept
+        vm.prank(feeWallet);
+        vm.expectRevert(AgentJobEscrow.TransferFailed.selector);
+        e.withdrawPlatformFees();
+        assertEq(e.pendingPlatformFees(), fee);
+
+        // rotate and pull
+        address next = makeAddr("nextFeeWallet");
+        vm.prank(operator);
+        e.setFeeWallet(next);
+        vm.prank(operator);
+        e.withdrawPlatformFees();
+        assertEq(bl.balanceOf(next), fee);
+        assertEq(e.pendingPlatformFees(), 0);
+        assertEq(bl.balanceOf(address(e)), 0);
+    }
+
+    // =========================================================================
+    // Blacklisted client / provider (documented: no escape hatch on purpose)
+    // =========================================================================
+
+    function test_ClientBlacklisted_RejectAndClaimRefundRevert_CompleteIsTheOnlyExit() public {
+        (AgentJobEscrow e, BlacklistERC20 bl, uint256 jobId) = _blacklistSetup();
+        bl.setBlacklisted(client, true);
+
+        vm.prank(evaluator);
+        vm.expectRevert(AgentJobEscrow.TransferFailed.selector);
+        e.reject(jobId, REASON, "");
+        assertEq(uint8(e.getJob(jobId).status), uint8(AgentJobEscrow.JobStatus.Submitted));
+
+        vm.warp(e.getJob(jobId).expiredAt);
+        vm.prank(stranger);
+        vm.expectRevert(AgentJobEscrow.TransferFailed.selector);
+        e.claimRefund(jobId);
+        assertEq(uint8(e.getJob(jobId).status), uint8(AgentJobEscrow.JobStatus.Submitted));
+
+        vm.prank(evaluator);
+        e.complete(jobId, REASON, "");
+        assertEq(uint8(e.getJob(jobId).status), uint8(AgentJobEscrow.JobStatus.Completed));
+        assertEq(bl.balanceOf(provider), BUDGET - _platformFee(BUDGET));
+    }
+
+    function test_ClientBlacklisted_FundedJob_RefundResumesOnceUnblacklisted() public {
+        BlacklistERC20 bl = new BlacklistERC20();
+        AgentJobEscrow e = new AgentJobEscrow(address(bl), feeWallet, operator, 0, PLATFORM_BPS);
+        bl.mint(client, BUDGET);
+        vm.startPrank(client);
+        bl.approve(address(e), BUDGET);
+        uint256 jobId = e.createJob(provider, evaluator, _expiry(), "task", address(0));
+        e.setBudget(jobId, BUDGET, "");
+        e.fund(jobId, BUDGET, "");
+        vm.stopPrank();
+        bl.setBlacklisted(client, true);
+
+        vm.prank(evaluator);
+        vm.expectRevert(AgentJobEscrow.TransferFailed.selector);
+        e.reject(jobId, REASON, "");
+        vm.warp(e.getJob(jobId).expiredAt);
+        vm.expectRevert(AgentJobEscrow.TransferFailed.selector);
+        e.claimRefund(jobId);
+
+        // funds are held, not lost: the refund works again once the client is cleared
+        bl.setBlacklisted(client, false);
+        e.claimRefund(jobId);
+        assertEq(bl.balanceOf(client), BUDGET);
+    }
+
+    function test_ProviderBlacklisted_CompleteReverts_RejectRefundsClient() public {
+        (AgentJobEscrow e, BlacklistERC20 bl, uint256 jobId) = _blacklistSetup();
+        bl.setBlacklisted(provider, true);
+
+        vm.prank(evaluator);
+        vm.expectRevert(AgentJobEscrow.TransferFailed.selector);
+        e.complete(jobId, REASON, "");
+        assertEq(uint8(e.getJob(jobId).status), uint8(AgentJobEscrow.JobStatus.Submitted));
+        assertEq(e.pendingPlatformFees(), 0);
+
+        vm.prank(evaluator);
+        e.reject(jobId, keccak256("agentfi.payout-blocked"), "");
+        assertEq(uint8(e.getJob(jobId).status), uint8(AgentJobEscrow.JobStatus.Rejected));
+        assertEq(bl.balanceOf(client), BUDGET);
+        assertEq(bl.balanceOf(address(e)), 0);
+    }
+
+    function test_ProviderBlacklisted_ClaimRefundWorks() public {
+        (AgentJobEscrow e, BlacklistERC20 bl, uint256 jobId) = _blacklistSetup();
+        bl.setBlacklisted(provider, true);
+        vm.warp(e.getJob(jobId).expiredAt);
+        vm.prank(stranger);
+        e.claimRefund(jobId);
+        assertEq(uint8(e.getJob(jobId).status), uint8(AgentJobEscrow.JobStatus.Expired));
+        assertEq(bl.balanceOf(client), BUDGET);
+    }
+
+    // =========================================================================
     // Fuzz
     // =========================================================================
 
-    function testFuzz_Complete_FeeMath(uint96 budget, uint16 platformBps, uint16 evalBps) public {
-        budget = uint96(bound(budget, 1, type(uint96).max));
+    function testFuzz_Complete_FeeMath(uint256 budget, uint16 platformBps, uint16 evalBps) public {
+        budget = bound(budget, 1, type(uint256).max);
         platformBps = uint16(bound(platformBps, 0, 9_999));
         evalBps = uint16(bound(evalBps, 0, 9_999 - platformBps));
 
-        AgentJobEscrow e = new AgentJobEscrow(address(token), feeWallet, operator, evalBps, platformBps);
-        token.mint(client, budget);
+        // fresh token so any uint256 budget can be minted without overflowing a prior balance
+        MockERC20 t = new MockERC20();
+        AgentJobEscrow e = new AgentJobEscrow(address(t), feeWallet, operator, evalBps, platformBps);
+        t.mint(client, budget);
         vm.startPrank(client);
-        token.approve(address(e), budget);
+        t.approve(address(e), budget);
         uint256 jobId = e.createJob(provider, evaluator, _expiry(), "task", address(0));
         e.setBudget(jobId, budget, "");
         e.fund(jobId, budget, "");
@@ -1233,13 +1859,62 @@ contract AgentJobEscrowTest is Test {
         vm.prank(evaluator);
         e.complete(jobId, REASON, "");
 
-        uint256 platformFee = (uint256(budget) * platformBps) / BPS;
-        uint256 evaluatorFee = (uint256(budget) * evalBps) / BPS;
-        assertEq(token.balanceOf(provider), budget - platformFee - evaluatorFee);
-        assertEq(token.balanceOf(feeWallet), platformFee);
-        assertEq(token.balanceOf(evaluator), evaluatorFee);
-        assertEq(token.balanceOf(address(e)), 0);
-        assertEq(token.balanceOf(provider) + token.balanceOf(feeWallet) + token.balanceOf(evaluator), budget);
+        uint256 platformFee = e.pendingPlatformFees();
+        uint256 evaluatorFee = t.balanceOf(evaluator);
+        if (budget <= type(uint256).max / BPS) {
+            // where the naive formula cannot overflow, the split formula must agree with it exactly
+            assertEq(platformFee, (budget * platformBps) / BPS, "platform fee");
+            assertEq(evaluatorFee, (budget * evalBps) / BPS, "evaluator fee");
+        } else {
+            assertEq(platformFee, (budget / BPS) * platformBps + ((budget % BPS) * platformBps) / BPS);
+            assertEq(evaluatorFee, (budget / BPS) * evalBps + ((budget % BPS) * evalBps) / BPS);
+        }
+        assertEq(t.balanceOf(provider), budget - platformFee - evaluatorFee);
+        assertEq(t.balanceOf(feeWallet), 0);
+        assertEq(t.balanceOf(address(e)), platformFee);
+        assertEq(t.balanceOf(provider) + evaluatorFee + platformFee, budget, "conservation");
+    }
+
+    function testFuzz_PlatformFeeAccrual_Conservation(uint96[5] memory budgets, uint8 outcomes) public {
+        uint256 expectedFees;
+        uint256 expectedHeld;
+        for (uint256 i = 0; i < budgets.length; i++) {
+            uint256 budget = bound(budgets[i], 1, type(uint96).max);
+            token.mint(client, budget);
+            vm.startPrank(client);
+            uint256 jobId = escrow.createJob(provider, evaluator, _expiry(), "task", address(0));
+            escrow.setBudget(jobId, budget, "");
+            escrow.fund(jobId, budget, "");
+            vm.stopPrank();
+            vm.prank(provider);
+            escrow.submit(jobId, DELIVERABLE, "");
+
+            uint256 outcome = (outcomes >> (2 * i)) & 3; // 0: complete, 1: reject, 2/3: leave open
+            if (outcome == 0) {
+                vm.prank(evaluator);
+                escrow.complete(jobId, REASON, "");
+                expectedFees += _platformFee(budget);
+            } else if (outcome == 1) {
+                vm.prank(evaluator);
+                escrow.reject(jobId, REASON, "");
+            } else {
+                expectedHeld += budget;
+            }
+            assertEq(escrow.pendingPlatformFees(), expectedFees, "accrual");
+            assertEq(token.balanceOf(address(escrow)), expectedFees + expectedHeld, "balance");
+        }
+
+        if (expectedFees == 0) {
+            vm.prank(feeWallet);
+            vm.expectRevert(AgentJobEscrow.NothingToWithdraw.selector);
+            escrow.withdrawPlatformFees();
+        } else {
+            vm.prank(operator);
+            escrow.withdrawPlatformFees();
+        }
+        assertEq(token.balanceOf(feeWallet), expectedFees);
+        assertEq(escrow.pendingPlatformFees(), 0);
+        assertEq(token.balanceOf(address(escrow)), expectedHeld);
     }
 
     function testFuzz_FundAndRefund_RoundTrip(uint96 budget, uint32 ttl, bool viaReject) public {
