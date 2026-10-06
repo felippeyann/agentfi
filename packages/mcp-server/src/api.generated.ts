@@ -571,7 +571,35 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        /** Update operational policy */
+        /**
+         * Update operational policy (tighten-only for the agent; operator may loosen)
+         * @description Updates the agent's operational policy. Omitted fields keep their current value.
+         *
+         *     **Authority model**
+         *     - An agent (its own `agfi_live_…` key) may only **tighten** its policy. A patch
+         *       that loosens any field is rejected with `403` and `loosenedFields` names the
+         *       offending fields. This stops a compromised or prompt-injected agent from
+         *       raising its own limits.
+         *     - The operator (`x-api-key: <API_SECRET>`) may set any policy on any agent,
+         *       including loosening. The agent-ownership check does not apply to the operator.
+         *
+         *     A field **loosens** when:
+         *     - `maxValuePerTxEth` increases;
+         *     - `maxDailyVolumeUsd` increases — `"0"` means *no daily limit* and therefore
+         *       loosens any positive limit;
+         *     - `allowedContracts` / `allowedTokens` go from non-empty to empty, or gain an
+         *       address not in the current list (compared case-insensitively);
+         *     - `cooldownSeconds` decreases;
+         *     - `active` goes `false → true`;
+         *     - `expiresAt` is cleared (`null`) or moved later while one existed.
+         *
+         *     When no policy exists yet, any patch that sets a limit counts as tightening
+         *     (`active: true` and `expiresAt: null` are neutral).
+         *
+         *     Pass `expiresAt` (ISO 8601) to create a temporary task-scoped policy; the
+         *     policy rejects transactions after that timestamp. `expiresAt: null` clears
+         *     the expiry (operator only once an expiry exists).
+         */
         patch: {
             parameters: {
                 query?: never;
@@ -597,7 +625,20 @@ export interface paths {
                         "application/json": components["schemas"]["UpdatePolicyResponse"];
                     };
                 };
-                403: components["responses"]["Forbidden"];
+                /**
+                 * @description Access denied. Either the agent key does not belong to `{id}`, or the agent
+                 *     attempted to loosen its own policy — in that case `loosenedFields` lists the
+                 *     fields that would have been loosened and the operator credential is required.
+                 */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PolicyChangeForbidden"];
+                    };
+                };
+                404: components["responses"]["NotFound"];
             };
         };
         trace?: never;
@@ -2345,6 +2386,13 @@ export interface components {
             error: string;
             /** @description Optional additional context (string, object, or array). */
             details?: unknown;
+        };
+        PolicyChangeForbidden: components["schemas"]["Error"] & {
+            /**
+             * @description Policy fields the agent tried to loosen. Only present when the rejection
+             *     is a loosening attempt (not when the key belongs to another agent).
+             */
+            loosenedFields?: ("maxValuePerTxEth" | "maxDailyVolumeUsd" | "allowedContracts" | "allowedTokens" | "cooldownSeconds" | "active" | "expiresAt")[];
         };
         HealthStatus: {
             /** @example ok */

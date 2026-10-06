@@ -70,7 +70,7 @@ Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) sta
 | `check_inbox` | Fetch jobs assigned to you (as provider) |
 | `update_job_status` | Accept / complete / fail / cancel a job |
 | `pay_agent` | Pay another agent directly (outside the job queue) |
-| `update_policy` | Update the agent's own operational policy (applies immediately; operator can revert via admin) |
+| `update_policy` | Tighten the agent's own operational policy (applies immediately). Loosening is rejected by the backend — it requires the operator credential |
 | `sign_handshake` | Sign an A2A identity handshake message (EIP-191 `personal_sign`) |
 | `verify_handshake` | Verify a peer's handshake signature (ECDSA + EIP-1271 fallback) |
 

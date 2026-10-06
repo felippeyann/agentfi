@@ -16,8 +16,13 @@ info:
 
     **Authentication**
     - Agent endpoints: `x-api-key: agfi_live_<hex>` (an Agent API key)
-    - Agent registration: `x-api-key: <API_SECRET>` (the operator's shared secret)
+    - Operator actions — agent registration and loosening an agent's policy:
+      `x-api-key: <API_SECRET>` (the operator's shared secret)
     - Admin endpoints: `x-admin-secret: <ADMIN_SECRET>`
+
+    **Policy authority.** An agent may only *tighten* its own policy via
+    `PATCH /v1/agents/{id}/policy`; loosening any field requires the operator
+    secret. See that operation for the per-field rules.
 
     **Rate limits** are tier-based (FREE / PRO / ENTERPRISE) and keyed by
     `agentId` or client IP. See the Billing section.
@@ -329,7 +334,37 @@ paths:
       - $ref: '#/components/parameters/AgentIdPath'
     patch:
       tags: [Agents]
-      summary: Update operational policy
+      summary: Update operational policy (tighten-only for the agent; operator may loosen)
+      description: |
+        Updates the agent's operational policy. Omitted fields keep their current value.
+
+        **Authority model**
+        - An agent (its own `agfi_live_…` key) may only **tighten** its policy. A patch
+          that loosens any field is rejected with `403` and `loosenedFields` names the
+          offending fields. This stops a compromised or prompt-injected agent from
+          raising its own limits.
+        - The operator (`x-api-key: <API_SECRET>`) may set any policy on any agent,
+          including loosening. The agent-ownership check does not apply to the operator.
+
+        A field **loosens** when:
+        - `maxValuePerTxEth` increases;
+        - `maxDailyVolumeUsd` increases — `"0"` means *no daily limit* and therefore
+          loosens any positive limit;
+        - `allowedContracts` / `allowedTokens` go from non-empty to empty, or gain an
+          address not in the current list (compared case-insensitively);
+        - `cooldownSeconds` decreases;
+        - `active` goes `false → true`;
+        - `expiresAt` is cleared (`null`) or moved later while one existed.
+
+        When no policy exists yet, any patch that sets a limit counts as tightening
+        (`active: true` and `expiresAt: null` are neutral).
+
+        Pass `expiresAt` (ISO 8601) to create a temporary task-scoped policy; the
+        policy rejects transactions after that timestamp. `expiresAt: null` clears
+        the expiry (operator only once an expiry exists).
+      security:
+        - agentApiKey: []
+        - operatorApiKey: []
       requestBody:
         required: true
         content:
@@ -341,7 +376,15 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/UpdatePolicyResponse' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '403':
+          description: |
+            Access denied. Either the agent key does not belong to `{id}`, or the agent
+            attempted to loosen its own policy — in that case `loosenedFields` lists the
+            fields that would have been loosened and the operator credential is required.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PolicyChangeForbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /v1/agents/{id}/manifest:
     parameters:
@@ -1054,7 +1097,7 @@ components:
       type: apiKey
       in: header
       name: x-api-key
-      description: Operator shared secret. Only accepted by `POST /v1/agents`.
+      description: Operator shared secret. Accepted by `POST /v1/agents` and `PATCH /v1/agents/{id}/policy` (may loosen any agent's policy).
     adminSecret:
       type: apiKey
       in: header
@@ -1139,6 +1182,27 @@ components:
           description: Human-readable message.
         details:
           description: Optional additional context (string, object, or array).
+
+    PolicyChangeForbidden:
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          properties:
+            loosenedFields:
+              type: array
+              description: |
+                Policy fields the agent tried to loosen. Only present when the rejection
+                is a loosening attempt (not when the key belongs to another agent).
+              items:
+                type: string
+                enum:
+                  - maxValuePerTxEth
+                  - maxDailyVolumeUsd
+                  - allowedContracts
+                  - allowedTokens
+                  - cooldownSeconds
+                  - active
+                  - expiresAt
 
     HealthStatus:
       type: object

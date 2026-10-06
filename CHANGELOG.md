@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`POST /admin/agents/:id/pause` is honest about its on-chain effect.** The handler claimed to "also pause the on-chain policy" but only flipped the DB flags. The comment is gone; the route now accepts an optional body `{ "syncOnChain": true }` and, when the agent's chain has a policy module, returns `onChainSync: { to, chainId, actions, notice }` carrying `AgentPolicyModule.emergencyPause(safe)` (or `resume(safe)` when toggling back) calldata for the operator to broadcast via `/admin/transactions/batch` — same contract as `PATCH /v1/agents/:id/policy`. The backend still never broadcasts. `OnChainPolicyService` gained `buildEmergencyPauseCalldata` / `buildResumeCalldata`; the ABI now includes both functions. OpenAPI spec + generated types updated.
 
+### Security
+
+- **Agents can no longer loosen their own policy (S1).** `PATCH /v1/agents/:id/policy` only checked that the caller was the agent itself, so an agent — or a prompt-injected one — could raise `maxValuePerTxEth`, clear its whitelists, drop its cooldown, re-activate a paused policy or remove its expiry. The route now enforces *tighten-only for agents, operator may loosen*: a pure `classifyPolicyChange()` (`packages/backend/src/services/policy/policy-authority.ts`) flags each loosened field, the agent gets `403 { error, loosenedFields }`, and the operator (`x-api-key: <API_SECRET>`, now also accepted on this route by the auth middleware) may set any policy on any agent. Every policy write logs `agentId`, caller kind and changed fields. The `update_policy` MCP tool description now says it can only tighten. OpenAPI: operation description, `403` schema (`PolicyChangeForbidden`), `404`, `operatorApiKey` security; generated types regenerated.
+
 ## [0.5.0] — 2026-05-15
 
 ### Added (Phase 3/4 roadmap — merged 2026-05-13)
