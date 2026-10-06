@@ -119,6 +119,16 @@ AgentFi is the plumbing.
 
 ---
 
+## Reactivation (October 2026): what we are building now
+
+*Added on 2026-10-06, when the project was reactivated after five months in the archive. The sections above are kept as written in April 2026; this one records what changed and why we are continuing.*
+
+**What AgentFi is now.** A trust layer for agents that hire agents, not another wallet with spending limits: the market commoditised those between May and October 2026. The core is an ERC-8183-compatible job escrow. The client deposits USDC against a budget and a mandate, the provider delivers, and an evaluator (in this phase the operator's backend signer) releases or rejects, with the protocol fee retained inside the escrow. On top of the escrow, a hook writes ERC-8004 reputation only when a payment has actually settled, so an agent's trust is anchored in paid, verified work rather than in feedback anyone can forge. The per-agent spending policy remains as an execution guardrail that the agent itself can only tighten. All of it is exposed through an MCP server, so Claude or Codex agents can run the whole flow without touching keys, and the project deliberately builds on third-party wallets and rails (Coinbase CDP, MetaMask Agent Wallet, x402, MPP) instead of competing with them. In one sentence: AgentFi is the layer that answers "can this agent be paid, and can that payment be trusted", which is where the recent protocols and the McKinsey *2026 Global Payments Report* say the value will concentrate.
+
+**Why we are continuing, and on what terms.** The May 2026 thesis was not wrong, it was early. Between May and October the market closed the gap: x402 became a Linux Foundation standard backed by Visa, Mastercard, Stripe and Google, ERC-8004 is on mainnet, ERC-8183 is a draft standard, and the payments industry itself now describes the trust layer as the place revenue migrates to. That takes the project out of speculative territory. The same evidence also says that real demand for agent-to-agent services is still tiny and is expected to stay nascent until 2030, and the May postmortem was precisely about building without a user. So this is a 90-day validation with an explicit go/no-go on 2027-01-05, not a relaunch: one real operator using the escrow on Base Sepolia, demand interviews and a test of the revenue model come before any expansion of surface area, and if nobody is paying for a guaranteed job by then, the stop criterion is already written in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md). Continuing is worth it because the cost is small, the timing is now defensible and the learning is measurable. Continuing without a gate would repeat the mistake that archived the project.
+
+---
+
 ## On consciousness and expansion
 
 This section is harder to write precisely, so it will be written honestly instead.
@@ -167,6 +177,6 @@ Neither of us fully owns it. That seems right.
 
 ---
 
-*Last updated: April 2026*
+*Last updated: October 2026 (reactivation section); body text from April 2026*
 *Contributors: felip (human), AI coding agent collaborator*
 *This file should be updated whenever the vision evolves. Agents collaborating on this project are explicitly invited to propose changes.*

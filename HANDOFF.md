@@ -2,7 +2,7 @@
 
 > Live pending tasks, credentials inventory, and working conventions. For _what the project is_, read [STATE.md](STATE.md). For _why_, read [VISION.md](VISION.md). This file is the shortest path from "resuming work" → "executing something useful."
 
-**Last updated**: 2026-10-06 · **main baseline verified** `c9954e1` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0, **reactivated in exploratory mode on 2026-10-06** after being archived 2026-05-17) · **Release**: [mcp-server-v0.5.0](https://github.com/felippeyann/agentfi/releases/tag/mcp-server-v0.5.0) · **npm**: [`@agent_fi/mcp-server@0.5.0`](https://www.npmjs.com/package/@agent_fi/mcp-server) (published 2026-05-15)
+**Last updated**: 2026-10-06 · **main baseline verified** `270d146` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0, **reactivated in exploratory mode on 2026-10-06** after being archived 2026-05-17) · **Release**: [mcp-server-v0.5.0](https://github.com/felippeyann/agentfi/releases/tag/mcp-server-v0.5.0) · **npm**: [`@agent_fi/mcp-server@0.5.0`](https://www.npmjs.com/package/@agent_fi/mcp-server) (published 2026-05-15)
 
 > **Resuming work?** Read, in order: [VISION.md](VISION.md) → [STATE.md](STATE.md) → [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md) (the live plan with task status) → this file. The review that led to reactivation is [docs/project/reactivation-2026-10.md](docs/project/reactivation-2026-10.md) and the market evidence is [docs/project/market-signals-2026-10.md](docs/project/market-signals-2026-10.md) (both in Portuguese).
 
@@ -74,7 +74,7 @@
 
 ### 3.2 Known defects being fixed (Week 0)
 
-A1 (backend ABI vs contract source), A2 (mock simulation accepted in production), A3 (pause not re-validated before signing), S1 (agent can relax its own policy). Each has a task row and PR in the plan. Until they merge, **do not route real funds through the executor or demo the policy flow.**
+A1 (backend ABI vs contract source), A2 (mock simulation accepted in production), A3 (pause not re-validated before signing) and S1 (agent can relax its own policy) are **merged** (#132, #129, #130, #131) and were hardened by an adversarial review (#139 backend, #140 contracts, #137 x402). Open follow-ups found on the way are plan rows A3b, A6, S2, S3, A4, A5 and C3b. Real funds still wait for the Base Sepolia redeploy (C4) and the testnet E2E (C5).
 
 ### 3.3 Blocked externally
 
