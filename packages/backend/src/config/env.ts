@@ -118,6 +118,20 @@ if (parsed.data.NODE_ENV === 'production') {
     );
     process.exit(1);
   }
+
+  // Tenderly is optional, but without it production simulates every tx via a
+  // plain eth_call/estimateGas dry-run (no trace, no state diff). Say so at
+  // boot. A mock simulation is never used in production (see simulator.service).
+  if (
+    !parsed.data.TENDERLY_ACCESS_KEY ||
+    !parsed.data.TENDERLY_ACCOUNT ||
+    !parsed.data.TENDERLY_PROJECT
+  ) {
+    console.warn(
+      'WARN: Tenderly is not configured (TENDERLY_ACCESS_KEY, TENDERLY_ACCOUNT, TENDERLY_PROJECT); ' +
+      'falling back to eth_call simulation (estimateGas dry-run) for every transaction.',
+    );
+  }
 }
 
 // When WALLET_PROVIDER=turnkey, the three TURNKEY_* vars must be present —

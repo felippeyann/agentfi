@@ -22,7 +22,7 @@ Runs cleanly on the zero-credential dev stack. Graduates to real execution by sw
 Three graceful degradations:
 
 - `fromToken` is USDC Base, which is in the backend's `KNOWN_DECIMALS` map → decimals resolve without an on-chain `decimals()` call (no RPC needed)
-- Tenderly gracefully degrades when unconfigured — simulator returns `{ success: true, simulationId: 'mock_...', _isMock: true }`
+- Tenderly gracefully degrades when unconfigured in development/test — simulator returns `{ success: true, simulationId: 'mock_...', _isMock: true, provider: 'mock' }`. In production/staging it runs a real `eth_call`/`estimateGas` dry-run instead (`provider: 'eth_call'`); a mock is never used there.
 - `WALLET_PROVIDER=local` handles the wallet layer without Turnkey
 
 ## Run
