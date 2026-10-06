@@ -2,7 +2,7 @@
 
 > **Live document.** This is the single source of truth for what is being done, in what order, and why, during the 90-day exploratory reactivation that started on 2026-10-06. Update the status columns as PRs merge. Background: [reactivation-2026-10.md](reactivation-2026-10.md) (review) and [market-signals-2026-10.md](market-signals-2026-10.md) (evidence). Both are in Portuguese; this plan is in English because it is the operational document for the repository and for coding agents.
 
-**Last updated:** 2026-10-06 · **Phase:** Week 0 (housekeeping + safety fixes) · **Go/no-go date:** 2027-01-05
+**Last updated:** 2026-10-06 (evening) · **Phase:** Week 0 done for A1/A2/A3/S1; C2 and P1 in flight · **Go/no-go date:** 2027-01-05
 
 ---
 
@@ -51,33 +51,35 @@ Status legend: `todo` · `in-progress` · `pr` (open PR) · `done` · `blocked (
 | H1 | Unarchive GitHub repo | done | 2026-10-06, via owner account |
 | H2 | Sync `package-lock.json` (npm ci was failing since May) | done | [#120](https://github.com/felippeyann/agentfi/pull/120) merged |
 | H3 | Delete merged remote branches; sync `develop` mirror | done | 6 branches deleted; `develop` = `main` |
-| H4 | Dependabot triage: merge patch/minor when green; majors become tasks (WS8) | in-progress | #126 merged; #108/109/111/112/121/122 rebased, merge when green |
+| H4 | Dependabot triage: merge patch/minor when green; majors become tasks (WS8) | in-progress | merged #108, #112, #114, #121, #122, #126. Left for the owner (CI green, merge-without-review blocked for the agent): #109 aave helpers, #123 types/node 26, #124 eslint 10, #115 Turnkey 6 (deliberate task). Failing: #111 bullmq (code change needed), #125 TS 7, #127 Prisma 7 |
 | H5 | Fix `.claude/launch.json` (paths from previous machine) | done | relative paths |
 | H6 | Move architecture PNGs to `docs/architecture/diagrams/`, reference from overview | done | |
 | H7 | Remove empty worktree leftovers (`~/agentfi-fix-*`, `~/agentfi-gmx`, `~/agentfi-phase2-snapshots`) | done | local only |
 | H8 | Install Foundry (1.7.1) and graphify on this machine; `forge test` = 100/100 | done | `~/.foundry/bin`; `%APPDATA%\Python\Python314\Scripts` |
-| H9 | README banner → Reactivated (exploratory) | pr | [#128](https://github.com/felippeyann/agentfi/pull/128) |
-| H10 | Rewrite HANDOFF §3 and roadmap to point here; fix STATE header; remove contradictions (D1 in review) | pr | [#128](https://github.com/felippeyann/agentfi/pull/128) |
-| H11 | `graphify update .` after code PRs merge | todo | end of Week 0 |
+| H9 | README banner → Reactivated (exploratory) | done | [#128](https://github.com/felippeyann/agentfi/pull/128) |
+| H10 | Rewrite HANDOFF §3 and roadmap to point here; fix STATE header; remove contradictions (D1 in review) | done | [#128](https://github.com/felippeyann/agentfi/pull/128) |
+| H11 | `graphify update .` after code PRs merge | done | 2026-10-06, after A1/A2/A3/S1 |
 
 ### WS1 — Correctness and safety fixes (Week 0–1)
 
 | ID | Task | Acceptance | Status | PR |
 |---|---|---|---|---|
-| A1 | Backend `AgentExecutor` ABI = Solidity source (`token` field); remove hard-coded legacy Sepolia addresses; mark mainnet addresses legacy | selector test `0x672093df`/`0x596e8b81`; typecheck; docs note | in-progress (agent) | |
-| A2 | No mock simulation in production: `eth_call`/`estimateGas` fallback when Tenderly absent; routes reject `_isMock` in prod | 4 unit tests; smoke:dev still green | in-progress (agent) | |
-| A3 | Worker re-validates agent/policy/tx status before signing; pause route stops claiming on-chain pause and can return `emergencyPause` calldata | 5 unit tests | in-progress (agent) | |
-| S1 | Agent may only tighten its own policy; loosening requires operator credential; MCP tool description updated; OpenAPI updated | unit tests for each loosening rule; spec:check green | in-progress (agent) | |
+| A1 | Backend `AgentExecutor` ABI = Solidity source (`token` field); remove hard-coded legacy Sepolia addresses; mark mainnet addresses legacy | selector test `0x672093df`/`0x596e8b81`; typecheck; docs note | done | [#132](https://github.com/felippeyann/agentfi/pull/132): ABI generated from the Foundry artifact (`npm run abi:executor`), `token` threaded through every builder, legacy addresses detected at boot and in preflight |
+| A2 | No mock simulation in production: `eth_call`/`estimateGas` fallback when Tenderly absent; routes reject `_isMock` in prod | 4 unit tests; smoke:dev still green | done | [#129](https://github.com/felippeyann/agentfi/pull/129): `eth_call`/`estimateGas` fallback, `simulation-guard.ts`, 13 route guards, 18 tests |
+| A3 | Worker re-validates agent/policy/tx status before signing; pause route stops claiming on-chain pause and can return `emergencyPause` calldata | 5 unit tests | done | [#130](https://github.com/felippeyann/agentfi/pull/130): `pre-submit-guard.ts`, pause route returns `emergencyPause` calldata on request, 14 tests |
+| S1 | Agent may only tighten its own policy; loosening requires operator credential; MCP tool description updated; OpenAPI updated | unit tests for each loosening rule; spec:check green | done | [#131](https://github.com/felippeyann/agentfi/pull/131): `policy-authority.ts`, operator allowlist in auth middleware (timing-safe), 54 tests |
 | S2 | MCP tools: add `annotations` (readOnlyHint, destructiveHint, idempotentHint, openWorldHint) to all 31 tools; sanitize upstream errors (keep validation messages, strip internal URLs/secrets, add trace id) | tools/list shows annotations; unit test for error sanitizer | todo | |
 | A5 | Fee model decision: either collect fee on ERC-20 flows (executor pulls fee in token) or document that fee applies to ETH-value flows only; align `FEE_BPS` with tiers | decision recorded here + code/docs aligned | todo (needs owner input on fee design) | |
 | A4 | P&L: rename `profitable` semantics to on-chain margin; add optional `externalCostsUsd` input (inference/hosting) so breakeven can include them | tests; API doc | todo (after WS3) | |
 | S3 | Delete legacy x402 v0.1 middleware (`requirePayment`, nonce replay) — superseded by WS4 | removed + CHANGELOG | todo | |
+| A3b | Admin **resume** only flips `agent.active`; `agentPolicy.active` stays `false` after a pause, so the agent remains blocked until a policy PATCH (found while fixing A3) | resume re-activates the DB policy or the API says it does not; test | todo | |
+| A6 | `DailyVolume` is reserved at enqueue but never released on FAILED/REVERTED for ordinary txs, and appears to be counted again on CONFIRMED (`addDailyVolumeAtomic`) (found while fixing A3) | reproduce with a unit test; single reservation/release path | todo | |
 
 ### WS2 — Contracts: ERC-8183 compatible escrow and redeploy (Days 1–30)
 
 | ID | Task | Acceptance | Status |
 |---|---|---|---|
-| C1 | `docs/architecture/erc-8183-mapping.md`: AgentFi `Job` lifecycle mapped onto the **published** ERC-8183 text (2026-03-13 revision): `Open → Funded → Submitted → Completed/Rejected/Expired`, roles client/provider/evaluator, hooks, data encoding, and the known inconsistencies between prose and embedded contract (`fund(jobId, expectedBudget, optParams)` wins). Evaluator default = the operator backend signer (open question §5.1) | drafted 2026-10-06; owner review | pr [#128](https://github.com/felippeyann/agentfi/pull/128) |
+| C1 | `docs/architecture/erc-8183-mapping.md`: AgentFi `Job` lifecycle mapped onto the **published** ERC-8183 text (2026-03-13 revision): `Open → Funded → Submitted → Completed/Rejected/Expired`, roles client/provider/evaluator, hooks, data encoding, and the known inconsistencies between prose and embedded contract (`fund(jobId, expectedBudget, optParams)` wins). Evaluator default = the operator backend signer (open question §5.1) | drafted 2026-10-06; decisions D5–D8 applied | done [#128](https://github.com/felippeyann/agentfi/pull/128) |
 | C2 | `AgentJobEscrow.sol`: implements the published ERC-8183 interface (`createJob/setProvider/setBudget/fund/submit/complete/reject/claimRefund/getJob`, events, `IACPHook` before/after on the six hookable actions, `platformFeeBP` optional). **ERC-20 only (USDC first), as the standard requires**; native ETH jobs keep using the legacy `EscrowModule` until retired. Store `providerAgentId` (ERC-8004) per job as in the revised draft so outcomes attribute to an on-chain identity. Operator emergency path kept outside the standard surface | Foundry tests incl. fuzz; conformance test exercising every valid/invalid transition; 100% of critical functions | todo |
 | C3 | Backend `escrow-onchain.service.ts` + `payment-finalizer.service.ts` speak the v2 interface; DB `Job` gains `onChainJobId`, `evaluator`, `budgetToken`, `budgetAmount`, `expiresAt` (migration 0014) | unit tests with mocked Prisma; smoke:dev green (no contract) | todo |
 | C4 | Deploy `AgentPolicyModule`, `AgentExecutor` (new ABI), `AgentJobEscrow` on **Base Sepolia**; verify on Basescan; run `scripts/verify-deployment.sh`; record addresses in STATE.md and `docs/project/testnet-log.md` | addresses + tx hashes logged | owner (deployer key) + agent prepares the command |
@@ -88,7 +90,7 @@ Status legend: `todo` · `in-progress` · `pr` (open PR) · `done` · `blocked (
 
 | ID | Task | Acceptance | Status |
 |---|---|---|---|
-| R1 | `docs/architecture/erc-8004-integration.md`: registries and addresses on Base / Base Sepolia (Identity `0x8004A169…a432` / `0x8004A818…BD9e`, Reputation `0x8004BAa1…9b63` / `0x8004B663…8713`), current `giveFeedback(agentId, int128 value, uint8 valueDecimals, tag1, tag2, endpoint, feedbackURI, feedbackHash)` (the 2025 `feedbackAuth` was removed in the 2026-01-25 revision), anti-self-feedback gate, how consumers filter by `clientAddresses`, and the feedback-file format with `proofOfPayment` | drafted 2026-10-06; owner review | pr [#128](https://github.com/felippeyann/agentfi/pull/128) |
+| R1 | `docs/architecture/erc-8004-integration.md`: registries and addresses on Base / Base Sepolia (Identity `0x8004A169…a432` / `0x8004A818…BD9e`, Reputation `0x8004BAa1…9b63` / `0x8004B663…8713`), current `giveFeedback(agentId, int128 value, uint8 valueDecimals, tag1, tag2, endpoint, feedbackURI, feedbackHash)` (the 2025 `feedbackAuth` was removed in the 2026-01-25 revision), anti-self-feedback gate, how consumers filter by `clientAddresses`, and the feedback-file format with `proofOfPayment` | drafted 2026-10-06; decisions D5–D8 applied | done [#128](https://github.com/felippeyann/agentfi/pull/128) |
 | R2 | Identity: optional registration of an AgentFi agent in the ERC-8004 Identity Registry at creation (`agentURI` → AgentFi registration JSON with `services[]` incl. MCP endpoint, `x402Support`); store `erc8004AgentId` on `Agent` (migration 0015) | unit tests; registration on Base Sepolia logged | todo (opt-in default pending §5.3) |
 | R3 | **`ReputationHook.sol`** (ERC-8183 `IACPHook`): on `afterAction` for `complete`/`reject`, call `giveFeedback(providerAgentId, value, 0, "agentfi.job", <status>, "", feedbackURI, keccak256(file))` so the write is atomic with settlement and the hook is the canonical `clientAddress`; backend serves `feedbackURI` (`/v1/jobs/:id/feedback.json`) with `jobId`, escrow contract, chain, fund tx hash. No feedback on `claimRefund` (not hookable). Backend keeps an idempotent off-chain mirror | Foundry tests for the hook; testnet tx logged | todo |
 | R4 | Trust report reads aggregated ERC-8004 reputation alongside AgentFi's internal score; MCP `get_agent_trust_report` exposes both | API + MCP tests | todo |
@@ -132,7 +134,8 @@ Status legend: `todo` · `in-progress` · `pr` (open PR) · `done` · `blocked (
 
 | Bump | Risk | Plan |
 |---|---|---|
-| `@aave/*` 1.38, `bullmq` 5.76.7, `lucide-react` 1.14, production patch group, GitHub Actions v7 | low | merge when CI green (H4) |
+| `@aave/*` 1.38, `lucide-react` 1.14, production patch group, GitHub Actions v7, `dotenv-cli` 11, `@types/node` 26, `eslint` 10 | low | merge when CI green (H4); owner merges the ones left open |
+| `bullmq` 5.74 → 5.76.7 (#111) | medium | `JobsOptions.repeat` removed: migrate `payment-recovery.queue.ts:82` and `reputation.queue.ts:42` to `queue.upsertJobScheduler`; own task |
 | `@turnkey/sdk-server` 1.7 → 6.0 | high (signing API) | own task after W1; test `signRawPayload` path |
 | `prisma` 5.22 → 7.x | high (generator, client API) | own task after migrations 0014–0016 land |
 | `typescript` 6 → 7 | medium | own task; check `openapi-typescript` pin |

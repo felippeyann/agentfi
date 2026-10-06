@@ -87,3 +87,7 @@ desktop.ini
 
 # Claude Code agent worktrees (local only)
 .claude/worktrees/
+
+# graphify label cache (machine-local)
+graphify-out/.graphify_labels.json
+graphify-out/.graphify_labels.json.sig
