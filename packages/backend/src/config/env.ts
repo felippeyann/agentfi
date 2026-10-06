@@ -84,6 +84,10 @@ const envSchema = z.object({
   // Safe smart wallet deployer — optional (falls back to Turnkey EOA if not set)
   SAFE_DEPLOYER_PRIVATE_KEY: z.string().optional(),
 
+  // x402 facilitator override — optional. Defaults per chain live in
+  // config/x402.ts (x402.org for Base Sepolia, CDP for Base).
+  X402_FACILITATOR_URL: z.string().url().optional(),
+
   // Rate-limit overrides (requests/minute per tier)
   RATE_LIMIT_FREE: z.coerce.number().int().positive().default(30),
   RATE_LIMIT_PRO: z.coerce.number().int().positive().default(300),

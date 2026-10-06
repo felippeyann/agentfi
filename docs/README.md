@@ -15,6 +15,7 @@ Welcome to the AgentFi documentation. This hub is designed for both human operat
 - **[Market signals](project/market-signals-2026-10.md)** (pt-BR) — what the market did between May and October 2026, with sources.
 - **[ERC-8183 mapping](architecture/erc-8183-mapping.md)** — how AgentFi jobs map onto the Agentic Commerce escrow standard.
 - **[ERC-8004 integration](architecture/erc-8004-integration.md)** — identity and settlement-anchored reputation design.
+- **[x402 payments](architecture/x402-payments.md)** — buyer-side client: spend caps, idempotency, receipt verification, what the fake-facilitator tests do not prove.
 
 ### 🚀 Run the thing (fastest path)
 - **[Dev Quickstart](dev-quickstart.md)** — `docker compose up` → stack running in ~3 minutes, **zero external accounts**.

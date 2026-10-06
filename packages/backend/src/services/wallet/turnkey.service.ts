@@ -1,6 +1,14 @@
 import { Turnkey } from '@turnkey/sdk-server';
-import { getAddress, type Address } from 'viem';
+import {
+  getAddress,
+  hashMessage,
+  hashTypedData,
+  type Address,
+  type Hex,
+  type TypedDataDefinition,
+} from 'viem';
 import { env } from '../../config/env.js';
+import type { Eip712TypedData } from './signer.js';
 
 export interface WalletInfo {
   walletId: string;
@@ -138,12 +146,44 @@ export class TurnkeyService {
     walletId: string;
     message: string;
   }): Promise<{ signature: `0x${string}`; address: Address }> {
-    const apiClient = this.client.apiClient();
     const address = await this.getWalletAddress(params.walletId);
 
     // EIP-191 personal_sign prefix + keccak256
-    const { hashMessage } = await import('viem');
     const digest = hashMessage(params.message);
+    const signature = await this.signDigest(address, digest);
+
+    return { signature, address };
+  }
+
+  /**
+   * Signs an EIP-712 typed-data payload (domain + types + message). Used by
+   * the x402 client to authorize ERC-3009 / Permit2 token transfers.
+   *
+   * Same technique as `signMessage`: viem computes the EIP-712 digest
+   * (`\x19\x01 || domainSeparator || hashStruct(message)`) locally, Turnkey
+   * signs the pre-hashed 32 bytes with `HASH_FUNCTION_NO_OP`, and the
+   * r||s||v signature is assembled so `recoverTypedDataAddress` accepts it.
+   */
+  async signTypedData(params: {
+    walletId: string;
+    typedData: Eip712TypedData;
+  }): Promise<{ signature: `0x${string}`; address: Address }> {
+    const address = await this.getWalletAddress(params.walletId);
+
+    // The structural x402 payload is a valid viem TypedDataDefinition at
+    // runtime; the cast only bridges the two libraries' generic typings.
+    const digest = hashTypedData(params.typedData as unknown as TypedDataDefinition);
+    const signature = await this.signDigest(address, digest);
+
+    return { signature, address };
+  }
+
+  /**
+   * Signs a pre-computed 32-byte digest via Turnkey's `signRawPayload` and
+   * returns a standard 65-byte Ethereum signature.
+   */
+  private async signDigest(address: Address, digest: Hex): Promise<`0x${string}`> {
+    const apiClient = this.client.apiClient();
 
     const { r, s, v } = await apiClient.signRawPayload({
       signWith: address,
@@ -155,9 +195,7 @@ export class TurnkeyService {
     // Turnkey returns r, s as 64-hex strings and v as "00"/"01". Assemble
     // a standard 65-byte Ethereum signature (r || s || v+27).
     const vByte = (parseInt(v, 16) + 27).toString(16).padStart(2, '0');
-    const signature = `0x${r.padStart(64, '0')}${s.padStart(64, '0')}${vByte}` as `0x${string}`;
-
-    return { signature, address };
+    return `0x${r.padStart(64, '0')}${s.padStart(64, '0')}${vByte}` as `0x${string}`;
   }
 
   /**
