@@ -6,6 +6,7 @@ import { Queue, Worker, type Job, type WorkerOptions } from 'bullmq';
 import { db } from '../db/client.js';
 import { env } from '../config/env.js';
 import { SubmitterService } from '../services/transaction/submitter.service.js';
+import { preSubmitGuard } from '../services/transaction/pre-submit-guard.js';
 import { MonitorService } from '../services/transaction/monitor.service.js';
 import { FeeService } from '../services/policy/fee.service.js';
 import { weiToUsd } from '../services/transaction/price.service.js';
@@ -94,6 +95,31 @@ export function startTransactionWorker(): Worker<TransactionJobData> {
       const { data } = job;
 
       logger.info({ transactionId: data.transactionId }, 'Processing transaction job');
+
+      // Re-validate against the DB before signing. The job payload is a
+      // snapshot from enqueue time: the admin kill switch, a policy pause or
+      // expiry, or a redelivery of an already-broadcast tx are invisible in
+      // it. Returning (not throwing) keeps BullMQ from retrying a paused tx.
+      const guard = await preSubmitGuard(db, data.transactionId);
+      if (guard.action === 'skip') {
+        logger.warn(
+          { transactionId: data.transactionId, reason: guard.reason },
+          'Transaction job skipped — not resubmitting',
+        );
+        return { txHash: null, outcome: 'skipped', reason: guard.reason };
+      }
+      if (guard.action === 'fail') {
+        logger.warn(
+          {
+            transactionId: data.transactionId,
+            agentId: data.agentId,
+            reason: guard.reason,
+            ...(guard.finalizerError ? { finalizerError: guard.finalizerError } : {}),
+          },
+          'Transaction blocked before submission — marked FAILED',
+        );
+        return { txHash: null, outcome: 'blocked', reason: guard.reason };
+      }
 
       await db.transaction.update({
         where: { id: data.transactionId },

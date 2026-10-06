@@ -9,13 +9,16 @@ import type { FastifyInstance } from 'fastify';
 import { timingSafeEqual } from 'crypto';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
-import { getAddress } from 'viem';
+import { getAddress, type Address } from 'viem';
 import { logger } from '../middleware/logger.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
+import { getContracts } from '../../config/contracts.js';
+import { PolicyService } from '../../services/policy/policy.service.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
 import { PnLService } from '../../services/billing/pnl.service.js';
 import { OperatorService } from '../../services/billing/operator.service.js';
 
+const policyService = new PolicyService(db);
 const reputationService = new ReputationService();
 const pnlService = new PnLService();
 const operatorService = new OperatorService(db);
@@ -51,6 +54,58 @@ const batchAdminSchema = z.object({
   })).min(1).max(20),
   agentId: z.string().optional(), // If provided, executes AS this agent
 });
+
+const pauseAgentSchema = z.object({
+  /**
+   * When true, the response carries AgentPolicyModule calldata
+   * (`emergencyPause(safe)` when pausing, `resume(safe)` when resuming) for
+   * the operator to broadcast. The backend never broadcasts it itself.
+   */
+  syncOnChain: z.boolean().default(false),
+});
+
+/** Shape shared with PATCH /v1/agents/:id/policy — calldata the operator broadcasts. */
+interface OnChainSync {
+  to: string;
+  chainId: number;
+  actions: { to: string; value: string; data: string }[];
+  notice: string;
+}
+
+/**
+ * Builds the on-chain kill-switch calldata for an agent's primary chain, or
+ * null when that chain has no AgentPolicyModule configured. Encode-only.
+ */
+async function buildKillSwitchOnChainSync(
+  agent: { id: string; safeAddress: string; chainIds: number[] },
+  pause: boolean,
+): Promise<OnChainSync | null> {
+  const chainId = agent.chainIds[0] ?? 1;
+
+  let policyModule: Address | undefined;
+  try {
+    policyModule = getContracts(chainId).policyModule;
+  } catch (err) {
+    logger.warn(
+      { agentId: agent.id, chainId, err: (err as Error)?.message ?? String(err) },
+      'Cannot build on-chain kill-switch calldata: chain has no contract config',
+    );
+    return null;
+  }
+  if (!policyModule) return null;
+
+  const safeAddress = getAddress(agent.safeAddress);
+  const data = pause
+    ? await policyService.onChain.buildEmergencyPauseCalldata({ safeAddress })
+    : await policyService.onChain.buildResumeCalldata({ safeAddress });
+
+  return {
+    to: policyModule,
+    chainId,
+    actions: [{ to: policyModule, value: '0', data }],
+    notice: `Broadcast via POST /admin/transactions/batch to ${pause ? 'pause' : 'resume'} the on-chain policy. The backend has NOT broadcast this.`,
+  };
+}
 
 export async function adminRoutes(fastify: FastifyInstance) {
   /**
@@ -430,12 +485,37 @@ export async function adminRoutes(fastify: FastifyInstance) {
   });
 
   /**
-   * POST /admin/agents/:id/pause — emergency kill switch.
+   * POST /admin/agents/:id/pause — emergency kill switch (toggle).
+   *
+   * Off-chain effect (always): flips `agent.active`. When pausing, also sets
+   * `agentPolicy.active = false` so `PolicyService.validateTransaction` fails
+   * closed. Transactions that were already QUEUED when the pause landed are
+   * rejected by the worker's pre-submit guard
+   * (`services/transaction/pre-submit-guard.ts`) and marked FAILED.
+   *
+   * On-chain effect: NONE is performed by the backend. Send
+   * `{ "syncOnChain": true }` to receive `onChainSync` — the
+   * `AgentPolicyModule.emergencyPause(safe)` (or `resume(safe)`) calldata —
+   * to broadcast via POST /admin/transactions/batch, exactly like
+   * PATCH /v1/agents/:id/policy. `onChainSync` is null when the agent's chain
+   * has no policyModule configured or `syncOnChain` was not requested.
+   *
+   * Note: resuming only flips `agent.active`; it does not re-activate the
+   * DB policy (use PATCH /v1/agents/:id/policy for that).
    */
-  fastify.post<{ Params: { id: string } }>(
+  fastify.post<{ Params: { id: string }; Body: { syncOnChain?: boolean } | undefined }>(
     '/admin/agents/:id/pause',
     async (request, reply) => {
       if (!requireAdmin(request, reply)) return;
+
+      const parsed = pauseAgentSchema.safeParse(request.body ?? {});
+      if (!parsed.success) {
+        return reply.code(400).send({
+          error: 'Invalid request body',
+          details: parsed.error.flatten().fieldErrors,
+        });
+      }
+      const { syncOnChain } = parsed.data;
 
       const agent = await db.agent.findUnique({ where: { id: request.params.id } });
       if (!agent) return reply.code(404).send({ error: 'Not found' });
@@ -446,16 +526,26 @@ export async function adminRoutes(fastify: FastifyInstance) {
         data: { active: nowActive },
       });
 
-      if (!nowActive && agent) {
-        // Also pause the on-chain policy
-        await db.agentPolicy.updateMany({
-          where: { agentId: request.params.id },
-          data: { active: false },
-        });
+      if (!nowActive) {
+        // Off-chain kill switch only: pause the DB policy so policy checks
+        // fail closed. The on-chain policy is NOT touched here.
+        await policyService.emergencyPause(request.params.id);
       }
 
-      logger.info({ agentId: request.params.id, nowActive }, 'Admin toggled agent status');
-      return { active: nowActive };
+      const onChainSync = syncOnChain
+        ? await buildKillSwitchOnChainSync(agent, !nowActive)
+        : null;
+
+      logger.info(
+        {
+          agentId: request.params.id,
+          nowActive,
+          syncOnChain,
+          onChainSyncPrepared: onChainSync !== null,
+        },
+        'Admin toggled agent status',
+      );
+      return { active: nowActive, onChainSync };
     },
   );
 

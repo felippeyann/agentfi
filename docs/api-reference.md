@@ -244,7 +244,7 @@ All admin routes require `x-admin-secret` header. Local-only by default.
 | GET | `/admin/agents/:id/transactions` | Agent transaction history |
 | GET | `/admin/transactions` | Global transaction log |
 | POST | `/admin/transactions/batch` | Operator batch execution |
-| POST | `/admin/agents/:id/pause` | Emergency kill switch (toggle) |
+| POST | `/admin/agents/:id/pause` | Emergency kill switch (toggle). Off-chain only; already-queued txs are rejected by the worker. Body `{ "syncOnChain": true }` returns `emergencyPause`/`resume` calldata in `onChainSync` for the operator to broadcast |
 | POST | `/admin/transactions/:id/approve` | Approve PENDING_APPROVAL tx |
 | POST | `/admin/transactions/:id/reject` | Reject PENDING_APPROVAL tx |
 | GET | `/admin/volume` | Daily volume chart (7 days) |

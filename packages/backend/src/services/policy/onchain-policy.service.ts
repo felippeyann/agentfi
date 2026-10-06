@@ -45,6 +45,20 @@ export const AGENT_POLICY_MODULE_ABI = [
     ],
     outputs: [],
   },
+  {
+    name: 'emergencyPause',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'safe', type: 'address' }],
+    outputs: [],
+  },
+  {
+    name: 'resume',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'safe', type: 'address' }],
+    outputs: [],
+  },
 ] as const;
 
 export class OnChainPolicyService {
@@ -77,6 +91,34 @@ export class OnChainPolicyService {
         },
         BigInt(expiresAtUnix),
       ],
+    });
+  }
+
+  /**
+   * Builds calldata for `AgentPolicyModule.emergencyPause(safe)` — the
+   * on-chain kill switch. Flips the Safe's policy to `active = false` without
+   * touching limits, expiry or whitelists.
+   *
+   * Like `buildSyncPolicyCalldata`, this only encodes; the operator (or the
+   * Safe via execTransaction) must broadcast it. The backend never does.
+   */
+  async buildEmergencyPauseCalldata(params: { safeAddress: Address }): Promise<`0x${string}`> {
+    return encodeFunctionData({
+      abi: AGENT_POLICY_MODULE_ABI,
+      functionName: 'emergencyPause',
+      args: [getAddress(params.safeAddress)],
+    });
+  }
+
+  /**
+   * Builds calldata for `AgentPolicyModule.resume(safe)` — undoes
+   * `emergencyPause` by setting `active = true`. Encode-only, see above.
+   */
+  async buildResumeCalldata(params: { safeAddress: Address }): Promise<`0x${string}`> {
+    return encodeFunctionData({
+      abi: AGENT_POLICY_MODULE_ABI,
+      functionName: 'resume',
+      args: [getAddress(params.safeAddress)],
     });
   }
 
