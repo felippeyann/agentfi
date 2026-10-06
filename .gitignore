@@ -84,3 +84,6 @@ redis-data/
 deployments/*.json
 !deployments/.gitkeep
 desktop.ini
+
+# Claude Code agent worktrees (local only)
+.claude/worktrees/
