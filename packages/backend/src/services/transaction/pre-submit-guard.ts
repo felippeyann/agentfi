@@ -16,6 +16,7 @@
 
 import type { PrismaClient } from '@prisma/client';
 import { finalizeA2APaymentJob } from '../job/payment-finalizer.service.js';
+import { onEscrowTxOutcome } from '../job/escrow-erc8183.runtime.js';
 
 export const PAUSED_BEFORE_SUBMISSION = 'Agent paused before submission';
 export const POLICY_EXPIRED_BEFORE_SUBMISSION = 'Agent policy expired before submission';
@@ -99,7 +100,9 @@ export async function preSubmitGuard(
     data: { status: 'FAILED', error: reason },
   });
 
-  const meta = (tx.metadata ?? null) as { jobId?: string; a2aPayment?: boolean } | null;
+  const meta = (tx.metadata ?? null) as
+    | { jobId?: string; a2aPayment?: boolean; erc8183?: boolean }
+    | null;
   if (meta?.a2aPayment === true && typeof meta.jobId === 'string') {
     try {
       await finalizeA2APaymentJob({
@@ -111,6 +114,15 @@ export async function preSubmitGuard(
     } catch (err) {
       // The tx is already FAILED, so the money is safe; the payment-recovery
       // worker picks up Jobs left in PAYMENT_PENDING. Report, do not throw.
+      const finalizerError = (err as Error)?.message ?? String(err);
+      return { action: 'fail', reason, finalizerError };
+    }
+  } else if (meta?.erc8183 === true) {
+    // C3: a blocked ERC-8183 step never reached the chain — unwind the Job
+    // (FAILED + reservation release before FUNDED; back to ACCEPTED for submit).
+    try {
+      await onEscrowTxOutcome({ transactionId, status: 'FAILED', error: reason });
+    } catch (err) {
       const finalizerError = (err as Error)?.message ?? String(err);
       return { action: 'fail', reason, finalizerError };
     }

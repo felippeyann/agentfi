@@ -254,6 +254,21 @@ cast call $HOOK   "supportsInterface(bytes4)(bool)" 0xffffffff --rpc-url $RPC  #
 
 Note: `0x7ff6bc9e` is the `IACPHook` ERC-165 id (`beforeAction.selector 0xdc08fb1d ^ afterAction.selector 0xa3fe4783`; `IACPHook is IERC165` does not change it). The escrow checks it (and that `0xffffffff` answers `false`) at `createJob`, so a successful `createJob(..., hook)` on testnet is the simplest end-to-end check.
 
+### Backend environment variables (C3)
+
+Once deployed, the backend drives the escrow for paid A2A jobs on that chain ([erc-8183-mapping.md §6](../architecture/erc-8183-mapping.md#6-backend-flow-as-implemented-task-c3)):
+
+| Variable | Required | Meaning |
+|----------|----------|---------|
+| `AGENT_JOB_ESCROW_ADDRESS_<chainId>` | to enable the chain | `AgentJobEscrow` address from the deploy output. Paid jobs on this chain become USDC-only and escrowed on-chain. |
+| `REPUTATION_HOOK_ADDRESS_<chainId>` | optional | `ReputationHook` passed per job to `createJob(..., hook)`; blank → no hook (no ERC-8004 feedback). |
+| `ESCROW_EVALUATOR_PRIVATE_KEY` | **yes in staging/production** when any escrow address is set; optional in development (escrow disabled without it, WARN at boot) | Operator key that is the `evaluator` of every job and signs `complete` / `reject` / `claimRefund`. Its address is logged at boot as `escrowEvaluatorAddress` and **must equal the hook's `TRUSTED_EVALUATOR`**, otherwise the hook skips every write (`untrusted-evaluator`). Needs native gas on the chain. |
+| `ESCROW_JOB_TTL_SECONDS` | default `604800` | `expiredAt = now + TTL` at `createJob`; the expiry sweep calls `claimRefund` after it. |
+| `ESCROW_EVALUATION_DELAY_SECONDS` | default `0` | Grace period after `submit` confirms during which the requester may `POST /v1/jobs/:id/contest`. |
+| `BACKEND_PUBLIC_URL` | default `http://localhost:3000` | Base of the on-chain job description and of the `feedbackURI` (`/v1/jobs/<id>/feedback.json`, public). Must be reachable by reputation consumers. |
+
+Regenerate the backend ABIs after any Solidity change: `npm run abi:escrow` (or `npm run abi` for every contract) — `abi.erc8183.test.ts` pins the selectors and diffs the checked-in files against the Foundry artifacts when present.
+
 ### Operational notes
 
 - **Emergency path.** `pause()` (operator) stops new jobs and new funding. Jobs already funded can still be submitted, completed, rejected and refunded, and fees can still be withdrawn; the operator can never redirect escrowed USDC.
@@ -422,7 +437,7 @@ source into `packages/backend/src/abi/AgentExecutor.abi.ts` and imported by
 Regenerate after **any** change to `AgentExecutor.sol` (Foundry in `PATH`):
 
 ```bash
-npm run abi:executor          # = node scripts/gen-executor-abi.mjs → forge inspect AgentExecutor abi --json
+npm run abi:executor          # = node scripts/gen-abi.mjs AgentExecutor → forge inspect AgentExecutor abi --json (npm run abi regenerates every contract)
 git diff packages/backend/src/abi/AgentExecutor.abi.ts   # commit alongside the Solidity change
 ```
 

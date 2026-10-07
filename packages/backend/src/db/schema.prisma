@@ -132,6 +132,28 @@ model Job {
   rewardUsd      String?   // Total USD value of the reward at completion
   rewardPriceUsd String?   // Price-per-token-unit at completion (e.g. ETH/USD)
 
+  // ── ERC-8183 escrow (C3, migration 0014) ─────────────────────────────────
+  // Populated only when the job runs on `AgentJobEscrow` (escrowKind = "erc8183");
+  // NULL for legacy / free jobs. See docs/architecture/erc-8183-mapping.md §6.
+  escrowKind        String?   // "erc8183"
+  escrowChainId     Int?
+  escrowContract    String?   // AgentJobEscrow address (checksummed)
+  onChainJobId      String?   // uint256 job id as a decimal string
+  onChainStatus     String?   // CREATING | OPEN | BUDGET_SET | APPROVED | FUNDED | SUBMITTED | SETTLING | COMPLETED | REJECTED | EXPIRED | FAILED
+  evaluator         String?   // operator/backend signer address (decision D5)
+  budgetToken       String?   // escrow ERC-20 (USDC) address
+  budgetAmount      String?   // budget in token base units (6 decimals for USDC)
+  expiresAt         DateTime? // on-chain `expiredAt`
+  deliverableHash   String?   // keccak256(JSON.stringify(result)) passed to `submit`
+  settleTxHash      String?   // evaluator's complete / reject / claimRefund tx
+  platformFeeAmount String?   // PlatformFeeAccrued amount (base units) on completion
+  feedbackStatus    String?   // "written" | "skipped:<reason>" | "failed"
+  feedbackFile      Json?     // ERC-8004 feedback file, generated once before settlement
+  contestedAt       DateTime? // requester contested before settlement → evaluator rejects
+  contestReason     String?
+  escrowError       String?   // last escrow step / settlement error
+  // ── end ERC-8183 escrow ───────────────────────────────────────────────────
+
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
@@ -139,6 +161,9 @@ model Job {
   @@index([providerId])
   @@index([status])
   @@index([reservationStatus])
+  @@unique([escrowContract, onChainJobId])
+  @@index([onChainStatus])
+  @@index([expiresAt])
 }
 
 enum JobStatus {
@@ -297,4 +322,5 @@ enum TxType {
   ESCROW_LOCK
   ESCROW_RELEASE
   ESCROW_REFUND
+  ESCROW_SUBMIT   // ERC-8183: provider's `submit(jobId, deliverable)` (migration 0014)
 }

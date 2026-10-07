@@ -18,7 +18,8 @@ const KNOWN_TOKENS: KnownToken[] = [
   { chainId: 8453, symbol: 'USDC', address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', decimals: 6 },
   { chainId: 8453, symbol: 'WETH', address: '0x4200000000000000000000000000000000000006', decimals: 18 },
 
-  // Base Sepolia
+  // Base Sepolia (USDC = Circle's testnet deployment, the ERC-8183 escrow token)
+  { chainId: 84532, symbol: 'USDC', address: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', decimals: 6 },
   { chainId: 84532, symbol: 'WETH', address: '0x4200000000000000000000000000000000000006', decimals: 18 },
 
   // Arbitrum One

@@ -59,6 +59,7 @@ export async function finalizeA2APaymentJob(
       requesterId: true,
       reservationStatus: true,
       reward: true,
+      escrowKind: true,
       provider: { select: { name: true } },
     },
   });
@@ -86,6 +87,11 @@ export async function finalizeA2APaymentJob(
   const token = reward?.token ?? 'ETH';
   const chainId = reward?.chainId ?? 1;
   const providerName = job.provider?.name ?? job.providerId;
+  // C3: an ERC-8183 job was already released/refunded on-chain by the
+  // evaluator's complete/reject/claimRefund — the legacy EscrowModule
+  // release/refund must not be queued for it. Everything else (reputation,
+  // USD snapshot, DB reservation, notifications) applies unchanged.
+  const isErc8183 = job.escrowKind === 'erc8183';
 
   if (outcome === 'CONFIRMED') {
     // Phase 2 of #71 — capture the USD value of the reward at the moment
@@ -114,7 +120,7 @@ export async function finalizeA2APaymentJob(
     // Escrow v3: queue on-chain release if EscrowModule is deployed.
     // Fire-and-forget — the DB escrow is already marked RELEASED above;
     // the on-chain release is a best-effort secondary settlement.
-    if (chainId) {
+    if (chainId && !isErc8183) {
       queueOnChainEscrowRelease({ jobId, chainId }).catch((err) =>
         logger.warn(
           { jobId, err: (err as Error)?.message ?? String(err) },
@@ -183,7 +189,7 @@ export async function finalizeA2APaymentJob(
     }
 
     // Escrow v3: queue on-chain refund if EscrowModule is deployed.
-    if (chainId) {
+    if (chainId && !isErc8183) {
       queueOnChainEscrowRefund({ jobId, chainId }).catch((err) =>
         logger.warn(
           { jobId, err: (err as Error)?.message ?? String(err) },

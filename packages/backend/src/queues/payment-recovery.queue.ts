@@ -31,6 +31,7 @@ import { db } from '../db/client.js';
 import { env } from '../config/env.js';
 import { logger } from '../api/middleware/logger.js';
 import { finalizeA2APaymentJob } from '../services/job/payment-finalizer.service.js';
+import { recoverErc8183Job } from '../services/job/escrow-erc8183.runtime.js';
 
 const RECOVERY_QUEUE_NAME = 'payment-recovery';
 
@@ -100,6 +101,8 @@ interface RecoverySummary {
   finalizedFailed: number;
   refundedOrphan: number;
   stillInFlight: number;
+  /** ERC-8183 jobs handed to the escrow orchestrator (never refunded here). */
+  erc8183Recovered: number;
 }
 
 export function startPaymentRecoveryWorker(): Worker {
@@ -113,7 +116,7 @@ export function startPaymentRecoveryWorker(): Worker {
           status: 'PAYMENT_PENDING',
           updatedAt: { lt: cutoff },
         },
-        select: { id: true, updatedAt: true },
+        select: { id: true, updatedAt: true, escrowKind: true, onChainStatus: true },
         take: PER_TICK_LIMIT,
         orderBy: { updatedAt: 'asc' }, // oldest first, in case we hit the cap
       });
@@ -124,6 +127,7 @@ export function startPaymentRecoveryWorker(): Worker {
         finalizedFailed: 0,
         refundedOrphan: 0,
         stillInFlight: 0,
+        erc8183Recovered: 0,
       };
 
       if (stale.length === 0) {
@@ -132,6 +136,19 @@ export function startPaymentRecoveryWorker(): Worker {
       }
 
       for (const job of stale) {
+        if (job.escrowKind === 'erc8183') {
+          // C3: the budget is on-chain, so the FAILED finalizer (DB refund)
+          // must never run here. The orchestrator re-queues the idempotent
+          // settlement or hands a job whose `submit` died back to ACCEPTED.
+          const outcome = await recoverErc8183Job({ id: job.id, onChainStatus: job.onChainStatus });
+          logger.info(
+            { jobId: job.id, onChainStatus: job.onChainStatus, outcome },
+            'Payment recovery: ERC-8183 job handed to the escrow orchestrator',
+          );
+          summary.erc8183Recovered++;
+          continue;
+        }
+
         const intentId = `a2a-payment:${job.id}`;
         const tx = await db.transaction.findUnique({
           where: { intentId },

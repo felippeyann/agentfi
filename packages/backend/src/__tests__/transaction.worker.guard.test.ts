@@ -18,14 +18,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
 
-const { finalizeMock } = vi.hoisted(() => ({
+const { finalizeMock, escrowOutcomeMock } = vi.hoisted(() => ({
   finalizeMock: vi.fn(),
+  escrowOutcomeMock: vi.fn(),
 }));
 
 // The finalizer pulls in the real `db` singleton, the logger/env chain and the
 // escrow service (which instantiates BullMQ queues). Stub the module.
 vi.mock('../services/job/payment-finalizer.service.js', () => ({
   finalizeA2APaymentJob: finalizeMock,
+}));
+// The ERC-8183 runtime binds the real db / queues / signer. Stub the module.
+vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({
+  onEscrowTxOutcome: escrowOutcomeMock,
 }));
 
 import {
@@ -87,6 +92,7 @@ async function runWorkerStep(db: PrismaClient, submitter: ReturnType<typeof make
 
 beforeEach(() => {
   finalizeMock.mockReset().mockResolvedValue(undefined);
+  escrowOutcomeMock.mockReset().mockResolvedValue(undefined);
 });
 
 // ── Happy path ─────────────────────────────────────────────────────────────
@@ -313,6 +319,54 @@ describe('preSubmitGuard — A2A payment jobs', () => {
       snapshot({
         metadata: { a2aPayment: true, jobId: 'job-42' },
         agent: { active: false, policy: null },
+      }),
+    );
+
+    const decision = await preSubmitGuard(db, TX_ID);
+
+    expect(decision).toEqual({
+      action: 'fail',
+      reason: PAUSED_BEFORE_SUBMISSION,
+      finalizerError: 'job table unavailable',
+    });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: TX_ID },
+      data: { status: 'FAILED', error: PAUSED_BEFORE_SUBMISSION },
+    });
+  });
+});
+
+// ── ERC-8183 escrow steps (C3) ─────────────────────────────────────────────
+
+describe('preSubmitGuard — ERC-8183 escrow steps', () => {
+  it('blocked escrow step → orchestrator told FAILED with the block reason; A2A finalizer untouched', async () => {
+    const { db } = makeMockDb(
+      snapshot({
+        metadata: { erc8183: true, jobId: 'job-7', escrowStep: 'approve' },
+        agent: { active: false, policy: { active: true, expiresAt: null } },
+      }),
+    );
+    const submitter = makeSubmitter();
+
+    const decision = await runWorkerStep(db, submitter);
+
+    expect(decision).toEqual({ action: 'fail', reason: PAUSED_BEFORE_SUBMISSION });
+    expect(submitter.submit).not.toHaveBeenCalled();
+    expect(escrowOutcomeMock).toHaveBeenCalledTimes(1);
+    expect(escrowOutcomeMock).toHaveBeenCalledWith({
+      transactionId: TX_ID,
+      status: 'FAILED',
+      error: PAUSED_BEFORE_SUBMISSION,
+    });
+    expect(finalizeMock).not.toHaveBeenCalled();
+  });
+
+  it('orchestrator failure is reported as finalizerError, not thrown (tx already FAILED)', async () => {
+    escrowOutcomeMock.mockRejectedValueOnce(new Error('job table unavailable'));
+    const { db, update } = makeMockDb(
+      snapshot({
+        metadata: { erc8183: true, jobId: 'job-7', escrowStep: 'fund' },
+        agent: { active: false, policy: { active: true, expiresAt: null } },
       }),
     );
 

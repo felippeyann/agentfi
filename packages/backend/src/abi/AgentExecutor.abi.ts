@@ -2,7 +2,7 @@
  * GENERATED FILE — DO NOT EDIT BY HAND.
  *
  * Source: packages/contracts/src/AgentExecutor.sol
- * Regenerate: node scripts/gen-executor-abi.mjs  (or: npm run abi:executor)
+ * Regenerate: node scripts/gen-abi.mjs AgentExecutor  (or: npm run abi)
  *
  * The `Action` struct is (target, value, token, data). Contracts compiled from
  * the pre-October-2026 struct (target, value, data) expose different selectors
