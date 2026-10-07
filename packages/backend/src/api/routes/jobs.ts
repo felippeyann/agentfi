@@ -3,6 +3,7 @@ import type { JobStatus } from '@prisma/client';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { logger } from '../middleware/logger.js';
+import { publicErrorMessage, sanitizeStoredError } from '../errors/sanitize.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
 import { executeA2APayment } from './transactions.js';
 import {
@@ -55,6 +56,11 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
   ACCEPTED: ['COMPLETED', 'FAILED', 'CANCELLED'],
 };
 
+/**
+ * Full error text — for logs and the DB columns operators read. A response
+ * carries `publicErrorMessage(err)` instead (S5): a viem error's message
+ * holds the RPC URL with the provider key in its path.
+ */
 function errorMessage(err: unknown): string {
   return (err as Error)?.message ?? String(err);
 }
@@ -108,7 +114,7 @@ export async function jobRoutes(fastify: FastifyInstance) {
         escrowToken = await getEscrowToken(rewardChainId);
       } catch (err) {
         logger.error({ chainId: rewardChainId, err: errorMessage(err) }, 'ERC-8183 escrow token unavailable');
-        return reply.code(503).send({ error: 'ERC8183_UNAVAILABLE', message: errorMessage(err) });
+        return reply.code(503).send({ error: 'ERC8183_UNAVAILABLE', message: publicErrorMessage(err) });
       }
       if (!isEscrowTokenReward(rewardToken, escrowToken)) {
         return reply.code(400).send({
@@ -188,7 +194,7 @@ export async function jobRoutes(fastify: FastifyInstance) {
           logger.error({ jobId: job.id, err: errorMessage(releaseErr) }, 'ERC-8183 start failed AND reservation release failed'),
         );
         logger.error({ jobId: job.id, err: errorMessage(err) }, 'ERC-8183 escrow could not be started');
-        return reply.code(503).send({ error: 'ERC8183_START_FAILED', jobId: job.id, reason: errorMessage(err) });
+        return reply.code(503).send({ error: 'ERC8183_START_FAILED', jobId: job.id, reason: publicErrorMessage(err) });
       }
     } else if (body.reward?.amount && reservedAt) {
       // Escrow v3: queue on-chain lock if EscrowModule is deployed on the target chain.
@@ -287,7 +293,7 @@ export async function jobRoutes(fastify: FastifyInstance) {
         error: 'ESCROW_NOT_FUNDED',
         message: `Job is not funded on-chain yet (onChainStatus=${job.onChainStatus ?? 'unknown'})`,
         onChainStatus: job.onChainStatus,
-        escrowError: job.escrowError,
+        escrowError: sanitizeStoredError(job.escrowError),
       });
     }
 
@@ -320,7 +326,7 @@ export async function jobRoutes(fastify: FastifyInstance) {
         const reason = `submit could not be enqueued: ${errorMessage(err)}`;
         await db.job.update({ where: { id: job.id }, data: { status: 'ACCEPTED', escrowError: reason } });
         logger.error({ jobId: job.id, err: errorMessage(err) }, 'ERC-8183 submit enqueue failed — job returned to ACCEPTED');
-        return reply.code(503).send({ error: 'ESCROW_SUBMIT_FAILED', reason: errorMessage(err) });
+        return reply.code(503).send({ error: 'ESCROW_SUBMIT_FAILED', reason: publicErrorMessage(err) });
       }
     } else if (isPaidCompletion) {
       // Issue #81 (Phase 1.5 of #71): the Job lifecycle is finalized by the

@@ -425,6 +425,15 @@ export interface paths {
                 };
                 400: components["responses"]["BadRequest"];
                 404: components["responses"]["NotFound"];
+                /** @description `{ error: "Signing failed", details }` — `details` is the wallet provider's error, sanitized. */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
             };
         };
         delete?: never;
@@ -486,7 +495,20 @@ export interface paths {
                         };
                     };
                 };
-                400: components["responses"]["BadRequest"];
+                /**
+                 * @description Invalid body, or `{ error: "Verification failed", details }` when
+                 *     recovery or the EIP-1271 call failed. `details` is sanitized — the
+                 *     node's RPC URL (which carries the operator's provider key) is never
+                 *     returned.
+                 */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
                 404: components["responses"]["NotFound"];
             };
         };
@@ -1676,9 +1698,11 @@ export interface paths {
                 404: components["responses"]["NotFound"];
                 /**
                  * @description ERC-8183 chain only. `ERC8183_UNAVAILABLE` (escrow token could not be
-                 *     resolved) or `ERC8183_START_FAILED` (the `createJob` step could not be
-                 *     queued; the job is left `FAILED` and the reservation released; `jobId`
-                 *     is included).
+                 *     resolved; `message`) or `ERC8183_START_FAILED` (the `createJob` step
+                 *     could not be queued; the job is left `FAILED` and the reservation
+                 *     released; `jobId` and `reason` are included). `message` / `reason`
+                 *     are the sanitized upstream error (for a viem error, its one-line
+                 *     summary — never the RPC URL).
                  */
                 503: {
                     headers: {
@@ -1883,8 +1907,8 @@ export interface paths {
                 };
                 /**
                  * @description ERC-8183 chain only. `ESCROW_SUBMIT_FAILED` — the provider's `submit`
-                 *     could not be queued; the job is returned to `ACCEPTED` so the
-                 *     completion can be retried.
+                 *     could not be queued (`reason`, sanitized); the job is returned to
+                 *     `ACCEPTED` so the completion can be retried.
                  */
                 503: {
                     headers: {
@@ -2046,7 +2070,8 @@ export interface paths {
          *
          *     **Outbound target policy.** Before anything is fetched, the hostname
          *     is resolved and the request is refused (`400 INVALID_URL`, with
-         *     `refusal`, `hostname` and `address`) when the host is — or any address
+         *     `refusal` and `hostname`; the address a name resolved to is never
+         *     returned) when the host is — or any address
          *     it resolves to is — loopback, private, link-local, unique-local,
          *     unspecified or otherwise reserved (IPv4-mapped and NAT64 addresses are
          *     judged by their IPv4). The connection is pinned to the validated
@@ -2106,8 +2131,8 @@ export interface paths {
                 /**
                  * @description `VALIDATION_FAILED`, `INVALID_URL` (not an absolute http(s) URL, or
                  *     refused by the outbound target policy: `refusal` is `private-host`,
-                 *     `private-address` or `unresolvable`, with `hostname` and the
-                 *     offending `address`), `INVALID_BUDGET`, `UNSUPPORTED_BUDGET_TOKEN`
+                 *     `private-address` or `unresolvable`, with `hostname`; the
+                 *     offending resolved address is only logged), `INVALID_BUDGET`, `UNSUPPORTED_BUDGET_TOKEN`
                  *     (the job reward is not USDC) or `UNSUPPORTED_ASSET` (the 402 does
                  *     not offer USDC on the job's chain within the allowed authorization
                  *     window) — nothing was signed — or `REDIRECT_REFUSED`: the resource
@@ -2885,10 +2910,23 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         Error: {
-            /** @description Human-readable message. */
+            /** @description Human-readable message. Text that comes from an upstream (RPC node, wallet provider, x402 server) is sanitized: no keys, credentialed or keyed URLs, internal hosts, stack frames or file paths. */
             error: string;
+            /** @description Stable machine-readable code where the operation documents one (e.g. `VALIDATION_FAILED`, `INTERNAL_ERROR`, `ESCROW_NOT_FUNDED`). */
+            code?: string;
             /** @description Optional additional context (string, object, or array). */
             details?: unknown;
+            /** @description Present on `INTERNAL_ERROR`. The operator's log holds the full error under the same id; quote it when reporting a problem. */
+            traceId?: string;
+        };
+        /** @description Body of every unexpected server error (5xx). The underlying message is never returned; it is logged with the same `traceId`. */
+        InternalError: {
+            /** @enum {string} */
+            error: "Internal error";
+            /** @enum {string} */
+            code: "INTERNAL_ERROR";
+            /** @example 3f9a1c07b2de */
+            traceId: string;
         };
         PolicyChangeForbidden: components["schemas"]["Error"] & {
             /**
@@ -3202,7 +3240,9 @@ export interface components {
             amountOut?: string | null;
             gasUsed?: string | null;
             effectiveGasPriceWei?: string | null;
+            /** @description Why the transaction failed (sanitized broadcast / node error — no RPC URLs or keys). */
             error?: string | null;
+            /** @description Stored simulation result; its `error` is sanitized like `error`. */
             simulation?: {
                 [key: string]: unknown;
             } | null;
@@ -3362,7 +3402,7 @@ export interface components {
             contestedAt?: string | null;
             /** @description Reason given by the requester when contesting. */
             contestReason?: string | null;
-            /** @description Last escrow step or settlement error. */
+            /** @description Last escrow step or settlement error (sanitized: no RPC URLs, keys or internal hosts). */
             escrowError?: string | null;
             /**
              * @description ERC-8004 agent id of the provider attached to the on-chain job with
@@ -3380,7 +3420,7 @@ export interface components {
              * @enum {string|null}
              */
             providerAgentIdStatus?: "BINDING" | "BOUND" | "FAILED" | "SKIPPED" | null;
-            /** @description Why the binding FAILED or was SKIPPED. */
+            /** @description Why the binding FAILED or was SKIPPED (sanitized). */
             providerAgentIdError?: string | null;
             /**
              * Format: date-time
@@ -3572,10 +3612,8 @@ export interface components {
              * @enum {string}
              */
             refusal?: "private-host" | "private-address" | "unresolvable";
-            /** @description Hostname the outbound target policy judged (`INVALID_URL`). */
+            /** @description Hostname the outbound target policy judged (`INVALID_URL`). The private address it resolved to is never returned. */
             hostname?: string;
-            /** @description Resolved address that was refused (`INVALID_URL`, `refusal: private-address`). */
-            address?: string;
             /** @description Redirect target, resolved and stripped of query string and userinfo (`REDIRECT_REFUSED`); never requested. */
             location?: string | null;
             /**
@@ -3692,6 +3730,21 @@ export interface components {
             };
             content: {
                 "application/json": components["schemas"]["Error"];
+            };
+        };
+        /**
+         * @description Unexpected server error, on any operation. Body:
+         *     `{ "error": "Internal error", "code": "INTERNAL_ERROR", "traceId": "3f9a1c07b2de" }`.
+         *     The underlying message (which may come from an RPC node, the database
+         *     or a wallet provider) is never returned; the operator's log holds it
+         *     under the same `traceId`.
+         */
+        InternalError: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["InternalError"];
             };
         };
         /**

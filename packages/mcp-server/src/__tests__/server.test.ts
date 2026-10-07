@@ -174,22 +174,26 @@ describe('pay_for_resource outbound-target refusals (S4) pass through unchanged'
       refusal: 'private-host',
       hostname: 'localhost',
     },
+    // Since S5 the backend no longer sends the resolved `address` (it stays in its log).
     {
-      error:
-        'url hostname resolves to a private, loopback, link-local or reserved address (agent-target.example → 10.0.0.5)',
+      error: 'url hostname resolves to a private, loopback, link-local or reserved address (agent-target.example)',
       code: 'INVALID_URL',
       refusal: 'private-address',
       hostname: 'agent-target.example',
-      address: '10.0.0.5',
     },
     {
-      error: 'url hostname resolves to a private, loopback, link-local or reserved address (db.internal → 169.254.169.254)',
+      error: 'url must not point at a private, loopback, link-local or reserved host (169.254.169.254)',
+      code: 'INVALID_URL',
+      refusal: 'private-host',
+      hostname: '169.254.169.254',
+    },
+    {
+      error: 'url hostname resolves to a private, loopback, link-local or reserved address (db.internal)',
       code: 'INVALID_URL',
       refusal: 'private-address',
       hostname: 'db.internal',
-      address: '169.254.169.254',
     },
-  ])('INVALID_URL $refusal keeps message, refusal, hostname and address', async (body) => {
+  ])('INVALID_URL $refusal keeps message, refusal and hostname', async (body) => {
     fetchMock.mockImplementation(async () => jsonResponse(400, body));
     const result = await callTool('pay_for_resource', args, { log });
     expect(result.isError).toBe(true);

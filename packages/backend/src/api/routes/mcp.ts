@@ -15,9 +15,17 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  type CallToolResult,
   type ToolAnnotations,
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
+import {
+  describeError,
+  newTraceId,
+  sanitizeContextFromEnv,
+  sanitizeText,
+  sanitizeValue,
+} from '../errors/sanitize.js';
 
 // ─── Tool definitions (inline to avoid cross-package import issues) ───
 
@@ -348,7 +356,12 @@ const sessions = new Map<
   { transport: SSEServerTransport; apiKey: string; server: Server }
 >();
 
-export function createMcpServer(apiKey: string): Server {
+export interface McpServerOptions {
+  /** Where a failed tool call is logged in full (default: the backend logger). Tests inject one. */
+  logError?: ProxyErrorLogger;
+}
+
+export function createMcpServer(apiKey: string, options: McpServerOptions = {}): Server {
   const apiBaseUrl =
     process.env['API_BASE_URL'] ??
     `http://localhost:${process.env['API_PORT'] ?? '3000'}`;
@@ -400,15 +413,62 @@ export function createMcpServer(apiKey: string): Server {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
       };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return {
-        content: [{ type: 'text', text: JSON.stringify({ error: message, tool: name }) }],
-        isError: true,
-      };
+      return proxyToolErrorResult(err, name, options.logError);
     }
   });
 
   return server;
+}
+
+// ─── Tool errors (S5) ───
+
+export type ProxyErrorLogger = (traceId: string, tool: string, err: unknown) => void;
+
+/**
+ * Fallback when no logger is injected (tests, scripts): stderr. `mcpRoutes`
+ * passes the Fastify logger, so in the server the line lands in the app log
+ * with the request's other fields. Kept free of `middleware/logger.js` so this
+ * module loads without the backend env.
+ */
+const defaultProxyErrorLogger: ProxyErrorLogger = (traceId, tool, err) => {
+  console.error(`[AgentFi /mcp/sse] traceId=${traceId} tool=${tool} failed:`, err);
+};
+
+/**
+ * The `/mcp/sse` counterpart of @agent_fi/mcp-server's `toolErrorResult`
+ * (S2): before S5 this surface returned `err.message` verbatim — a failed
+ * call to the backend's own API (`API_BASE_URL`, an internal URL) or any
+ * upstream error text reached the MCP client. Now the result carries the
+ * sanitized message, the code (INVALID_INPUT for bad arguments,
+ * UPSTREAM_UNREACHABLE, …), the tool and a `traceId`; the full error is
+ * logged under the same id. REST error bodies the proxy relays are already
+ * sanitized by the API itself.
+ */
+export function proxyToolErrorResult(
+  err: unknown,
+  tool: string,
+  log: ProxyErrorLogger = defaultProxyErrorLogger,
+): CallToolResult {
+  const traceId = newTraceId();
+  const ctx = sanitizeContextFromEnv();
+  const described = describeError(err);
+  const payload = {
+    error: sanitizeText(described.message, ctx) || 'Unknown error',
+    ...(described.code !== undefined ? { code: described.code } : {}),
+    ...(described.details !== undefined ? { details: sanitizeValue(described.details, ctx) } : {}),
+    tool,
+    traceId,
+    recommendation:
+      described.code === 'INVALID_INPUT'
+        ? 'Fix the input parameters (see error and details) and try again.'
+        : `Unexpected error. Retry later; if it persists, contact the AgentFi operator and quote traceId ${traceId}.`,
+  };
+  try {
+    log(traceId, tool, err);
+  } catch {
+    // Logging must never turn a tool error into a protocol error.
+  }
+  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: true };
 }
 
 export async function mcpRoutes(fastify: FastifyInstance) {
@@ -421,7 +481,9 @@ export async function mcpRoutes(fastify: FastifyInstance) {
 
     // Allow unauthenticated connections for tool discovery (Smithery scan),
     // but tool calls will fail without a valid key.
-    const mcpServer = createMcpServer(apiKey);
+    const mcpServer = createMcpServer(apiKey, {
+      logError: (traceId, tool, err) => request.log.error({ err, traceId, tool }, 'MCP /mcp/sse tool call failed'),
+    });
 
     // Hijack the response so Fastify doesn't touch it — SSE needs raw streaming
     reply.hijack();

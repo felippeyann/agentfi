@@ -30,9 +30,23 @@ export async function registerRateLimit(fastify: FastifyInstance) {
       const url = request.routeOptions?.url ?? '';
       return url.startsWith('/health') || url.startsWith('/.well-known');
     },
-    errorResponseBuilder: (_request, context) => ({
-      error: `Rate limit exceeded. Retry after ${context.after}.`,
-      tier: 'Upgrade your plan for higher limits.',
-    }),
+    errorResponseBuilder: rateLimitErrorResponse,
   });
+}
+
+/**
+ * Body of a rate-limited response. @fastify/rate-limit THROWS this object, so
+ * it must carry `statusCode` (429, or 403 once a ban applies): without it the
+ * error handler sees a status-less throw — Fastify's default handler answered
+ * those with HTTP 500, and since S5 they would read as an internal error.
+ */
+export function rateLimitErrorResponse(
+  _request: unknown,
+  context: { statusCode: number; after: string },
+): { statusCode: number; error: string; tier: string } {
+  return {
+    statusCode: context.statusCode,
+    error: `Rate limit exceeded. Retry after ${context.after}.`,
+    tier: 'Upgrade your plan for higher limits.',
+  };
 }

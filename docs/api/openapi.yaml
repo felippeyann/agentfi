@@ -26,6 +26,17 @@ info:
 
     **Rate limits** are tier-based (FREE / PRO / ENTERPRISE) and keyed by
     `agentId` or client IP. See the Billing section.
+
+    **Errors.** Business refusals are `{ error, code?, ...details }` with a
+    stable `code` where the operation documents one. An unexpected server
+    error is always `{ "error": "Internal error", "code": "INTERNAL_ERROR",
+    "traceId": "<12 hex>" }` — never the underlying message; quote the
+    `traceId` to the operator, whose log holds the full error under the same
+    id. A body that fails schema validation in a handler is `400
+    { error: "Validation failed", code: "VALIDATION_FAILED", details }`.
+    Error text that comes from an upstream (RPC node, wallet provider, x402
+    server) is sanitized before it is returned: no API keys, credentialed or
+    keyed URLs, internal hosts, stack frames or file paths.
   license:
     name: Apache 2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -275,6 +286,11 @@ paths:
                   safeAddress: { type: string, pattern: '^0x[0-9a-fA-F]{40}$' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '500':
+          description: '`{ error: "Signing failed", details }` — `details` is the wallet provider''s error, sanitized.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /v1/agents/verify-handshake:
     post:
@@ -312,7 +328,15 @@ paths:
                   address: { type: string, pattern: '^0x[0-9a-fA-F]{40}$' }
                   verifiedVia: { type: string, enum: ['ecdsa', 'eip1271'] }
                   reason: { type: string, description: 'Only set when valid is false and an RPC/EIP-1271 attempt could not complete.' }
-        '400': { $ref: '#/components/responses/BadRequest' }
+        '400':
+          description: |
+            Invalid body, or `{ error: "Verification failed", details }` when
+            recovery or the EIP-1271 call failed. `details` is sanitized — the
+            node's RPC URL (which carries the operator's provider key) is never
+            returned.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /v1/agents/{id}:
@@ -846,9 +870,11 @@ paths:
         '503':
           description: |
             ERC-8183 chain only. `ERC8183_UNAVAILABLE` (escrow token could not be
-            resolved) or `ERC8183_START_FAILED` (the `createJob` step could not be
-            queued; the job is left `FAILED` and the reservation released; `jobId`
-            is included).
+            resolved; `message`) or `ERC8183_START_FAILED` (the `createJob` step
+            could not be queued; the job is left `FAILED` and the reservation
+            released; `jobId` and `reason` are included). `message` / `reason`
+            are the sanitized upstream error (for a viem error, its one-line
+            summary — never the RPC URL).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -957,8 +983,8 @@ paths:
         '503':
           description: |
             ERC-8183 chain only. `ESCROW_SUBMIT_FAILED` — the provider's `submit`
-            could not be queued; the job is returned to `ACCEPTED` so the
-            completion can be retried.
+            could not be queued (`reason`, sanitized); the job is returned to
+            `ACCEPTED` so the completion can be retried.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -1055,7 +1081,8 @@ paths:
 
         **Outbound target policy.** Before anything is fetched, the hostname
         is resolved and the request is refused (`400 INVALID_URL`, with
-        `refusal`, `hostname` and `address`) when the host is — or any address
+        `refusal` and `hostname`; the address a name resolved to is never
+        returned) when the host is — or any address
         it resolves to is — loopback, private, link-local, unique-local,
         unspecified or otherwise reserved (IPv4-mapped and NAT64 addresses are
         judged by their IPv4). The connection is pinned to the validated
@@ -1101,8 +1128,8 @@ paths:
           description: |
             `VALIDATION_FAILED`, `INVALID_URL` (not an absolute http(s) URL, or
             refused by the outbound target policy: `refusal` is `private-host`,
-            `private-address` or `unresolvable`, with `hostname` and the
-            offending `address`), `INVALID_BUDGET`, `UNSUPPORTED_BUDGET_TOKEN`
+            `private-address` or `unresolvable`, with `hostname`; the
+            offending resolved address is only logged), `INVALID_BUDGET`, `UNSUPPORTED_BUDGET_TOKEN`
             (the job reward is not USDC) or `UNSUPPORTED_ASSET` (the 402 does
             not offer USDC on the job's chain within the allowed authorization
             window) — nothing was signed — or `REDIRECT_REFUSED`: the resource
@@ -1515,6 +1542,16 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
+    InternalError:
+      description: |
+        Unexpected server error, on any operation. Body:
+        `{ "error": "Internal error", "code": "INTERNAL_ERROR", "traceId": "3f9a1c07b2de" }`.
+        The underlying message (which may come from an RPC node, the database
+        or a wallet provider) is never returned; the operator's log holds it
+        under the same `traceId`.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/InternalError' }
     TransactionAccepted:
       description: |
         The request is valid, policy-approved, and has been queued.
@@ -1530,9 +1567,34 @@ components:
       properties:
         error:
           type: string
-          description: Human-readable message.
+          description: >-
+            Human-readable message. Text that comes from an upstream (RPC node,
+            wallet provider, x402 server) is sanitized: no keys, credentialed or
+            keyed URLs, internal hosts, stack frames or file paths.
+        code:
+          type: string
+          description: >-
+            Stable machine-readable code where the operation documents one
+            (e.g. `VALIDATION_FAILED`, `INTERNAL_ERROR`, `ESCROW_NOT_FUNDED`).
         details:
           description: Optional additional context (string, object, or array).
+        traceId:
+          type: string
+          pattern: '^[0-9a-f]{12}$'
+          description: >-
+            Present on `INTERNAL_ERROR`. The operator's log holds the full
+            error under the same id; quote it when reporting a problem.
+
+    InternalError:
+      type: object
+      required: [error, code, traceId]
+      description: >-
+        Body of every unexpected server error (5xx). The underlying message is
+        never returned; it is logged with the same `traceId`.
+      properties:
+        error: { type: string, enum: ['Internal error'] }
+        code: { type: string, enum: [INTERNAL_ERROR] }
+        traceId: { type: string, pattern: '^[0-9a-f]{12}$', example: 3f9a1c07b2de }
 
     PolicyChangeForbidden:
       allOf:
@@ -1981,11 +2043,15 @@ components:
         amountOut: { type: string, nullable: true }
         gasUsed: { type: string, nullable: true }
         effectiveGasPriceWei: { type: string, nullable: true }
-        error: { type: string, nullable: true }
+        error:
+          type: string
+          nullable: true
+          description: Why the transaction failed (sanitized broadcast / node error — no RPC URLs or keys).
         simulation:
           nullable: true
           type: object
           additionalProperties: true
+          description: Stored simulation result; its `error` is sanitized like `error`.
         metadata:
           nullable: true
           type: object
@@ -2185,7 +2251,7 @@ components:
           description: ERC-8004 feedback outcome from the hook — `written`, `skipped:<reason>` or `failed`.
         contestedAt: { type: string, format: date-time, nullable: true }
         contestReason: { type: string, nullable: true, description: Reason given by the requester when contesting. }
-        escrowError: { type: string, nullable: true, description: Last escrow step or settlement error. }
+        escrowError: { type: string, nullable: true, description: 'Last escrow step or settlement error (sanitized: no RPC URLs, keys or internal hosts).' }
         providerAgentId:
           type: string
           nullable: true
@@ -2204,7 +2270,7 @@ components:
             proceeds, the hook skips feedback) or `SKIPPED` (no reputation hook
             or identity registry on the chain, job no longer funded). `null` for
             jobs funded before R2. Never blocks payment.
-        providerAgentIdError: { type: string, nullable: true, description: Why the binding FAILED or was SKIPPED. }
+        providerAgentIdError: { type: string, nullable: true, description: Why the binding FAILED or was SKIPPED (sanitized). }
         deferredSubmitAt:
           type: string
           format: date-time
@@ -2451,8 +2517,7 @@ components:
                 the host is a loopback name or a private/reserved literal, one
                 of its resolved addresses is private/reserved, or it does not
                 resolve.
-            hostname: { type: string, description: 'Hostname the outbound target policy judged (`INVALID_URL`).' }
-            address: { type: string, description: 'Resolved address that was refused (`INVALID_URL`, `refusal: private-address`).' }
+            hostname: { type: string, description: 'Hostname the outbound target policy judged (`INVALID_URL`). The private address it resolved to is never returned.' }
             location:
               type: string
               nullable: true

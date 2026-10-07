@@ -20,6 +20,7 @@ import { PnLService } from '../../services/billing/pnl.service.js';
 import { EnsService } from '../../services/identity/ens.service.js';
 import { buildRegistrationFile, identityView } from '../../services/job/erc8004-identity.service.js';
 import { logger } from '../middleware/logger.js';
+import { publicErrorMessage } from '../errors/sanitize.js';
 const turnkey = getWalletService();
 const safeService = new SafeService();
 const policyService = new PolicyService(db);
@@ -587,9 +588,10 @@ export async function agentRoutes(fastify: FastifyInstance) {
       });
     } catch (err) {
       logger.error({ err, agentId: request.agentId }, 'sign-handshake failed');
+      // S5: the wallet provider's error text is sanitized (Turnkey / RPC URLs, keys).
       return reply.code(500).send({
         error: 'Signing failed',
-        details: err instanceof Error ? err.message : String(err),
+        details: publicErrorMessage(err),
       });
     }
   });
@@ -682,9 +684,11 @@ export async function agentRoutes(fastify: FastifyInstance) {
       });
     } catch (err) {
       logger.warn({ err }, 'verify-handshake error');
+      // S5: the EIP-1271 fallback calls the chain through the operator's RPC
+      // URL (Alchemy key in the path) — a viem error must not echo it.
       return reply.code(400).send({
         error: 'Verification failed',
-        details: err instanceof Error ? err.message : String(err),
+        details: publicErrorMessage(err),
       });
     }
   });

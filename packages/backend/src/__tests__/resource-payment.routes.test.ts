@@ -865,4 +865,38 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
       expect(wallet.signatures).toBe(1);
     });
   });
+
+  describe('error hygiene (S5)', () => {
+    const ALCHEMY_KEY = 'Zq8mN3pL5vR7tX9wB2cD4fG6hJ1kM0aS';
+    let savedKey: string | undefined;
+    beforeEach(() => {
+      savedKey = process.env['ALCHEMY_API_KEY'];
+      process.env['ALCHEMY_API_KEY'] = ALCHEMY_KEY;
+    });
+    afterEach(() => {
+      if (savedKey === undefined) delete process.env['ALCHEMY_API_KEY'];
+      else process.env['ALCHEMY_API_KEY'] = savedKey;
+    });
+
+    it('a signer failure that embeds the keyed RPC URL is PAYMENT_FAILED with the key stripped from `error` and `payment.error`', async () => {
+      const f = await fixture({ price: '$0.40' });
+      const app = await buildApp({ base: f.base });
+      const signSpy = vi
+        .spyOn(wallet, 'signTypedData')
+        .mockRejectedValueOnce(new Error(`eth_chainId failed: https://base-sepolia.g.alchemy.com/v2/${ALCHEMY_KEY}`));
+
+      const res = await pay(app, { url: f.url, paymentId: PAYMENT_ID });
+      signSpy.mockRestore();
+
+      expect(res.statusCode).toBe(502);
+      const body = res.json();
+      expect(body).toMatchObject({ code: 'PAYMENT_FAILED', paymentId: PAYMENT_ID, stage: 'payment-creation', timedOut: false });
+      expect(res.payload).not.toContain(ALCHEMY_KEY);
+      expect(body.error).toContain('eth_chainId failed: https://base-sepolia.g.alchemy.com/v2/[redacted]');
+      expect(body.payment).toMatchObject({ status: 'failed_before_signing', paymentId: PAYMENT_ID });
+      expect(body.payment.error).toContain('[redacted]');
+      // The ledger itself keeps the full text for the operator.
+      expect(ledger.all()[0]?.error).toContain(ALCHEMY_KEY);
+    });
+  });
 });

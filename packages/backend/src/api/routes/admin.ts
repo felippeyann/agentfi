@@ -12,6 +12,7 @@ import { db } from '../../db/client.js';
 import { getAddress, type Address } from 'viem';
 import { AGENT_EXECUTOR_ABI } from '../../abi/AgentExecutor.abi.js';
 import { logger } from '../middleware/logger.js';
+import { publicErrorMessage } from '../errors/sanitize.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
 import { getContracts } from '../../config/contracts.js';
 import {
@@ -865,7 +866,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (msg.includes('not found')) {
-          return reply.code(404).send({ error: msg });
+          return reply.code(404).send({ error: publicErrorMessage(err) });
         }
         logger.error({ err, agentId: request.params.id }, 'P&L compute failed');
         return reply.code(500).send({ error: 'Failed to compute P&L' });

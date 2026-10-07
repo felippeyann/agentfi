@@ -6,6 +6,8 @@ import { describeLegacyContract, findLegacyContractConfig } from './config/contr
 import { logger } from './api/middleware/logger.js';
 import { authMiddleware } from './api/middleware/auth.js';
 import { registerRateLimit } from './api/middleware/rateLimit.js';
+import { registerJsonBodyParser } from './api/middleware/json-body.js';
+import { registerErrorHandler } from './api/errors/handler.js';
 import { agentRoutes } from './api/routes/agents.js';
 import { transactionRoutes } from './api/routes/transactions.js';
 import { walletRoutes } from './api/routes/wallets.js';
@@ -55,24 +57,15 @@ const fastify = Fastify({
 });
 
 // Stripe webhook needs the raw request body for signature verification.
-// Register a raw content-type parser BEFORE any other plugins so Fastify
-// does not JSON-parse the /v1/billing/webhook payload.
-fastify.addContentTypeParser(
-  'application/json',
-  { parseAs: 'buffer' },
-  (req, body, done) => {
-    if (req.routeOptions?.url === '/v1/billing/webhook') {
-      // Keep as Buffer — passed directly to stripe.webhooks.constructEvent
-      done(null, body);
-    } else {
-      try {
-        done(null, JSON.parse(body.toString()));
-      } catch (err) {
-        done(err as Error, undefined);
-      }
-    }
-  },
-);
+// Register the JSON parser BEFORE any other plugins so Fastify does not
+// JSON-parse the /v1/billing/webhook payload.
+registerJsonBodyParser(fastify);
+
+// S5: one error handler for the whole app, installed before any route is
+// registered (routes capture the handler of their context when added). An
+// unexpected error answers { error: 'Internal error', code: 'INTERNAL_ERROR',
+// traceId } and is logged in full under the same traceId — never its message.
+registerErrorHandler(fastify);
 
 async function start() {
   // Security middleware

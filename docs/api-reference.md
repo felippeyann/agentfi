@@ -302,7 +302,7 @@ Terminal states never change; `unknown → settled` is reserved for the reconcil
 
 | Status | `code` | Details |
 |--------|--------|---------|
-| 400 | `VALIDATION_FAILED`, `INVALID_URL`, `INVALID_BUDGET`, `UNSUPPORTED_BUDGET_TOKEN`, `UNSUPPORTED_ASSET` | nothing signed; `UNSUPPORTED_ASSET` carries `required` and `offered`; an `INVALID_URL` from the target policy carries `refusal` (`private-host` \| `private-address` \| `unresolvable`), `hostname` and, for a resolved address, `address` |
+| 400 | `VALIDATION_FAILED`, `INVALID_URL`, `INVALID_BUDGET`, `UNSUPPORTED_BUDGET_TOKEN`, `UNSUPPORTED_ASSET` | nothing signed; `UNSUPPORTED_ASSET` carries `required` and `offered`; an `INVALID_URL` from the target policy carries `refusal` (`private-host` \| `private-address` \| `unresolvable`) and `hostname`; the private address a name resolved to is never returned (it is logged for the operator) |
 | 400 | `REDIRECT_REFUSED` | the resource answered `3xx`, which is never followed: `responseStatus`, `location` (query string stripped). Before signing `payment` is `null`; after signing `payment.status` is `refused`, or `settled` if the server reported a settlement on the redirect (the amount is spent — do not retry with a new `paymentId`) |
 | 402 | `BUDGET_EXCEEDED` | refused before signing: `price`, `remaining`, `cap` (base units), `payment` (`failed_before_signing`) |
 | 402 | `PAYMENT_REFUSED` | server rejected the signed payment or settlement failed: `reason`, `responseStatus`, `payment` (`refused`) |
@@ -350,17 +350,29 @@ All admin routes require `x-admin-secret` header. Local-only by default.
 **Backend MCP Proxy Tools** (16):
 `get_wallet`, `get_balance`, `get_allowances`, `simulate_swap`, `execute_swap`, `execute_transfer`, `supply_aave`, `withdraw_aave`, `supply_compound`, `withdraw_compound`, `deposit_erc4626`, `withdraw_erc4626`, `swap_curve`, `get_transaction_status`, `list_transactions`, `get_agent_policy`
 
+A failed proxy tool call returns `isError: true` with `{ error, code?, details?, tool, traceId, recommendation }` — the same shape as `@agent_fi/mcp-server` — where `error` is sanitized (see [Error Responses](#error-responses)); the full error is logged with the same `traceId`.
+
 > **Note:** The backend's `/mcp/sse` endpoint exposes a **thin 18-tool proxy** for simple HTTP-over-MCP clients, including agent profile and P&L checks. The standalone `@agent_fi/mcp-server` package is richer: **32 tools** including GMX V2 perpetuals (`list_gmx_markets`, `open_gmx_position`, `close_gmx_position`) and A2A collaboration (`search_agents`, `post_job`, `check_inbox`, `pay_agent`, `pay_for_resource`, `get_my_pnl`, etc.) — see [packages/mcp-server/README.md](../packages/mcp-server/README.md) for the full catalog.
 
 ---
 
 ## Error Responses
 
-All errors follow this format:
+Business errors follow this format; `code` is a stable machine-readable value where the endpoint documents one, and endpoint-specific fields sit next to it:
 
 ```json
-{ "error": "Human-readable message", "details": "Optional additional context" }
+{ "error": "Human-readable message", "code": "ESCROW_NOT_FUNDED", "details": "Optional additional context" }
 ```
+
+**Unexpected errors** — anything an endpoint did not turn into a response itself (an RPC node refusing a call, the database being unreachable, a bug) — always answer the same envelope, with status `500` (or the specific 5xx the error carries), and **never** the underlying message:
+
+```json
+{ "error": "Internal error", "code": "INTERNAL_ERROR", "traceId": "3f9a1c07b2de" }
+```
+
+The operator's log holds the full error under the same `traceId` (`"msg":"Unhandled error"`); quote it when you report a problem. A request body that fails a handler's schema is `400 { "error": "Validation failed", "code": "VALIDATION_FAILED", "details": [ …zod issues… ] }`; framework refusals (malformed JSON, unsupported content type, rate limit) keep their status (`400`, `415`, `429`).
+
+**Error text is sanitized.** Fields that carry an upstream error — a job's `reason` / `message` / `escrow.escrowError` / `escrow.providerAgentIdError`, a transaction's `error` and `simulation.error`, handshake `details`, pay-resource `error` / `reason` / `payment.error`, `/mcp/sse` tool errors — go through the same rules as the MCP server: API keys and secret values, credentialed or keyed URLs (an RPC URL keeps its origin, e.g. `https://base-mainnet.g.alchemy.com/[redacted]`), internal hosts and private IPs, stack frames and file paths are removed; viem errors are reduced to their one-line summary. Business messages, `code`s, revert reasons and transaction hashes are kept.
 
 | Status | Meaning |
 |--------|---------|
@@ -371,5 +383,6 @@ All errors follow this format:
 | 409 | Conflict (idempotency key collision) |
 | 422 | Policy violation (limit exceeded, cooldown) |
 | 429 | Rate limit exceeded |
+| 500 | Unexpected error — `INTERNAL_ERROR` with a `traceId`, no message |
 | 501 | Not implemented |
 | 503 | Service unavailable (dependency down) |

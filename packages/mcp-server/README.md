@@ -243,8 +243,10 @@ paths, values of secret-named environment variables, your `AGENTFI_API_KEY`
 and any `agfi_` key, bearer tokens, labelled secrets (`apiKey=…`,
 `"password": …`) and 32-byte hex that follows a key-ish word (`private key
 0x…`) — a bare transaction hash survives. `pay_for_resource` target refusals
-(`INVALID_URL`, `REDIRECT_REFUSED`) keep their hostnames, addresses and
-redirect location, which describe your own request. The full original error
+(`INVALID_URL`, `REDIRECT_REFUSED`) keep their hostnames (or private
+literals) and redirect location, which describe your own request. The
+AgentFi backend applies the same rules to its REST responses and to its
+own `/mcp/sse` tools. The full original error
 is logged to **stderr** with the same `traceId`; stdout carries only MCP
 JSON-RPC. `pay_for_resource` refusals such as `BUDGET_EXCEEDED` and
 `PAYMENT_OUTCOME_UNKNOWN` are still returned as structured, non-error output.

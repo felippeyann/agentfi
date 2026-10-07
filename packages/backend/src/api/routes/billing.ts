@@ -10,6 +10,7 @@
 import type { FastifyInstance } from 'fastify';
 import { db } from '../../db/client.js';
 import { StripeService } from '../../services/billing/stripe.service.js';
+import { publicErrorMessage } from '../errors/sanitize.js';
 const stripeService = new StripeService(db);
 
 const ADMIN_URL = process.env['ADMIN_URL'] ?? 'http://localhost:3001';
@@ -63,8 +64,10 @@ export async function billingRoutes(fastify: FastifyInstance) {
         );
         return reply.code(200).send({ received: true });
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return reply.code(400).send({ error: message });
+        // Public, unauthenticated route: the reason is sanitized (S5) — a
+        // failure inside handleWebhook (DB, Stripe API) must not echo
+        // connection strings, file paths or keys.
+        return reply.code(400).send({ error: publicErrorMessage(err) });
       }
     },
   );

@@ -1,19 +1,34 @@
 /**
- * Error sanitizer for MCP tool results.
+ * Error sanitizer for everything the backend sends to a caller (S5).
  *
- * Every tool call goes through one dispatcher (server.ts), and every error it
- * catches is turned into a tool result here. The result keeps what an agent
- * needs to act — the backend's validation/business message, its `code`
- * (BUDGET_EXCEEDED, ESCROW_NOT_FUNDED, VALIDATION_FAILED, …), HTTP status and
- * structured details — and strips what must not leave the process: internal
- * and credentialed URLs, stack frames, file paths, secret env values, API
- * keys, bearer tokens and private-key-shaped hex. A short random `traceId` is
- * added to the result, and the full original error is logged to stderr with
- * the same id (stdout is the MCP stdio channel and must stay clean).
+ * The MCP server sanitizes errors at its own tool dispatcher
+ * (packages/mcp-server/src/errors.ts, S2), but that only protects MCP stdio
+ * clients: agents calling the REST API directly — and the backend's own
+ * `/mcp/sse` surface — got raw error text. viem errors embed the RPC URL, and
+ * the Alchemy URL carries the operator's API key in its path
+ * (`https://…alchemy.com/v2/<ALCHEMY_API_KEY>`), so any response that forwarded
+ * `err.message` from a chain call could leak it to an agent.
+ *
+ * Used by the Fastify error handler (api/errors/handler.ts), by every route
+ * field that carries a caught or upstream error (`reason`, `details`,
+ * `message`, `escrowError`, a transaction's `error`, …) and by `/mcp/sse`.
+ * Business messages and `code`s survive — agents act on them; what goes is
+ * secret env values, credentialed or keyed URLs, internal hosts, stack frames
+ * and file paths.
+ *
+ * WHY A COPY: the backend cannot import @agent_fi/mcp-server (separate rootDir,
+ * separate Docker build, and the MCP package is published to npm on its own, so
+ * a shared workspace package would have to be published or bundled too). The
+ * "Text rules" and "Structured values" sections below are a VERBATIM copy of
+ * packages/mcp-server/src/errors.ts; src/__tests__/errors.sanitize.sync.test.ts
+ * fails if the two drift apart. Change both files together. The Context and
+ * Error classification sections are backend-specific (backend env, viem and
+ * Zod errors instead of the MCP client's ApiError).
+ *
+ * Pure module: reads `process.env` at call time, never `config/env.ts`, so it
+ * can be imported anywhere (routes, services, tests) without side effects.
  */
 import { randomBytes } from 'node:crypto';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { ApiError } from './api-error.js';
 
 // ─── Context ───────────────────────────────────────────────────────────────
 
@@ -26,38 +41,67 @@ export interface SanitizeContext {
   internalHosts: readonly string[];
 }
 
-/** Env var names whose values are secrets wherever they show up. */
+/** Env var names whose values are secrets wherever they show up (same list as the MCP server). */
 const SENSITIVE_ENV_NAME =
   /KEY|SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|MNEMONIC|SEED|AUTH|DATABASE_URL|REDIS_URL|RPC_URL|DSN/i;
 const MIN_SECRET_LENGTH = 8;
 
+/**
+ * Env vars holding the URL of AgentFi's own infrastructure. Their host names
+ * are internal wherever they show up bare (Prisma: "Can't reach database
+ * server at `db.example.com`:`5432`"), even when they look public.
+ */
+const INFRA_URL_ENV = ['DATABASE_URL', 'DIRECT_URL', 'REDIS_URL', 'API_BASE_URL'] as const;
+
+function addSecret(secrets: Set<string>, value: string | undefined): void {
+  if (!value || value.length < MIN_SECRET_LENGTH) return;
+  // A digits-only value (a window in ms, a port, a chain id) is not a secret
+  // and would redact unrelated numbers from every message.
+  if (/^\d+$/.test(value)) return;
+  secrets.add(value);
+}
+
+function parseUrl(value: string): URL | undefined {
+  try {
+    return new URL(value);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The backend's context: every secret-named env value (ALCHEMY_API_KEY,
+ * INFURA_API_KEY, TENDERLY_ACCESS_KEY, TURNKEY_API_PRIVATE_KEY,
+ * ESCROW_EVALUATOR_PRIVATE_KEY, API_SECRET, ADMIN_SECRET, DATABASE_URL,
+ * REDIS_URL, *_RPC_URL, …) plus the password inside any URL-valued one, and
+ * the hosts of the database, Redis and the backend's own base URL.
+ */
 export function sanitizeContextFromEnv(env: NodeJS.ProcessEnv = process.env): SanitizeContext {
   const secrets = new Set<string>();
   for (const [name, value] of Object.entries(env)) {
-    if (!value) continue;
-    if (SENSITIVE_ENV_NAME.test(name) && value.length >= MIN_SECRET_LENGTH) secrets.add(value);
+    if (!value || !SENSITIVE_ENV_NAME.test(name)) continue;
+    addSecret(secrets, value);
+    const url = value.includes('://') ? parseUrl(value) : undefined;
+    if (url?.password) addSecret(secrets, decodeURIComponent(url.password));
   }
-  // The agent's own key is never echoed, whatever its length.
-  const apiKey = env['AGENTFI_API_KEY'];
-  if (apiKey && apiKey.length >= 4) secrets.add(apiKey);
 
-  const internalOrigins: string[] = [];
-  const internalHosts: string[] = [];
-  const apiUrl = env['AGENTFI_API_URL'];
-  if (apiUrl) {
-    try {
-      const parsed = new URL(apiUrl);
-      internalOrigins.push(parsed.origin.toLowerCase());
-      internalHosts.push(parsed.host.toLowerCase());
-    } catch {
-      // Not a URL — still never echo it verbatim.
-      if (apiUrl.length >= 4) secrets.add(apiUrl);
-    }
+  const internalOrigins = new Set<string>();
+  const internalHosts = new Set<string>();
+  for (const name of INFRA_URL_ENV) {
+    const raw = env[name];
+    const url = raw ? parseUrl(raw) : undefined;
+    if (!url || !url.hostname) continue;
+    if (url.protocol === 'http:' || url.protocol === 'https:') internalOrigins.add(url.origin.toLowerCase());
+    // Only dotted names: a single-label host ("postgres", "redis", "api" in
+    // docker-compose) is already internal inside a URL, and redacting the
+    // bare word would mangle ordinary prose.
+    const host = url.hostname.toLowerCase();
+    if (host.includes('.') && !host.startsWith('[')) internalHosts.add(host);
   }
   return {
     secrets: [...secrets].sort((a, b) => b.length - a.length),
-    internalOrigins,
-    internalHosts,
+    internalOrigins: [...internalOrigins],
+    internalHosts: [...internalHosts],
   };
 }
 
@@ -307,7 +351,6 @@ export function sanitizeValue(
 export interface DescribedError {
   message: string;
   code?: string;
-  status?: number;
   details?: unknown;
 }
 
@@ -317,7 +360,8 @@ interface ZodLikeIssue {
   code?: string;
 }
 
-function isZodLikeError(err: unknown): err is Error & { issues: ZodLikeIssue[] } {
+/** Duck-typed so the module stays free of a zod import (any zod copy matches). */
+export function isZodLikeError(err: unknown): err is Error & { issues: ZodLikeIssue[] } {
   return (
     err instanceof Error &&
     err.name === 'ZodError' &&
@@ -348,25 +392,28 @@ function networkErrorCode(err: unknown): string | undefined {
 }
 
 /**
- * Typed refusals about the agent's OWN outbound target (pay_for_resource,
- * S4): `INVALID_URL` carries `refusal` / `hostname` (the agent's hostname or
- * private literal; since S5 the backend no longer sends the `address` a name
- * resolved to) and `REDIRECT_REFUSED` carries the third party's redirect
- * `location` (already stripped of query and userinfo by the backend). Those
- * values are the agent's input or a third party's answer, not AgentFi
- * infrastructure, and the agent needs them to fix its request — so the
- * network-location rules are not applied to them. Every secret rule still
- * is. The backend applies the same set (packages/backend/src/api/errors/sanitize.ts).
+ * viem's `BaseError` keeps a one-line `shortMessage` and the node's own words
+ * in `details`; its `message` adds the RPC URL (with the provider key in the
+ * path), the JSON-RPC request body and the viem version. Same format as the
+ * simulator's `describeSimulationError`. Duck-typed: no viem import here.
+ */
+function viemSummary(err: Error): string | undefined {
+  const { shortMessage, details } = err as { shortMessage?: unknown; details?: unknown };
+  if (typeof shortMessage !== 'string' || shortMessage === '') return undefined;
+  const detail = typeof details === 'string' && details !== '' && details !== shortMessage ? ` (${details})` : '';
+  return `${shortMessage}${detail}`;
+}
+
+/**
+ * Typed refusals about the agent's OWN outbound target (pay-resource, S4):
+ * `INVALID_URL` carries `refusal` / `hostname` (the agent's input) and
+ * `REDIRECT_REFUSED` the third party's redirect `location` (already stripped
+ * of query and userinfo). The agent needs them to fix its request, so the
+ * network-location rules are not applied to them; every secret rule still
+ * is. Same set as the MCP server. Since S5 `INVALID_URL` no longer carries
+ * the resolved `address` (it stays in the warn log).
  */
 export const TARGET_REFUSAL_CODES: ReadonlySet<string> = new Set(['INVALID_URL', 'REDIRECT_REFUSED']);
-
-/** Backends that put the code in `error` (e.g. `{ error: 'ESCROW_NOT_FUNDED' }`). */
-const CODE_LIKE = /^[A-Z][A-Z0-9_]{2,}$/;
-
-function omitKeys(body: Record<string, unknown>, keys: string[]): Record<string, unknown> | undefined {
-  const rest = Object.fromEntries(Object.entries(body).filter(([k]) => !keys.includes(k)));
-  return Object.keys(rest).length > 0 ? rest : undefined;
-}
 
 function stringifyUnknown(value: unknown): string {
   if (value === null || value === undefined) return 'Unknown error (no details)';
@@ -383,19 +430,8 @@ function stringifyUnknown(value: unknown): string {
   return `Non-Error thrown: ${Object.prototype.toString.call(value)}`;
 }
 
-/** Extracts message / code / status / details from anything that was thrown. */
+/** Extracts message / code / details from anything that was thrown (not yet sanitized). */
 export function describeError(err: unknown): DescribedError {
-  if (err instanceof ApiError) {
-    const bodyError = err.body['error'];
-    const code = err.code ?? (typeof bodyError === 'string' && CODE_LIKE.test(bodyError) ? bodyError : undefined);
-    const details = omitKeys(err.body, ['error', 'code']);
-    return {
-      message: err.message,
-      status: err.status,
-      ...(code !== undefined ? { code } : {}),
-      ...(details !== undefined ? { details } : {}),
-    };
-  }
   if (isZodLikeError(err)) {
     const issues = err.issues.map((issue) => ({
       path: issue.path.join('.'),
@@ -415,90 +451,74 @@ export function describeError(err: unknown): DescribedError {
   if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
     return { message: 'Upstream request timed out.', code: 'UPSTREAM_TIMEOUT' };
   }
-  if (err instanceof Error) return { message: err.message || err.name || 'Error' };
+  if (err instanceof Error) return { message: viemSummary(err) ?? (err.message || err.name || 'Error') };
   return { message: stringifyUnknown(err) };
 }
 
-function recommendationFor(described: DescribedError, traceId: string): string {
-  const { code, status } = described;
-  if (code === 'INVALID_INPUT' || status === 400 || status === 422) {
-    return 'Fix the input parameters (see error and details) and try again.';
-  }
-  if (status === 401) return 'The AgentFi API key was rejected. Check the AGENTFI_API_KEY configured for this server.';
-  if (status === 403) {
-    return 'Refused by the agent policy or permissions. Do not retry unchanged; ask the operator if limits must change.';
-  }
-  if (status === 404) return 'The referenced resource was not found. Check the id and try again.';
-  if (status === 409) return 'The request conflicts with the current state (see code and details). Resolve that before retrying.';
-  if (status === 429) return 'A rate or tier limit was reached. Wait before retrying.';
-  if (status !== undefined && status < 500) return 'The request was refused (see code and details). Do not retry unchanged.';
-  return `Unexpected error. Retry later; if it persists, contact the AgentFi operator and quote traceId ${traceId}.`;
-}
+// ─── Helpers for routes ────────────────────────────────────────────────────
 
-// ─── Tool result ───────────────────────────────────────────────────────────
-
-/** Short random id shared by the tool result and the stderr log line. */
+/** Short random id shared by a response and the log line that holds the full error. */
 export function newTraceId(): string {
   return randomBytes(6).toString('hex');
 }
 
-export type ErrorLogger = (traceId: string, tool: string, err: unknown) => void;
-
-/** Default logger: stderr only — stdout carries the MCP stdio protocol. */
-export const stderrErrorLogger: ErrorLogger = (traceId, tool, err) => {
-  console.error(`[AgentFi MCP] traceId=${traceId} tool=${tool} failed:`, err);
-};
-
-export interface ToolErrorPayload {
-  error: string;
-  code?: string;
-  status?: number;
-  details?: unknown;
-  tool: string;
-  traceId: string;
-  recommendation: string;
-}
-
-export interface ToolErrorOptions {
-  tool: string;
-  log?: ErrorLogger;
-  context?: SanitizeContext;
-  traceId?: string;
-}
-
-export function buildToolErrorPayload(err: unknown, options: ToolErrorOptions): ToolErrorPayload {
-  const ctx = options.context ?? sanitizeContextFromEnv();
-  const traceId = options.traceId ?? newTraceId();
-  const described = describeError(err);
-  const rules: SanitizeOptions = {
-    keepNetworkLocations: described.code !== undefined && TARGET_REFUSAL_CODES.has(described.code),
-  };
-  const message = sanitizeText(described.message, ctx, rules) || 'Unknown error';
-  const details = described.details !== undefined ? sanitizeValue(described.details, ctx, rules) : undefined;
-  return {
-    error: message,
-    ...(described.code !== undefined ? { code: sanitizeText(described.code, ctx) } : {}),
-    ...(described.status !== undefined ? { status: described.status } : {}),
-    ...(details !== undefined ? { details } : {}),
-    tool: options.tool,
-    traceId,
-    recommendation: recommendationFor(described, traceId),
-  };
+/**
+ * What a caller may read about a caught error: viem's summary instead of its
+ * full message, then every rule above. Use it for any `reason` / `details` /
+ * `message` field built from a caught or upstream error.
+ */
+export function publicErrorMessage(
+  err: unknown,
+  options: SanitizeOptions = {},
+  ctx: SanitizeContext = sanitizeContextFromEnv(),
+): string {
+  return sanitizeText(describeError(err).message, ctx, options) || 'Unknown error';
 }
 
 /**
- * Turns anything a tool threw into a safe `isError` tool result and logs the
- * original error (unsanitized, with stack) to stderr under the same traceId.
+ * For an error string persisted earlier (Job.escrowError, Transaction.error,
+ * …): those were written from `err.message` by workers and may predate S5.
  */
-export function toolErrorResult(err: unknown, options: ToolErrorOptions): CallToolResult {
-  const payload = buildToolErrorPayload(err, options);
-  try {
-    (options.log ?? stderrErrorLogger)(payload.traceId, options.tool, err);
-  } catch {
-    // Logging must never turn a tool error into a protocol error.
+export function sanitizeStoredError(value: string | null | undefined, ctx?: SanitizeContext): string | null {
+  // The context is only built when there is something to clean: job and
+  // transaction lists call this for every row.
+  if (!value) return value ?? null;
+  return sanitizeText(value, ctx ?? sanitizeContextFromEnv()) || null;
+}
+
+/** Keys that hold error text in response bodies and stored rows. */
+const ERROR_TEXT_KEYS = new Set(['error', 'reason', 'message', 'details', 'escrowError', 'providerAgentIdError']);
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object') return false;
+  const proto = Object.getPrototypeOf(value) as unknown;
+  return proto === Object.prototype || proto === null;
+}
+
+/**
+ * Sanitizes only the error-text fields of a response body (`error`, `reason`,
+ * `message`, `details`, `escrowError`, `providerAgentIdError`, at any depth)
+ * and leaves every other field byte-for-byte — ids, amounts, hashes, URLs the
+ * agent itself supplied. Dates and other class instances are kept as they are.
+ */
+export function sanitizeErrorFields<T>(
+  value: T,
+  options: SanitizeOptions = {},
+  ctx: SanitizeContext = sanitizeContextFromEnv(),
+  depth = 0,
+): T {
+  if (depth >= MAX_DEPTH) return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeErrorFields(item, options, ctx, depth + 1)) as T;
   }
-  return {
-    content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
-    isError: true,
-  };
+  if (!isPlainObject(value)) return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, inner] of Object.entries(value)) {
+    if (ERROR_TEXT_KEYS.has(key) && inner !== null && inner !== undefined) {
+      out[key] = typeof inner === 'string' ? sanitizeText(inner, ctx, options) : sanitizeValue(inner, ctx, options);
+    } else {
+      out[key] = sanitizeErrorFields(inner, options, ctx, depth + 1);
+    }
+  }
+  return out as T;
 }

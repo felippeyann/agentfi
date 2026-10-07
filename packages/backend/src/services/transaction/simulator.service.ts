@@ -31,6 +31,7 @@ import type { Address } from 'viem';
 import { env } from '../../config/env.js';
 import { createChainPublicClient } from '../../config/chains.js';
 import { isProductionLikeEnv } from '../../config/runtime-env.js';
+import { sanitizeText } from '../../api/errors/sanitize.js';
 
 // Re-exported so existing importers keep working; the implementation moved
 // to config/runtime-env.ts so simulation-guard.ts can share it.
@@ -135,12 +136,20 @@ function isRpcTransportFailure(err: unknown): boolean {
   return !/revert|insufficient funds|out of gas|intrinsic gas|nonce too/i.test(message);
 }
 
+/**
+ * The simulation error an agent sees — in `/v1/transactions/simulate`, in
+ * every `Simulation failed: …` refusal and in the `simulation` JSON stored on
+ * the Transaction. Sanitized (S5): a non-viem error's message, or a node's
+ * `details`, can carry the RPC URL with the provider key. Revert reasons are
+ * kept as they are.
+ */
 function describeSimulationError(err: unknown): string {
+  // Sanitize before clipping, so a cut can never leave half a key behind.
   if (err instanceof BaseError) {
     const detail = err.details && err.details !== err.shortMessage ? ` (${err.details})` : '';
-    return `${err.shortMessage}${detail}`.slice(0, 500);
+    return sanitizeText(`${err.shortMessage}${detail}`).slice(0, 500);
   }
-  return (err instanceof Error ? err.message : String(err)).slice(0, 500);
+  return sanitizeText(err instanceof Error ? err.message : String(err)).slice(0, 500);
 }
 
 export class SimulatorService {
@@ -303,7 +312,7 @@ export class SimulatorService {
       success: sim.status,
       gasUsed: sim.gas_used.toString(),
       gasPrice: sim.gas_price,
-      ...(sim.error_message !== undefined ? { error: sim.error_message } : {}),
+      ...(sim.error_message !== undefined ? { error: sanitizeText(sim.error_message) } : {}),
       simulationId: sim.id,
       provider: 'tenderly',
     };
