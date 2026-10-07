@@ -40,13 +40,15 @@ const { ALCHEMY_KEY, TURNKEY_PRIVATE_KEY } = vi.hoisted(() => {
   return { ALCHEMY_KEY: alchemy, TURNKEY_PRIVATE_KEY: turnkey };
 });
 
-const { mockDb, walletMock, rpcUrls } = vi.hoisted(() => ({
+const { mockDb, walletMock, rpcUrls, loggerMock } = vi.hoisted(() => ({
   mockDb: { agent: { findUnique: vi.fn() } } as any,
   walletMock: { signMessage: vi.fn() },
   rpcUrls: [] as string[],
+  loggerMock: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
 vi.mock('@prisma/client', () => ({ PrismaClient: vi.fn(() => mockDb) }));
+vi.mock('../api/middleware/logger.js', () => ({ logger: loggerMock }));
 vi.mock('../services/wallet/index.js', () => ({ getWalletService: () => walletMock }));
 vi.mock('../services/wallet/safe.service.js', () => ({ SafeService: vi.fn().mockImplementation(() => ({})) }));
 vi.mock('../services/identity/ens.service.js', () => ({
@@ -107,6 +109,7 @@ afterAll(() => {
 beforeEach(() => {
   mockDb.agent.findUnique.mockReset();
   walletMock.signMessage.mockReset();
+  for (const fn of Object.values(loggerMock)) fn.mockClear();
   rpcUrls.length = 0;
 });
 
@@ -142,6 +145,11 @@ describe('POST /v1/agents/verify-handshake (S5)', () => {
       details: 'HTTP request failed. (Your app has exceeded its compute units per second capacity.)',
     });
     expect(res.payload).not.toContain(ALCHEMY_KEY);
+    // The operator's log keeps the full viem error.
+    expect(loggerMock.warn).toHaveBeenCalledWith(
+      { err: expect.objectContaining({ name: 'HttpRequestError', url: rpcUrls[0] }) },
+      'verify-handshake error',
+    );
     await app.close();
   });
 
@@ -182,6 +190,10 @@ describe('POST /v1/agents/me/sign-handshake (S5)', () => {
     });
     expect(res.payload).not.toContain(TURNKEY_PRIVATE_KEY);
     expect(res.payload).not.toContain('org-123');
+    expect(loggerMock.error).toHaveBeenCalledWith(
+      { err: expect.objectContaining({ message: expect.stringContaining(TURNKEY_PRIVATE_KEY) }), agentId: AGENT_ID },
+      'sign-handshake failed',
+    );
     await app.close();
   });
 });
