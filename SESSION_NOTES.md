@@ -17,9 +17,9 @@ session did and what the next one should pick up.
 
 | Surface | Status |
 |---|---|
-| `main` | `270d146` — Week 0 fixes (#129 A2, #130 A3, #131 S1, #132 A1), C2 #135, P1 #134, docs #128/#133/#136/#138, adversarial-review fixes #137 (x402), #139 (backend), #140 (contracts), Dependabot #108/#112/#114/#121/#122/#126 |
-| Local CI reproduction on `main` | green on 2026-10-06 late: typecheck 4/4, backend 374 unit tests, admin 8, Foundry 291, spec:lint. `spec:check` shows a Windows line-ending artifact only (see plan Appendix); GitHub CI on 270d146 is green |
-| In flight | **C3** (`feat/c3-erc8183-backend`) and **P2** (`feat/p2-pay-for-resource`) being built by coding agents in isolated worktrees with their own test databases (`agentfi_c3`, `agentfi_p2`). PRs expected; review line by line before merging |
+| `main` | `b051077` — #141 (docs), #142 (A3b), #143 (C3), #144 (P2) merged on top of Week 0 fixes (#129 A2, #130 A3, #131 S1, #132 A1), C2 #135, P1 #134, docs #128/#133/#136/#138, adversarial-review fixes #137 (x402), #139 (backend), #140 (contracts), Dependabot #108/#112/#114/#121/#122/#126 |
+| Local CI reproduction on `main` | green on b051077 (2026-10-06 21:44): typecheck 4/4, backend 522 unit tests, E2E 3 pass / 4 skipped by design, admin 8, mcp-server build, Foundry 291, spec:lint. `spec:check` shows a Windows line-ending artifact only (see plan Appendix); GitHub CI on 270d146 is green |
+| In flight | **S4** (`fix/s4-pay-resource-ssrf`): SSRF hardening of `pay-resource` (DNS-resolved private-range check, pinned connect, no redirects, unconditional with a dev override), flagged by the automated security review of #144; a coding agent was building it when the session was cut. Review line by line before merging |
 | GitHub repo | un-archived 2026-10-06 (admin actions need the `felippeyann` gh account) |
 | npm `@agent_fi/mcp-server` | 0.5.0 (unchanged); 0.6.0 planned in WS6 (X3) |
 | Live infra | none (decommissioned in May; none planned during validation) |
@@ -88,27 +88,19 @@ session did and what the next one should pick up.
 
 ## Next session (do this first)
 
-1. `gh pr list` — review the C3 and P2 PRs diff by diff against their briefs
-   (recorded in this session's transcript and summarised in the plan rows);
-   rebase the second one onto the first (both touch `schema.prisma`: C3 adds
-   a `Job` block after `rewardPriceUsd`, P2 adds a `ResourcePayment` model at
-   the end plus one relation line after `result Json?`). Merge only with CI
-   green, then `graphify update .` and re-validate the dev stack
-   (`docker compose -f docker-compose.dev.yml up --build -d`, `npm run
-   smoke:dev`, the three examples).
+1. Review and merge the S4 PR (SSRF hardening of `pay-resource`, plan row S4). Re-run the dev stack validation on `main` (`docker compose -f docker-compose.dev.yml up --build -d --wait`, `npm run smoke:dev`, the three examples): it was still building when the session hit its usage limit on 2026-10-06. `graphify update .` only after code changes.
 2. **Owner:** C4 — add the Base Sepolia deployer key (keystore or `.env`) and
    follow [docs/project/testnet-log.md](docs/project/testnet-log.md); also
    generate the backend evaluator key (`ESCROW_EVALUATOR_PRIVATE_KEY`,
    testnet-only) and fund it. Until then nothing real-chain can run.
-3. After C3 + C4: C5 (E2E on Base Sepolia, `examples/escrow-erc8183/`), then
+3. After C4: C5 (E2E on Base Sepolia, `examples/escrow-erc8183/`), then
    C3b (fee sweep), R2 (ERC-8004 identity + `setProviderAgentId`), R4, W1–W3,
    X1–X4.
-4. Follow-ups already in the plan: A3b (resume does not re-activate the
-   policy), A6 (DailyVolume reserved but never released on FAILED), S2 (MCP
+4. Follow-ups already in the plan: A6 (DailyVolume reserved but never released on FAILED), S2 (MCP
    annotations + error sanitiser), S3 (delete legacy x402 v0.1 middleware),
    P1b (file the x402 upstream issue), bullmq scheduler migration (#111).
 5. **Owner:** interviews (WS7 V1–V3, Day-30 checkpoint 2026-11-05), merge the
    CI-green Dependabot PRs (#109, #123, #124), answer plan §5 (mainnet
    addresses, Brazil assumption, fee tiers, revenue model per job vs bps).
 
-_Last touch: 2026-10-06 ~20:30 (C3 and P2 agents running)._
+_Last touch: 2026-10-06 ~21:50 (session cut by the usage limit; S4 agent still running, dev stack validation still building)._
