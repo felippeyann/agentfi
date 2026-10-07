@@ -15,14 +15,57 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  type ToolAnnotations,
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
 // ─── Tool definitions (inline to avoid cross-package import issues) ───
 
-interface ToolDef {
+/**
+ * MCP tool annotations (spec 2025-11-25). Required on every tool so a new
+ * proxy tool cannot ship without them. The classification rules — and the
+ * annotations of the equivalent stdio tools — live in
+ * packages/mcp-server/src/annotations.ts; this surface cannot import that
+ * package (separate rootDir and Docker build), so
+ * src/__tests__/mcp.annotations.test.ts fails if a tool here disagrees with
+ * its counterpart there.
+ */
+export type ProxyToolAnnotations = ToolAnnotations & {
+  title: string;
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+};
+
+/** Reads only the calling agent's own AgentFi records. */
+const READ_OWN_RECORDS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const;
+
+/** Reads a chain or a third-party API (CoinGecko). */
+const READ_OPEN_WORLD = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+} as const;
+
+/** Moves or commits funds on-chain; a repeat is a second trade/transfer. */
+const MOVES_FUNDS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: true,
+} as const;
+
+export interface ToolDef {
   name: string;
   description: string;
+  annotations: ProxyToolAnnotations;
   inputSchema: z.ZodObject<z.ZodRawShape>;
   handler: (args: Record<string, unknown>) => Promise<unknown>;
 }
@@ -31,7 +74,7 @@ interface ToolDef {
  * Builds a thin MCP tool list that proxies every call to the backend REST API.
  * The API key is forwarded so agent-level auth still applies.
  */
-function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
+export function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
   const call = async (
     method: string,
     path: string,
@@ -52,12 +95,14 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
   return [
     {
       name: 'get_my_agent_profile',
+      annotations: { title: 'Get my agent profile', ...READ_OWN_RECORDS },
       description: 'Get the authenticated AgentFi agent profile, policy, billing usage, and supported chains',
       inputSchema: z.object({}),
       handler: async () => call('GET', '/v1/agents/me'),
     },
     {
       name: 'get_my_pnl',
+      annotations: { title: 'Get my profit and loss', ...READ_OPEN_WORLD },
       description: 'Get the authenticated agent P&L breakdown: earnings, costs, gas, net P&L, and breakeven status',
       inputSchema: z.object({
         since: z.string().datetime().optional().describe('Optional ISO timestamp for the beginning of the P&L period'),
@@ -69,12 +114,14 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     },
     {
       name: 'get_wallet',
+      annotations: { title: 'Get wallet address', ...READ_OWN_RECORDS },
       description: 'Get the agent wallet address and supported networks',
       inputSchema: z.object({}),
       handler: async () => call('GET', '/v1/wallet/address'),
     },
     {
       name: 'get_balance',
+      annotations: { title: 'Get wallet balances', ...READ_OPEN_WORLD },
       description: 'Get ETH and ERC-20 token balances for the agent wallet',
       inputSchema: z.object({
         chainId: z.number().optional().describe('Chain ID to query (omit for all supported chains)'),
@@ -86,6 +133,7 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     },
     {
       name: 'get_allowances',
+      annotations: { title: 'Get token allowances', ...READ_OPEN_WORLD },
       description: 'Get active ERC-20 token allowances for the agent wallet',
       inputSchema: z.object({
         chainId: z.number().optional().describe('Chain ID (default: 1)'),
@@ -101,6 +149,7 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     },
     {
       name: 'simulate_swap',
+      annotations: { title: 'Simulate a Uniswap swap', ...READ_OPEN_WORLD },
       description: 'Simulate a token swap — returns gas estimate and success/failure without executing',
       inputSchema: z.object({
         fromToken: z.string().describe('Source token contract address'),
@@ -113,6 +162,7 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     },
     {
       name: 'execute_swap',
+      annotations: { title: 'Execute a Uniswap swap', ...MOVES_FUNDS },
       description: 'Execute a token swap via Uniswap V3 — requires a prior simulation ID',
       inputSchema: z.object({
         fromToken: z.string().describe('Source token contract address'),
@@ -127,6 +177,7 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     },
     {
       name: 'execute_transfer',
+      annotations: { title: 'Transfer tokens', ...MOVES_FUNDS },
       description: 'Transfer tokens or native ETH to another address',
       inputSchema: z.object({
         to: z.string().describe('Recipient address (0x...)'),
@@ -139,6 +190,7 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     },
     {
       name: 'supply_aave',
+      annotations: { title: 'Supply to Aave V3', ...MOVES_FUNDS },
       description: 'Supply tokens to Aave V3 lending protocol to earn yield',
       inputSchema: z.object({
         asset: z.string().describe('Token contract address to supply'),
@@ -150,6 +202,7 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     },
     {
       name: 'withdraw_aave',
+      annotations: { title: 'Withdraw from Aave V3', ...MOVES_FUNDS },
       description: 'Withdraw tokens from Aave V3 lending position',
       inputSchema: z.object({
         asset: z.string().describe('aToken contract address to withdraw'),
@@ -161,6 +214,7 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     },
     {
       name: 'supply_compound',
+      annotations: { title: 'Supply to Compound V3', ...MOVES_FUNDS },
       description: 'Supply tokens to Compound V3 (Comet USDC market) to earn yield',
       inputSchema: z.object({
         asset: z.string().describe('ERC-20 token address to supply'),
@@ -172,6 +226,7 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     },
     {
       name: 'withdraw_compound',
+      annotations: { title: 'Withdraw from Compound V3', ...MOVES_FUNDS },
       description: 'Withdraw tokens from Compound V3 position',
       inputSchema: z.object({
         asset: z.string().describe('ERC-20 token address to withdraw'),
@@ -183,6 +238,7 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     },
     {
       name: 'deposit_erc4626',
+      annotations: { title: 'Deposit into ERC-4626 vault', ...MOVES_FUNDS },
       description: 'Deposit into any ERC-4626 compliant vault (Yearn, Morpho, Beefy, etc.)',
       inputSchema: z.object({
         vault: z.string().describe('ERC-4626 vault contract address'),
@@ -195,6 +251,7 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     },
     {
       name: 'withdraw_erc4626',
+      annotations: { title: 'Withdraw from ERC-4626 vault', ...MOVES_FUNDS },
       description: 'Withdraw from any ERC-4626 compliant vault',
       inputSchema: z.object({
         vault: z.string().describe('ERC-4626 vault contract address'),
@@ -207,6 +264,7 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     },
     {
       name: 'swap_curve',
+      annotations: { title: 'Swap on Curve', ...MOVES_FUNDS },
       description: 'Swap between two assets on a Curve StableSwap pool (stablecoins)',
       inputSchema: z.object({
         pool: z.string().describe('Curve pool contract address'),
@@ -223,6 +281,7 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     },
     {
       name: 'get_transaction_status',
+      annotations: { title: 'Get transaction status', ...READ_OWN_RECORDS },
       description: 'Get the status of a previously submitted transaction',
       inputSchema: z.object({
         transactionId: z.string().describe('Transaction ID returned by execute_*'),
@@ -232,6 +291,7 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     },
     {
       name: 'list_transactions',
+      annotations: { title: 'List my transactions', ...READ_OWN_RECORDS },
       description: 'List transaction history with optional status filter',
       inputSchema: z.object({
         page: z.number().optional().describe('Page number (default: 1)'),
@@ -249,6 +309,7 @@ function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     },
     {
       name: 'get_agent_policy',
+      annotations: { title: 'Get my policy and limits', ...READ_OWN_RECORDS },
       description: 'Get the current agent policy constraints (spending limits, allowed tokens, etc.)',
       inputSchema: z.object({}),
       handler: async () => call('GET', '/v1/agents/me'),
@@ -287,7 +348,7 @@ const sessions = new Map<
   { transport: SSEServerTransport; apiKey: string; server: Server }
 >();
 
-function createMcpServer(apiKey: string): Server {
+export function createMcpServer(apiKey: string): Server {
   const apiBaseUrl =
     process.env['API_BASE_URL'] ??
     `http://localhost:${process.env['API_PORT'] ?? '3000'}`;
@@ -303,7 +364,9 @@ function createMcpServer(apiKey: string): Server {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: tools.map((tool) => ({
       name: tool.name,
+      title: tool.annotations.title,
       description: tool.description,
+      annotations: tool.annotations,
       inputSchema: {
         type: 'object' as const,
         properties: Object.fromEntries(
