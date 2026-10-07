@@ -59,10 +59,13 @@ function statusFor(error: unknown, reply: FastifyReply): number {
   return explicitStatus(error) ?? (reply.statusCode >= 400 ? reply.statusCode : 500);
 }
 
-export function errorHandler(error: FastifyError | unknown, request: FastifyRequest, reply: FastifyReply) {
-  const headers = (error as { headers?: unknown } | null)?.headers;
-  if (headers && typeof headers === 'object') reply.headers(headers as Record<string, string>);
+function isPlainHeaders(value: unknown): value is Record<string, string> {
+  if (value === null || typeof value !== 'object') return false;
+  const proto = Object.getPrototypeOf(value) as unknown;
+  return proto === Object.prototype || proto === null;
+}
 
+export function errorHandler(error: FastifyError | unknown, request: FastifyRequest, reply: FastifyReply) {
   if (isZodLikeError(error)) {
     request.log.info({ err: error }, 'Request validation failed');
     const ctx = sanitizeContextFromEnv();
@@ -74,6 +77,11 @@ export function errorHandler(error: FastifyError | unknown, request: FastifyRequ
   const status = statusFor(error, reply);
 
   if (status < 500) {
+    // A client error may ask for response headers (as Fastify's default
+    // handler allows). Never for a 5xx: viem's HttpRequestError carries the
+    // RPC provider's own response `headers`.
+    const headers = (error as { headers?: unknown } | null)?.headers;
+    if (isPlainHeaders(headers)) reply.headers(headers);
     request.log.info({ err: error, statusCode: status }, 'Request refused');
     const ctx = sanitizeContextFromEnv();
     if (error instanceof Error) {

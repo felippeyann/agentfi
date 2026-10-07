@@ -93,7 +93,15 @@ async function buildApp(): Promise<{ app: FastifyInstance; logs: LogLine[] }> {
       throw new SimulationUnavailableError();
     });
     scope.get('/conflict', async () => {
-      throw Object.assign(new Error(`Agent paused (see ${ALCHEMY_URL})`), { statusCode: 409, code: 'AGENT_PAUSED' });
+      throw Object.assign(new Error(`Agent paused (see ${ALCHEMY_URL})`), {
+        statusCode: 409,
+        code: 'AGENT_PAUSED',
+        headers: { 'retry-after': '5' },
+      });
+    });
+    scope.get('/upstream-headers', async () => {
+      // An upstream error object that carries the provider's response headers.
+      throw Object.assign(new Error('upstream failed'), { headers: { 'x-upstream-session': 'sess-123' } });
     });
     scope.post('/parse', async (request) => {
       const body = z.object({ amount: z.string(), chainId: z.number() }).parse(request.body);
@@ -148,6 +156,14 @@ describe('unhandled errors', () => {
     const a = (await app.inject({ method: 'GET', url: '/plain-failure' })).json();
     const b = (await app.inject({ method: 'GET', url: '/plain-failure' })).json();
     expect(a.traceId).not.toBe(b.traceId);
+    await app.close();
+  });
+
+  it("never copies an upstream error's `headers` onto a 5xx response", async () => {
+    const { app } = await buildApp();
+    const res = await app.inject({ method: 'GET', url: '/upstream-headers' });
+    expect(res.statusCode).toBe(500);
+    expect(res.headers['x-upstream-session']).toBeUndefined();
     await app.close();
   });
 
@@ -233,6 +249,7 @@ describe("Fastify's own 4xx keep their meaning", () => {
       error: 'Conflict',
       message: 'Agent paused (see https://base-sepolia.g.alchemy.com/v2/[redacted])',
     });
+    expect(res.headers['retry-after']).toBe('5');
     expectNoLeak(res.payload);
     await app.close();
   });
