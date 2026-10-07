@@ -3113,6 +3113,8 @@ export interface components {
             feedbackStatus?: string | null;
             /** Format: date-time */
             contestedAt?: string | null;
+            /** @description Reason given by the requester when contesting. */
+            contestReason?: string | null;
             /** @description Last escrow step or settlement error. */
             escrowError?: string | null;
         };

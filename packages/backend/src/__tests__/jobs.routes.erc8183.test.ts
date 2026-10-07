@@ -392,7 +392,7 @@ describe('POST /v1/jobs/:id/contest', () => {
     const res = await contest(app, { reason: 'wrong answer' });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json().escrow).toMatchObject({ onChainStatus: 'SUBMITTED', contestedAt: contestedAt.toISOString() });
+    expect(res.json().escrow).toMatchObject({ onChainStatus: 'SUBMITTED', contestedAt: contestedAt.toISOString(), contestReason: 'wrong answer' });
   });
 });
 

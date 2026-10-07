@@ -890,11 +890,13 @@ async function settle(deps: Erc8183Deps, job: EscrowJobRow, chainStatus: number)
   const contested = fresh.contestedAt !== null;
   const outcome: FeedbackFile['outcome'] = contested ? 'rejected' : 'completed';
 
-  // Generate the feedback file exactly once. It may only be rebuilt while no
-  // settlement has been mined (the on-chain status check above guarantees
-  // that) and only if a contest changed the outcome after the first attempt.
+  // Generate the feedback file once per outcome. The on-chain status check
+  // above guarantees nothing carrying an earlier hash was mined (a reverted
+  // attempt sets `settleTxHash` but changes nothing on-chain), so the only
+  // reason to rebuild is a contest that flipped the outcome after a reverted
+  // `complete` — the file must then say "rejected" like the tx it goes with.
   let file = (fresh.feedbackFile ?? null) as FeedbackFile | null;
-  if (!file || (file.outcome !== outcome && !fresh.settleTxHash)) {
+  if (!file || file.outcome !== outcome) {
     file = await buildFeedbackFile(deps, fresh, outcome);
     await deps.db.job.update({ where: { id: job.id }, data: { feedbackFile: file as unknown as Prisma.InputJsonValue } });
   }
@@ -1136,6 +1138,7 @@ export interface EscrowView {
   platformFeeAmount: string | null;
   feedbackStatus: string | null;
   contestedAt: Date | null;
+  contestReason: string | null;
   escrowError: string | null;
 }
 
@@ -1184,6 +1187,7 @@ export function toJobResponse<T extends Record<string, unknown>>(job: T): Omit<T
           platformFeeAmount: (job['platformFeeAmount'] as string | null) ?? null,
           feedbackStatus: (job['feedbackStatus'] as string | null) ?? null,
           contestedAt: (job['contestedAt'] as Date | null) ?? null,
+          contestReason: (job['contestReason'] as string | null) ?? null,
           escrowError: (job['escrowError'] as string | null) ?? null,
         }
       : null;

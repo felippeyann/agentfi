@@ -700,6 +700,34 @@ describe('processSettlementJob — settle', () => {
     expect(releaseJobEscrow).not.toHaveBeenCalled();
   });
 
+  it('reverted complete → contest → the retry sends reject with a feedback file whose outcome is "rejected"', async () => {
+    const { deps, jobs, signer } = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: rejectLogs() });
+    // Attempt 1: complete is sent but reverts. settleTxHash is now set, the
+    // feedback file says "completed", nothing was mined.
+    signer.waitForTransactionReceipt.mockResolvedValueOnce({ status: 'reverted', logs: [] } as never);
+    const first = settleJob(3);
+    await expect(processSettlementJob(deps, first)).rejects.toThrow(/reverted on-chain/);
+    await handleFailedSettlementJob(deps, first, new Error('reverted'));
+    expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'SUBMITTED', settleTxHash: SETTLE_HASH });
+    expect((jobs.get('job-1')!['feedbackFile'] as FeedbackFile).outcome).toBe('completed');
+    expect((signer.writeContract.mock.calls[0]![0] as { functionName: string }).functionName).toBe('complete');
+
+    // Requester contests while the job is back to SUBMITTED.
+    jobs.get('job-1')!['contestedAt'] = NOW;
+
+    // Attempt 2 (recovery re-enqueue): must reject with a REBUILT file.
+    const result = await processSettlementJob(deps, settleJob(1));
+
+    expect(result).toMatchObject({ outcome: 'settled', onChainStatus: 'REJECTED' });
+    const second = signer.writeContract.mock.calls[1]![0] as { functionName: string; args: readonly unknown[] };
+    expect(second.functionName).toBe('reject');
+    expect(second.args[1]).toBe(SETTLEMENT_REASONS.contested);
+    const file = jobs.get('job-1')!['feedbackFile'] as FeedbackFile;
+    expect(file.outcome).toBe('rejected');
+    const [, hash] = decodeAbiParameters([{ type: 'string' }, { type: 'bytes32' }], second.args[2] as Hex);
+    expect(hash).toBe(feedbackHashOf(file));
+  });
+
   it('the failure handler is a no-op before the last attempt', async () => {
     const { deps, jobs } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'SETTLING', status: 'PAYMENT_PENDING' })]);
     await handleFailedSettlementJob(deps, settleJob(1), new Error('rpc down'));
@@ -866,6 +894,14 @@ describe('toJobResponse', () => {
     expect(view).not.toHaveProperty('onChainStatus');
     expect(view).toHaveProperty('id', 'job-1');
     expect(view).toHaveProperty('reward');
+  });
+
+  it('exposes contestedAt and contestReason', () => {
+    const contestedAt = new Date('2026-10-06T13:00:00.000Z');
+    const view = toJobResponse(escrowJob({ contestedAt, contestReason: 'wrong answer' }));
+    expect(view.escrow).toMatchObject({ contestedAt, contestReason: 'wrong answer' });
+    expect(view).not.toHaveProperty('contestReason');
+    expect(toJobResponse(escrowJob()).escrow).toMatchObject({ contestedAt: null, contestReason: null });
   });
 
   it('is `escrow: null` for legacy jobs', () => {

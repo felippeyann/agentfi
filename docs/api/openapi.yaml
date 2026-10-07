@@ -2018,6 +2018,7 @@ components:
           nullable: true
           description: ERC-8004 feedback outcome from the hook — `written`, `skipped:<reason>` or `failed`.
         contestedAt: { type: string, format: date-time, nullable: true }
+        contestReason: { type: string, nullable: true, description: Reason given by the requester when contesting. }
         escrowError: { type: string, nullable: true, description: Last escrow step or settlement error. }
 
     ContestJobRequest:
