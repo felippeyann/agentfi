@@ -191,6 +191,64 @@ Blockchain (Ethereum, Base, Arbitrum, Polygon)
 - **Smart accounts** — Safe multisig with policy module guard
 - **A2A escrow** — job rewards are committed at creation time (v2 DB escrow)
 
+## Annotations
+
+Every tool in `tools/list` carries a display `title` and the four MCP
+[tool annotations](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
+(`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), so
+clients can auto-approve reads and ask a human before anything else. The
+reviewed table, with a one-line justification per tool, is
+[`src/annotations.ts`](src/annotations.ts). In short:
+
+- **Read-only** (14): balances, prices, rates, `simulate_swap`, status, policy,
+  profile, P&L, `list_gmx_markets`, agent search/manifest/trust report,
+  `check_inbox`, `verify_handshake`. `openWorldHint` is `false` only for reads
+  of the agent's own AgentFi records.
+- **Moves funds** (15): swaps, transfers, Aave/Compound/ERC-4626
+  deposits and withdrawals, Curve, GMX open/close, `pay_agent`,
+  `pay_for_resource`, `post_job` (escrows the reward) and `update_job_status`
+  (completion releases payment) — destructive, open-world, **not idempotent**.
+  `pay_for_resource` is idempotent per `payment_id` on the server, but a fresh
+  id is generated when you omit it, so retry with the same id.
+- **Other writes**: `update_policy` (destructive, idempotent, closed world),
+  `set_my_manifest` (destructive — replaces the published manifest —
+  idempotent, open world) and `sign_handshake` (not read-only: it exercises
+  the wallet's signing authority; not destructive, idempotent, open world).
+
+Hints are advisory; the backend still enforces policy on every call.
+
+## Errors
+
+A failed tool call returns `isError: true` with a JSON body:
+
+```json
+{
+  "error": "AgentFi API error 409: ESCROW_NOT_FUNDED",
+  "code": "ESCROW_NOT_FUNDED",
+  "status": 409,
+  "details": { "message": "Job is not funded on-chain yet (onChainStatus=CREATED)", "onChainStatus": "CREATED" },
+  "tool": "update_job_status",
+  "traceId": "3f9a1c2b7d4e",
+  "recommendation": "The request conflicts with the current state (see code and details). Resolve that before retrying."
+}
+```
+
+Backend validation and business messages, their `code` and structured
+details are kept (invalid tool input is `code: "INVALID_INPUT"` with the
+Zod issues; an unreachable upstream is `UPSTREAM_UNREACHABLE`). Before
+anything is returned, the server strips internal and credentialed URLs
+(the configured `AGENTFI_API_URL`, private/loopback hosts, RPC URLs with a key
+in the path, any URL with userinfo or a query string), stack frames, file
+paths, values of secret-named environment variables, your `AGENTFI_API_KEY`
+and any `agfi_` key, bearer tokens, labelled secrets (`apiKey=…`,
+`"password": …`) and 32-byte hex that follows a key-ish word (`private key
+0x…`) — a bare transaction hash survives. `pay_for_resource` target refusals
+(`INVALID_URL`, `REDIRECT_REFUSED`) keep their hostnames, addresses and
+redirect location, which describe your own request. The full original error
+is logged to **stderr** with the same `traceId`; stdout carries only MCP
+JSON-RPC. `pay_for_resource` refusals such as `BUDGET_EXCEEDED` and
+`PAYMENT_OUTCOME_UNKNOWN` are still returned as structured, non-error output.
+
 ## Example Usage
 
 Once connected via MCP, an AI agent can:

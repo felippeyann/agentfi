@@ -12,109 +12,12 @@
  *   AGENTFI_API_KEY=agfi_live_xxx MCP_TRANSPORT=sse node dist/index.js
  */
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
-import { z } from 'zod';
-import { walletTools } from './tools/wallet.js';
-import { swapTools } from './tools/swap.js';
-import { defiTools } from './tools/defi.js';
-import { gmxTools } from './tools/gmx.js';
-import { statusTools } from './tools/status.js';
-import { agentTools } from './tools/agent.js';
+import { createServer } from './server.js';
 
-// Combine all tools
-const ALL_TOOLS = [...walletTools, ...swapTools, ...defiTools, ...gmxTools, ...statusTools, ...agentTools];
-
-// Build tool registry
-const toolRegistry = new Map(ALL_TOOLS.map((t) => [t.name, t]));
-
-// Create MCP server
-const server = new Server(
-  {
-    name: 'agentfi',
-    version: '0.5.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  },
-);
-
-// List available tools
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: ALL_TOOLS.map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    inputSchema: {
-      type: 'object',
-      properties: Object.fromEntries(
-        Object.entries(tool.inputSchema.shape ?? {}).map(([key, schema]) => [
-          key,
-          {
-            type: inferJsonSchemaType(schema as z.ZodTypeAny),
-            description: (schema as z.ZodTypeAny).description,
-          },
-        ]),
-      ),
-      required: getRequiredFields(tool.inputSchema),
-    },
-  })),
-}));
-
-// Handle tool calls
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
-  const tool = toolRegistry.get(name);
-  if (!tool) {
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({ error: `Unknown tool: ${name}` }),
-        },
-      ],
-      isError: true,
-    };
-  }
-
-  try {
-    // Validate input schema
-    const validated = tool.inputSchema.parse(args);
-    // Execute handler
-    const result = await tool.handler(validated as any);
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(result, null, 2),
-        },
-      ],
-    };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            error: message,
-            tool: name,
-            recommendation:
-              'Check the input parameters and try again. If the error persists, contact AgentFi support.',
-          }),
-        },
-      ],
-      isError: true,
-    };
-  }
-});
+// Tool registry, tools/list (with annotations) and the sanitizing tools/call
+// dispatcher live in server.ts; this file only starts a transport.
+const server = createServer();
 
 // Start transport
 async function main() {
@@ -227,27 +130,6 @@ async function startSSEServer() {
     console.error(`[AgentFi MCP] SSE server running on port ${port}`);
     console.error(`[AgentFi MCP] SSE endpoint: http://localhost:${port}/mcp/sse`);
   });
-}
-
-// Helper: infer JSON Schema type from Zod schema
-function inferJsonSchemaType(schema: z.ZodTypeAny): string {
-  if (schema instanceof z.ZodString) return 'string';
-  if (schema instanceof z.ZodNumber) return 'number';
-  if (schema instanceof z.ZodBoolean) return 'boolean';
-  if (schema instanceof z.ZodArray) return 'array';
-  if (schema instanceof z.ZodObject) return 'object';
-  if (schema instanceof z.ZodOptional) return inferJsonSchemaType(schema.unwrap());
-  if (schema instanceof z.ZodDefault) return inferJsonSchemaType(schema.removeDefault());
-  return 'string';
-}
-
-function getRequiredFields(schema: z.ZodObject<z.ZodRawShape>): string[] {
-  const required: string[] = [];
-  for (const [key, value] of Object.entries(schema.shape)) {
-    const isOptional = value instanceof z.ZodOptional || value instanceof z.ZodDefault;
-    if (!isOptional) required.push(key);
-  }
-  return required;
 }
 
 main().catch((err) => {
