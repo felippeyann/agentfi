@@ -20,6 +20,7 @@ import { cacheSimulation, getSimulation } from '../../services/transaction/simul
 import { getContracts } from '../../config/contracts.js';
 import { createChainPublicClient } from '../../config/chains.js';
 import { logger } from '../middleware/logger.js';
+import { sanitizeContextFromEnv, sanitizeErrorFields, type SanitizeContext } from '../errors/sanitize.js';
 import { notificationService } from '../../services/notification.service.js';
 import type { Address } from 'viem';
 const builder = new TransactionBuilder();
@@ -1934,7 +1935,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       where: { id: request.params.id, agentId: request.agentId },
     });
     if (!tx) return reply.code(404).send({ error: 'Transaction not found' });
-    return tx;
+    return toTransactionResponse(tx);
   });
 
   /**
@@ -1961,7 +1962,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     });
 
     if (!tx) return reply.code(404).send({ error: 'Transaction not found' });
-    return tx;
+    return toTransactionResponse(tx);
   });
 
   /**
@@ -1986,8 +1987,20 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       db.transaction.count({ where: { agentId: request.agentId } }),
     ]);
 
-    return { transactions, total, page, limit };
+    const ctx = sanitizeContextFromEnv();
+    return { transactions: transactions.map((tx) => toTransactionResponse(tx, ctx)), total, page, limit };
   });
+}
+
+/**
+ * API view of a Transaction row (S5). `error` and `simulation.error` were
+ * written from worker / simulator error text — a viem broadcast error carries
+ * the RPC URL with the provider key in its path — so every error-text field
+ * is sanitized on the way out (the public `/v1/public/transactions/:id` too).
+ * Everything else is returned as stored; the DB keeps the full text.
+ */
+function toTransactionResponse<T>(tx: T, ctx: SanitizeContext = sanitizeContextFromEnv()): T {
+  return sanitizeErrorFields(tx, {}, ctx);
 }
 
 async function getAgent(agentId: string) {
@@ -2021,7 +2034,8 @@ async function getIdempotentTransaction(agentId: string, idempotencyKey: string)
       },
     },
   });
-  if (existingForAgent) return { existing: existingForAgent, conflictWithAnotherAgent: false };
+  // An idempotent replay answers with the stored row — same view as GET /v1/transactions/:id.
+  if (existingForAgent) return { existing: toTransactionResponse(existingForAgent), conflictWithAnotherAgent: false };
 
   const existingForOtherAgent = await db.transaction.findFirst({
     where: { idempotencyKey },

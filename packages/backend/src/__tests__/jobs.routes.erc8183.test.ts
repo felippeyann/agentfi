@@ -67,9 +67,10 @@ vi.mock('../api/routes/transactions.js', () => paymentMock);
 vi.mock('../services/job/payment-finalizer.service.js', () => ({ finalizeA2APaymentJob: vi.fn() }));
 
 import Fastify from 'fastify';
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { keccak256, toBytes } from 'viem';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { HttpRequestError, keccak256, toBytes } from 'viem';
 import { feedbackHashOf, serializeFeedbackFile, type FeedbackFile } from '../services/job/escrow-erc8183.service.js';
+import { registerErrorHandler } from '../api/errors/handler.js';
 
 type JobsModule = typeof import('../api/routes/jobs.js');
 type AuthModule = typeof import('../api/middleware/auth.js');
@@ -90,6 +91,7 @@ beforeAll(async () => {
 
 async function buildApp(agentId = REQUESTER.id) {
   const app = Fastify({ logger: false });
+  registerErrorHandler(app); // as in index.ts (S5)
   app.addHook('preHandler', async (request: any) => {
     request.agentId = agentId;
     request.agentTier = 'FREE';
@@ -472,5 +474,139 @@ describe('GET /v1/jobs/:id/feedback.json', () => {
 
     const protectedRoute = await app.inject({ method: 'GET', url: '/v1/jobs/job-1' });
     expect(protectedRoute.statusCode).toBe(401);
+  });
+});
+
+// ── S5: error hygiene — the operator's RPC key never reaches a job response ──
+
+describe('S5: chain errors in job responses are sanitized', () => {
+  const ALCHEMY_KEY = 'Zq8mN3pL5vR7tX9wB2cD4fG6hJ1kM0aS';
+  const ALCHEMY_URL = `https://base-sepolia.g.alchemy.com/v2/${ALCHEMY_KEY}`;
+  /** What viem throws when the RPC provider refuses a call: the message holds the keyed URL. */
+  const rpcError = () =>
+    new HttpRequestError({ url: ALCHEMY_URL, status: 429, details: 'compute units exceeded', body: { method: 'eth_sendRawTransaction' } });
+  /** The full viem message, as the transaction worker stores it in escrowError. */
+  const storedRpcError = () => `fund failed after 3 attempts: ${rpcError().message.slice(0, 400)}`;
+
+  let savedKey: string | undefined;
+  beforeEach(() => {
+    savedKey = process.env['ALCHEMY_API_KEY'];
+    process.env['ALCHEMY_API_KEY'] = ALCHEMY_KEY; // a realistic operator key in the env
+  });
+  afterEach(() => {
+    if (savedKey === undefined) delete process.env['ALCHEMY_API_KEY'];
+    else process.env['ALCHEMY_API_KEY'] = savedKey;
+  });
+
+  const post = (app: Awaited<ReturnType<typeof buildApp>>) =>
+    app.inject({
+      method: 'POST',
+      url: '/v1/jobs',
+      payload: { providerId: PROVIDER.id, payload: { task: 'x' }, reward: { amount: '12.5', token: 'USDC', chainId: CHAIN_ID } },
+    });
+
+  it('ERC8183_START_FAILED: `reason` is the viem summary, never the keyed RPC URL (the DB keeps the full text)', async () => {
+    expect(rpcError().message).toContain(ALCHEMY_KEY);
+    mockDb.agent.findUnique.mockResolvedValueOnce(PROVIDER).mockResolvedValueOnce(REQUESTER);
+    mockDb.job.create.mockResolvedValue({ id: 'job-1', status: 'PENDING' });
+    runtimeMock.startEscrow.mockRejectedValue(rpcError());
+    const app = await buildApp();
+
+    const res = await post(app);
+
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({
+      error: 'ERC8183_START_FAILED',
+      jobId: 'job-1',
+      reason: 'HTTP request failed. (compute units exceeded)',
+    });
+    expect(res.payload).not.toContain(ALCHEMY_KEY);
+    // Operators still see the whole error in the job row.
+    expect(mockDb.job.update).toHaveBeenCalledWith({
+      where: { id: 'job-1' },
+      data: expect.objectContaining({ escrowError: expect.stringContaining(ALCHEMY_KEY) }),
+    });
+  });
+
+  it('ERC8183_START_FAILED from a plain Error that embeds the URL keeps the origin and drops the key', async () => {
+    mockDb.agent.findUnique.mockResolvedValueOnce(PROVIDER).mockResolvedValueOnce(REQUESTER);
+    mockDb.job.create.mockResolvedValue({ id: 'job-1', status: 'PENDING' });
+    runtimeMock.startEscrow.mockRejectedValue(new Error(`createJob reverted at ${ALCHEMY_URL}`));
+    const app = await buildApp();
+
+    const res = await post(app);
+
+    expect(res.json().reason).toBe('createJob reverted at https://base-sepolia.g.alchemy.com/v2/[redacted]');
+    expect(res.payload).not.toContain(ALCHEMY_KEY);
+  });
+
+  it('ERC8183_UNAVAILABLE: the escrow-token lookup error is sanitized', async () => {
+    mockDb.agent.findUnique.mockResolvedValueOnce(PROVIDER);
+    runtimeMock.getEscrowToken.mockRejectedValue(rpcError());
+    const app = await buildApp();
+
+    const res = await post(app);
+
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({ error: 'ERC8183_UNAVAILABLE', message: 'HTTP request failed. (compute units exceeded)' });
+    expect(res.payload).not.toContain(ALCHEMY_KEY);
+  });
+
+  it('ESCROW_SUBMIT_FAILED: the enqueue error is sanitized', async () => {
+    mockDb.job.findUnique.mockResolvedValueOnce(escrowJob({ status: 'ACCEPTED' }));
+    runtimeMock.enqueueSubmit.mockRejectedValue(new Error(`queue: redis://default:hunter2-redis-pass@cache.internal:6379 refused; rpc ${ALCHEMY_URL}`));
+    const app = await buildApp(PROVIDER.id);
+
+    const res = await app.inject({ method: 'PATCH', url: '/v1/jobs/job-1', payload: { status: 'COMPLETED', result: {} } });
+
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({
+      error: 'ESCROW_SUBMIT_FAILED',
+      reason: 'queue: [redacted-url] refused; rpc https://base-sepolia.g.alchemy.com/v2/[redacted]',
+    });
+    expect(res.payload).not.toContain('hunter2-redis-pass');
+    expect(res.payload).not.toContain(ALCHEMY_KEY);
+  });
+
+  it('a stored escrowError / providerAgentIdError is sanitized in GET /v1/jobs/:id and in ESCROW_NOT_FUNDED', async () => {
+    const stored = { escrowError: storedRpcError(), providerAgentIdError: `setProviderAgentId FAILED: ${storedRpcError()}` };
+    mockDb.job.findUnique.mockResolvedValue(escrowJob({ onChainStatus: 'FAILED', ...stored }));
+
+    const view = await (await buildApp()).inject({ method: 'GET', url: '/v1/jobs/job-1' });
+    expect(view.statusCode).toBe(200);
+    expect(view.json().escrow.escrowError).toMatch(/^fund failed after 3 attempts: HTTP request failed\./);
+    expect(view.json().escrow.escrowError).toContain('https://base-sepolia.g.alchemy.com/v2/[redacted]');
+    expect(view.json().escrow.providerAgentIdError).toMatch(/^setProviderAgentId FAILED: fund failed/);
+    expect(view.payload).not.toContain(ALCHEMY_KEY);
+
+    const refused = await (await buildApp(PROVIDER.id)).inject({ method: 'PATCH', url: '/v1/jobs/job-1', payload: { status: 'ACCEPTED' } });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json()).toMatchObject({ error: 'ESCROW_NOT_FUNDED', escrowError: expect.stringContaining('[redacted]') });
+    expect(refused.payload).not.toContain(ALCHEMY_KEY);
+  });
+
+  it('an unexpected failure answers the opaque 500 envelope (Prisma message with a file path and the DB URL never leaks)', async () => {
+    mockDb.job.findUnique.mockRejectedValue(
+      new Error(
+        "Invalid `prisma.job.findUnique()` invocation in\n/app/packages/backend/dist/api/routes/jobs.js:519:36\nCan't reach database server at postgresql://agentfi:s3cret-db-pass@db.prod.example.com:5432/agentfi",
+      ),
+    );
+    const app = await buildApp();
+
+    const res = await app.inject({ method: 'GET', url: '/v1/jobs/job-1' });
+
+    expect(res.statusCode).toBe(500);
+    expect(res.json()).toEqual({ error: 'Internal error', code: 'INTERNAL_ERROR', traceId: expect.stringMatching(/^[0-9a-f]{12}$/) });
+  });
+
+  it('a thrown ZodError (createJobSchema.parse) is 400 VALIDATION_FAILED, not a 500', async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: 'POST', url: '/v1/jobs', payload: { providerId: 'not-a-cuid', payload: {} } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({
+      error: 'Validation failed',
+      code: 'VALIDATION_FAILED',
+      details: [expect.objectContaining({ path: ['providerId'] })],
+    });
   });
 });

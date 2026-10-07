@@ -55,6 +55,7 @@ import {
 import { AGENT_JOB_ESCROW_ABI } from '../../abi/AgentJobEscrow.abi.js';
 import { REPUTATION_HOOK_ABI } from '../../abi/ReputationHook.abi.js';
 import { getKnownTokenBySymbol } from '../transaction/token-registry.js';
+import { sanitizeStoredError } from '../../api/errors/sanitize.js';
 import type { EvaluatorSigner } from '../escrow/evaluator-signer.js';
 import type { FinalizeA2APaymentJobParams } from './payment-finalizer.service.js';
 import type { ProcessorLogger, TransactionJobData } from '../../queues/transaction.processor.js';
@@ -1254,7 +1255,9 @@ const ESCROW_COLUMNS = [
 /**
  * API shape: the raw escrow columns are folded into one `escrow` object (null
  * for legacy/free jobs) and the feedback file is never inlined — it has its
- * own public endpoint.
+ * own public endpoint. `escrowError` and `providerAgentIdError` are stored
+ * from worker `err.message` (a viem message carries the keyed RPC URL), so
+ * they are sanitized on the way out (S5); the DB keeps the full text.
  */
 export function toJobResponse<T extends Record<string, unknown>>(job: T): Omit<T, (typeof ESCROW_COLUMNS)[number]> & { escrow: EscrowView | null } {
   const rest = { ...job } as Record<string, unknown>;
@@ -1277,10 +1280,10 @@ export function toJobResponse<T extends Record<string, unknown>>(job: T): Omit<T
           feedbackStatus: (job['feedbackStatus'] as string | null) ?? null,
           contestedAt: (job['contestedAt'] as Date | null) ?? null,
           contestReason: (job['contestReason'] as string | null) ?? null,
-          escrowError: (job['escrowError'] as string | null) ?? null,
+          escrowError: sanitizeStoredError(job['escrowError'] as string | null),
           providerAgentId: (job['providerAgentId'] as string | null) ?? null,
           providerAgentIdStatus: (job['providerAgentIdStatus'] as string | null) ?? null,
-          providerAgentIdError: (job['providerAgentIdError'] as string | null) ?? null,
+          providerAgentIdError: sanitizeStoredError(job['providerAgentIdError'] as string | null),
           deferredSubmitAt: (job['deferredSubmitAt'] as Date | null) ?? null,
         }
       : null;

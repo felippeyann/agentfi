@@ -479,12 +479,11 @@ export function publicErrorMessage(
  * For an error string persisted earlier (Job.escrowError, Transaction.error,
  * …): those were written from `err.message` by workers and may predate S5.
  */
-export function sanitizeStoredError(
-  value: string | null | undefined,
-  ctx: SanitizeContext = sanitizeContextFromEnv(),
-): string | null {
-  if (value === null || value === undefined) return null;
-  return sanitizeText(value, ctx) || null;
+export function sanitizeStoredError(value: string | null | undefined, ctx?: SanitizeContext): string | null {
+  // The context is only built when there is something to clean: job and
+  // transaction lists call this for every row.
+  if (!value) return value ?? null;
+  return sanitizeText(value, ctx ?? sanitizeContextFromEnv()) || null;
 }
 
 /** Keys that hold error text in response bodies and stored rows. */
