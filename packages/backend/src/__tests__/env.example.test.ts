@@ -156,3 +156,37 @@ describe('RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS (S4 development override)', () =>
     );
   });
 });
+
+describe('RPC_URL_<chainId> (per-chain RPC override, C5a)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    restoreEnv();
+  });
+
+  function example(): Record<string, string> {
+    return parse(readFileSync(EXAMPLE_FILE, 'utf8'));
+  }
+
+  it('ships blank for Base Sepolia and boots as unset', async () => {
+    expect(example()['RPC_URL_84532']).toBe('');
+    const { env, exit } = await bootWith(example());
+    expect(exit).not.toHaveBeenCalled();
+    expect(env.RPC_URL_84532).toBeUndefined();
+  });
+
+  it('accepts an http(s) URL on every supported chain and trims it', async () => {
+    const { env, exit } = await bootWith({
+      ...example(),
+      RPC_URL_84532: ' http://127.0.0.1:8546 ',
+      RPC_URL_8453: 'https://base.example.org/rpc',
+    });
+    expect(exit).not.toHaveBeenCalled();
+    expect(env.RPC_URL_84532).toBe('http://127.0.0.1:8546');
+    expect(env.RPC_URL_8453).toBe('https://base.example.org/rpc');
+  });
+
+  it.each(['not a url', 'ws://127.0.0.1:8546'])('refuses to boot with RPC_URL_84532=%s', async (value) => {
+    // The example itself boots (test above), so the override is what fails.
+    await expect(bootWith({ ...example(), RPC_URL_84532: value })).rejects.toThrow(/process\.exit\(1\)/);
+  });
+});

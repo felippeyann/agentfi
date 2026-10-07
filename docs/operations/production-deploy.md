@@ -46,6 +46,15 @@ Every variable below must be configured on the **backend service** of your host.
 | `TENDERLY_ACCOUNT` | Your slug | visible in Tenderly dashboard URL |
 | `TENDERLY_PROJECT` | Your project slug | visible in Tenderly dashboard URL |
 
+### Optional — RPC endpoints
+
+By default every chain's RPC is built from `ALCHEMY_API_KEY`, with Infura (`INFURA_API_KEY`) and the chain's public RPC as fallbacks.
+
+| Variable | Value | Notes |
+|---|---|---|
+| `INFURA_API_KEY` | Your Infura key | Second candidate after Alchemy |
+| `RPC_URL_<chainId>` (`RPC_URL_8453`, `RPC_URL_84532`, `RPC_URL_1`, `RPC_URL_42161`, `RPC_URL_137`) | `https://…` (http/https only) | Becomes the **primary** RPC of that chain — your own node, another provider, or a local Anvil fork (the C5a escrow rehearsal sets `RPC_URL_84532` to its fork). Alchemy, Infura and the public RPC stay behind it as fallbacks. Blank = unset; a malformed value refuses boot. Used everywhere the backend talks to the chain: transaction submitter and monitor, the ERC-8183 evaluator signer, escrow and registry reads. |
+
 ### Stripe (needed only if running paid subscriptions)
 
 | Variable | Value | Where to get it |
