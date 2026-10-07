@@ -349,13 +349,14 @@ function networkErrorCode(err: unknown): string | undefined {
 
 /**
  * Typed refusals about the agent's OWN outbound target (pay_for_resource,
- * S4): `INVALID_URL` carries `refusal` / `hostname` / `address` (the agent's
- * hostname and what it resolved to) and `REDIRECT_REFUSED` carries the third
- * party's redirect `location` (already stripped of query and userinfo by the
- * backend). Those values are the agent's input or a third party's answer,
- * not AgentFi infrastructure, and the agent needs them to fix its request —
- * so the network-location rules are not applied to them. Every secret rule
- * still is.
+ * S4): `INVALID_URL` carries `refusal` / `hostname` (the agent's hostname or
+ * private literal; since S5 the backend no longer sends the `address` a name
+ * resolved to) and `REDIRECT_REFUSED` carries the third party's redirect
+ * `location` (already stripped of query and userinfo by the backend). Those
+ * values are the agent's input or a third party's answer, not AgentFi
+ * infrastructure, and the agent needs them to fix its request — so the
+ * network-location rules are not applied to them. Every secret rule still
+ * is. The backend applies the same set (packages/backend/src/api/errors/sanitize.ts).
  */
 export const TARGET_REFUSAL_CODES: ReadonlySet<string> = new Set(['INVALID_URL', 'REDIRECT_REFUSED']);
 
