@@ -426,6 +426,32 @@ paths:
                     nullable: true
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /v1/agents/{id}/erc8004.json:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdPath'
+    get:
+      tags: [Agents]
+      summary: ERC-8004 agent registration file (public)
+      description: |
+        The `agentURI` the agent's own wallet passes to the ERC-8004 Identity
+        Registry's `register(agentURI)` on its first funded job as a provider
+        (decision D7, `docs/architecture/erc-8004-integration.md` "Backend flow
+        (R2)"). EIP-8004 `registration-v1` format: `services` lists the AgentFi
+        manifest (`web`), the public MCP endpoint when the operator set
+        `MCP_PUBLIC_URL`, and the ENS name when the agent has one;
+        `registrations` lists every identity whose mint is confirmed;
+        `x402Support` is `false` because AgentFi agents are hired through the
+        escrow and only *pay* x402 resources. Served for inactive agents too
+        (`active: false`). No API key required.
+      security: []
+      responses:
+        '200':
+          description: Registration file.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Erc8004RegistrationFile' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /v1/agents/{id}/trust-report:
     parameters:
       - $ref: '#/components/parameters/AgentIdPath'
@@ -901,7 +927,11 @@ paths:
 
         ERC-8183 jobs: `ACCEPTED` requires `escrow.onChainStatus = FUNDED`
         (409 `ESCROW_NOT_FUNDED`); `CANCELLED` / `FAILED` schedule an evaluator
-        `reject` that refunds the locked budget.
+        `reject` that refunds the locked budget. A `COMPLETED` sent while the
+        provider's ERC-8004 identity is still being bound to the job
+        (`escrow.providerAgentIdStatus = BINDING`) answers 200 with
+        `escrow.deferredSubmitAt` set: the `submit` is sent automatically once
+        the binding is BOUND / FAILED / SKIPPED.
       requestBody:
         required: true
         content:
@@ -1624,6 +1654,13 @@ components:
           items: { type: integer }
         active: { type: boolean }
         tier: { $ref: '#/components/schemas/AgentTier' }
+        erc8004:
+          type: array
+          description: |
+            The agent's ERC-8004 identities, one per chain (R2). Minted lazily
+            from the agent's own wallet on its first funded ERC-8183 job as a
+            provider; empty until then.
+          items: { $ref: '#/components/schemas/AgentErc8004Identity' }
         policy:
           type: object
           nullable: true
@@ -2149,6 +2186,80 @@ components:
         contestedAt: { type: string, format: date-time, nullable: true }
         contestReason: { type: string, nullable: true, description: Reason given by the requester when contesting. }
         escrowError: { type: string, nullable: true, description: Last escrow step or settlement error. }
+        providerAgentId:
+          type: string
+          nullable: true
+          description: |
+            ERC-8004 agent id of the provider attached to the on-chain job with
+            `setProviderAgentId` (decimal string), read by the ReputationHook at
+            settlement (R2). Set when the bind transaction is enqueued.
+        providerAgentIdStatus:
+          type: string
+          nullable: true
+          enum: [BINDING, BOUND, FAILED, SKIPPED]
+          description: |
+            Identity binding started when `fund` confirmed: `BINDING` (the
+            provider's `register` and/or `setProviderAgentId` in flight),
+            `BOUND`, `FAILED` (revert, guard block or retries exhausted — the job
+            proceeds, the hook skips feedback) or `SKIPPED` (no reputation hook
+            or identity registry on the chain, job no longer funded). `null` for
+            jobs funded before R2. Never blocks payment.
+        providerAgentIdError: { type: string, nullable: true, description: Why the binding FAILED or was SKIPPED. }
+        deferredSubmitAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Set when the provider completed (`PATCH status=COMPLETED`) while the
+            binding was `BINDING`: `submit` is sent automatically once the
+            binding is terminal, because `setProviderAgentId` is only valid
+            before the job is Submitted. `null` once released.
+
+    AgentErc8004Identity:
+      type: object
+      properties:
+        chainId: { type: integer }
+        registry: { type: string, description: ERC-8004 Identity Registry address. }
+        agentId:
+          type: string
+          nullable: true
+          description: ERC-721 tokenId (decimal string); `null` until the mint is confirmed.
+        status: { type: string, enum: [REGISTERING, REGISTERED, FAILED] }
+
+    Erc8004RegistrationFile:
+      type: object
+      description: EIP-8004 agent registration file (`registration-v1`).
+      required: [type, name, description, services, x402Support, active, registrations, supportedTrust]
+      properties:
+        type: { type: string, example: 'https://eips.ethereum.org/EIPS/eip-8004#registration-v1' }
+        name: { type: string }
+        description: { type: string }
+        services:
+          type: array
+          items:
+            type: object
+            required: [name, endpoint]
+            properties:
+              name: { type: string, example: web }
+              endpoint: { type: string }
+              version: { type: string }
+        x402Support: { type: boolean, description: Always false — AgentFi agents do not sell behind HTTP 402. }
+        active: { type: boolean }
+        registrations:
+          type: array
+          items:
+            type: object
+            required: [agentId, agentRegistry]
+            properties:
+              agentId:
+                description: tokenId; a JSON number when it fits in 2^53, else a decimal string.
+                oneOf:
+                  - { type: integer }
+                  - { type: string }
+              agentRegistry: { type: string, example: 'eip155:84532:0x8004A818BFB912233c491871b3d84c89A494BD9e' }
+        supportedTrust:
+          type: array
+          items: { type: string, enum: [reputation] }
 
     ContestJobRequest:
       type: object

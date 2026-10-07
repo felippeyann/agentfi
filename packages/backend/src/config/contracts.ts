@@ -20,6 +20,8 @@ interface ChainContracts {
   // `ReputationHook` passed per job to `createJob(..., hook)`.
   agentJobEscrow?: Address | undefined;
   reputationHook?: Address | undefined;
+  // ERC-8004 (R2) — Identity Registry the provider identities are minted in.
+  identityRegistry?: Address | undefined;
 }
 
 /** `AGENT_JOB_ESCROW_ADDRESS_<chainId>` / `REPUTATION_HOOK_ADDRESS_<chainId>` as the deploy script prints them. */
@@ -28,6 +30,28 @@ function erc8183FromEnv(chainId: number): Pick<ChainContracts, 'agentJobEscrow' 
     agentJobEscrow: (process.env[`AGENT_JOB_ESCROW_ADDRESS_${chainId}`] as Address) || undefined,
     reputationHook: (process.env[`REPUTATION_HOOK_ADDRESS_${chainId}`] as Address) || undefined,
   };
+}
+
+/**
+ * Official ERC-8004 Identity Registry deployments (CREATE2, UUPS proxies), the
+ * same defaults `script/DeployEscrow.s.sol` wires into `ReputationHook`.
+ * Verified 2026-10-07 — see docs/architecture/erc-8004-integration.md §2.
+ */
+export const DEFAULT_IDENTITY_REGISTRIES: Readonly<Record<number, Address>> = {
+  8453: '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
+  84532: '0x8004A818BFB912233c491871b3d84c89A494BD9e',
+};
+
+/**
+ * `IDENTITY_REGISTRY_ADDRESS_<chainId>` when set (blank counts as unset), else
+ * the official default for the chain, else undefined (no identity step there).
+ * Must be the registry the chain's `ReputationHook` was deployed with, or the
+ * hook skips feedback with `agent-not-provider`.
+ */
+export function resolveIdentityRegistry(chainId: number, source: ContractEnvSource = process.env): Address | undefined {
+  const override = source[`IDENTITY_REGISTRY_ADDRESS_${chainId}`];
+  if (override) return override as Address;
+  return DEFAULT_IDENTITY_REGISTRIES[chainId];
 }
 
 /** `process.env`-shaped lookup; injectable so the helpers below are unit-testable. */
@@ -133,6 +157,7 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
     executor: executorFromEnv(1),
     escrowModule: (process.env['ESCROW_MODULE_ADDRESS_1'] as Address) || undefined,
     ...erc8183FromEnv(1),
+    identityRegistry: resolveIdentityRegistry(1),
     uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
     uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
     aavePoolAddressProvider: '0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e',
@@ -144,6 +169,7 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
     executor: executorFromEnv(8453),
     escrowModule: (process.env['ESCROW_MODULE_ADDRESS_8453'] as Address) || undefined,
     ...erc8183FromEnv(8453),
+    identityRegistry: resolveIdentityRegistry(8453),
     uniswapV3Router: '0x2626664c2603336E57B271c5C0b26F421741e481',
     uniswapV3Quoter: '0x3d4e44Eb1374240CE5F1B136CFc5b5e8b4e1b2f7',
     aavePoolAddressProvider: '0xe20fCBdBfFC4Dd138cE8b2E6FBb6CB49777ad64B',
@@ -155,6 +181,7 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
     executor: executorFromEnv(42161),
     escrowModule: (process.env['ESCROW_MODULE_ADDRESS_42161'] as Address) || undefined,
     ...erc8183FromEnv(42161),
+    identityRegistry: resolveIdentityRegistry(42161),
     uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
     uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
     aavePoolAddressProvider: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb',
@@ -173,6 +200,7 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
     executor: executorFromEnv(84532),
     escrowModule: (process.env['ESCROW_MODULE_ADDRESS_84532'] as Address) || undefined,
     ...erc8183FromEnv(84532),
+    identityRegistry: resolveIdentityRegistry(84532),
     uniswapV3Router: '0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4',
     uniswapV3Quoter: '0xC5290058841028F1614F3A6F0F5816cAd0df5E27',
     aavePoolAddressProvider: '0x0000000000000000000000000000000000000000', // not deployed on testnet
@@ -183,6 +211,7 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
     executor: executorFromEnv(137),
     escrowModule: (process.env['ESCROW_MODULE_ADDRESS_137'] as Address) || undefined,
     ...erc8183FromEnv(137),
+    identityRegistry: resolveIdentityRegistry(137),
     uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
     uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
     aavePoolAddressProvider: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb',

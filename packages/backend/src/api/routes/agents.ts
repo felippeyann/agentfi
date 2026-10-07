@@ -18,6 +18,7 @@ import {
 import { ReputationService } from '../../services/policy/reputation.service.js';
 import { PnLService } from '../../services/billing/pnl.service.js';
 import { EnsService } from '../../services/identity/ens.service.js';
+import { buildRegistrationFile, identityView } from '../../services/job/erc8004-identity.service.js';
 import { logger } from '../middleware/logger.js';
 const turnkey = getWalletService();
 const safeService = new SafeService();
@@ -33,6 +34,18 @@ const ensService = new EnsService();
  * (`""`, `"1e3"`, `"0x10"`, `" 5"`, `"unlimited"` are all 400 here).
  */
 const policyDecimal = z.string().regex(POLICY_DECIMAL_PATTERN, POLICY_DECIMAL_MESSAGE);
+
+/** ERC-8004 identities (R2) returned as `erc8004` on agent responses. */
+const IDENTITY_SELECT = {
+  select: { chainId: true, registry: true, erc8004AgentId: true, status: true },
+  orderBy: { chainId: 'asc' },
+} as const;
+
+/** Base URLs the ERC-8004 registration file advertises (R2). */
+const registrationFileConfig = {
+  backendPublicUrl: env.BACKEND_PUBLIC_URL.replace(/\/+$/, ''),
+  mcpPublicUrl: env.MCP_PUBLIC_URL ?? null,
+};
 
 /** Initial policy for a new agent. `parse({})` yields the server defaults. */
 const initialPolicySchema = z.object({
@@ -280,7 +293,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
   fastify.get('/v1/agents/me', async (request) => {
     const agent = await db.agent.findUnique({
       where: { id: request.agentId },
-      include: { policy: true, billing: true },
+      include: { policy: true, billing: true, identities: IDENTITY_SELECT },
     });
 
     if (!agent) return { error: 'Agent not found' };
@@ -294,6 +307,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
       chainIds: agent.chainIds,
       active: agent.active,
       tier: agent.tier,
+      erc8004: identityView(agent.identities ?? []),
       policy: agent.policy,
       billing: agent.billing
         ? {
@@ -315,7 +329,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
 
     const agent = await db.agent.findUnique({
       where: { id: request.params.id },
-      include: { policy: true, billing: true },
+      include: { policy: true, billing: true, identities: IDENTITY_SELECT },
     });
 
     if (!agent) return reply.code(404).send({ error: 'Agent not found' });
@@ -329,6 +343,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
       chainIds: agent.chainIds,
       active: agent.active,
       tier: agent.tier,
+      erc8004: identityView(agent.identities ?? []),
       policy: agent.policy,
       billing: agent.billing
         ? {
@@ -477,6 +492,31 @@ export async function agentRoutes(fastify: FastifyInstance) {
 
     if (!agent) return reply.code(404).send({ error: 'Agent not found' });
     return agent;
+  });
+
+  /**
+   * GET /v1/agents/:id/erc8004.json — public ERC-8004 registration file (R2).
+   *
+   * This URL is the `agentURI` the agent's wallet passes to the Identity
+   * Registry's `register(agentURI)` on its first funded job as a provider
+   * (decision D7), so it must be reachable without an API key. Format:
+   * `registration-v1` of the EIP (see `buildRegistrationFile`); `registrations`
+   * lists every identity whose mint is confirmed. Served for inactive agents
+   * too (`active: false`), because the on-chain tokenURI keeps pointing here.
+   */
+  fastify.get<{ Params: { id: string } }>('/v1/agents/:id/erc8004.json', async (request, reply) => {
+    const agent = await db.agent.findUnique({
+      where: { id: request.params.id },
+      select: { id: true, name: true, active: true, ensName: true, identities: IDENTITY_SELECT },
+    });
+    if (!agent) return reply.code(404).send({ error: 'Agent not found' });
+
+    const file = buildRegistrationFile(agent, agent.identities ?? [], registrationFileConfig);
+    return reply
+      .code(200)
+      .header('content-type', 'application/json; charset=utf-8')
+      .header('cache-control', 'public, max-age=300')
+      .send(JSON.stringify(file));
   });
 
   /**

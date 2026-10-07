@@ -707,6 +707,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/agents/{id}/erc8004.json": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent CUID. */
+                id: components["parameters"]["AgentIdPath"];
+            };
+            cookie?: never;
+        };
+        /**
+         * ERC-8004 agent registration file (public)
+         * @description The `agentURI` the agent's own wallet passes to the ERC-8004 Identity
+         *     Registry's `register(agentURI)` on its first funded job as a provider
+         *     (decision D7, `docs/architecture/erc-8004-integration.md` "Backend flow
+         *     (R2)"). EIP-8004 `registration-v1` format: `services` lists the AgentFi
+         *     manifest (`web`), the public MCP endpoint when the operator set
+         *     `MCP_PUBLIC_URL`, and the ENS name when the agent has one;
+         *     `registrations` lists every identity whose mint is confirmed;
+         *     `x402Support` is `false` because AgentFi agents are hired through the
+         *     escrow and only *pay* x402 resources. Served for inactive agents too
+         *     (`active: false`). No API key required.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Agent CUID. */
+                    id: components["parameters"]["AgentIdPath"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Registration file. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Erc8004RegistrationFile"];
+                    };
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/agents/{id}/trust-report": {
         parameters: {
             query?: never;
@@ -1775,7 +1830,11 @@ export interface paths {
          *
          *     ERC-8183 jobs: `ACCEPTED` requires `escrow.onChainStatus = FUNDED`
          *     (409 `ESCROW_NOT_FUNDED`); `CANCELLED` / `FAILED` schedule an evaluator
-         *     `reject` that refunds the locked budget.
+         *     `reject` that refunds the locked budget. A `COMPLETED` sent while the
+         *     provider's ERC-8004 identity is still being bound to the job
+         *     (`escrow.providerAgentIdStatus = BINDING`) answers 200 with
+         *     `escrow.deferredSubmitAt` set: the `submit` is sent automatically once
+         *     the binding is BOUND / FAILED / SKIPPED.
          */
         patch: {
             parameters: {
@@ -2904,6 +2963,12 @@ export interface components {
             chainIds?: number[];
             active?: boolean;
             tier?: components["schemas"]["AgentTier"];
+            /**
+             * @description The agent's ERC-8004 identities, one per chain (R2). Minted lazily
+             *     from the agent's own wallet on its first funded ERC-8183 job as a
+             *     provider; empty until then.
+             */
+            erc8004?: components["schemas"]["AgentErc8004Identity"][];
             policy?: components["schemas"]["Policy"] | null;
             billing?: {
                 txCountThisPeriod?: number;
@@ -3299,6 +3364,64 @@ export interface components {
             contestReason?: string | null;
             /** @description Last escrow step or settlement error. */
             escrowError?: string | null;
+            /**
+             * @description ERC-8004 agent id of the provider attached to the on-chain job with
+             *     `setProviderAgentId` (decimal string), read by the ReputationHook at
+             *     settlement (R2). Set when the bind transaction is enqueued.
+             */
+            providerAgentId?: string | null;
+            /**
+             * @description Identity binding started when `fund` confirmed: `BINDING` (the
+             *     provider's `register` and/or `setProviderAgentId` in flight),
+             *     `BOUND`, `FAILED` (revert, guard block or retries exhausted — the job
+             *     proceeds, the hook skips feedback) or `SKIPPED` (no reputation hook
+             *     or identity registry on the chain, job no longer funded). `null` for
+             *     jobs funded before R2. Never blocks payment.
+             * @enum {string|null}
+             */
+            providerAgentIdStatus?: "BINDING" | "BOUND" | "FAILED" | "SKIPPED" | null;
+            /** @description Why the binding FAILED or was SKIPPED. */
+            providerAgentIdError?: string | null;
+            /**
+             * Format: date-time
+             * @description Set when the provider completed (`PATCH status=COMPLETED`) while the
+             *     binding was `BINDING`: `submit` is sent automatically once the
+             *     binding is terminal, because `setProviderAgentId` is only valid
+             *     before the job is Submitted. `null` once released.
+             */
+            deferredSubmitAt?: string | null;
+        };
+        AgentErc8004Identity: {
+            chainId?: number;
+            /** @description ERC-8004 Identity Registry address. */
+            registry?: string;
+            /** @description ERC-721 tokenId (decimal string); `null` until the mint is confirmed. */
+            agentId?: string | null;
+            /** @enum {string} */
+            status?: "REGISTERING" | "REGISTERED" | "FAILED";
+        };
+        /** @description EIP-8004 agent registration file (`registration-v1`). */
+        Erc8004RegistrationFile: {
+            /** @example https://eips.ethereum.org/EIPS/eip-8004#registration-v1 */
+            type: string;
+            name: string;
+            description: string;
+            services: {
+                /** @example web */
+                name: string;
+                endpoint: string;
+                version?: string;
+            }[];
+            /** @description Always false — AgentFi agents do not sell behind HTTP 402. */
+            x402Support: boolean;
+            active: boolean;
+            registrations: {
+                /** @description tokenId; a JSON number when it fits in 2^53, else a decimal string. */
+                agentId: number | string;
+                /** @example eip155:84532:0x8004A818BFB912233c491871b3d84c89A494BD9e */
+                agentRegistry: string;
+            }[];
+            supportedTrust: "reputation"[];
         };
         ContestJobRequest: {
             reason?: string;

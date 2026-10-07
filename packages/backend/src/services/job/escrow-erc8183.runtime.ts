@@ -8,7 +8,7 @@
  * pre-submit guard and the recovery worker call. Tests mock THIS module.
  */
 
-import type { Hex } from 'viem';
+import type { Address, Hex } from 'viem';
 import { db } from '../../db/client.js';
 import { env, escrowEvaluatorAddress } from '../../config/env.js';
 import { getContracts } from '../../config/contracts.js';
@@ -36,6 +36,16 @@ export const erc8183Config: Erc8183Config = {
       return null;
     }
   },
+  // R2: ERC-8004 Identity Registry (IDENTITY_REGISTRY_ADDRESS_<chainId> or the
+  // official Base / Base Sepolia default, config/contracts.ts).
+  identityRegistry(chainId: number): Address | null {
+    try {
+      return getContracts(chainId).identityRegistry ?? null;
+    } catch {
+      return null;
+    }
+  },
+  mcpPublicUrl: env.MCP_PUBLIC_URL ?? null,
 };
 
 const publicClients = new Map<number, ReturnType<typeof createChainPublicClient>>();
