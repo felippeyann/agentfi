@@ -92,11 +92,17 @@ const LABELLED_SECRET =
 const KEY_SHAPED_HEX =
   /(\b(?:private|priv|secret|mnemonic|seed|signing|signer|pk|key)\b[^\n]{0,32}?)(?<![0-9A-Fa-fx])(?:0x)?[0-9A-Fa-f]{64}(?![0-9A-Fa-f])/gi;
 
-/** http(s) and ws(s) URLs, up to whitespace, quotes or closing brackets. */
-const URL_PATTERN = /\b(?:https?|wss?):\/\/[^\s"'<>`)\]}]+/gi;
+/** http(s) and ws(s) URLs, up to whitespace or quotes (unbalanced closers trimmed later). */
+const URL_PATTERN = /\b(?:https?|wss?):\/\/[^\s"'<>`]+/gi;
 
 /** `file://` URLs. */
 const FILE_URL = /\bfile:\/\/\/?[^\s"'<>`)\]}]*/gi;
+
+/** Any scheme with userinfo: postgresql://user:pass@db, redis://:pass@cache, https://u:p@host. */
+const CREDENTIAL_URL = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>@/]*@[^\s"'<>`)\]}]*/gi;
+
+/** Bare host names under private-network suffixes ("db.internal:5432"). */
+const INTERNAL_SUFFIX_HOST = /\b[\w-]+(?:\.[\w-]+)*\.(?:internal|local|lan|svc)(?::\d{1,5})?\b/gi;
 
 /** Windows drive paths, with either separator. */
 const WINDOWS_PATH = /\b[A-Za-z]:[\\/](?:[^\s"'<>|\\/]+[\\/])*[^\s"'<>|]*/g;
@@ -135,10 +141,36 @@ function isCredentialLikeSegment(segment: string): boolean {
   return segment.length >= 20 && /^[A-Za-z0-9_-]+$/.test(segment) && /\d/.test(segment) && /[A-Za-z]/.test(segment);
 }
 
+const CLOSER_TO_OPENER: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
+
+/**
+ * Splits sentence punctuation and unbalanced closing brackets off the end of
+ * a URL match: "(see https://x.io/a)." → "https://x.io/a" + ").", while
+ * "…?apiKey=[redacted]" keeps its balanced "]".
+ */
+function splitTrailing(raw: string): [string, string] {
+  let end = raw.length;
+  while (end > 0) {
+    const ch = raw.charAt(end - 1);
+    if ('.,;:!?'.includes(ch)) {
+      end -= 1;
+      continue;
+    }
+    const opener = CLOSER_TO_OPENER[ch];
+    if (opener) {
+      const body = raw.slice(0, end - 1);
+      if (body.split(opener).length <= body.split(ch).length) {
+        end -= 1;
+        continue;
+      }
+    }
+    break;
+  }
+  return [raw.slice(0, end), raw.slice(end)];
+}
+
 function sanitizeUrl(raw: string, ctx: SanitizeContext): string {
-  // Sentence punctuation is not part of the URL.
-  const trailing = /[.,;:!?]+$/.exec(raw)?.[0] ?? '';
-  const candidate = trailing ? raw.slice(0, -trailing.length) : raw;
+  const [candidate, trailing] = splitTrailing(raw);
   let url: URL;
   try {
     url = new URL(candidate);
@@ -181,11 +213,13 @@ export function sanitizeText(input: string, ctx: SanitizeContext = sanitizeConte
   text = text.replace(KEY_SHAPED_HEX, '$1[redacted-key]');
 
   text = text.replace(FILE_URL, '[path]');
+  text = text.replace(CREDENTIAL_URL, '[redacted-url]');
   text = text.replace(URL_PATTERN, (raw) => sanitizeUrl(raw, ctx));
 
   for (const host of ctx.internalHosts) {
     text = text.replace(new RegExp(`(?<![\\w.-])${escapeRegExp(host)}(?::\\d{1,5})?(?![\\w.-])`, 'gi'), '[internal-host]');
   }
+  text = text.replace(INTERNAL_SUFFIX_HOST, '[internal-host]');
   text = text.replace(PRIVATE_IPV4, '[internal-host]');
   text = text.replace(IPV6_LOOPBACK, '[internal-host]');
   text = text.replace(LOCALHOST, '[internal-host]');

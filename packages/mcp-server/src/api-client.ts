@@ -4,8 +4,12 @@
  * into typed HTTP requests to the backend.
  */
 
-import 'dotenv/config';
+import { config as loadDotenv } from 'dotenv';
 import { ApiError } from './api-error.js';
+
+// dotenv >= 17 logs "injected env (n) from .env" to stdout by default; on the
+// stdio transport stdout is the MCP JSON-RPC channel, so keep it quiet.
+loadDotenv({ quiet: true });
 
 export { ApiError };
 
