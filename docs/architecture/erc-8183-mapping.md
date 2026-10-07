@@ -110,13 +110,18 @@ requester wallet  ── createJob(provider, evaluator, now+TTL, "<BACKEND_PUBLI
 requester wallet  ── setBudget(jobId, budget, "0x") ───────────────────────────────────────────────────► BUDGET_SET
 requester wallet  ── USDC.approve(escrow, budget) ─────────────────────────────────────────────────────► APPROVED
 requester wallet  ── fund(jobId, budget, "0x") ────────────────────────────────────────────────────────► FUNDED      ← provider may PATCH ACCEPTED only now (409 ESCROW_NOT_FUNDED before)
-provider wallet   ── submit(jobId, keccak256(JSON.stringify(result ?? {})), "0x") ──────────────────────► SUBMITTED   (PATCH COMPLETED → Job PAYMENT_PENDING)
+                       │ R2 (chain with a ReputationHook): providerAgentIdStatus = BINDING
+provider wallet   ── [register(agentURI) on the ERC-8004 Identity Registry — first funded job only (D7)]
+provider wallet   ── setProviderAgentId(jobId, erc8004AgentId) ───────────────────────────────────────► (still FUNDED)  providerAgentIdStatus = BOUND (FAILED / SKIPPED never block)
+provider wallet   ── submit(jobId, keccak256(JSON.stringify(result ?? {})), "0x") ──────────────────────► SUBMITTED   (PATCH COMPLETED → Job PAYMENT_PENDING;
+                                                                                                                         while BINDING the submit is deferred and sent when the binding ends)
                        │ ESCROW_EVALUATION_DELAY_SECONDS (requester may POST /v1/jobs/:id/contest)
 evaluator signer  ── complete(jobId, keccak("agentfi.completed"), abi.encode(feedbackURI, feedbackHash)) ► COMPLETED → finalizer CONFIRMED → Job COMPLETED
                or ── reject(jobId,   keccak("agentfi.contested"), abi.encode(feedbackURI, feedbackHash)) ► REJECTED  → finalizer FAILED    → Job PAYMENT_FAILED (refunded on-chain)
 ```
 
 - **Requester and provider steps** are ordinary `Transaction` rows (`type = ESCROW_LOCK` for the four funding steps, `ESCROW_SUBMIT` for `submit`, `metadata = { erc8183: true, escrowStep, jobId }`) signed by the agent's wallet provider through the transaction queue, so the pre-submit guard, policy pause, retries and dead-lettering apply as to any other transaction. The orchestrator advances the chain from the worker's post-confirmation hook, the permanent-failure handler and the guard's fail path (`onEscrowTxOutcome`). Before enqueuing the next step it re-reads the Job and stops if it is no longer `PENDING`/`ACCEPTED`.
+- **Provider identity steps (R2)**: when `fund` confirms on a chain with a `ReputationHook`, the provider's wallet binds its ERC-8004 identity to the job with `setProviderAgentId` — after minting it with `register(agentURI)` if this is its first funded job on the chain (decision D7) — so the hook can write feedback at settlement. Same transaction queue, `type = ERC8004_IDENTITY`, `metadata.escrowStep = register | bindAgent`. `setProviderAgentId` is only valid while the job is `Open`/`Funded` and is signed by the same wallet as `submit`, so a `PATCH COMPLETED` that arrives while the binding is `BINDING` **defers** the `submit` (`Job.deferredSubmitAt`); the orchestrator sends it when the binding is `BOUND`, `FAILED` or `SKIPPED`. A failed or skipped binding never blocks payment — the hook just skips feedback. Full flow: [erc-8004-integration.md](erc-8004-integration.md) §7.
 - **Evaluator steps** (`complete`, `reject`, `claimRefund`) are signed by the operator key `ESCROW_EVALUATOR_PRIVATE_KEY` (its address is logged at boot as `escrowEvaluatorAddress` and must be the hook's `TRUSTED_EVALUATOR`). The evaluator is not an `Agent` row, so it never goes through the transaction queue; it has its own BullMQ queue `escrow-settlement` (3 attempts, exponential backoff, one job per `<action>:<jobId>`). Every settlement reads `getJob(onChainJobId).status` first and, when the chain is already terminal, reconciles the DB without sending anything — a crash after broadcast, a redelivery or the expiry race are therefore harmless.
 - `Job.onChainStatus` always records the last **confirmed** step; `SETTLING` marks a claimed settlement (contests are refused from then on).
 
@@ -144,7 +149,8 @@ A reverted or unmined settlement throws so BullMQ retries against a fresh on-cha
 
 | What | Key |
 |---|---|
-| Agent-signed step | `Transaction.intentId = "erc8183:<create\|setBudget\|approve\|fund\|submit>:<jobId>"` (retried `submit`: `…#<timestamp>`) |
+| Agent-signed step | `Transaction.intentId = "erc8183:<create\|setBudget\|approve\|fund\|submit\|bindAgent>:<jobId>"` (retried `submit`: `…#<timestamp>`) |
+| ERC-8004 mint (R2) | `Transaction.intentId = "erc8004:register:<agentId>:<chainId>"` (retry after a FAILED mint: `…#<timestamp>`) + unique `AgentIdentity(agentId, chainId)` |
 | Settlement job | BullMQ `jobId = "<settle\|reject\|claimRefund>:<jobId>"`; completed/failed entries are removed before a re-add |
 | Expiry sweep | BullMQ repeatable `jobId = "escrow-expiry-sweep"` |
 | On-chain job | `@@unique([escrowContract, onChainJobId])` on `Job` |
@@ -154,4 +160,6 @@ A reverted or unmined settlement throws so BullMQ retries against a fresh on-cha
 
 Env: `AGENT_JOB_ESCROW_ADDRESS_<chainId>`, `REPUTATION_HOOK_ADDRESS_<chainId>`, `ESCROW_EVALUATOR_PRIVATE_KEY` (required in staging/production when an escrow address is set), `ESCROW_JOB_TTL_SECONDS` (default 604800), `ESCROW_EVALUATION_DELAY_SECONDS` (default 0), `BACKEND_PUBLIC_URL` (default `http://localhost:3000`). API: `Job.escrow` object on every job response (`kind, chainId, contract, onChainJobId, onChainStatus, evaluator, budgetAmount, budgetToken, expiresAt, deliverableHash, settleTxHash, platformFeeAmount, feedbackStatus, contestedAt, contestReason, escrowError`), `POST /v1/jobs/:id/contest`, public `GET /v1/jobs/:id/feedback.json`; error codes `ERC8183_USDC_ONLY`, `ERC8183_PROVIDER_IS_REQUESTER`, `ERC8183_PROVIDER_IS_EVALUATOR`, `ERC8183_START_FAILED`, `ESCROW_NOT_FUNDED`, `ESCROW_SUBMIT_FAILED`, `CONTEST_NOT_ALLOWED`, `NOT_ESCROW_JOB`.
 
-Not in C3: the platform-fee sweep (`withdrawPlatformFees`, plan C3b), `setProviderAgentId` (needs the ERC-8004 identity from R2 — until then the hook skips feedback with `no-agent-id`), MCP tools (X3/X4), and the testnet E2E (C5).
+R2 adds `IDENTITY_REGISTRY_ADDRESS_<chainId>` (blank = official Base / Base Sepolia registry), `MCP_PUBLIC_URL`, the `escrow` fields `providerAgentId, providerAgentIdStatus, providerAgentIdError, deferredSubmitAt`, `erc8004` on agent responses and the public `GET /v1/agents/:id/erc8004.json` ([erc-8004-integration.md](erc-8004-integration.md) §7).
+
+Not in C3: the platform-fee sweep (`withdrawPlatformFees`, plan C3b), `setProviderAgentId` (done in R2 — before it the hook skipped feedback with `no-agent-id`), MCP tools (X3/X4), and the testnet E2E (C5).
