@@ -92,6 +92,7 @@ function basePolicy(overrides: Partial<AgentPolicy> = {}): AgentPolicy {
     allowedTokens: [],
     cooldownSeconds: 60,
     expiresAt: null,
+    pausedByOperatorAt: null,
     updatedAt: new Date('2026-01-01T00:00:00Z'),
     ...overrides,
   };
@@ -249,6 +250,8 @@ describe('PATCH /v1/agents/:id/policy — operator caller', () => {
       maxValuePerTxEth: '5.0',
       allowedContracts: [],
       active: true,
+      // An explicit `active` write clears the admin-pause stamp (A3b).
+      pausedByOperatorAt: null,
     });
 
     await app.close();

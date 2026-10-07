@@ -32,6 +32,7 @@ function basePolicy(overrides: Partial<AgentPolicy> = {}): AgentPolicy {
     allowedTokens: [],
     maxDailyVolumeUsd: '0', // 0 = no daily limit
     expiresAt: null,
+    pausedByOperatorAt: null,
     updatedAt: new Date(),
     ...overrides,
   };
@@ -43,6 +44,7 @@ function makeMockDb(policy: AgentPolicy | null = basePolicy()): PrismaClient {
       findUnique: vi.fn().mockResolvedValue(policy),
       upsert: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: policy ? 1 : 0 }),
     },
     dailyVolume: {
       findUnique: vi.fn().mockResolvedValue(null),
@@ -52,6 +54,100 @@ function makeMockDb(policy: AgentPolicy | null = basePolicy()): PrismaClient {
     $executeRaw: vi.fn().mockResolvedValue(1),
   } as unknown as PrismaClient;
 }
+
+// ── Admin pause / resume bookkeeping (A3b) ─────────────────────────────────
+//
+// `pausedByOperatorAt` records that the admin kill switch flipped an active
+// policy, so that resume undoes exactly that flip and nothing else.
+
+describe('PolicyService.pauseByOperator / resumeByOperator', () => {
+  const NOW = new Date('2026-10-06T12:00:00Z');
+
+  it('pauseByOperator deactivates only an active policy and stamps it', async () => {
+    const db = makeMockDb();
+    const svc = new PolicyService(db);
+
+    await expect(svc.pauseByOperator('agent-1', NOW)).resolves.toBe(true);
+    expect(db.agentPolicy.updateMany).toHaveBeenCalledWith({
+      where: { agentId: 'agent-1', active: true },
+      data: { active: false, pausedByOperatorAt: NOW },
+    });
+  });
+
+  it('pauseByOperator reports false when no active policy matched (already inactive / no row)', async () => {
+    const db = makeMockDb(null);
+    const svc = new PolicyService(db);
+
+    await expect(svc.pauseByOperator('agent-1', NOW)).resolves.toBe(false);
+  });
+
+  it('resumeByOperator re-activates only a stamped inactive policy, clearing the stamp', async () => {
+    const db = makeMockDb(basePolicy({ active: false, pausedByOperatorAt: NOW }));
+    const svc = new PolicyService(db);
+
+    await expect(svc.resumeByOperator('agent-1')).resolves.toBe('reactivated');
+    expect(db.agentPolicy.updateMany).toHaveBeenCalledWith({
+      where: { agentId: 'agent-1', active: false, pausedByOperatorAt: { not: null } },
+      data: { active: true, pausedByOperatorAt: null },
+    });
+    // The outcome came from the conditional write itself — no read needed.
+    expect(db.agentPolicy.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('resumeByOperator → left_inactive when the policy is inactive without a stamp', async () => {
+    const db = makeMockDb(basePolicy({ active: false, pausedByOperatorAt: null }));
+    (db.agentPolicy.updateMany as any).mockResolvedValue({ count: 0 });
+    const svc = new PolicyService(db);
+
+    await expect(svc.resumeByOperator('agent-1')).resolves.toBe('left_inactive');
+  });
+
+  it('resumeByOperator → already_active when the policy is active', async () => {
+    const db = makeMockDb(basePolicy({ active: true }));
+    (db.agentPolicy.updateMany as any).mockResolvedValue({ count: 0 });
+    const svc = new PolicyService(db);
+
+    await expect(svc.resumeByOperator('agent-1')).resolves.toBe('already_active');
+  });
+
+  it('resumeByOperator → no_policy when the agent has no policy row', async () => {
+    const db = makeMockDb(null);
+    const svc = new PolicyService(db);
+
+    await expect(svc.resumeByOperator('agent-1')).resolves.toBe('no_policy');
+  });
+
+  it('emergencyPause (independent deactivation) clears the stamp', async () => {
+    const db = makeMockDb();
+    const svc = new PolicyService(db);
+
+    await svc.emergencyPause('agent-1');
+    expect(db.agentPolicy.updateMany).toHaveBeenCalledWith({
+      where: { agentId: 'agent-1' },
+      data: { active: false, pausedByOperatorAt: null },
+    });
+  });
+
+  it('setPolicy clears the stamp on an explicit `active` write, and only then', async () => {
+    const db = makeMockDb();
+    (db.agentPolicy.upsert as any).mockImplementation(async ({ update }: any) => basePolicy(update));
+    const svc = new PolicyService(db);
+
+    await svc.setPolicy('agent-1', { active: false });
+    expect((db.agentPolicy.upsert as any).mock.calls[0][0]).toEqual({
+      where: { agentId: 'agent-1' },
+      create: { agentId: 'agent-1', active: false, pausedByOperatorAt: null },
+      update: { active: false, pausedByOperatorAt: null },
+    });
+
+    await svc.setPolicy('agent-1', { maxValuePerTxEth: '0.5' });
+    expect((db.agentPolicy.upsert as any).mock.calls[1][0]).toEqual({
+      where: { agentId: 'agent-1' },
+      create: { agentId: 'agent-1', maxValuePerTxEth: '0.5' },
+      update: { maxValuePerTxEth: '0.5' },
+    });
+  });
+});
 
 // ── Core allow/block scenarios ─────────────────────────────────────────────
 

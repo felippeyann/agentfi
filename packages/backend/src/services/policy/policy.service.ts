@@ -9,6 +9,17 @@ export interface PolicyValidationResult {
   reason?: string;
 }
 
+/** What `PolicyService.resumeByOperator` did to the policy row. */
+export type OperatorResumeOutcome =
+  /** The policy was inactive because the operator pause flipped it; it is active again. */
+  | 'reactivated'
+  /** Nothing to do — the policy was already active. */
+  | 'already_active'
+  /** Inactive, but not because of the operator pause — left inactive on purpose. */
+  | 'left_inactive'
+  /** The agent has no policy row (no restrictions apply). */
+  | 'no_policy';
+
 export class PolicyService {
   public onChain: OnChainPolicyService;
 
@@ -147,10 +158,15 @@ export class PolicyService {
     agentId: string,
     policy: Partial<Omit<AgentPolicy, 'id' | 'agentId' | 'updatedAt'>>,
   ): Promise<AgentPolicy> {
+    // An explicit `active` write supersedes the admin pause's bookkeeping:
+    // whatever the flag is from here on was not set by the pause, so a later
+    // admin resume must not undo it. See pauseByOperator / resumeByOperator.
+    const data =
+      policy.active === undefined ? policy : { ...policy, pausedByOperatorAt: null };
     return this.db.agentPolicy.upsert({
       where: { agentId },
-      create: { agentId, ...policy },
-      update: policy,
+      create: { agentId, ...data },
+      update: data,
     });
   }
 
@@ -160,18 +176,53 @@ export class PolicyService {
 
   /**
    * Emergency kill switch — immediately disables the agent's policy.
+   *
+   * This is the *independent* deactivation path (agent soft-delete via
+   * DELETE /v1/agents/:id). It clears `pausedByOperatorAt` so an admin
+   * resume never re-activates a policy the agent itself switched off.
    */
   async emergencyPause(agentId: string): Promise<void> {
     await this.db.agentPolicy.updateMany({
       where: { agentId },
-      data: { active: false },
+      data: { active: false, pausedByOperatorAt: null },
     });
   }
 
-  async resume(agentId: string): Promise<void> {
-    await this.db.agentPolicy.updateMany({
-      where: { agentId },
-      data: { active: true },
+  /**
+   * Admin kill switch (POST /admin/agents/:id/pause). Deactivates the policy
+   * only if it is currently active and stamps `pausedByOperatorAt`, so that
+   * `resumeByOperator` can undo exactly this flip and nothing else. A policy
+   * that is already inactive is left untouched — and unstamped.
+   *
+   * @returns `true` when this call deactivated the policy.
+   */
+  async pauseByOperator(agentId: string, now: Date = new Date()): Promise<boolean> {
+    const { count } = await this.db.agentPolicy.updateMany({
+      where: { agentId, active: true },
+      data: { active: false, pausedByOperatorAt: now },
     });
+    return count > 0;
+  }
+
+  /**
+   * Undo of `pauseByOperator`: re-activates the policy only while
+   * `pausedByOperatorAt` is set, then clears the stamp. The write is a single
+   * conditional `updateMany`, so a concurrent explicit `active` write (which
+   * clears the stamp) can never be undone by this. When nothing changed, the
+   * returned outcome says why so the route can tell the operator.
+   */
+  async resumeByOperator(agentId: string): Promise<OperatorResumeOutcome> {
+    const { count } = await this.db.agentPolicy.updateMany({
+      where: { agentId, active: false, pausedByOperatorAt: { not: null } },
+      data: { active: true, pausedByOperatorAt: null },
+    });
+    if (count > 0) return 'reactivated';
+
+    const policy = await this.db.agentPolicy.findUnique({
+      where: { agentId },
+      select: { active: true },
+    });
+    if (!policy) return 'no_policy';
+    return policy.active ? 'already_active' : 'left_inactive';
   }
 }

@@ -207,6 +207,12 @@ model AgentPolicy {
   active            Boolean   @default(true)
   /// Optional expiry for temporary task-scoped policies (null = no expiration)
   expiresAt         DateTime?
+  /// Set by the admin kill switch (POST /admin/agents/:id/pause) when it flipped
+  /// an *active* policy to inactive; the admin resume re-activates the policy
+  /// only while this is set, then clears it. Null when the policy was
+  /// deactivated by anything else (agent soft-delete, PATCH active=false) —
+  /// those are never undone by resume. Migration 0017.
+  pausedByOperatorAt DateTime?
   updatedAt         DateTime  @updatedAt
 }
 

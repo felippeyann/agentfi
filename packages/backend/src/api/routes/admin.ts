@@ -14,7 +14,10 @@ import { AGENT_EXECUTOR_ABI } from '../../abi/AgentExecutor.abi.js';
 import { logger } from '../middleware/logger.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
 import { getContracts } from '../../config/contracts.js';
-import { PolicyService } from '../../services/policy/policy.service.js';
+import {
+  PolicyService,
+  type OperatorResumeOutcome,
+} from '../../services/policy/policy.service.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
 import { PnLService } from '../../services/billing/pnl.service.js';
 import { OperatorService } from '../../services/billing/operator.service.js';
@@ -73,6 +76,39 @@ interface OnChainSync {
   notice: string;
 }
 
+/** The slice of an `Agent` row the kill-switch handlers need. */
+interface KillSwitchAgent {
+  id: string;
+  active: boolean;
+  safeAddress: string;
+  chainIds: number[];
+}
+
+/**
+ * `policyNote` of the admin resume response, keyed by what
+ * `PolicyService.resumeByOperator` did. Exported for tests.
+ */
+export const RESUME_POLICY_NOTES: Record<OperatorResumeOutcome, string> = {
+  reactivated: 'Policy re-activated: the operator pause had deactivated it.',
+  already_active: 'Policy already active; nothing to re-activate.',
+  left_inactive:
+    'Policy left inactive: it was not deactivated by the operator pause (agent soft-delete, ' +
+    'PATCH active=false, or a pause that predates resume tracking). ' +
+    'Re-activate it with PATCH /v1/agents/:id/policy.',
+  no_policy: 'Agent has no policy row; nothing to re-activate.',
+};
+
+/** Parses the optional `{ syncOnChain }` body of the kill-switch routes; replies 400 and returns null when invalid. */
+function parseKillSwitchBody(request: any, reply: any): { syncOnChain: boolean } | null {
+  const parsed = pauseAgentSchema.safeParse(request.body ?? {});
+  if (parsed.success) return parsed.data;
+  reply.code(400).send({
+    error: 'Invalid request body',
+    details: parsed.error.flatten().fieldErrors,
+  });
+  return null;
+}
+
 /**
  * Builds the on-chain kill-switch calldata for an agent's primary chain, or
  * null when that chain has no AgentPolicyModule configured. Encode-only.
@@ -105,6 +141,44 @@ async function buildKillSwitchOnChainSync(
     chainId,
     actions: [{ to: policyModule, value: '0', data }],
     notice: `Broadcast via POST /admin/transactions/batch to ${pause ? 'pause' : 'resume'} the on-chain policy. The backend has NOT broadcast this.`,
+  };
+}
+
+/**
+ * Shared by POST /admin/agents/:id/resume and the resume half of the pause
+ * toggle. Idempotent: an agent that is already active is left alone
+ * (`agentReactivated: false`), and the DB policy is re-activated only when the
+ * operator pause deactivated it (`PolicyService.resumeByOperator`) — a policy
+ * that was inactive for any other reason stays inactive and `policyNote` says
+ * so. `onChainSync` (`AgentPolicyModule.resume(safe)` calldata) is built
+ * whenever requested, even on a no-op, so the chain can be re-synced alone.
+ */
+async function resumeAgent(agent: KillSwitchAgent, syncOnChain: boolean) {
+  const agentReactivated = !agent.active;
+  if (agentReactivated) {
+    await db.agent.update({ where: { id: agent.id }, data: { active: true } });
+  }
+
+  const policyOutcome = await policyService.resumeByOperator(agent.id);
+  const onChainSync = syncOnChain ? await buildKillSwitchOnChainSync(agent, false) : null;
+
+  logger.info(
+    {
+      agentId: agent.id,
+      agentReactivated,
+      policyOutcome,
+      syncOnChain,
+      onChainSyncPrepared: onChainSync !== null,
+    },
+    'Admin resumed agent',
+  );
+
+  return {
+    active: true as const,
+    agentReactivated,
+    policyReactivated: policyOutcome === 'reactivated',
+    policyNote: RESUME_POLICY_NOTES[policyOutcome],
+    onChainSync,
   };
 }
 
@@ -475,10 +549,13 @@ export async function adminRoutes(fastify: FastifyInstance) {
    * POST /admin/agents/:id/pause — emergency kill switch (toggle).
    *
    * Off-chain effect (always): flips `agent.active`. When pausing, also sets
-   * `agentPolicy.active = false` so `PolicyService.validateTransaction` fails
-   * closed. Transactions that were already QUEUED when the pause landed are
-   * rejected by the worker's pre-submit guard
-   * (`services/transaction/pre-submit-guard.ts`) and marked FAILED.
+   * `agentPolicy.active = false` (stamping `pausedByOperatorAt`) so
+   * `PolicyService.validateTransaction` fails closed. Transactions that were
+   * already QUEUED when the pause landed are rejected by the worker's
+   * pre-submit guard (`services/transaction/pre-submit-guard.ts`) and marked
+   * FAILED. When the toggle resumes, it behaves exactly like
+   * POST /admin/agents/:id/resume (see `resumeAgent`): the DB policy is
+   * re-activated only if the pause deactivated it, and the response says so.
    *
    * On-chain effect: NONE is performed by the backend. Send
    * `{ "syncOnChain": true }` to receive `onChainSync` — the
@@ -487,52 +564,71 @@ export async function adminRoutes(fastify: FastifyInstance) {
    * PATCH /v1/agents/:id/policy. `onChainSync` is null when the agent's chain
    * has no policyModule configured or `syncOnChain` was not requested.
    *
-   * Note: resuming only flips `agent.active`; it does not re-activate the
-   * DB policy (use PATCH /v1/agents/:id/policy for that).
+   * Response: `{ active: false, onChainSync }` when pausing (unchanged);
+   * the resume response shape when resuming.
    */
   fastify.post<{ Params: { id: string }; Body: { syncOnChain?: boolean } | undefined }>(
     '/admin/agents/:id/pause',
     async (request, reply) => {
       if (!requireAdmin(request, reply)) return;
 
-      const parsed = pauseAgentSchema.safeParse(request.body ?? {});
-      if (!parsed.success) {
-        return reply.code(400).send({
-          error: 'Invalid request body',
-          details: parsed.error.flatten().fieldErrors,
-        });
-      }
-      const { syncOnChain } = parsed.data;
+      const body = parseKillSwitchBody(request, reply);
+      if (!body) return;
+      const { syncOnChain } = body;
 
       const agent = await db.agent.findUnique({ where: { id: request.params.id } });
       if (!agent) return reply.code(404).send({ error: 'Not found' });
 
-      const nowActive = !agent.active;
-      await db.agent.update({
-        where: { id: request.params.id },
-        data: { active: nowActive },
-      });
-
-      if (!nowActive) {
-        // Off-chain kill switch only: pause the DB policy so policy checks
-        // fail closed. The on-chain policy is NOT touched here.
-        await policyService.emergencyPause(request.params.id);
+      if (!agent.active) {
+        return resumeAgent(agent, syncOnChain);
       }
 
-      const onChainSync = syncOnChain
-        ? await buildKillSwitchOnChainSync(agent, !nowActive)
-        : null;
+      await db.agent.update({
+        where: { id: agent.id },
+        data: { active: false },
+      });
+
+      // Off-chain kill switch only: pause the DB policy so policy checks fail
+      // closed, stamping it so resume can undo exactly this flip. The on-chain
+      // policy is NOT touched here.
+      const policyPaused = await policyService.pauseByOperator(agent.id);
+
+      const onChainSync = syncOnChain ? await buildKillSwitchOnChainSync(agent, true) : null;
 
       logger.info(
         {
-          agentId: request.params.id,
-          nowActive,
+          agentId: agent.id,
+          nowActive: false,
+          policyPaused,
           syncOnChain,
           onChainSyncPrepared: onChainSync !== null,
         },
         'Admin toggled agent status',
       );
-      return { active: nowActive, onChainSync };
+      return { active: false, onChainSync };
+    },
+  );
+
+  /**
+   * POST /admin/agents/:id/resume — explicit, idempotent counterpart of the
+   * pause toggle. Never pauses. Sets `agent.active = true` and re-activates
+   * the DB policy only if the operator pause deactivated it; otherwise the
+   * policy is left as is and `policyNote` explains (use
+   * PATCH /v1/agents/:id/policy). Same `{ "syncOnChain": true }` contract as
+   * the pause route, returning `AgentPolicyModule.resume(safe)` calldata.
+   */
+  fastify.post<{ Params: { id: string }; Body: { syncOnChain?: boolean } | undefined }>(
+    '/admin/agents/:id/resume',
+    async (request, reply) => {
+      if (!requireAdmin(request, reply)) return;
+
+      const body = parseKillSwitchBody(request, reply);
+      if (!body) return;
+
+      const agent = await db.agent.findUnique({ where: { id: request.params.id } });
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+
+      return resumeAgent(agent, body.syncOnChain);
     },
   );
 
