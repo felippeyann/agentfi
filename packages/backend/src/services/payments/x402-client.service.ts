@@ -25,6 +25,18 @@
  * The buyer never contacts a facilitator: the resource server does. What
  * this service proves is therefore "the server told us it settled", not
  * "USDC moved on-chain" — see docs/architecture/x402-payments.md.
+ *
+ * Transport: `init.redirect` defaults to `'manual'` — a 3xx comes back as-is
+ * and is never followed, because following would re-send the signed
+ * `PAYMENT-SIGNATURE` to whatever origin `Location` names. `init.dispatcher`
+ * (undici) is forwarded explicitly on every transport call so a caller can
+ * pin the connection to addresses it validated (S4 — see
+ * `outbound-target.ts`); `@x402/fetch` only hands this service `Request`
+ * objects, so the init is not available to the transport by itself. The
+ * default transport is the `undici` package's own `fetch`
+ * (`undiciTransport`), never Node's built-in one, so a dispatcher built from
+ * that package is always driven by the same undici copy whatever the Node
+ * version bundles.
  */
 
 import { x402Client, x402HTTPClient } from '@x402/core/client';
@@ -59,6 +71,7 @@ import {
   isValidPaymentId,
 } from '@x402/extensions/payment-identifier';
 import { wrapFetchWithPayment } from '@x402/fetch';
+import { fetch as undiciFetch, type Dispatcher } from 'undici';
 import { formatUnits } from 'viem';
 import type { ClientSigner } from '../wallet/signer.js';
 
@@ -114,11 +127,21 @@ export class PaymentFailedError extends X402PaymentError {
 
 // ── Public types ────────────────────────────────────────────────────────────
 
+/**
+ * `RequestInit` plus undici's `dispatcher`: the Agent the transport must use
+ * (e.g. one pinned to validated addresses). Not part of the DOM typing, but
+ * Node's `fetch` reads it on every call.
+ */
+export interface TransportRequestInit extends RequestInit {
+  dispatcher?: Dispatcher;
+}
+
 export interface PayResourceParams {
   /** Wallet-backed signer (`toClientSigner(...)`) or any `{ address, signTypedData }`. */
   signer: ClientSigner;
   url: string;
-  init?: RequestInit;
+  /** `redirect` defaults to `'manual'` (3xx returned, never followed); `dispatcher` is forwarded to every transport call. */
+  init?: TransportRequestInit;
   /** Per-payment USD cap, e.g. `"$1"`, `"0.50"`. Required — no implicit default. */
   maxAmountUsd: string;
   /**
@@ -245,7 +268,11 @@ export interface TestOnlyGates {
 }
 
 export interface X402ClientServiceOptions {
-  /** Transport override (tests, loopback restriction). Defaults to `globalThis.fetch`. */
+  /**
+   * Transport override (tests, loopback restriction). Called as
+   * `fetch(request, { dispatcher })` — honour the second argument. Defaults
+   * to `undiciTransport`.
+   */
   fetch?: typeof globalThis.fetch;
   /** Default per-phase transport timeout in milliseconds. Default `DEFAULT_REQUEST_TIMEOUT_MS`. */
   requestTimeoutMs?: number;
@@ -381,6 +408,44 @@ function withTimeout(request: Request, timeoutMs: number): Request {
   return new Request(request, { signal });
 }
 
+/**
+ * Never follow redirects unless the caller explicitly asks: `fetch` would
+ * replay the request — signed `PAYMENT-SIGNATURE` included — against whatever
+ * origin `Location` names. The caller sees the 3xx and decides.
+ */
+function withTransportDefaults(init: TransportRequestInit | undefined): TransportRequestInit {
+  return { ...init, redirect: init?.redirect ?? 'manual' };
+}
+
+/**
+ * Default transport: the `undici` package's `fetch`, i.e. the same copy as
+ * the `Agent` a caller passes as `init.dispatcher` (Node's global `fetch`
+ * bundles its own undici — 6.x on Node 22, 7.x on Node 24 — and mixing an
+ * Agent from one major with the fetch of another is not supported). The
+ * `Request` built by `@x402/fetch` is a global one, which undici's `fetch`
+ * does not accept as input, so it is unpacked into URL + init; the body is
+ * buffered (resource bodies here are small JSON) and `redirect` / `signal`
+ * carry over unchanged.
+ */
+export const undiciTransport: typeof globalThis.fetch = async (input, init) => {
+  const request = input instanceof Request ? input : new Request(input, init);
+  const dispatcher = (init as TransportRequestInit | undefined)?.dispatcher;
+  const headers: Array<[string, string]> = [];
+  request.headers.forEach((value, key) => {
+    headers.push([key, value]);
+  });
+  const body = request.body ? await request.arrayBuffer() : undefined;
+  const response = await undiciFetch(request.url, {
+    method: request.method,
+    headers,
+    redirect: request.redirect,
+    signal: request.signal,
+    ...(body !== undefined ? { body } : {}),
+    ...(dispatcher ? { dispatcher } : {}),
+  });
+  return response as unknown as Response;
+};
+
 function positiveNumber(name: string, value: number | undefined, fallback: number): number {
   if (value === undefined) return fallback;
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
@@ -471,7 +536,7 @@ export class X402ClientService {
   private readonly testGates: TestOnlyGates;
 
   constructor(options: X402ClientServiceOptions = {}) {
-    this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.fetchImpl = options.fetch ?? undiciTransport;
     this.requestTimeoutMs = positiveNumber('requestTimeoutMs', options.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
     this.maxAuthorizationWindowSeconds = positiveNumber(
       'maxAuthorizationWindowSeconds',
@@ -486,7 +551,12 @@ export class X402ClientService {
   }
 
   async payResource(params: PayResourceParams): Promise<PayResourceResult> {
-    const { signer, url, init } = params;
+    const { signer, url } = params;
+    const init = withTransportDefaults(params.init);
+    // `@x402/fetch` turns `init` into a Request and only ever hands us
+    // Request objects (and clones), so the dispatcher must be re-attached on
+    // every transport call — Node's fetch reads `init.dispatcher` each time.
+    const transportInit = init.dispatcher ? ({ dispatcher: init.dispatcher } as RequestInit) : undefined;
     const safeUrl = redactUrl(url);
     const capUsd = parseCapUsd(params.maxAmountUsd);
     const networks = parseNetworks(params.allowedNetworks, params.allowWildcardNetworks === true);
@@ -588,7 +658,7 @@ export class X402ClientService {
       );
       // A ledger hook refused after signing: the signed payload must not leave.
       if (state.abort && hasPaymentHeader(request)) throw state.abort;
-      const response = await this.fetchImpl(request);
+      const response = await this.fetchImpl(request, transportInit);
       if (response.status === 402 && !hasPaymentHeader(request)) {
         const paymentRequired = await this.decodePaymentRequired(httpClient, response.clone(), ctx);
         state.paymentRequired = paymentRequired;

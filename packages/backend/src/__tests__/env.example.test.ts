@@ -95,3 +95,64 @@ describe('.env.example boots through config/env.ts', () => {
     await expect(bootWith({ ...example, X402_FACILITATOR_URL: 'not a url' })).rejects.toThrow(/process\.exit\(1\)/);
   });
 });
+
+describe('RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS (S4 development override)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    restoreEnv();
+  });
+
+  function example(): Record<string, string> {
+    return parse(readFileSync(EXAMPLE_FILE, 'utf8'));
+  }
+
+  it('ships as false and defaults to false when unset or blank', async () => {
+    expect(example()['RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS']).toBe('false');
+
+    const shipped = await bootWith(example());
+    expect(shipped.env.RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS).toBe('false');
+
+    const { RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS: _omit, ...unset } = example();
+    const absent = await bootWith(unset);
+    expect(absent.env.RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS).toBe('false');
+
+    const blank = await bootWith({ ...example(), RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS: '' });
+    expect(blank.env.RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS).toBe('false');
+    expect(blank.exit).not.toHaveBeenCalled();
+  });
+
+  it('may be true in development and test', async () => {
+    for (const NODE_ENV of ['development', 'test']) {
+      const { env, exit } = await bootWith({ ...example(), NODE_ENV, RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS: 'true' });
+      expect(exit).not.toHaveBeenCalled();
+      expect(env.RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS).toBe('true');
+    }
+  });
+
+  it.each(['production', 'staging'])('refuses to boot with true when NODE_ENV=%s (FATAL)', async (NODE_ENV) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(
+      bootWith({ ...example(), NODE_ENV, WALLET_PROVIDER: 'turnkey', RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS: 'true' }),
+    ).rejects.toThrow(
+      new RegExp(`process\\.exit\\(1\\)[\\s\\S]*FATAL: RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS=true cannot run with NODE_ENV=${NODE_ENV}`),
+    );
+  });
+
+  it.each(['production', 'staging'])('boots with false when NODE_ENV=%s', async (NODE_ENV) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { env, exit } = await bootWith({
+      ...example(),
+      NODE_ENV,
+      WALLET_PROVIDER: 'turnkey',
+      RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS: 'false',
+    });
+    expect(exit).not.toHaveBeenCalled();
+    expect(env.RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS).toBe('false');
+  });
+
+  it('rejects anything but true / false', async () => {
+    await expect(bootWith({ ...example(), RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS: 'yes' })).rejects.toThrow(
+      /process\.exit\(1\)/,
+    );
+  });
+});

@@ -273,13 +273,15 @@ The job's **provider** pays a third-party HTTP 402 (x402 v2) resource with its *
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `url` | yes | Absolute http(s) URL. Query strings are sent but **never stored or logged** (only origin + path is kept) |
+| `url` | yes | Absolute http(s) URL that resolves only to public addresses (see *Outbound target policy*). Query strings are sent but **never stored or logged** (only origin + path is kept) |
 | `method` | no | `GET` (default) or `POST` |
 | `body` | no | JSON body, `POST` only |
 | `maxAmount` | no | Caller's own cap in USDC (`"0.50"`); the lower of this and the remaining budget applies |
 | `paymentId` | no | Idempotency key, 16–128 chars of `[A-Za-z0-9_-]`, unique per job. Server UUID when omitted. **Reuse it on retries** |
 
 Budget: `remaining = reward − Σ amount of this job's payments in (reserved, pending, settled, unknown)`. A 402 price above the cap is refused **before anything is signed**. Only USDC on the job's chain is accepted (`400 UNSUPPORTED_ASSET`).
+
+Outbound target policy: before anything is fetched the hostname is resolved, and the request is refused (`400 INVALID_URL`) when the host is — or **any** address it resolves to is — loopback, private (RFC 1918, 100.64/10), link-local (169.254/16, fe80::/10), unique-local (fc00::/7), unspecified or otherwise reserved; IPv4-mapped (`::ffff:…`) and NAT64 (`64:ff9b::…`) addresses are judged by their IPv4. The connection is pinned to the addresses that were checked (no DNS rebinding), and redirects are never followed (`400 REDIRECT_REFUSED`). This applies in every environment; only a development backend with `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS=true` may reach a resource server on localhost (production and staging refuse to boot with it).
 
 **Response 200** — `{ payment, remainingBudget, resource, replayed?, warning? }`: `payment` is the `ResourcePayment` row (`null` when the resource never asked for payment), `remainingBudget` is `{ asset, symbol, decimals, network, total, spent, remaining, remainingFormatted }` in base units, `resource` is `{ status, headers (whitelist), body (JSON or text, capped at 64 KiB), truncated? }`. On an idempotent replay `replayed` is `true` and `resource` is `null`. The signed authorization is never returned — only its nonce (`payment.authorizationNonce`).
 
@@ -300,13 +302,14 @@ Terminal states never change; `unknown → settled` is reserved for the reconcil
 
 | Status | `code` | Details |
 |--------|--------|---------|
-| 400 | `VALIDATION_FAILED`, `INVALID_URL`, `INVALID_BUDGET`, `UNSUPPORTED_BUDGET_TOKEN`, `UNSUPPORTED_ASSET` | nothing signed; `UNSUPPORTED_ASSET` carries `required` and `offered` |
+| 400 | `VALIDATION_FAILED`, `INVALID_URL`, `INVALID_BUDGET`, `UNSUPPORTED_BUDGET_TOKEN`, `UNSUPPORTED_ASSET` | nothing signed; `UNSUPPORTED_ASSET` carries `required` and `offered`; an `INVALID_URL` from the target policy carries `refusal` (`private-host` \| `private-address` \| `unresolvable`), `hostname` and, for a resolved address, `address` |
+| 400 | `REDIRECT_REFUSED` | the resource answered `3xx`, which is never followed: `responseStatus`, `location` (query string stripped). Before signing `payment` is `null`; after signing `payment.status` is `refused`, or `settled` if the server reported a settlement on the redirect (the amount is spent — do not retry with a new `paymentId`) |
 | 402 | `BUDGET_EXCEEDED` | refused before signing: `price`, `remaining`, `cap` (base units), `payment` (`failed_before_signing`) |
 | 402 | `PAYMENT_REFUSED` | server rejected the signed payment or settlement failed: `reason`, `responseStatus`, `payment` (`refused`) |
 | 403 | `NOT_PROVIDER`, `AGENT_INACTIVE`, `POLICY_PAUSED` | |
 | 404 | `JOB_NOT_FOUND` | |
 | 409 | `JOB_NOT_ACTIVE`, `PAYMENT_IN_PROGRESS`, `PAYMENT_ID_CONFLICT` | |
-| 502 | `PAYMENT_FAILED` | 402 unusable, or request failed / timed out before signing: `stage`, `timedOut` |
+| 502 | `PAYMENT_FAILED` | transient DNS failure (`stage: "resolve"`), 402 unusable, or request failed / timed out before signing: `stage`, `timedOut` |
 | 502 | `PAYMENT_OUTCOME_UNKNOWN` | signed and sent, no answer: `authorization { method, nonce, validAfter, validBefore }`, `payment` (`unknown`). **Do not retry with a new `paymentId`** |
 
 MCP equivalent: `pay_for_resource` in `@agent_fi/mcp-server`.
