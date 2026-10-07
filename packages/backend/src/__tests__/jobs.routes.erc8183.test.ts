@@ -294,6 +294,29 @@ describe('PATCH /v1/jobs/:id on an ERC-8183 job', () => {
     expect(res.json()).toMatchObject({ status: 'PAYMENT_PENDING', escrow: { onChainStatus: 'FUNDED' } });
   });
 
+  it('R2: paid COMPLETED while the ERC-8004 binding is in flight answers 200 with the submit deferred', async () => {
+    const result = { answer: 42 };
+    const deferredAt = new Date('2026-10-07T12:00:00.000Z');
+    mockDb.job.findUnique
+      .mockResolvedValueOnce(escrowJob({ status: 'ACCEPTED', providerAgentIdStatus: 'BINDING', providerAgentId: '9598' }))
+      .mockResolvedValueOnce(
+        escrowJob({ status: 'PAYMENT_PENDING', result, providerAgentIdStatus: 'BINDING', providerAgentId: '9598', deferredSubmitAt: deferredAt }),
+      );
+    mockDb.job.update.mockResolvedValue(escrowJob({ status: 'PAYMENT_PENDING', result }));
+    runtimeMock.enqueueSubmit.mockResolvedValue({ deferred: true });
+    const app = await buildApp(PROVIDER.id);
+
+    const res = await patch(app, { status: 'COMPLETED', result });
+
+    expect(res.statusCode).toBe(200);
+    expect(runtimeMock.enqueueSubmit).toHaveBeenCalledWith({ jobId: 'job-1', result });
+    expect(paymentMock.executeA2APayment).not.toHaveBeenCalled();
+    expect(res.json()).toMatchObject({
+      status: 'PAYMENT_PENDING',
+      escrow: { onChainStatus: 'FUNDED', providerAgentId: '9598', providerAgentIdStatus: 'BINDING', deferredSubmitAt: deferredAt.toISOString() },
+    });
+  });
+
   it('a submit that cannot be enqueued returns the job to ACCEPTED and answers 503', async () => {
     mockDb.job.findUnique.mockResolvedValueOnce(escrowJob({ status: 'ACCEPTED' }));
     runtimeMock.enqueueSubmit.mockRejectedValue(new Error('no on-chain id'));
