@@ -33,7 +33,7 @@ export default defineConfig({
       DATABASE_URL:
         process.env['E2E_DATABASE_URL'] ??
         'postgresql://agentfi:agentfi@localhost:5432/agentfi',
-      REDIS_URL: 'redis://localhost:6379',
+      REDIS_URL: process.env['E2E_REDIS_URL'] ?? 'redis://localhost:6379',
       API_SECRET:
         process.env['API_SECRET'] ?? 'e2e-test-secret-min-32-chars-long!!',
       ADMIN_SECRET:

@@ -164,7 +164,9 @@ export async function setup(): Promise<void> {
 
   const LOCAL_DB = process.env['E2E_DATABASE_URL'] ?? 'postgresql://agentfi:agentfi@localhost:5432/agentfi';
   process.env['DATABASE_URL'] = LOCAL_DB;
-  process.env['REDIS_URL'] = 'redis://localhost:6379';
+  // Opt-in E2E_REDIS_URL: a dedicated logical DB when a dev stack's worker
+  // consumes the same queues on DB 0 (default unchanged).
+  process.env['REDIS_URL'] = process.env['E2E_REDIS_URL'] ?? 'redis://localhost:6379';
 
   const forkUrl = process.env['E2E_ANVIL_FORK_URL'];
   const forkRequired = process.env['E2E_ANVIL_FORK_REQUIRED'] === 'true';

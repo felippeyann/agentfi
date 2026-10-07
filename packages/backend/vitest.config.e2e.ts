@@ -40,7 +40,9 @@ export default defineConfig({
       // Never use the production Upstash/Neon URLs from .env — those have
       // request limits and would pollute production data.
       DATABASE_URL: process.env['E2E_DATABASE_URL'] ?? 'postgresql://agentfi:agentfi@localhost:5432/agentfi',
-      REDIS_URL:    'redis://localhost:6379',
+      // E2E_REDIS_URL (e.g. redis://localhost:6379/12) keeps the run off the
+      // dev stack's queues when docker-compose's API worker shares this Redis.
+      REDIS_URL:    process.env['E2E_REDIS_URL'] ?? 'redis://localhost:6379',
 
       // Secrets — dummy values are fine; E2E mocks bypass Turnkey and Alchemy
       API_SECRET:               process.env['API_SECRET']               ?? 'e2e-test-secret-min-32-chars-long!!',

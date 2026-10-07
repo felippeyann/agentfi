@@ -307,6 +307,22 @@ export async function flushTestRedis(redisUrl: string): Promise<void> {
   }
 }
 
+/**
+ * Fails fast when `port` is taken — typically an Anvil or backend left over by
+ * an interrupted run (on Windows killing the npm/vitest parent does not kill
+ * its children) — instead of silently talking to a stale process.
+ */
+export async function assertPortFree(port: number, what: string): Promise<void> {
+  const { createServer } = await import('net');
+  await new Promise<void>((resolve, reject) => {
+    const server = createServer();
+    server.once('error', () =>
+      reject(new Error(`[e2e:escrow-fork] port ${port} (${what}) is already in use — stop the leftover process or pick another port`)),
+    );
+    server.listen(port, '127.0.0.1', () => server.close(() => resolve()));
+  });
+}
+
 // ── Fork + deployment ──────────────────────────────────────────────────────
 
 export interface EscrowForkStack {
@@ -359,6 +375,9 @@ export async function startEscrowFork(config: EscrowForkConfig, log: (msg: strin
       throw new Error(`ANVIL_ACCOUNTS.${role}: key does not match address`);
     }
   }
+
+  await assertPortFree(config.anvilPort, 'Anvil, E2E_ESCROW_ANVIL_PORT');
+  await assertPortFree(config.backendPort, 'backend, E2E_ESCROW_BACKEND_PORT');
 
   const anvilRpc = `http://127.0.0.1:${config.anvilPort}`;
   log(`[e2e:escrow-fork] Starting Anvil fork of Base Sepolia on ${anvilRpc} (block ${config.forkBlockNumber ?? 'latest'})…`);

@@ -434,7 +434,9 @@ describe.skipIf(!ctx)('ERC-8183 escrow + ERC-8004 reputation on a Base Sepolia f
       expect(events.feedback).toHaveLength(0);
       const skipped = events.hook.find((e) => e.eventName === 'FeedbackSkipped');
       expect(skipped).toBeDefined();
-      expect(rejected.escrow!.feedbackStatus).toBe('skipped:not-submitted');
+      // A cancellation reject carries no optParams ("0x", erc-8183-mapping §6.4), so the
+      // hook's first gate already skips it — before the `not-submitted` gate.
+      expect(rejected.escrow!.feedbackStatus).toBe('skipped:no-params');
       expect(rejected.status).toBe('CANCELLED');
       expect((await fetchFeedbackFile(backend, created.id)).status).toBe(404);
 
