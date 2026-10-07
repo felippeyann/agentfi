@@ -57,3 +57,66 @@ Alternative: if you prefer the agent to broadcast, put the deployer key in `pack
 | Date | AgentFi agent id | `erc8004AgentId` | register tx | `agentURI` |
 |---|---|---|---|---|
 | | | | | |
+
+## 5. Fork rehearsal (C5a) — local Anvil fork, no real funds
+
+Everything C5 will do on Base Sepolia, rehearsed on a local Anvil fork of Base Sepolia so the real run only needs the owner's keys. Not testnet evidence: nothing below was broadcast to a public network, and the tables above stay empty until C4/C5.
+
+**What is real and what is not.** The fork (chain id 84532) carries the real state: Circle's testnet USDC `0x036C…CF7e`, the ERC-8004 Identity Registry `0x8004A818…BD9e` and Reputation Registry `0x8004B663…8713` (both implementation v2.0.0). `AgentJobEscrow` + `ReputationHook` are deployed fresh on the fork with the **same script and env names as the C4 runbook** (`script/DeployEscrow.s.sol`, `OPERATOR_ADDRESS`, `FEE_WALLET`, `TRUSTED_EVALUATOR`), signed with an Anvil test key (`--private-key`, the runbook's `--account` equivalent). The backend is the real `src/index.ts` (API + transaction worker + escrow settlement worker + payment recovery) in a child process with `WALLET_PROVIDER=local`, `RPC_URL_84532` pointing at Anvil, `AGENT_JOB_ESCROW_ADDRESS_84532` / `REPUTATION_HOOK_ADDRESS_84532` from the deploy and `ESCROW_EVALUATOR_PRIVATE_KEY` = an Anvil test key; the test drives it over HTTP like two agents.
+
+| Role | Anvil test account | Address |
+|---|---|---|
+| Deployer (`forge script --private-key`) | 0 | `0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266` |
+| `OPERATOR_ADDRESS` | 1 | `0x70997970C51812dc3A010C7d01b50e0d17dc79C8` |
+| `FEE_WALLET` / backend `OPERATOR_FEE_WALLET` | 2 | `0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC` |
+| `TRUSTED_EVALUATOR` / backend `ESCROW_EVALUATOR_PRIVATE_KEY` | 3 | `0x90F79bf6EB2c4f870365E785982E1f101E93b906` |
+
+Cheat codes (fork only): native ETH with `anvil_setBalance`; **USDC with `anvil_setStorageAt` on FiatToken v2.2's balance mapping, slot 9** (`balanceAndBlacklistStates`: balance in the low 255 bits) — verified with `balanceOf` after every write. The alternative also works and is what `examples/escrow-erc8183` uses (no keccak needed in a zero-dependency script): impersonate the token's `masterMinter` (`0xD52081E4…4E1c` at the fork block), `configureMinter` a throwaway minter, impersonate it, `mint`. The harness also aligns the fork's clock with the wall clock (`anvil_setTime`; the backend derives `expiredAt` from it) and clears the EIP-7702 delegations that sweeper bots have put on Anvil accounts 1–3 on the real Base Sepolia (`anvil_setCode(addr, "0x")`).
+
+### 5.1 Commands
+
+Prerequisites: Foundry 1.7.1 (`forge`, `anvil`), `git submodule update --init packages/contracts/lib/forge-std`, Postgres + Redis (`docker compose -f docker-compose.dev.yml up -d postgres redis`), `npm ci`. The public RPC `https://sepolia.base.org` serves archive state for the pinned block (occasional rate limiting: rerun).
+
+```bash
+cd packages/backend
+
+# Automated rehearsal (≈ 3 min): happy, cancellation, example script, contest, expiry
+E2E_ANVIL_FORK_URL=https://sepolia.base.org npm run test:e2e:escrow-fork
+
+# Same stack kept running for manual use (Ctrl+C stops it)
+E2E_ANVIL_FORK_URL=https://sepolia.base.org npm run e2e:escrow-fork:stack
+# …then, from the repository root, with the values it prints:
+AGENTFI_API_URL=http://127.0.0.1:3155 \
+AGENTFI_OPERATOR_SECRET=e2e-escrow-fork-api-secret-min-32-chars!! \
+AGENTFI_RPC_URL=http://127.0.0.1:8546 AGENTFI_FORK_FUNDING=true \
+node examples/escrow-erc8183/index.mjs
+```
+
+Without `E2E_ANVIL_FORK_URL` the suite is reported as skipped and exits 0 (CI). Knobs: `E2E_ANVIL_FORK_BLOCK_NUMBER` (default `47822000`, `latest` = unpinned), `E2E_ESCROW_ANVIL_PORT` (8546), `E2E_ESCROW_BACKEND_PORT` (3155), `E2E_DATABASE_URL` (default `…/agentfi_e2e_escrow`, created if missing and **emptied on every run**; `agentfi` is refused), `E2E_ESCROW_REDIS_URL` (default `redis://localhost:6379/13`, **flushed on every run**; DB 0 is refused because the docker-compose API worker consumes the same queue names there). Backend logs: `%TEMP%/agentfi-escrow-fork/backend-<name>-<ts>.log` (`/tmp/…` on Linux/macOS). An interrupted run on Windows can leave Anvil/the backend running; the next run stops with "port … is already in use".
+
+### 5.2 What the rehearsal proved (2026-10-07, fork block 47 822 000)
+
+Deployment (deterministic for the pinned block): `AgentJobEscrow` `0x70449abF99B0b470F0280D5E3036265cB849d77C`, `ReputationHook` `0x47D053c18726916e47f07D444B2D645235647677`; post-deploy reads match the runbook (`token()` = USDC, `platformFeeBP()` = 30, `operator()`, hook `acp()` / `trustedEvaluator()` / registries / `minFeedbackBudget()` = 1 000 000). Result: **5/5 passed in 182 s**.
+
+| Path | Backend env | What is asserted |
+|---|---|---|
+| Happy (2.5 USDC) | `ESCROW_EVALUATION_DELAY_SECONDS=0` | `createJob → setBudget → approve → fund` from the requester wallet; `getJob` Funded with client/provider/evaluator/hook/budget; provider `ACCEPTED` only once FUNDED; R2 `register(agentURI)` from the provider wallet (ERC-8004 agent **#9599**) + `setProviderAgentId`; `submit`; evaluator `complete`. On-chain: status Completed, provider +2 492 500 units (budget − 7 500), requester −2 500 000, `pendingPlatformFees` +7 500 (= 30 bps, still in the escrow), `PaymentReleased` / `PlatformFeeAccrued`, hook `FeedbackWritten(jobId, 9599, 100)`, registry `NewFeedback` (client = hook, value 100, `agentfi.job` / `completed`, feedbackURI = `/v1/jobs/:id/feedback.json`), `providerAgentId(jobId)` = 9599, `ownerOf` = `getAgentWallet` = provider wallet, `tokenURI` = `/v1/agents/:id/erc8004.json`, `getSummary(9599, [hook], "agentfi.job", "")` = (1, 100, 0). Off-chain: `keccak256(GET /v1/jobs/:id/feedback.json)` = the `feedbackHash` in `NewFeedback`; the file's `proofOfPayment.txHash` = the `JobFunded` tx; `escrow.platformFeeAmount` = 7 500, `feedbackStatus` = `written`; the registration file lists the identity. |
+| Cancellation while FUNDED | delay 0 | requester `CANCELLED` → evaluator `reject(…, "0x")` → Rejected, full refund, fee unchanged, no `NewFeedback`, hook `FeedbackSkipped` (`skipped:no-params`), `feedback.json` 404; the provider's in-flight binding ends `SKIPPED`. |
+| Example script | delay 0 | `examples/escrow-erc8183/index.mjs` exits 0 against the same backend in both flows, `happy` and `AGENTFI_FLOW=cancel` (fork funding via `masterMinter`). |
+| Contest while SUBMITTED | `ESCROW_EVALUATION_DELAY_SECONDS=20` | provider completes while the ERC-8004 binding is still in flight → `submit` **deferred** (R2) and released after `BOUND`; requester `POST /contest` inside the window → evaluator `reject` → Rejected, full refund, hook `FeedbackWritten(value 0)`, `NewFeedback` `rejected`, `getSummary(#9602, [hook], "agentfi.job", "rejected")` = (1, 0, 0), feedback file `outcome: rejected` with matching hash. |
+| Expiry | `ESCROW_JOB_TTL_SECONDS=60`, `PAYMENT_RECOVERY_INTERVAL_SEC=5` | FUNDED job, chain time moved past `expiredAt` (`evm_increaseTime`), the sweep's evaluator `claimRefund` → Expired, full refund, no hook call, job `FAILED`. |
+
+### 5.3 Bugs it found (fixed in the C5a PR)
+
+1. **No settlement could ever be enqueued.** The escrow settlement queue used BullMQ `jobId = "<action>:<jobId>"`; BullMQ 5 rejects custom ids with `:` (unless they split into exactly three parts), so every `complete` / `reject` / `claimRefund` enqueue threw `Custom Id cannot contain :`: jobs stuck `PAYMENT_PENDING`/`SUBMITTED`, no cancellation/contest refund, no expiry sweep. Now `<action>-<jobId>` (regression test runs BullMQ's own validation).
+2. **ERC-8004 feedback silently lost on every settlement.** The evaluator sent viem's default gas = `eth_estimateGas`, the lowest limit at which `complete` succeeds — and at that limit the hook's `giveFeedback` runs out of gas inside its try/catch, so the hook emits `FeedbackFailed(jobId, "")` and payment settles without feedback. Measured on the fork: estimate 246 770 → `FeedbackFailed`; full path 340 231 (`giveFeedback` 179 416). The evaluator signer now sends estimate + 400 000 (`EVALUATOR_GAS_HEADROOM`; unused gas is not charged).
+
+**Recommendation before C4 (contract change, owner's call — not done here).** Bug 2 is fixed for AgentFi's own evaluator, but the hook still lets *any* caller that trusts gas estimation lose the feedback (another evaluator client, a manual `cast send`, future third-party evaluators). Since the contracts are not deployed yet, consider a guard in `ReputationHook._write` before the `try`: revert the whole settlement when `gasleft()` is below a reserve that covers `giveFeedback` (e.g. 250 000) — estimators then converge on the full path, and only a caller that deliberately under-funds gas is affected (the evaluator is trusted). Needs a Foundry test with a gas-limited call and the 291-test suite rerun.
+
+**Observation (not a bug).** On Base Sepolia CoinGecko has no prices, so a USDC reward resolves to $0: the requester's daily-volume reservation is skipped (`Escrow: USD value resolved to 0`) and the revenue snapshot stays NULL. Expected on testnet; on Base mainnet USDC is priced.
+
+### 5.4 What C5 on Base Sepolia still needs from the owner
+
+1. C4: deployer key/keystore with Base Sepolia ETH, a fresh evaluator EOA (`cast wallet new`, a little ETH), the fee wallet address, `BASESCAN_API_KEY` (optional) — section 2 above.
+2. Backend `.env`: `ALCHEMY_API_KEY` (or `RPC_URL_84532`), `AGENT_JOB_ESCROW_ADDRESS_84532`, `REPUTATION_HOOK_ADDRESS_84532`, `ESCROW_EVALUATOR_PRIVATE_KEY`, `BACKEND_PUBLIC_URL` reachable from the internet if the `feedbackURI` / `agentURI` should resolve for third parties, transaction worker enabled.
+3. Faucet funds for the two agents of `examples/escrow-erc8183`: ≥ 1 USDC (Circle faucet) on the requester, ~0.0005 ETH on each wallet; then `node examples/escrow-erc8183/index.mjs` against that backend (happy path) and again with `AGENTFI_FLOW=cancel` (failure path: full refund), and record the rows of sections 3 and 4. A contest on testnet needs the backend's `ESCROW_EVALUATION_DELAY_SECONDS` > 0 and a `POST /v1/jobs/:id/contest` inside that window (the fork suite automates it).

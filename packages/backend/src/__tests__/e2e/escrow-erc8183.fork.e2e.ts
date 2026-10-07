@@ -452,7 +452,10 @@ describe.skipIf(!ctx)('ERC-8183 escrow + ERC-8004 reputation on a Base Sepolia f
       log(`cancel: provider binding ended ${settledBinding.escrow!.providerAgentIdStatus} (${settledBinding.escrow!.providerAgentIdError ?? 'no error'})`);
     });
 
-    it('examples/escrow-erc8183 runs the happy path end to end against this backend', async () => {
+    it.each([
+      ['happy', 'Escrow flow completed end to end', 'feedback written'],
+      ['cancel', 'Escrow cancellation refunded end to end', 'requester got     2.500000 USDC back'],
+    ])('examples/escrow-erc8183 (AGENTFI_FLOW=%s) runs end to end against this backend', async (flow, done, detail) => {
       const script = join(REPO_ROOT, 'examples', 'escrow-erc8183', 'index.mjs');
       const child = spawn(process.execPath, [script], {
         cwd: REPO_ROOT,
@@ -463,6 +466,8 @@ describe.skipIf(!ctx)('ERC-8183 escrow + ERC-8004 reputation on a Base Sepolia f
           AGENTFI_CHAIN_ID: String(fork.chainId),
           AGENTFI_RPC_URL: fork.anvilRpc,
           AGENTFI_FORK_FUNDING: 'true',
+          AGENTFI_FLOW: flow,
+          AGENTFI_REWARD_USDC: BUDGET,
           AGENTFI_POLL_INTERVAL_MS: '1000',
           NO_COLOR: '1',
         },
@@ -473,8 +478,9 @@ describe.skipIf(!ctx)('ERC-8183 escrow + ERC-8004 reputation on a Base Sepolia f
       child.stderr.on('data', (chunk) => (output += String(chunk)));
       const code = await new Promise<number | null>((resolve) => child.on('exit', resolve));
       if (code !== 0) throw new Error(`example exited ${code}:\n${output}\n--- backend log (tail) ---\n${backend.logTail(60)}`);
-      expect(output).toContain('Escrow flow completed end to end');
-      log(`example output (last lines):\n${output.trim().split(/\r?\n/).slice(-8).join('\n')}`);
+      expect(output).toContain(done);
+      expect(output).toContain(detail);
+      log(`example (${flow}) output (last lines):\n${output.trim().split(/\r?\n/).slice(-7).join('\n')}`);
     });
   });
 

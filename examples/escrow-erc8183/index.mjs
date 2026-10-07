@@ -18,6 +18,9 @@
  *      completes → USDC released minus the 30 bps platform fee, and the
  *      escrow's ReputationHook writes ERC-8004 feedback in the same tx
  *
+ * AGENTFI_FLOW=cancel runs the failure path instead: after step 3 the
+ * requester cancels → evaluator reject → the full budget is refunded.
+ *
  * Zero dependencies (Node 22 native fetch). It never sees a private key:
  * the agents' wallets live in the backend (Turnkey or the dev-only local
  * provider); this script only calls the AgentFi REST API and, to read
@@ -38,6 +41,13 @@ const REWARD_USDC = env.AGENTFI_REWARD_USDC ?? '1.0'; // ≥ 1 USDC: the hook's 
 const REQUESTER_API_KEY = env.AGENTFI_REQUESTER_API_KEY; // optional: reuse already-funded agents
 const PROVIDER_API_KEY = env.AGENTFI_PROVIDER_API_KEY;
 const FORK_FUNDING = env.AGENTFI_FORK_FUNDING === 'true';
+// `happy` (default) or `cancel`: the requester cancels once the budget is
+// locked → evaluator reject → full refund (C5's failure path).
+const FLOW = env.AGENTFI_FLOW ?? 'happy';
+if (!['happy', 'cancel'].includes(FLOW)) {
+  console.error(`AGENTFI_FLOW must be "happy" or "cancel" (got "${FLOW}")`);
+  process.exit(1);
+}
 const POLL_MS = Number(env.AGENTFI_POLL_INTERVAL_MS ?? 3000);
 const FUNDING_TIMEOUT_MS = Number(env.AGENTFI_FUNDING_TIMEOUT_SEC ?? 900) * 1000;
 const STEP_TIMEOUT_MS = Number(env.AGENTFI_STEP_TIMEOUT_SEC ?? 600) * 1000;
@@ -231,7 +241,7 @@ async function ensureFunded(requester, provider) {
 // ── main ───────────────────────────────────────────────────────────────────
 
 async function main() {
-  log('env', `API ${API_URL} · chain ${CHAIN_ID} · RPC ${RPC_URL} · USDC ${USDC} · reward ${REWARD_USDC} USDC${FORK_FUNDING ? ' · fork funding' : ''}`);
+  log('env', `API ${API_URL} · chain ${CHAIN_ID} · RPC ${RPC_URL} · USDC ${USDC} · reward ${REWARD_USDC} USDC · flow ${FLOW}${FORK_FUNDING ? ' · fork funding' : ''}`);
 
   log('1', REQUESTER_API_KEY && PROVIDER_API_KEY ? 'Reuse the requester and provider agents' : 'Register a requester and a provider agent');
   const stamp = Date.now();
@@ -259,6 +269,23 @@ async function main() {
   log('3', `job ${created.id} · evaluator ${created.escrow.evaluator} · createJob → setBudget → approve → fund`);
   const funded = await waitForJob(requester.apiKey, created.id, 'funding', (job) => job.escrow?.onChainStatus === 'FUNDED');
   log('3', `funded: on-chain job #${funded.escrow.onChainJobId} on ${funded.escrow.contract}`);
+
+  if (FLOW === 'cancel') {
+    const requesterLocked = await usdcBalance(requester.address);
+    log('4', 'Requester cancels the funded job → evaluator reject → full refund');
+    await api(`/v1/jobs/${created.id}`, { method: 'PATCH', apiKey: requester.apiKey, body: { status: 'CANCELLED' } });
+    const refunded = await waitForJob(requester.apiKey, created.id, 'refund', (job) => job.escrow?.onChainStatus === 'REJECTED', {
+      failOn: (job) => (job.escrow?.onChainStatus === 'FAILED' ? `escrow: ${job.escrow.escrowError}` : null),
+    });
+    const back = (await usdcBalance(requester.address)) - requesterLocked;
+    console.log('');
+    console.log(`       on-chain job      #${refunded.escrow.onChainJobId} (${refunded.escrow.contract}) → Rejected`);
+    console.log(`       refund tx         ${refunded.escrow.settleTxHash}${EXPLORER ? `  ${EXPLORER}/tx/${refunded.escrow.settleTxHash}` : ''}`);
+    console.log(`       requester got     ${fmtUsdc(back)} back (budget ${fmtUsdc(BUDGET_UNITS)}) · feedback ${refunded.escrow.feedbackStatus}`);
+    console.log('');
+    console.log(color('32', '✓ Escrow cancellation refunded end to end.'));
+    return;
+  }
 
   log('4', 'Provider accepts the funded job');
   await api(`/v1/jobs/${created.id}`, { method: 'PATCH', apiKey: provider.apiKey, body: { status: 'ACCEPTED' } });
