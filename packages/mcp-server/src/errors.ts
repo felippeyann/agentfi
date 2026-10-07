@@ -169,7 +169,7 @@ function splitTrailing(raw: string): [string, string] {
   return [raw.slice(0, end), raw.slice(end)];
 }
 
-function sanitizeUrl(raw: string, ctx: SanitizeContext): string {
+function sanitizeUrl(raw: string, ctx: SanitizeContext, keepNetworkLocations: boolean): string {
   const [candidate, trailing] = splitTrailing(raw);
   let url: URL;
   try {
@@ -177,7 +177,10 @@ function sanitizeUrl(raw: string, ctx: SanitizeContext): string {
   } catch {
     return '[redacted-url]' + trailing;
   }
-  if (ctx.internalOrigins.includes(url.origin.toLowerCase()) || isPrivateHostname(url.hostname)) {
+  if (
+    !keepNetworkLocations &&
+    (ctx.internalOrigins.includes(url.origin.toLowerCase()) || isPrivateHostname(url.hostname))
+  ) {
     return '[internal-url]' + trailing;
   }
   const hasCredentials = url.username !== '' || url.password !== '';
@@ -193,12 +196,27 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+export interface SanitizeOptions {
+  /**
+   * Keep internal-looking URLs, host names and private IPs (the network
+   * location rules). Only for typed refusals about the agent's OWN outbound
+   * target — see TARGET_REFUSAL_CODES. Secret, credential, stack-frame and
+   * file-path rules always apply.
+   */
+  keepNetworkLocations?: boolean;
+}
+
 /**
  * Strips secrets and internals from one string. Order matters: exact secrets
  * first (so a key inside a URL is gone before the URL rules look at it), then
  * the pattern rules, then paths and hosts.
  */
-export function sanitizeText(input: string, ctx: SanitizeContext = sanitizeContextFromEnv()): string {
+export function sanitizeText(
+  input: string,
+  ctx: SanitizeContext = sanitizeContextFromEnv(),
+  options: SanitizeOptions = {},
+): string {
+  const keepNetworkLocations = options.keepNetworkLocations === true;
   let text = input.length > MAX_INPUT_CHARS ? input.slice(0, MAX_INPUT_CHARS) : input;
 
   text = text.replace(STACK_FRAME_LINE, '');
@@ -214,15 +232,20 @@ export function sanitizeText(input: string, ctx: SanitizeContext = sanitizeConte
 
   text = text.replace(FILE_URL, '[path]');
   text = text.replace(CREDENTIAL_URL, '[redacted-url]');
-  text = text.replace(URL_PATTERN, (raw) => sanitizeUrl(raw, ctx));
+  text = text.replace(URL_PATTERN, (raw) => sanitizeUrl(raw, ctx, keepNetworkLocations));
 
-  for (const host of ctx.internalHosts) {
-    text = text.replace(new RegExp(`(?<![\\w.-])${escapeRegExp(host)}(?::\\d{1,5})?(?![\\w.-])`, 'gi'), '[internal-host]');
+  if (!keepNetworkLocations) {
+    for (const host of ctx.internalHosts) {
+      text = text.replace(
+        new RegExp(`(?<![\\w.-])${escapeRegExp(host)}(?::\\d{1,5})?(?![\\w.-])`, 'gi'),
+        '[internal-host]',
+      );
+    }
+    text = text.replace(INTERNAL_SUFFIX_HOST, '[internal-host]');
+    text = text.replace(PRIVATE_IPV4, '[internal-host]');
+    text = text.replace(IPV6_LOOPBACK, '[internal-host]');
+    text = text.replace(LOCALHOST, '[internal-host]');
   }
-  text = text.replace(INTERNAL_SUFFIX_HOST, '[internal-host]');
-  text = text.replace(PRIVATE_IPV4, '[internal-host]');
-  text = text.replace(IPV6_LOOPBACK, '[internal-host]');
-  text = text.replace(LOCALHOST, '[internal-host]');
 
   text = text.replace(WINDOWS_PATH, '[path]');
   text = text.replace(UNIX_PATH, (path) =>
@@ -248,15 +271,16 @@ const SECRET_KEY =
 export function sanitizeValue(
   value: unknown,
   ctx: SanitizeContext = sanitizeContextFromEnv(),
+  options: SanitizeOptions = {},
   depth = 0,
 ): unknown {
-  if (typeof value === 'string') return sanitizeText(value, ctx);
+  if (typeof value === 'string') return sanitizeText(value, ctx, options);
   if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
   if (typeof value === 'bigint') return value.toString();
   if (value === undefined || typeof value === 'function' || typeof value === 'symbol') return undefined;
   if (depth >= MAX_DEPTH) return '[truncated]';
   if (Array.isArray(value)) {
-    const items = value.slice(0, MAX_ARRAY_ITEMS).map((item) => sanitizeValue(item, ctx, depth + 1));
+    const items = value.slice(0, MAX_ARRAY_ITEMS).map((item) => sanitizeValue(item, ctx, options, depth + 1));
     if (value.length > MAX_ARRAY_ITEMS) items.push(`[${value.length - MAX_ARRAY_ITEMS} more items truncated]`);
     return items;
   }
@@ -268,7 +292,7 @@ export function sanitizeValue(
         out[key] = '[redacted]';
         continue;
       }
-      const clean = sanitizeValue(inner, ctx, depth + 1);
+      const clean = sanitizeValue(inner, ctx, options, depth + 1);
       if (clean !== undefined) out[key] = clean;
     }
     return out;
@@ -321,6 +345,18 @@ function networkErrorCode(err: unknown): string | undefined {
   if (err instanceof TypeError && err.message === 'fetch failed') return 'FETCH_FAILED';
   return undefined;
 }
+
+/**
+ * Typed refusals about the agent's OWN outbound target (pay_for_resource,
+ * S4): `INVALID_URL` carries `refusal` / `hostname` / `address` (the agent's
+ * hostname and what it resolved to) and `REDIRECT_REFUSED` carries the third
+ * party's redirect `location` (already stripped of query and userinfo by the
+ * backend). Those values are the agent's input or a third party's answer,
+ * not AgentFi infrastructure, and the agent needs them to fix its request —
+ * so the network-location rules are not applied to them. Every secret rule
+ * still is.
+ */
+export const TARGET_REFUSAL_CODES: ReadonlySet<string> = new Set(['INVALID_URL', 'REDIRECT_REFUSED']);
 
 /** Backends that put the code in `error` (e.g. `{ error: 'ESCROW_NOT_FUNDED' }`). */
 const CODE_LIKE = /^[A-Z][A-Z0-9_]{2,}$/;
@@ -432,8 +468,11 @@ export function buildToolErrorPayload(err: unknown, options: ToolErrorOptions): 
   const ctx = options.context ?? sanitizeContextFromEnv();
   const traceId = options.traceId ?? newTraceId();
   const described = describeError(err);
-  const message = sanitizeText(described.message, ctx) || 'Unknown error';
-  const details = described.details !== undefined ? sanitizeValue(described.details, ctx) : undefined;
+  const rules: SanitizeOptions = {
+    keepNetworkLocations: described.code !== undefined && TARGET_REFUSAL_CODES.has(described.code),
+  };
+  const message = sanitizeText(described.message, ctx, rules) || 'Unknown error';
+  const details = described.details !== undefined ? sanitizeValue(described.details, ctx, rules) : undefined;
   return {
     error: message,
     ...(described.code !== undefined ? { code: sanitizeText(described.code, ctx) } : {}),

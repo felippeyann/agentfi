@@ -146,6 +146,14 @@ describe('sanitizeText — stripping rules', () => {
     expect(sanitizeText(msg2, ctx)).toBe(msg2);
   });
 
+  it('keepNetworkLocations keeps hosts, IPs and internal URLs but still strips secrets', () => {
+    const msg = `redirect to http://169.254.169.254/x from localhost via 10.0.0.5 (key ${API_KEY})`;
+    expect(sanitizeText(msg, ctx, { keepNetworkLocations: true })).toBe(
+      'redirect to http://169.254.169.254/x from localhost via 10.0.0.5 (key [redacted])',
+    );
+    expect(sanitizeText(msg, ctx)).toBe('redirect to [internal-url] from [internal-host] via [internal-host] (key [redacted])');
+  });
+
   it('caps very long messages', () => {
     const out = sanitizeText('x'.repeat(10_000), ctx);
     expect(out.length).toBeLessThan(4_100);

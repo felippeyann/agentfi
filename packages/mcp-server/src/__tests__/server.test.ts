@@ -164,6 +164,74 @@ describe('tools/call error sanitizing', () => {
   });
 });
 
+describe('pay_for_resource outbound-target refusals (S4) pass through unchanged', () => {
+  const args = { job_id: 'job_1', url: 'https://agent-target.example/data', payment_id: 'pay_0123456789abcdef' };
+
+  it.each([
+    {
+      error: 'url must not point at a private, loopback, link-local or reserved host (localhost)',
+      code: 'INVALID_URL',
+      refusal: 'private-host',
+      hostname: 'localhost',
+    },
+    {
+      error:
+        'url hostname resolves to a private, loopback, link-local or reserved address (agent-target.example → 10.0.0.5)',
+      code: 'INVALID_URL',
+      refusal: 'private-address',
+      hostname: 'agent-target.example',
+      address: '10.0.0.5',
+    },
+    {
+      error: 'url hostname resolves to a private, loopback, link-local or reserved address (db.internal → 169.254.169.254)',
+      code: 'INVALID_URL',
+      refusal: 'private-address',
+      hostname: 'db.internal',
+      address: '169.254.169.254',
+    },
+  ])('INVALID_URL $refusal keeps message, refusal, hostname and address', async (body) => {
+    fetchMock.mockImplementation(async () => jsonResponse(400, body));
+    const result = await callTool('pay_for_resource', args, { log });
+    expect(result.isError).toBe(true);
+    const { error, code, ...rest } = body;
+    expect(payloadOf(result)).toMatchObject({
+      error: `AgentFi API error 400: ${error}`,
+      code,
+      status: 400,
+      details: rest,
+    });
+  });
+
+  it('REDIRECT_REFUSED keeps the redirect location and payment fields', async () => {
+    const body = {
+      error:
+        'The resource answered HTTP 302 (redirect to http://169.254.169.254/latest/meta-data/); redirects are not followed for paid resources. Nothing was signed.',
+      code: 'REDIRECT_REFUSED',
+      paymentId: 'pay_0123456789abcdef',
+      responseStatus: 302,
+      location: 'http://169.254.169.254/latest/meta-data/',
+      payment: null,
+    };
+    fetchMock.mockImplementation(async () => jsonResponse(400, body));
+    const payload = payloadOf(await callTool('pay_for_resource', args, { log }));
+    const { error, code, ...rest } = body;
+    expect(payload).toMatchObject({ error: `AgentFi API error 400: ${error}`, code, status: 400, details: rest });
+  });
+
+  it('still applies the secret rules to those refusals', async () => {
+    fetchMock.mockImplementation(async () =>
+      jsonResponse(400, {
+        error: 'redirect refused',
+        code: 'REDIRECT_REFUSED',
+        location: `https://evil.example/collect/${API_KEY}`,
+      }),
+    );
+    const payload = payloadOf(await callTool('pay_for_resource', args, { log }));
+    expect(JSON.stringify(payload)).not.toContain(API_KEY);
+    expect(payload['details']).toEqual({ location: 'https://evil.example/collect/[redacted]' });
+  });
+});
+
 describe('pay_for_resource typed refusals (unchanged)', () => {
   it('returns BUDGET_EXCEEDED as structured, non-error output', async () => {
     const body = {
