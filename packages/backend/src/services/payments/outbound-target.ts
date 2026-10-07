@@ -79,7 +79,7 @@ export type OutboundTargetRefusal =
 export class OutboundTargetError extends Error {
   readonly refusal: OutboundTargetRefusal;
   readonly hostname: string;
-  /** The offending address, for `private-address`. */
+  /** The offending address, for `private-address`. Logged only — never sent to the caller (S5). */
   readonly address: string | undefined;
 
   constructor(refusal: OutboundTargetRefusal, hostname: string, message: string, address?: string) {
@@ -249,10 +249,13 @@ export async function assertPublicTarget(url: URL, policy: OutboundTargetPolicy 
   if (!allowPrivate) {
     for (const { address } of addresses) {
       if (isPrivateAddress(address)) {
+        // The message goes back to the agent, so it names the hostname (the
+        // agent's input) but not the address it resolved to (S5) — that would
+        // let an agent map internal DNS names. `address` is for the log.
         throw new OutboundTargetError(
           'private-address',
           hostname,
-          `url hostname resolves to a private, loopback, link-local or reserved address (${hostname} → ${address})`,
+          `url hostname resolves to a private, loopback, link-local or reserved address (${hostname})`,
           address,
         );
       }

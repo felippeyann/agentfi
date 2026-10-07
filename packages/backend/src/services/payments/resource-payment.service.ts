@@ -1095,9 +1095,10 @@ export class ResourcePaymentService {
    * Outbound target policy (S4): refuse a private / loopback / link-local /
    * reserved destination — literal, or any address the hostname resolves to
    * — and return the addresses the connection will be pinned to. Refusals
-   * are `400 INVALID_URL` with `refusal`, `hostname` and (for a resolved
-   * address) `address`; a transient resolver failure is `502 PAYMENT_FAILED`
-   * with `stage: "resolve"`. Nothing is recorded or signed either way.
+   * are `400 INVALID_URL` with `refusal` and `hostname`; the offending
+   * resolved `address` is only logged (S5); a transient resolver failure is
+   * `502 PAYMENT_FAILED` with `stage: "resolve"`. Nothing is recorded or
+   * signed either way.
    */
   private async validateTarget(target: Target, paymentId: string): Promise<ValidatedTarget> {
     try {
@@ -1116,10 +1117,12 @@ export class ResourcePaymentService {
           payment: null,
         });
       }
+      // S5: no `address`. The private address an agent-supplied name resolved
+      // to would let an agent map internal DNS names; it stays in the warn
+      // log above. `refusal` and `hostname` (the agent's own input) remain.
       throw new ResourcePaymentError('INVALID_URL', 400, error.message, {
         refusal: error.refusal,
         hostname: error.hostname,
-        ...(error.address !== undefined ? { address: error.address } : {}),
       });
     }
   }

@@ -66,6 +66,7 @@ vi.mock('../services/wallet/index.js', () => ({
 import Fastify, { type FastifyInstance } from 'fastify';
 import { Agent } from 'undici';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { logger } from '../api/middleware/logger.js';
 import { resourcePaymentRoutes } from '../api/routes/resource-payments.js';
 import { env } from '../config/env.js';
 import type { TargetLookup } from '../services/payments/outbound-target.js';
@@ -248,13 +249,20 @@ describe('pay-resource outbound target policy — default configuration (S4)', (
       const res = await pay(app, 'https://metadata.attacker.example/latest/meta-data/');
 
       expect(res.statusCode).toBe(400);
-      expect(res.json()).toMatchObject({
+      expect(res.json()).toEqual({
+        error: 'url hostname resolves to a private, loopback, link-local or reserved address (metadata.attacker.example)',
         code: 'INVALID_URL',
         refusal: 'private-address',
         hostname: 'metadata.attacker.example',
-        address,
       });
-      expect(res.json().error).toMatch(/resolves to a private/);
+      // S5: the private address the name resolved to is never sent back (it
+      // would let an agent map internal DNS names) — only logged.
+      expect(res.json()).not.toHaveProperty('address');
+      expect(res.payload).not.toContain(address);
+      expect(vi.mocked(logger.warn)).toHaveBeenCalledWith(
+        expect.objectContaining({ refusal: 'private-address', hostname: 'metadata.attacker.example', address }),
+        expect.stringContaining('refused by the outbound target policy'),
+      );
       expect(lookup).toHaveBeenCalledWith('metadata.attacker.example');
       expectNothingHappened();
     });

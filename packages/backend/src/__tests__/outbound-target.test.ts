@@ -148,6 +148,9 @@ describe('assertPublicTarget', () => {
     const lookup = resolvesTo(['93.184.216.34', 4], ['2606:4700:4700::1111', 6], ['10.1.2.3', 4]);
     const error = await refusal(assertPublicTarget(new URL('https://Mixed.Example.com/x'), { lookup }));
     expect(error).toMatchObject({ refusal: 'private-address', hostname: 'mixed.example.com', address: '10.1.2.3' });
+    // S5: the message reaches the agent, so only the property (for the log) names the address.
+    expect(error?.message).toContain('mixed.example.com');
+    expect(error?.message).not.toContain('10.1.2.3');
     expect(lookup).toHaveBeenCalledWith('mixed.example.com');
   });
 

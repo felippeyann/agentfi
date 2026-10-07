@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { getWalletService } from '../../services/wallet/index.js';
 import { X402ClientService } from '../../services/payments/x402-client.service.js';
+import { sanitizeErrorFields, TARGET_REFUSAL_CODES } from '../errors/sanitize.js';
 import {
   ResourcePaymentError,
   ResourcePaymentService,
@@ -72,10 +73,21 @@ export async function resourcePaymentRoutes(
         ...(maxAmount !== undefined ? { maxAmount } : {}),
         ...(paymentId !== undefined ? { paymentId } : {}),
       });
-      return reply.code(200).send(outcome);
+      // The ledger row's `error` (e.g. an `unknown` replay) is sanitized; the
+      // paid `resource` is the third party's answer and is returned untouched.
+      return reply
+        .code(200)
+        .send(outcome.payment ? { ...outcome, payment: sanitizeErrorFields(outcome.payment) } : outcome);
     } catch (err) {
       if (err instanceof ResourcePaymentError) {
-        return reply.code(err.httpStatus).send({ error: err.message, code: err.code, ...err.details });
+        // S5: the message and the error-text fields (`reason`, `payment.error`)
+        // can carry upstream text (x402 server, facilitator, wallet, RPC), so
+        // they are sanitized; codes, amounts, ids and the agent's own URL stay.
+        // A target refusal keeps the agent's hostname / private literal.
+        const body = { error: err.message, code: err.code, ...err.details };
+        return reply
+          .code(err.httpStatus)
+          .send(sanitizeErrorFields(body, { keepNetworkLocations: TARGET_REFUSAL_CODES.has(err.code) }));
       }
       throw err;
     }
