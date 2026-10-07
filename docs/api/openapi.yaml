@@ -996,6 +996,116 @@ paths:
               schema: { $ref: '#/components/schemas/FeedbackFile' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /v1/jobs/{id}/pay-resource:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Jobs]
+      summary: Pay an x402 (HTTP 402) resource from the job's remaining budget
+      description: |
+        The job's **provider** pays a third-party `402` resource with its own
+        USDC, within the job's remaining reward budget
+        (`reward − Σ reserved/pending/settled/unknown payments on the job`).
+        The requester cannot call this (`403 NOT_PROVIDER`); the job must be
+        `ACCEPTED` (`409 JOB_NOT_ACTIVE`); the job reward must be denominated
+        in USDC on a supported chain (`400 UNSUPPORTED_BUDGET_TOKEN`).
+
+        The backend fetches `url`. On a `402` it checks the offered price
+        against the cap — the lower of the remaining budget and `maxAmount` —
+        **before anything is signed**, reserves the amount in a durable
+        `ResourcePayment` row (under a row lock on the job, so concurrent
+        payments cannot overspend), signs an EIP-3009 USDC authorization with
+        the provider's wallet and resends the request with
+        `PAYMENT-SIGNATURE`. Only USDC on the job's chain is accepted
+        (`400 UNSUPPORTED_ASSET`). A non-402 response (free resource, or an
+        error) is returned untouched with `payment: null`.
+
+        **Idempotency.** `paymentId` is unique per job (a server UUID when
+        omitted). A retry with the same id returns the existing row *without a
+        second payment* when it is `pending`, `settled` or `unknown`
+        (`replayed: true`, `resource: null`); a `reserved` row is an attempt
+        in flight (`409 PAYMENT_IN_PROGRESS`); only `refused` /
+        `failed_before_signing` rows are retried, on the same row. The id is
+        also sent to the server inside the x402 `payment-identifier`
+        extension so a cache-enabled server deduplicates on its side.
+
+        **State machine** (`ResourcePayment.status`):
+        `reserved → pending → settled | unknown | refused`, plus
+        `failed_before_signing` for refusals before any signature. `unknown`
+        (timeout or transport error after signing; `502
+        PAYMENT_OUTCOME_UNKNOWN`) is never retried automatically and stays
+        reserved against the budget until an operator reconciles it.
+
+        When the server provides an `offer-receipt`, it is verified against
+        the accepted offer; a mismatch still settles but is stored with
+        `receiptVerified: false`. The signed authorization is never echoed
+        back; only its nonce and validity window are.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PayResourceRequest' }
+      responses:
+        '200':
+          description: |
+            The resource was fetched (or the payment replayed). `payment` is the
+            ledger row — `settled`, or `unknown` with a `warning` when the
+            server reported no settlement — or `null` when the resource never
+            asked for payment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayResourceResponse' }
+        '400':
+          description: |
+            `VALIDATION_FAILED`, `INVALID_URL`, `INVALID_BUDGET`,
+            `UNSUPPORTED_BUDGET_TOKEN` (the job reward is not USDC) or
+            `UNSUPPORTED_ASSET` (the 402 does not offer USDC on the job's chain
+            within the allowed authorization window). Nothing was signed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResourcePaymentError' }
+        '402':
+          description: |
+            `BUDGET_EXCEEDED` — refused before signing; `price`, `remaining` and
+            `cap` are base units — or `PAYMENT_REFUSED` — the server answered
+            the signed payment (verification rejected, settlement failed, or a
+            4xx/5xx) without settling it; `payment.status` is `refused` and the
+            same `paymentId` may be retried.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResourcePaymentError' }
+        '403':
+          description: '`NOT_PROVIDER` (only the provider pays), `AGENT_INACTIVE` or `POLICY_PAUSED`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResourcePaymentError' }
+        '404':
+          description: '`JOB_NOT_FOUND`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResourcePaymentError' }
+        '409':
+          description: |
+            `JOB_NOT_ACTIVE` (job is not `ACCEPTED`), `PAYMENT_IN_PROGRESS`
+            (same `paymentId` currently reserved) or `PAYMENT_ID_CONFLICT`
+            (same `paymentId`, different URL or method).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResourcePaymentError' }
+        '502':
+          description: |
+            `PAYMENT_FAILED` — the 402 was unusable or the request failed / timed
+            out before anything was signed — or `PAYMENT_OUTCOME_UNKNOWN` — a
+            signed authorization left the process and no answer came back.
+            `payment.status` is `unknown`; `authorization` carries the nonce
+            and window for reconciliation. Do not retry with a new `paymentId`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResourcePaymentError' }
+
   # ── Admin ───────────────────────────────────────────────────────────────
   /admin/stats:
     get:
@@ -2050,3 +2160,170 @@ components:
         deliverableHash: { type: string, nullable: true }
         evaluator: { type: string }
         issuedAt: { type: string, format: date-time }
+    ResourcePaymentStatus:
+      type: string
+      description: |
+        Ledger state of a job-scoped x402 payment:
+        `reserved` (budget checked, nothing signed) → `pending` (authorization
+        signed and sent) → `settled` | `unknown` (no answer after signing;
+        money may have moved, never retried automatically) | `refused`
+        (server answered 4xx/5xx after signing, no settlement);
+        `failed_before_signing` for refusals before any signature.
+      enum: [reserved, pending, settled, unknown, refused, failed_before_signing]
+
+    ResourcePayment:
+      type: object
+      description: One attempt to pay a 402 resource from a job budget. Never carries the signed authorization.
+      properties:
+        id: { type: string }
+        jobId: { type: string }
+        agentId: { type: string, description: The payer — the job's provider. }
+        url: { type: string, description: 'Origin + path only; query string, fragment and userinfo are stripped.' }
+        method: { type: string, enum: [GET, POST] }
+        network: { type: string, description: 'CAIP-2 id, e.g. `eip155:84532`.' }
+        asset: { type: string, description: USDC contract on the job's chain. }
+        amount: { type: string, description: 'Price in base units (`"400000"` = 0.40 USDC).' }
+        payTo: { type: string }
+        paymentId: { type: string, description: 'x402 `payment-identifier` id, unique per job.' }
+        authorizationNonce:
+          type: string
+          nullable: true
+          description: EIP-3009 / Permit2 nonce of the signed authorization; set once signed.
+        status: { $ref: '#/components/schemas/ResourcePaymentStatus' }
+        receipt:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Raw `offer-receipt` receipt from the resource server, when provided.
+        receiptVerified:
+          type: boolean
+          nullable: true
+          description: True when the receipt verified against the accepted offer; false means it was marked unverified.
+        settlementTxHash: { type: string, nullable: true }
+        responseStatus: { type: integer, nullable: true }
+        error: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    PayResourceRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          description: Absolute http(s) URL of the 402 resource. Query strings are sent but never stored or logged.
+        method: { type: string, enum: [GET, POST], default: GET }
+        body:
+          description: JSON body; only allowed with `POST`.
+        maxAmount:
+          type: string
+          pattern: '^\d+(\.\d{1,6})?$'
+          description: 'Caller cap in USDC human units (e.g. `"0.50"`); the lower of this and the remaining job budget applies.'
+        paymentId:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{16,128}$'
+          description: Idempotency key, unique per job. Server-generated UUID when omitted; reuse it on retries.
+
+    RemainingBudget:
+      type: object
+      properties:
+        asset: { type: string, description: USDC contract on the job's chain. }
+        symbol: { type: string, example: USDC }
+        decimals: { type: integer, example: 6 }
+        network: { type: string, example: 'eip155:84532' }
+        total: { type: string, description: Job reward in base units. }
+        spent: { type: string, description: 'Base units reserved, pending, settled or unknown.' }
+        remaining: { type: string, description: Base units. }
+        remainingFormatted: { type: string, example: '0.6' }
+
+    ResourceResponse:
+      type: object
+      description: The resource server's final response, capped at 64 KiB.
+      properties:
+        status: { type: integer }
+        headers:
+          type: object
+          additionalProperties: { type: string }
+          description: Whitelisted headers only (content-type, content-length, cache-control, etag, last-modified, date, x-request-id).
+        body:
+          description: Parsed JSON when the response is JSON and fits the cap; otherwise text.
+        truncated: { type: boolean, description: True when the body was cut at 64 KiB. }
+
+    PayResourceResponse:
+      type: object
+      required: [payment, remainingBudget, resource]
+      properties:
+        payment:
+          type: object
+          nullable: true
+          allOf:
+            - { $ref: '#/components/schemas/ResourcePayment' }
+        remainingBudget: { $ref: '#/components/schemas/RemainingBudget' }
+        resource:
+          type: object
+          nullable: true
+          allOf:
+            - { $ref: '#/components/schemas/ResourceResponse' }
+        replayed:
+          type: boolean
+          description: True when an existing `pending` / `settled` / `unknown` row was returned without a new payment.
+        warning:
+          type: string
+          description: Present when `payment.status` is `unknown`.
+
+    ResourcePaymentError:
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          required: [code]
+          properties:
+            code:
+              type: string
+              enum:
+                - VALIDATION_FAILED
+                - INVALID_URL
+                - INVALID_BUDGET
+                - UNSUPPORTED_BUDGET_TOKEN
+                - UNSUPPORTED_ASSET
+                - BUDGET_EXCEEDED
+                - NOT_PROVIDER
+                - AGENT_INACTIVE
+                - POLICY_PAUSED
+                - JOB_NOT_FOUND
+                - JOB_NOT_ACTIVE
+                - PAYMENT_IN_PROGRESS
+                - PAYMENT_ID_CONFLICT
+                - PAYMENT_REFUSED
+                - PAYMENT_FAILED
+                - PAYMENT_OUTCOME_UNKNOWN
+                - LEDGER_ERROR
+            paymentId: { type: string }
+            price:
+              type: string
+              nullable: true
+              description: 'Offered price in base units (`BUDGET_EXCEEDED`); `null` when the budget was exhausted before fetching.'
+            priceFormatted: { type: string, example: '0.4' }
+            remaining: { type: string, description: Remaining job budget in base units. }
+            remainingFormatted: { type: string }
+            cap: { type: string, description: Effective per-payment cap in base units (min of remaining budget and `maxAmount`). }
+            capFormatted: { type: string }
+            reason: { type: string, description: 'Server-supplied reason (`PAYMENT_REFUSED`), clipped at 200 characters.' }
+            responseStatus: { type: integer }
+            stage:
+              type: string
+              enum: [request, payment-creation, paid-request]
+              description: 'Phase that failed (`PAYMENT_FAILED`).'
+            timedOut: { type: boolean }
+            authorization:
+              type: object
+              description: 'Nonce and window of the signed authorization (`PAYMENT_OUTCOME_UNKNOWN`), for reconciliation. Never the signature.'
+              properties:
+                method: { type: string, enum: [eip3009, permit2] }
+                nonce: { type: string }
+                validAfter: { type: string }
+                validBefore: { type: string }
+            payment:
+              type: object
+              nullable: true
+              allOf:
+                - { $ref: '#/components/schemas/ResourcePayment' }

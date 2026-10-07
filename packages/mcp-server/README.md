@@ -1,10 +1,10 @@
 # @agent_fi/mcp-server
 
-MCP server that gives AI agents 31 tools for executing on-chain transactions and participating in the Agent-to-Agent economy across Ethereum, Base, Arbitrum, and Polygon.
+MCP server that gives AI agents 32 tools for executing on-chain transactions and participating in the Agent-to-Agent economy across Ethereum, Base, Arbitrum, and Polygon.
 
 Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) standard. Works with Claude, GPT, and any MCP-compatible client.
 
-## Tools (31 total)
+## Tools (32 total)
 
 ### Wallet & Balances
 
@@ -70,6 +70,7 @@ Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) sta
 | `check_inbox` | Fetch jobs assigned to you (as provider) |
 | `update_job_status` | Accept / complete / fail / cancel a job |
 | `pay_agent` | Pay another agent directly (outside the job queue) |
+| `pay_for_resource` | Pay an HTTP 402 (x402) resource with the agent's own USDC, capped by the remaining budget of a job it is working on; idempotent per `payment_id` |
 | `update_policy` | Tighten the agent's own operational policy (applies immediately). Loosening is rejected by the backend — it requires the operator credential |
 | `sign_handshake` | Sign an A2A identity handshake message (EIP-191 `personal_sign`) |
 | `verify_handshake` | Verify a peer's handshake signature (ECDSA + EIP-1271 fallback) |

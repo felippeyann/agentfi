@@ -136,7 +136,63 @@ The fake facilitator does **not** prove: signature validity, balances, nonces or
 - No real facilitator (x402.org, CDP) has been called; CDP auth is not implemented.
 - `txHash` and `payer` are whatever the server's `PAYMENT-RESPONSE` says; nothing is checked against an RPC.
 - Receipts have no trust anchor (no issuer registry, no DID resolution, no JWS).
-- No per-job budget, reservation, or protection against paying twice across process restarts (P5) — and no `cancelAuthorization` helper yet; the nonce is surfaced so P5 can add one.
-- No `ResourcePayment` persistence, route, or MCP tool (P2).
+- Per-job budget, reservation and replay protection exist (§10, P2) but there is no reconciliation of `unknown` rows and no `cancelAuthorization` helper yet; the nonce is stored so the reconciliation task can add both.
 - `@x402/express` is not a dependency: its required `express` peer would add ~60 packages to the lockfile for a test-only server, and `@x402/core/server` already provides the full pipeline.
 - The `includeTxHash` quirk (§4) is observed on 2.28.0 and not reported upstream yet.
+
+## 10. Job-scoped payments (P2) and the ledger state machine (P5 subset)
+
+> Task P2 of the execution plan, with the part of P5 that fits in it: the durable ledger semantics of `~/agentfi-lab/ledger.mjs` (reserve → pending → settled/unknown; no automatic retry on unknown) restated on a `ResourcePayment` row. Reconciliation of `unknown` rows is **not** part of this; see the TODO list at the end.
+
+`POST /v1/jobs/:id/pay-resource` (`api/routes/resource-payments.ts` → `services/payments/resource-payment.service.ts`) and the MCP tool `pay_for_resource` let the agent **working** on a job pay a 402 resource from that job's budget. The whole thing sits on top of `payResource` (§1); nothing in the client changed except two hooks (below).
+
+**Who pays.** The job's provider, from its own wallet (`toClientSigner(getWalletService(), provider.walletId)`). The requester is refused (`403 NOT_PROVIDER`); the job must be `ACCEPTED` (`409 JOB_NOT_ACTIVE`); the provider must be active with a non-paused, non-expired policy (`403`).
+
+**Budget.** The job reward must be USDC on the job's chain (`reward.token` = `USDC` or the chain's USDC address; anything else is `400 UNSUPPORTED_BUDGET_TOKEN` — converting an ETH reward would need the price oracle, and a payment gate must not depend on one). Then
+
+```
+remaining = parseUnits(reward.amount, 6) − Σ amount of this job's rows in (reserved, pending, settled, unknown)
+cap       = min(remaining, maxAmount)            // maxAmount: the caller's optional own cap
+```
+
+`cap` is what `payResource` receives as `maxAmountUsd`, and `allowedNetworks` is `[eip155:<job.chainId>]`, so gates 1–3 (§2) refuse an above-cap price or a foreign network **before anything is signed**. `BudgetExceededError` becomes `402 BUDGET_EXCEEDED` with `price`, `remaining` and `cap` (base units); `NoAcceptableSchemeError` becomes `400 UNSUPPORTED_ASSET`. A second, explicit check in the pre-signing hook refuses any asset that is not the chain's USDC even if the default-asset registry grows.
+
+**Two client hooks.** `PayResourceParams` gained `onBeforeSign(selected)` — called after gate 3 with the priced option (`network`, `asset`, `amount`, `payTo`, `symbol`, `decimals`, `usd`), before any signature; a throw aborts and is rethrown unchanged — and `onAuthorizationSigned(authorization, selected)` — called after signing and **before the paid request leaves**; a throw propagates out of the library's `createPaymentPayload` (and the transport shim refuses to send a paid request once `state.abort` is set), so the signature exists but never reaches the server. The service uses them as the two ledger writes:
+
+```
+           onBeforeSign                 onAuthorizationSigned           response
+402 ──► reserve (row lock on Job) ──► sign ──► pending (+nonce) ──► send ──► settled | unknown | refused
+             │
+             └─ price > remaining / asset ≠ USDC  →  failed_before_signing, nothing signed
+```
+
+The reservation runs in a transaction that first takes `SELECT … FOR UPDATE` on the Job row and re-sums the counted rows, so two concurrent payments on the same job cannot both pass on the same remaining amount. The `(jobId, paymentId)` unique index turns a concurrent duplicate into `409 PAYMENT_IN_PROGRESS` at the same point — before any signature.
+
+**State machine** (`ResourcePayment.status`, terminal states never change):
+
+| Status | Set when | Counts against budget | Same `paymentId` again |
+|---|---|---|---|
+| `reserved` | row created, budget re-checked under the lock | yes | `409 PAYMENT_IN_PROGRESS` |
+| `pending` | authorization signed; nonce stored; payload about to leave | yes | returned as-is, no new payment |
+| `settled` | 2xx with `PAYMENT-RESPONSE{success:true}`; `settlementTxHash` from the response (or the receipt), `receipt` + `receiptVerified` when an `offer-receipt` came back | yes | returned as-is |
+| `unknown` | timeout or transport error **after** signing, or a 2xx **without** a settlement report (§5) | **yes** — the server may still settle | returned as-is with a `warning`; **no automatic retry** |
+| `refused` | the server answered the signed payment without settling: verification rejected, `settle.success:false`, or any 4xx/5xx | no | fresh attempt on the same row |
+| `failed_before_signing` | 402 unparseable, budget / asset refusal, library refused to create the payment, plain request failed or timed out | no | fresh attempt on the same row |
+
+`unknown` is the case §3 warns about: the rule "do not call `payResource` again for a `paymentId` whose last attempt had `authorizationSent: true`" is enforced by the ledger — the row is returned, nothing is re-signed, the amount stays reserved, and the operator gets an `error`-level log line with the nonce and `validBefore`. The caller gets `502 PAYMENT_OUTCOME_UNKNOWN` (or, for the 2xx-without-report case, `200` with `payment.status: "unknown"` and a `warning`) carrying `authorization { method, nonce, validAfter, validBefore }` — never the signature.
+
+**Receipts** reuse §4 unchanged: `receiptVerified: true` only when the receipt binds to the accepted offer and our payer; a mismatch still **settles** (the server did report a settlement) but the row is stored with `receiptVerified: false` and a `warn` log — the plan's "marked unverified". `settlementTxHash` is the server's `transaction`, falling back to the receipt's when present (2.28.0 servers usually omit both, §4).
+
+**What is stored and what is not.** The row keeps `url` as origin + path only (query strings and userinfo — where API keys travel — are sent to the resource but never stored, logged or echoed), `method`, `network`, `asset`, `amount`, `payTo`, `paymentId`, `authorizationNonce`, `receipt`, `receiptVerified`, `settlementTxHash`, `responseStatus`, `error`. The signed authorization payload is never persisted or returned. The resource response is returned with a whitelist of headers and a body capped at 64 KiB.
+
+**Idempotency on the server side.** `paymentId` (caller-supplied, or a server UUID) is also sent through the `payment-identifier` extension, so a cache-enabled resource server deduplicates on its side — but as §3 says, that protects nothing on our side; the ledger does.
+
+**SSRF.** In `production` / `staging` the URL may not point at a loopback, private, link-local or unspecified host (`400 INVALID_URL`); in development / test it may, so the fake-facilitator harness can run on `127.0.0.1`.
+
+**Tests.** `src/__tests__/resource-payment.routes.test.ts` runs the real route, service and client against the P1 harness (now shared in `src/__tests__/helpers/x402-fixture.ts`) with an ephemeral provider key and an in-memory `ResourcePayment` table enforcing the unique index: budget exceeded → `failed_before_signing`, signer never called; same `paymentId` → one payment, same row; retry of a refused / failed row on the same row; `maxAmount` below the remaining budget; settled + unknown rows counted, refused rows not; receipt tampered → `settled` + `receiptVerified: false` + warn; stalled paid request → `unknown`, 502 with `paymentId` and nonce, replay without re-signing; 2xx without `PAYMENT-RESPONSE` → `unknown` + warning; verification rejected → `refused`, retry re-signs on the same row; non-USDC asset and mainnet-only offers → `400 UNSUPPORTED_ASSET`, nothing signed; requester → 403; job not `ACCEPTED` → 409; paused / expired policy → 403; URL stored without its query string; the authorization never echoed. Two tests in the P1 suite pin the hooks (a throw in `onBeforeSign` signs nothing; a throw in `onAuthorizationSigned` signs but never sends).
+
+**Still to do (not in P2):**
+
+- Reconciliation of `unknown` rows (`unknown → settled` with the tx hash, or cancel the authorization once `validBefore` has passed): a worker that matches `authorizationNonce` against on-chain USDC `AuthorizationUsed` / `Transfer` events to `payTo`. Until then an operator resolves them by hand; the `error`-level log line carries everything needed.
+- The `mppx` dialect (P4) behind the same route/tool.
+- Facilitator configuration (P3) does not affect this flow — the buyer never calls one.
