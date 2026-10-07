@@ -3,7 +3,7 @@
 > **Read together with [VISION.md](VISION.md) (the _why_) and [HANDOFF.md](HANDOFF.md) (live pending tasks).**
 > This file is the **comprehensive, point-in-time snapshot** of what the project _is_ today — purpose, stack, capabilities, progress. Update it whenever the scope or architecture shifts.
 
-**Last updated**: 2026-10-06 · **main baseline verified** `b051077` · **npm** `@agent_fi/mcp-server@0.5.0` published 2026-05-15 (31 tools) · **Status**: reactivated in exploratory mode on 2026-10-06 (archived 2026-05-17 → 2026-10-06); live plan in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md)
+**Last updated**: 2026-10-06 · **main baseline verified** `52e8d5a` · **npm** `@agent_fi/mcp-server@0.5.0` published 2026-05-15 (31 tools) · **Status**: reactivated in exploratory mode on 2026-10-06 (archived 2026-05-17 → 2026-10-06); live plan in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md)
 
 ---
 
