@@ -27,6 +27,19 @@ const escrowAddressFields = Object.fromEntries(
   ReturnType<typeof optionalAddress>
 >;
 
+// ── ERC-8004 identity (R2) ────────────────────────────────────────────────
+// `IDENTITY_REGISTRY_ADDRESS_<chainId>` overrides the ERC-8004 Identity
+// Registry the backend mints provider identities in. Blank or unset → the
+// known default for Base / Base Sepolia (config/contracts.ts); other chains
+// have no default, so the identity step is SKIPPED there unless set.
+const identityRegistryFields = Object.fromEntries(
+  ESCROW_CHAIN_IDS.map((chainId) => [
+    `IDENTITY_REGISTRY_ADDRESS_${chainId}`,
+    optionalAddress(`IDENTITY_REGISTRY_ADDRESS_${chainId}`),
+  ]),
+) as Record<`IDENTITY_REGISTRY_ADDRESS_${(typeof ESCROW_CHAIN_IDS)[number]}`, ReturnType<typeof optionalAddress>>;
+// ── end ERC-8004 identity ─────────────────────────────────────────────────
+
 const transactionWorkerEnabledDefault: 'true' | 'false' =
   process.env['TRANSACTION_WORKER_ENABLED'] === 'true' ||
   process.env['TRANSACTION_WORKER_ENABLED'] === 'false'
@@ -114,6 +127,17 @@ const envSchema = z.object({
     blankToUndefined,
     z.string().url().default('http://localhost:3000'),
   ),
+
+  // ── ERC-8004 identity (R2) ──────────────────────────────────────────────
+  // On a chain with the ERC-8183 escrow AND a reputation hook, the provider of
+  // a funded job gets an ERC-8004 identity (minted from its own wallet on the
+  // first funded job, decision D7) bound to the job with setProviderAgentId.
+  // Registration file: `<BACKEND_PUBLIC_URL>/v1/agents/<id>/erc8004.json`.
+  ...identityRegistryFields,
+  // Optional public MCP endpoint advertised as the `MCP` service of every
+  // agent's registration file. Omitted from the file when unset.
+  MCP_PUBLIC_URL: z.preprocess(blankToUndefined, z.string().url().optional()),
+  // ── end ERC-8004 identity ───────────────────────────────────────────────
 
   // Revenue — fee collection wallet (0x Ethereum address)
   OPERATOR_FEE_WALLET: z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'Must be a valid 0x Ethereum address'),
