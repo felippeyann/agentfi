@@ -91,3 +91,6 @@ desktop.ini
 # graphify label cache (machine-local)
 graphify-out/.graphify_labels.json
 graphify-out/.graphify_labels.json.sig
+
+# graphify dated backups of the curated graph (machine-local)
+graphify-out/20*/
