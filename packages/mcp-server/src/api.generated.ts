@@ -1985,6 +1985,15 @@ export interface paths {
          *     (`400 UNSUPPORTED_ASSET`). A non-402 response (free resource, or an
          *     error) is returned untouched with `payment: null`.
          *
+         *     **Outbound target policy.** Before anything is fetched, the hostname
+         *     is resolved and the request is refused (`400 INVALID_URL`, with
+         *     `refusal`, `hostname` and `address`) when the host is — or any address
+         *     it resolves to is — loopback, private, link-local, unique-local,
+         *     unspecified or otherwise reserved (IPv4-mapped and NAT64 addresses are
+         *     judged by their IPv4). The connection is pinned to the validated
+         *     addresses, so a DNS rebind cannot redirect it. Redirects are never
+         *     followed: any `3xx` is `400 REDIRECT_REFUSED`, before or after signing.
+         *
          *     **Idempotency.** `paymentId` is unique per job (a server UUID when
          *     omitted). A retry with the same id returns the existing row *without a
          *     second payment* when it is `pending`, `settled` or `unknown`
@@ -2036,10 +2045,18 @@ export interface paths {
                     };
                 };
                 /**
-                 * @description `VALIDATION_FAILED`, `INVALID_URL`, `INVALID_BUDGET`,
-                 *     `UNSUPPORTED_BUDGET_TOKEN` (the job reward is not USDC) or
-                 *     `UNSUPPORTED_ASSET` (the 402 does not offer USDC on the job's chain
-                 *     within the allowed authorization window). Nothing was signed.
+                 * @description `VALIDATION_FAILED`, `INVALID_URL` (not an absolute http(s) URL, or
+                 *     refused by the outbound target policy: `refusal` is `private-host`,
+                 *     `private-address` or `unresolvable`, with `hostname` and the
+                 *     offending `address`), `INVALID_BUDGET`, `UNSUPPORTED_BUDGET_TOKEN`
+                 *     (the job reward is not USDC) or `UNSUPPORTED_ASSET` (the 402 does
+                 *     not offer USDC on the job's chain within the allowed authorization
+                 *     window) — nothing was signed — or `REDIRECT_REFUSED`: the resource
+                 *     answered `3xx`, which is never followed (`responseStatus`,
+                 *     `location` without query string). Before any signature `payment` is
+                 *     `null`; after signing `payment.status` is `refused`, or `settled`
+                 *     when the server reported a settlement on the redirect (the amount
+                 *     is spent; do not retry with a new `paymentId`).
                  */
                 400: {
                     headers: {
@@ -2096,8 +2113,10 @@ export interface paths {
                     };
                 };
                 /**
-                 * @description `PAYMENT_FAILED` — the 402 was unusable or the request failed / timed
-                 *     out before anything was signed — or `PAYMENT_OUTCOME_UNKNOWN` — a
+                 * @description `PAYMENT_FAILED` — the hostname could not be resolved because of a
+                 *     transient resolver failure (`stage: resolve`), the 402 was unusable,
+                 *     or the request failed / timed out before anything was signed — or
+                 *     `PAYMENT_OUTCOME_UNKNOWN` — a
                  *     signed authorization left the process and no answer came back.
                  *     `payment.status` is `unknown`; `authorization` carries the nonce
                  *     and window for reconciliation. Do not retry with a new `paymentId`.
@@ -3355,7 +3374,7 @@ export interface components {
             updatedAt?: string;
         };
         PayResourceRequest: {
-            /** @description Absolute http(s) URL of the 402 resource. Query strings are sent but never stored or logged. */
+            /** @description Absolute http(s) URL of the 402 resource. Query strings are sent but never stored or logged. Must resolve only to public addresses (outbound target policy); redirects are not followed. */
             url: string;
             /**
              * @default GET
@@ -3410,7 +3429,7 @@ export interface components {
         };
         ResourcePaymentError: components["schemas"]["Error"] & {
             /** @enum {string} */
-            code: "VALIDATION_FAILED" | "INVALID_URL" | "INVALID_BUDGET" | "UNSUPPORTED_BUDGET_TOKEN" | "UNSUPPORTED_ASSET" | "BUDGET_EXCEEDED" | "NOT_PROVIDER" | "AGENT_INACTIVE" | "POLICY_PAUSED" | "JOB_NOT_FOUND" | "JOB_NOT_ACTIVE" | "PAYMENT_IN_PROGRESS" | "PAYMENT_ID_CONFLICT" | "PAYMENT_REFUSED" | "PAYMENT_FAILED" | "PAYMENT_OUTCOME_UNKNOWN" | "LEDGER_ERROR";
+            code: "VALIDATION_FAILED" | "INVALID_URL" | "REDIRECT_REFUSED" | "INVALID_BUDGET" | "UNSUPPORTED_BUDGET_TOKEN" | "UNSUPPORTED_ASSET" | "BUDGET_EXCEEDED" | "NOT_PROVIDER" | "AGENT_INACTIVE" | "POLICY_PAUSED" | "JOB_NOT_FOUND" | "JOB_NOT_ACTIVE" | "PAYMENT_IN_PROGRESS" | "PAYMENT_ID_CONFLICT" | "PAYMENT_REFUSED" | "PAYMENT_FAILED" | "PAYMENT_OUTCOME_UNKNOWN" | "LEDGER_ERROR";
             paymentId?: string;
             /** @description Offered price in base units (`BUDGET_EXCEEDED`); `null` when the budget was exhausted before fetching. */
             price?: string | null;
@@ -3426,10 +3445,21 @@ export interface components {
             reason?: string;
             responseStatus?: number;
             /**
-             * @description Phase that failed (`PAYMENT_FAILED`).
+             * @description Why the outbound target policy refused the URL (`INVALID_URL`): the host is a loopback name or a private/reserved literal, one of its resolved addresses is private/reserved, or it does not resolve.
              * @enum {string}
              */
-            stage?: "request" | "payment-creation" | "paid-request";
+            refusal?: "private-host" | "private-address" | "unresolvable";
+            /** @description Hostname the outbound target policy judged (`INVALID_URL`). */
+            hostname?: string;
+            /** @description Resolved address that was refused (`INVALID_URL`, `refusal: private-address`). */
+            address?: string;
+            /** @description Redirect target, resolved and stripped of query string and userinfo (`REDIRECT_REFUSED`); never requested. */
+            location?: string | null;
+            /**
+             * @description Phase that failed (`PAYMENT_FAILED`); `resolve` is a transient DNS failure before anything was fetched.
+             * @enum {string}
+             */
+            stage?: "resolve" | "request" | "payment-creation" | "paid-request";
             timedOut?: boolean;
             /** @description Nonce and window of the signed authorization (`PAYMENT_OUTCOME_UNKNOWN`), for reconciliation. Never the signature. */
             authorization?: {
