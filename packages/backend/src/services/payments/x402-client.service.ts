@@ -139,6 +139,41 @@ export interface PayResourceParams {
    * Overrides the service default (`MAX_AUTHORIZATION_WINDOW_SECONDS`).
    */
   maxAuthorizationWindowSeconds?: number;
+  /**
+   * Called once an option has passed every spend gate and **before anything
+   * is signed**. A durable ledger (P2/P5) reserves the amount here. Throwing
+   * aborts the payment: nothing is signed and the thrown error is rethrown
+   * unchanged by `payResource`.
+   */
+  onBeforeSign?: (selected: SelectedPaymentOption) => Promise<void> | void;
+  /**
+   * Called right after the authorization is signed and **before the paid
+   * request leaves the process**. The ledger records the nonce here. Throwing
+   * aborts the send — the signature exists but never reaches the server —
+   * and the thrown error is rethrown unchanged by `payResource`.
+   */
+  onAuthorizationSigned?: (
+    authorization: AuthorizationInfo,
+    selected: SelectedPaymentOption,
+  ) => Promise<void> | void;
+}
+
+/** The payment option the client is about to sign for, priced in USD. */
+export interface SelectedPaymentOption {
+  scheme: string;
+  /** CAIP-2 id, e.g. `"eip155:84532"`. */
+  network: string;
+  /** Token contract address. */
+  asset: string;
+  /** Atomic units. */
+  amount: string;
+  payTo: string;
+  maxTimeoutSeconds: number;
+  /** Asset symbol from the default-asset registry (e.g. `"USDC"`). */
+  symbol: string;
+  decimals: number;
+  /** Human-readable USD view of `amount` using the asset's decimals. */
+  usd: string;
 }
 
 /**
@@ -249,7 +284,8 @@ interface AttemptState {
   /** Unix seconds at which the authorization was created. */
   signedAt?: number;
   paymentIdSent: boolean;
-  abort?: X402PaymentError;
+  /** Error to surface instead of the library's generic one (gate 3 refusal or a ledger hook throw). */
+  abort?: Error;
 }
 
 interface PreflightContext {
@@ -507,6 +543,17 @@ export class X402ClientService {
         return { abort: true, reason: refusal.message };
       }
 
+      // (c) Ledger hook: the caller may reserve the amount (and refuse) here,
+      // while nothing has been signed. Its error is surfaced unchanged.
+      if (params.onBeforeSign) {
+        try {
+          await params.onBeforeSign(this.describeSelected(selectedRequirements, ctx));
+        } catch (error) {
+          state.abort = error instanceof Error ? error : new Error(String(error));
+          return { abort: true, reason: state.abort.message };
+        }
+      }
+
       state.selected = selectedRequirements;
     });
 
@@ -515,6 +562,18 @@ export class X402ClientService {
       state.signedAt = nowSeconds();
       state.authorization = describeAuthorization(paymentPayload);
       state.paymentIdSent = extractPaymentIdentifier(paymentPayload) === paymentId;
+
+      // Ledger hook: record the nonce before the signed payload can leave.
+      // A throw here propagates out of the library's createPaymentPayload,
+      // so the paid request is never sent; `inspectingFetch` guards too.
+      if (params.onAuthorizationSigned && state.authorization && state.selected) {
+        try {
+          await params.onAuthorizationSigned(state.authorization, this.describeSelected(state.selected, ctx));
+        } catch (error) {
+          state.abort = error instanceof Error ? error : new Error(String(error));
+          throw state.abort;
+        }
+      }
     });
 
     const httpClient = new x402HTTPClient(client);
@@ -527,6 +586,8 @@ export class X402ClientService {
         input instanceof Request && requestInit === undefined ? input : new Request(input, requestInit),
         timeoutMs,
       );
+      // A ledger hook refused after signing: the signed payload must not leave.
+      if (state.abort && hasPaymentHeader(request)) throw state.abort;
       const response = await this.fetchImpl(request);
       if (response.status === 402 && !hasPaymentHeader(request)) {
         const paymentRequired = await this.decodePaymentRequired(httpClient, response.clone(), ctx);
@@ -775,6 +836,23 @@ export class X402ClientService {
       });
     }
     return undefined;
+  }
+
+  /**
+   * Public view of the option about to be signed for, handed to the ledger
+   * hooks. Only called after `recheck` passed, so the asset is a known
+   * stablecoin and `price` cannot be undefined; the fallback keeps the type
+   * honest if that invariant ever changes.
+   */
+  private describeSelected(selected: PaymentRequirements, ctx: PreflightContext): SelectedPaymentOption {
+    const priced = this.price(selected, ctx.scheme);
+    return {
+      ...summarize(selected),
+      maxTimeoutSeconds: typeof selected.maxTimeoutSeconds === 'number' ? selected.maxTimeoutSeconds : 0,
+      symbol: priced?.symbol ?? 'UNKNOWN',
+      decimals: priced?.decimals ?? 0,
+      usd: priced?.usd ?? '0',
+    };
   }
 
   /** USD view of a requirement, or undefined when the asset is not a known stablecoin. */

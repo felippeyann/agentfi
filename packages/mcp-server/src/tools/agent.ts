@@ -1,9 +1,25 @@
 import { z } from 'zod';
-import { api } from '../api-client.js';
+import { api, ApiError } from '../api-client.js';
 import type { components } from '../api.generated.js';
 
 type Agent = components['schemas']['Agent'];
 type PnLBreakdown = components['schemas']['PnLBreakdown'];
+type PayResourceResponse = components['schemas']['PayResourceResponse'];
+
+/**
+ * Backend refusals of `pay_for_resource` that carry structured data an agent
+ * can act on (price vs. remaining budget, an unknown outcome to reconcile,
+ * a refusal reason). Returned as tool output instead of thrown, so the
+ * details are not flattened into an error string.
+ */
+const PAY_RESOURCE_STRUCTURED_CODES = new Set([
+  'BUDGET_EXCEEDED',
+  'PAYMENT_REFUSED',
+  'PAYMENT_OUTCOME_UNKNOWN',
+  'UNSUPPORTED_ASSET',
+  'UNSUPPORTED_BUDGET_TOKEN',
+  'PAYMENT_IN_PROGRESS',
+]);
 
 export const agentTools = [
   {
@@ -295,6 +311,65 @@ export const agentTools = [
         result: input.result,
       });
       return result;
+    },
+  },
+
+  {
+    name: 'pay_for_resource',
+    description:
+      'Pays for an HTTP 402 (x402) resource — an API call, a dataset, a quote — while working on a job you ' +
+      'ACCEPTED as provider, and returns the resource response. This SPENDS YOUR OWN USDC: the backend signs a ' +
+      "USDC authorization with your wallet, capped by the job's remaining reward budget (reward minus everything " +
+      'already paid or pending on that job) and by `max_amount` when you pass one. A price above the cap is refused ' +
+      'BEFORE anything is signed (BUDGET_EXCEEDED, with `price` and `remaining`). Only USDC on the job\'s chain is ' +
+      'accepted (UNSUPPORTED_ASSET otherwise). Idempotent per `payment_id`: calling again with the same id returns ' +
+      'the recorded payment instead of paying twice — always reuse the id when retrying. A PAYMENT_OUTCOME_UNKNOWN ' +
+      'result means a signed authorization reached the server but no settlement was confirmed: do NOT retry with a ' +
+      'new id; the amount stays reserved against the job until an operator reconciles it.',
+    inputSchema: z.object({
+      job_id: z
+        .string()
+        .describe('The ID of the ACCEPTED job whose budget pays for the resource (you must be its provider).'),
+      url: z.string().url().describe('Absolute http(s) URL of the 402 resource.'),
+      method: z.enum(['GET', 'POST']).optional().describe('HTTP method (default GET).'),
+      body: z.record(z.any()).optional().describe('JSON body for POST requests.'),
+      max_amount: z
+        .string()
+        .regex(/^\d+(\.\d{1,6})?$/, 'must be a plain USDC amount such as "0.50"')
+        .optional()
+        .describe(
+          'Your own cap for this payment in USDC (e.g. "0.50"). The lower of this and the remaining job budget applies.',
+        ),
+      payment_id: z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{16,128}$/, 'must be 16-128 chars of [A-Za-z0-9_-]')
+        .optional()
+        .describe('Idempotency key (16-128 chars of [A-Za-z0-9_-]). Generated when omitted; reuse it on retries.'),
+    }),
+    handler: async (input: {
+      job_id: string;
+      url: string;
+      method?: 'GET' | 'POST';
+      body?: Record<string, any>;
+      max_amount?: string;
+      payment_id?: string;
+    }) => {
+      try {
+        return await api.post<PayResourceResponse>(`/v1/jobs/${input.job_id}/pay-resource`, {
+          url: input.url,
+          method: input.method ?? 'GET',
+          ...(input.body !== undefined ? { body: input.body } : {}),
+          ...(input.max_amount !== undefined ? { maxAmount: input.max_amount } : {}),
+          ...(input.payment_id !== undefined ? { paymentId: input.payment_id } : {}),
+        });
+      } catch (err) {
+        // Typed refusals keep their structure (price, remaining, paymentId,
+        // the ledger row) so the agent can decide what to do next.
+        if (err instanceof ApiError && err.code && PAY_RESOURCE_STRUCTURED_CODES.has(err.code)) {
+          return { paid: false, httpStatus: err.status, ...err.body };
+        }
+        throw err;
+      }
     },
   },
 ];

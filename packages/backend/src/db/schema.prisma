@@ -40,6 +40,7 @@ model Agent {
   transactions Transaction[]
   requestedJobs Job[]      @relation("RequestedJobs")
   providedJobs  Job[]      @relation("ProvidedJobs")
+  resourcePayments ResourcePayment[]
   policy       AgentPolicy?
   billing      AgentBilling?
 
@@ -118,6 +119,7 @@ model Job {
   
   signature    String?   // Requester's signature of the payload
   result       Json?     // The output/proof of work from the provider
+  resourcePayments ResourcePayment[]
 
   // v2 Escrow — funds committed at job creation, released on terminal state
   reservedAmount    String?   // Amount in human-readable units (same as reward.amount)
@@ -323,4 +325,59 @@ enum TxType {
   ESCROW_RELEASE
   ESCROW_REFUND
   ESCROW_SUBMIT   // ERC-8183: provider's `submit(jobId, deliverable)` (migration 0014)
+}
+
+/// x402 payment made by a job's provider for a third-party HTTP 402 resource,
+/// charged against that job's reward budget (plan tasks P2 / P5).
+///
+/// State machine (terminal states never change, except `unknown → settled`
+/// through a future reconciliation task):
+///   reserved → pending → settled | unknown | refused
+///   failed_before_signing (402 parse / budget / scheme errors before any signature)
+model ResourcePayment {
+  id                 String                @id @default(cuid())
+  jobId              String
+  job                Job                   @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  /// Payer — always the job's provider.
+  agentId            String
+  agent              Agent                 @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// Origin + path only: query string, fragment and userinfo are stripped before storage.
+  url                String
+  method             String
+  /// CAIP-2 network of the accepted payment option (e.g. `eip155:84532`).
+  network            String
+  /// Token contract of the accepted option (USDC on the job's chain).
+  asset              String
+  /// Price in the asset's base units (e.g. `"400000"` = 0.40 USDC).
+  amount             String
+  payTo              String
+  /// x402 `payment-identifier` id; unique per job. Caller-supplied or a server UUID.
+  paymentId          String
+  /// EIP-3009 / Permit2 nonce of the signed authorization (set once signed).
+  authorizationNonce String?
+  status             ResourcePaymentStatus
+  /// Raw `offer-receipt` receipt from the resource server, when provided.
+  receipt            Json?
+  /// True when the receipt verified against the accepted offer; false = marked unverified.
+  receiptVerified    Boolean?
+  /// Settlement tx hash as reported by the server (receipt or PAYMENT-RESPONSE); often absent.
+  settlementTxHash   String?
+  /// HTTP status of the paid response, when one was received.
+  responseStatus     Int?
+  error              String?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  @@unique([jobId, paymentId])
+  @@index([jobId])
+  @@index([status])
+}
+
+enum ResourcePaymentStatus {
+  reserved              // row created, budget checked, nothing signed yet
+  pending               // authorization signed and sent to the resource server
+  settled               // 2xx with a settlement report (receipt verified or marked unverified)
+  unknown               // timeout / transport error after signing: money may have moved; no automatic retry
+  refused               // server answered 4xx/5xx after signing, no settlement
+  failed_before_signing // 402 parse / budget / scheme error before any signature
 }

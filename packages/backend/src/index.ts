@@ -14,6 +14,7 @@ import { billingRoutes } from './api/routes/billing.js';
 import { adminRoutes } from './api/routes/admin.js';
 import { mcpRoutes } from './api/routes/mcp.js';
 import { jobRoutes } from './api/routes/jobs.js';
+import { resourcePaymentRoutes } from './api/routes/resource-payments.js';
 import { startTransactionWorker } from './queues/transaction.queue.js';
 import { startReputationWorker, scheduleReputationUpdate } from './queues/reputation.queue.js';
 import {
@@ -100,6 +101,7 @@ async function start() {
   await fastify.register(adminRoutes);
   await fastify.register(mcpRoutes);
   await fastify.register(jobRoutes);
+  await fastify.register(resourcePaymentRoutes);
 
   // Well-known agent capability advertisement
   fastify.get('/.well-known/agent.json', async () => ({

@@ -1955,6 +1955,169 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/jobs/{id}/pay-resource": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pay an x402 (HTTP 402) resource from the job's remaining budget
+         * @description The job's **provider** pays a third-party `402` resource with its own
+         *     USDC, within the job's remaining reward budget
+         *     (`reward − Σ reserved/pending/settled/unknown payments on the job`).
+         *     The requester cannot call this (`403 NOT_PROVIDER`); the job must be
+         *     `ACCEPTED` (`409 JOB_NOT_ACTIVE`); the job reward must be denominated
+         *     in USDC on a supported chain (`400 UNSUPPORTED_BUDGET_TOKEN`).
+         *
+         *     The backend fetches `url`. On a `402` it checks the offered price
+         *     against the cap — the lower of the remaining budget and `maxAmount` —
+         *     **before anything is signed**, reserves the amount in a durable
+         *     `ResourcePayment` row (under a row lock on the job, so concurrent
+         *     payments cannot overspend), signs an EIP-3009 USDC authorization with
+         *     the provider's wallet and resends the request with
+         *     `PAYMENT-SIGNATURE`. Only USDC on the job's chain is accepted
+         *     (`400 UNSUPPORTED_ASSET`). A non-402 response (free resource, or an
+         *     error) is returned untouched with `payment: null`.
+         *
+         *     **Idempotency.** `paymentId` is unique per job (a server UUID when
+         *     omitted). A retry with the same id returns the existing row *without a
+         *     second payment* when it is `pending`, `settled` or `unknown`
+         *     (`replayed: true`, `resource: null`); a `reserved` row is an attempt
+         *     in flight (`409 PAYMENT_IN_PROGRESS`); only `refused` /
+         *     `failed_before_signing` rows are retried, on the same row. The id is
+         *     also sent to the server inside the x402 `payment-identifier`
+         *     extension so a cache-enabled server deduplicates on its side.
+         *
+         *     **State machine** (`ResourcePayment.status`):
+         *     `reserved → pending → settled | unknown | refused`, plus
+         *     `failed_before_signing` for refusals before any signature. `unknown`
+         *     (timeout or transport error after signing; `502
+         *     PAYMENT_OUTCOME_UNKNOWN`) is never retried automatically and stays
+         *     reserved against the budget until an operator reconciles it.
+         *
+         *     When the server provides an `offer-receipt`, it is verified against
+         *     the accepted offer; a mismatch still settles but is stored with
+         *     `receiptVerified: false`. The signed authorization is never echoed
+         *     back; only its nonce and validity window are.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["PayResourceRequest"];
+                };
+            };
+            responses: {
+                /**
+                 * @description The resource was fetched (or the payment replayed). `payment` is the
+                 *     ledger row — `settled`, or `unknown` with a `warning` when the
+                 *     server reported no settlement — or `null` when the resource never
+                 *     asked for payment.
+                 */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PayResourceResponse"];
+                    };
+                };
+                /**
+                 * @description `VALIDATION_FAILED`, `INVALID_URL`, `INVALID_BUDGET`,
+                 *     `UNSUPPORTED_BUDGET_TOKEN` (the job reward is not USDC) or
+                 *     `UNSUPPORTED_ASSET` (the 402 does not offer USDC on the job's chain
+                 *     within the allowed authorization window). Nothing was signed.
+                 */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ResourcePaymentError"];
+                    };
+                };
+                /**
+                 * @description `BUDGET_EXCEEDED` — refused before signing; `price`, `remaining` and
+                 *     `cap` are base units — or `PAYMENT_REFUSED` — the server answered
+                 *     the signed payment (verification rejected, settlement failed, or a
+                 *     4xx/5xx) without settling it; `payment.status` is `refused` and the
+                 *     same `paymentId` may be retried.
+                 */
+                402: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ResourcePaymentError"];
+                    };
+                };
+                /** @description `NOT_PROVIDER` (only the provider pays), `AGENT_INACTIVE` or `POLICY_PAUSED`. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ResourcePaymentError"];
+                    };
+                };
+                /** @description `JOB_NOT_FOUND`. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ResourcePaymentError"];
+                    };
+                };
+                /**
+                 * @description `JOB_NOT_ACTIVE` (job is not `ACCEPTED`), `PAYMENT_IN_PROGRESS`
+                 *     (same `paymentId` currently reserved) or `PAYMENT_ID_CONFLICT`
+                 *     (same `paymentId`, different URL or method).
+                 */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ResourcePaymentError"];
+                    };
+                };
+                /**
+                 * @description `PAYMENT_FAILED` — the 402 was unusable or the request failed / timed
+                 *     out before anything was signed — or `PAYMENT_OUTCOME_UNKNOWN` — a
+                 *     signed authorization left the process and no answer came back.
+                 *     `payment.status` is `unknown`; `authorization` carries the nonce
+                 *     and window for reconciliation. Do not retry with a new `paymentId`.
+                 */
+                502: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ResourcePaymentError"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/stats": {
         parameters: {
             query?: never;
@@ -3144,6 +3307,139 @@ export interface components {
             evaluator?: string;
             /** Format: date-time */
             issuedAt?: string;
+        };
+        /**
+         * @description Ledger state of a job-scoped x402 payment:
+         *     `reserved` (budget checked, nothing signed) → `pending` (authorization
+         *     signed and sent) → `settled` | `unknown` (no answer after signing;
+         *     money may have moved, never retried automatically) | `refused`
+         *     (server answered 4xx/5xx after signing, no settlement);
+         *     `failed_before_signing` for refusals before any signature.
+         * @enum {string}
+         */
+        ResourcePaymentStatus: "reserved" | "pending" | "settled" | "unknown" | "refused" | "failed_before_signing";
+        /** @description One attempt to pay a 402 resource from a job budget. Never carries the signed authorization. */
+        ResourcePayment: {
+            id?: string;
+            jobId?: string;
+            /** @description The payer — the job's provider. */
+            agentId?: string;
+            /** @description Origin + path only; query string, fragment and userinfo are stripped. */
+            url?: string;
+            /** @enum {string} */
+            method?: "GET" | "POST";
+            /** @description CAIP-2 id, e.g. `eip155:84532`. */
+            network?: string;
+            /** @description USDC contract on the job's chain. */
+            asset?: string;
+            /** @description Price in base units (`"400000"` = 0.40 USDC). */
+            amount?: string;
+            payTo?: string;
+            /** @description x402 `payment-identifier` id, unique per job. */
+            paymentId?: string;
+            /** @description EIP-3009 / Permit2 nonce of the signed authorization; set once signed. */
+            authorizationNonce?: string | null;
+            status?: components["schemas"]["ResourcePaymentStatus"];
+            /** @description Raw `offer-receipt` receipt from the resource server, when provided. */
+            receipt?: {
+                [key: string]: unknown;
+            } | null;
+            /** @description True when the receipt verified against the accepted offer; false means it was marked unverified. */
+            receiptVerified?: boolean | null;
+            settlementTxHash?: string | null;
+            responseStatus?: number | null;
+            error?: string | null;
+            /** Format: date-time */
+            createdAt?: string;
+            /** Format: date-time */
+            updatedAt?: string;
+        };
+        PayResourceRequest: {
+            /** @description Absolute http(s) URL of the 402 resource. Query strings are sent but never stored or logged. */
+            url: string;
+            /**
+             * @default GET
+             * @enum {string}
+             */
+            method: "GET" | "POST";
+            /** @description JSON body; only allowed with `POST`. */
+            body?: unknown;
+            /** @description Caller cap in USDC human units (e.g. `"0.50"`); the lower of this and the remaining job budget applies. */
+            maxAmount?: string;
+            /** @description Idempotency key, unique per job. Server-generated UUID when omitted; reuse it on retries. */
+            paymentId?: string;
+        };
+        RemainingBudget: {
+            /** @description USDC contract on the job's chain. */
+            asset?: string;
+            /** @example USDC */
+            symbol?: string;
+            /** @example 6 */
+            decimals?: number;
+            /** @example eip155:84532 */
+            network?: string;
+            /** @description Job reward in base units. */
+            total?: string;
+            /** @description Base units reserved, pending, settled or unknown. */
+            spent?: string;
+            /** @description Base units. */
+            remaining?: string;
+            /** @example 0.6 */
+            remainingFormatted?: string;
+        };
+        /** @description The resource server's final response, capped at 64 KiB. */
+        ResourceResponse: {
+            status?: number;
+            /** @description Whitelisted headers only (content-type, content-length, cache-control, etag, last-modified, date, x-request-id). */
+            headers?: {
+                [key: string]: string;
+            };
+            /** @description Parsed JSON when the response is JSON and fits the cap; otherwise text. */
+            body?: unknown;
+            /** @description True when the body was cut at 64 KiB. */
+            truncated?: boolean;
+        };
+        PayResourceResponse: {
+            payment: components["schemas"]["ResourcePayment"] | null;
+            remainingBudget: components["schemas"]["RemainingBudget"];
+            resource: components["schemas"]["ResourceResponse"] | null;
+            /** @description True when an existing `pending` / `settled` / `unknown` row was returned without a new payment. */
+            replayed?: boolean;
+            /** @description Present when `payment.status` is `unknown`. */
+            warning?: string;
+        };
+        ResourcePaymentError: components["schemas"]["Error"] & {
+            /** @enum {string} */
+            code: "VALIDATION_FAILED" | "INVALID_URL" | "INVALID_BUDGET" | "UNSUPPORTED_BUDGET_TOKEN" | "UNSUPPORTED_ASSET" | "BUDGET_EXCEEDED" | "NOT_PROVIDER" | "AGENT_INACTIVE" | "POLICY_PAUSED" | "JOB_NOT_FOUND" | "JOB_NOT_ACTIVE" | "PAYMENT_IN_PROGRESS" | "PAYMENT_ID_CONFLICT" | "PAYMENT_REFUSED" | "PAYMENT_FAILED" | "PAYMENT_OUTCOME_UNKNOWN" | "LEDGER_ERROR";
+            paymentId?: string;
+            /** @description Offered price in base units (`BUDGET_EXCEEDED`); `null` when the budget was exhausted before fetching. */
+            price?: string | null;
+            /** @example 0.4 */
+            priceFormatted?: string;
+            /** @description Remaining job budget in base units. */
+            remaining?: string;
+            remainingFormatted?: string;
+            /** @description Effective per-payment cap in base units (min of remaining budget and `maxAmount`). */
+            cap?: string;
+            capFormatted?: string;
+            /** @description Server-supplied reason (`PAYMENT_REFUSED`), clipped at 200 characters. */
+            reason?: string;
+            responseStatus?: number;
+            /**
+             * @description Phase that failed (`PAYMENT_FAILED`).
+             * @enum {string}
+             */
+            stage?: "request" | "payment-creation" | "paid-request";
+            timedOut?: boolean;
+            /** @description Nonce and window of the signed authorization (`PAYMENT_OUTCOME_UNKNOWN`), for reconciliation. Never the signature. */
+            authorization?: {
+                /** @enum {string} */
+                method?: "eip3009" | "permit2";
+                nonce?: string;
+                validAfter?: string;
+                validBefore?: string;
+            };
+            payment?: components["schemas"]["ResourcePayment"] | null;
         };
     };
     responses: {
