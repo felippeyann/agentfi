@@ -12,8 +12,17 @@
  * Step chain (who signs what — see docs/architecture/erc-8183-mapping.md §6):
  *
  *   requester wallet   create ─► setBudget ─► approve(USDC) ─► fund      (TxType ESCROW_LOCK)
+ *   provider wallet    [register] ─► setProviderAgentId (R2)            (TxType ERC8004_IDENTITY)
  *   provider wallet    submit                                           (TxType ESCROW_SUBMIT)
  *   evaluator signer   complete | reject | claimRefund                  (settlement queue, no Transaction row)
+ *
+ * R2: when `fund` confirms, `erc8004-identity.service.ts` gives the provider
+ * an ERC-8004 identity (minted from its own wallet on its first funded job,
+ * decision D7) and binds it to the job, so the ReputationHook can write
+ * feedback at settlement. `setProviderAgentId` is only valid while the job is
+ * Funded, so a `submit` requested while the binding is BINDING is deferred
+ * (`Job.deferredSubmitAt`) and released here when the binding is terminal.
+ * The binding never blocks payment: any failure ends it FAILED/SKIPPED.
  *
  * `Job.onChainStatus` records the last CONFIRMED step:
  *   CREATING → OPEN → BUDGET_SET → APPROVED → FUNDED → SUBMITTED → SETTLING → COMPLETED | REJECTED
@@ -49,6 +58,14 @@ import { getKnownTokenBySymbol } from '../transaction/token-registry.js';
 import type { EvaluatorSigner } from '../escrow/evaluator-signer.js';
 import type { FinalizeA2APaymentJobParams } from './payment-finalizer.service.js';
 import type { ProcessorLogger, TransactionJobData } from '../../queues/transaction.processor.js';
+import { enqueueAgentStep, IN_FLIGHT_TX, type SigningAgent } from './escrow-tx-steps.js';
+import {
+  onIdentityTxOutcome,
+  resumeBinding,
+  startProviderBinding,
+  TERMINAL_BINDING_STATUSES,
+  type IdentityStep,
+} from './erc8004-identity.service.js';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -129,6 +146,10 @@ export interface Erc8183Config {
   evaluationDelaySeconds: number;
   backendPublicUrl: string;
   chain(chainId: number): Erc8183ChainConfig | null;
+  /** R2: ERC-8004 Identity Registry on `chainId` (null/absent → the identity step is SKIPPED). */
+  identityRegistry?(chainId: number): Address | null;
+  /** R2: public MCP endpoint advertised in agent registration files (`MCP_PUBLIC_URL`). */
+  mcpPublicUrl?: string | null;
 }
 
 export type EscrowPublicClient = Pick<PublicClient, 'getTransactionReceipt' | 'readContract'>;
@@ -217,23 +238,16 @@ export function isEscrowTokenReward(token: string, escrowToken: Address): boolea
 
 // ── Transaction steps (agent wallets through the transaction queue) ────────
 
-interface SigningAgent {
-  id: string;
-  walletId: string;
-  safeAddress: string;
-}
-
 export function escrowIntentId(step: EscrowStep, jobId: string): string {
   return `erc8183:${step}:${jobId}`;
 }
 
-const IN_FLIGHT_TX = new Set(['QUEUED', 'SUBMITTED', 'PENDING_APPROVAL', 'CONFIRMED']);
-
 /**
- * Creates the Transaction row and enqueues it for the agent's wallet. A step
- * whose deterministic `intentId` already exists in a live state is returned
- * as-is (idempotent); a terminal-failed one gets a suffixed `intentId` so the
- * provider can retry `submit` (the only step that is ever retried).
+ * Creates the Transaction row and enqueues it for the agent's wallet
+ * (`escrow-tx-steps.ts`). A step whose deterministic `intentId` already exists
+ * in a live state is returned as-is (idempotent); a terminal-failed one gets a
+ * suffixed `intentId` so the provider can retry `submit` (the only ERC-8183
+ * step that is ever retried).
  */
 async function enqueueStep(
   deps: Erc8183Deps,
@@ -248,61 +262,7 @@ async function enqueueStep(
     extraMetadata?: Record<string, unknown>;
   },
 ): Promise<string> {
-  const base = escrowIntentId(params.step, params.jobId);
-  let intentId = base;
-  const existing = await deps.db.transaction.findUnique({
-    where: { intentId: base },
-    select: { id: true, status: true },
-  });
-  if (existing) {
-    if (IN_FLIGHT_TX.has(existing.status)) {
-      deps.logger.info(
-        { jobId: params.jobId, step: params.step, transactionId: existing.id, status: existing.status },
-        'ERC-8183 step already in flight — not re-enqueued',
-      );
-      return existing.id;
-    }
-    intentId = `${base}#${(deps.now?.() ?? new Date()).getTime()}`;
-  }
-
-  const tx = await deps.db.transaction.create({
-    data: {
-      agentId: params.signer.id,
-      type: params.type,
-      chainId: params.chainId,
-      status: 'QUEUED',
-      intentId,
-      metadata: {
-        jobId: params.jobId,
-        erc8183: true,
-        escrowStep: params.step,
-        ...(params.extraMetadata ?? {}),
-        queuePayload: { to: params.to, data: params.data, value: '0' },
-      },
-    },
-    select: { id: true },
-  });
-
-  await deps.queue.add(`erc8183-${params.step}`, {
-    transactionId: tx.id,
-    chainId: params.chainId,
-    walletId: params.signer.walletId,
-    from: getAddress(params.signer.safeAddress),
-    to: params.to,
-    data: params.data,
-    value: '0',
-    agentId: params.signer.id,
-    tier: 'FREE',
-    feeAmountWei: '0',
-    feeUsd: '0',
-    feeBps: 0,
-  });
-
-  deps.logger.info(
-    { jobId: params.jobId, step: params.step, transactionId: tx.id, intentId, from: params.signer.safeAddress },
-    'ERC-8183 step enqueued',
-  );
-  return tx.id;
+  return enqueueAgentStep(deps, { ...params, intentId: escrowIntentId(params.step, params.jobId) });
 }
 
 // ── startEscrow ────────────────────────────────────────────────────────────
@@ -410,12 +370,27 @@ const LIVE_JOB_STATUSES = new Set(['PENDING', 'ACCEPTED']);
 export async function onEscrowTxOutcome(deps: Erc8183Deps, outcome: EscrowTxOutcome): Promise<void> {
   const tx = await deps.db.transaction.findUnique({
     where: { id: outcome.transactionId },
-    select: { txHash: true, chainId: true, metadata: true },
+    select: { txHash: true, chainId: true, agentId: true, metadata: true },
   });
   const meta = (tx?.metadata ?? null) as
-    | { jobId?: string; erc8183?: boolean; escrowStep?: EscrowStep; deliverable?: Hex }
+    | { jobId?: string; erc8183?: boolean; escrowStep?: EscrowStep | IdentityStep; deliverable?: Hex }
     | null;
   if (!tx || meta?.erc8183 !== true || typeof meta.jobId !== 'string' || !meta.escrowStep) return;
+
+  // R2: the provider's ERC-8004 `register` / `setProviderAgentId`. A binding
+  // that reaches a terminal state releases a `submit` deferred behind it.
+  if (meta.escrowStep === 'register' || meta.escrowStep === 'bindAgent') {
+    const terminalJobIds = await onIdentityTxOutcome(
+      deps,
+      { id: outcome.transactionId, agentId: tx.agentId, chainId: tx.chainId, txHash: tx.txHash },
+      meta.escrowStep,
+      meta.jobId,
+      { status: outcome.status, error: outcome.error ?? null },
+    );
+    for (const jobId of terminalJobIds) await releaseDeferredSubmit(deps, jobId);
+    return;
+  }
+  const escrowStep: EscrowStep = meta.escrowStep;
 
   const job = await loadEscrowJob(deps, meta.jobId);
   if (!job) {
@@ -424,11 +399,11 @@ export async function onEscrowTxOutcome(deps: Erc8183Deps, outcome: EscrowTxOutc
   }
 
   if (outcome.status !== 'CONFIRMED') {
-    await handleStepFailure(deps, job, meta.escrowStep, `${meta.escrowStep} ${outcome.status}: ${outcome.error ?? 'no error recorded'}`);
+    await handleStepFailure(deps, job, escrowStep, `${escrowStep} ${outcome.status}: ${outcome.error ?? 'no error recorded'}`);
     return;
   }
 
-  switch (meta.escrowStep) {
+  switch (escrowStep) {
     case 'create': {
       if (!tx.txHash) {
         await handleStepFailure(deps, job, 'create', 'create CONFIRMED without a txHash');
@@ -464,6 +439,20 @@ export async function onEscrowTxOutcome(deps: Erc8183Deps, outcome: EscrowTxOutc
       if (fresh && (fresh.status === 'CANCELLED' || fresh.status === 'FAILED')) {
         await deps.settlement.add({ jobId: job.id, action: 'reject', reason: 'cancelled' });
         deps.logger.warn({ jobId: job.id }, 'ERC-8183 job funded after cancellation — evaluator reject scheduled');
+      }
+      // R2: bind the provider's ERC-8004 identity (minting it first if this is
+      // its first funded job on the chain). Never allowed to affect the funding
+      // outcome above: any error ends the binding FAILED and the job goes on.
+      // No submit can be deferred yet (ACCEPTED requires FUNDED), so the
+      // terminal ids it returns need no release here.
+      try {
+        await startProviderBinding(deps, { id: job.id, status: fresh?.status ?? job.status, escrowChainId: job.escrowChainId, provider: job.provider });
+      } catch (err) {
+        const reason = `binding could not be started: ${(err as Error)?.message ?? String(err)}`;
+        await deps.db.job
+          .updateMany({ where: { id: job.id, providerAgentIdStatus: 'BINDING' }, data: { providerAgentIdStatus: 'FAILED', providerAgentIdError: reason } })
+          .catch(() => undefined);
+        deps.logger.error({ jobId: job.id, err: reason }, 'ERC-8004 binding failed to start — job continues without feedback');
       }
       return;
     }
@@ -582,12 +571,43 @@ export function deliverableHashOf(result: unknown): Hex {
   return keccak256(toBytes(JSON.stringify(result ?? {})));
 }
 
+/** Enqueues `submit(onChainJobId, deliverable, "0x")` from the provider's wallet. */
+async function sendSubmitStep(deps: Erc8183Deps, job: EscrowJobRow, deliverable: Hex): Promise<void> {
+  const data = encodeFunctionData({
+    abi: AGENT_JOB_ESCROW_ABI,
+    functionName: 'submit',
+    args: [BigInt(job.onChainJobId!), deliverable, '0x'],
+  });
+  await enqueueStep(deps, {
+    jobId: job.id,
+    chainId: job.escrowChainId!,
+    step: 'submit',
+    signer: job.provider,
+    to: getAddress(job.escrowContract!),
+    data,
+    type: 'ESCROW_SUBMIT',
+    extraMetadata: { deliverable },
+  });
+}
+
 /**
  * Enqueues `submit(onChainJobId, keccak256(result), "0x")` from the provider's
  * wallet. The route has already moved the Job to PAYMENT_PENDING; on a
  * synchronous failure the Job is put back to ACCEPTED before rethrowing.
+ *
+ * R2: while the provider's ERC-8004 binding is BINDING the submit is DEFERRED
+ * (`deferredSubmitAt` + `deliverableHash` stored, nothing enqueued):
+ * `setProviderAgentId` reverts once the job is Submitted, and both
+ * transactions come from the provider's wallet, so they must not race.
+ * `releaseDeferredSubmit` sends it when the binding is BOUND/FAILED/SKIPPED.
+ * The defer is a conditional write on `providerAgentIdStatus = BINDING`, the
+ * same row the binding's terminal write is conditioned on, so exactly one of
+ * "defer here" or "submit now" happens.
  */
-export async function enqueueSubmit(deps: Erc8183Deps, params: { jobId: string; result: unknown }): Promise<void> {
+export async function enqueueSubmit(
+  deps: Erc8183Deps,
+  params: { jobId: string; result: unknown },
+): Promise<{ deferred: boolean }> {
   const job = await loadEscrowJob(deps, params.jobId);
   if (!job) throw new Error(`Job ${params.jobId} is not an ERC-8183 escrow job`);
   if (!job.onChainJobId || !job.escrowContract || !job.escrowChainId) {
@@ -596,27 +616,72 @@ export async function enqueueSubmit(deps: Erc8183Deps, params: { jobId: string; 
 
   const deliverable = deliverableHashOf(params.result);
   try {
+    if (job.providerAgentIdStatus === 'BINDING') {
+      const deferred = await deps.db.job.updateMany({
+        where: { id: job.id, providerAgentIdStatus: 'BINDING' },
+        data: { deferredSubmitAt: deps.now?.() ?? new Date(), deliverableHash: deliverable, escrowError: null },
+      });
+      if (deferred.count > 0) {
+        deps.logger.info(
+          { jobId: job.id, providerAgentId: job.providerAgentId },
+          'ERC-8183 submit deferred until the ERC-8004 binding is terminal',
+        );
+        return { deferred: true };
+      }
+      // The binding ended between the read and the conditional write: submit now.
+    }
     await deps.db.job.update({ where: { id: job.id }, data: { deliverableHash: deliverable, escrowError: null } });
-    const data = encodeFunctionData({
-      abi: AGENT_JOB_ESCROW_ABI,
-      functionName: 'submit',
-      args: [BigInt(job.onChainJobId), deliverable, '0x'],
-    });
-    await enqueueStep(deps, {
-      jobId: job.id,
-      chainId: job.escrowChainId,
-      step: 'submit',
-      signer: job.provider,
-      to: getAddress(job.escrowContract),
-      data,
-      type: 'ESCROW_SUBMIT',
-      extraMetadata: { deliverable },
-    });
+    await sendSubmitStep(deps, job, deliverable);
   } catch (err) {
     const reason = `submit enqueue failed: ${(err as Error)?.message ?? String(err)}`;
     await deps.db.job.update({ where: { id: job.id }, data: { status: 'ACCEPTED', escrowError: reason } });
     throw err;
   }
+  return { deferred: false };
+}
+
+/**
+ * Sends a `submit` that `enqueueSubmit` deferred behind the ERC-8004 binding.
+ * Called for every job whose binding just became terminal; a no-op unless
+ * `deferredSubmitAt` is set. Claiming the deferral is a conditional write, so
+ * a redelivered outcome or the recovery scan never sends it twice. Dropped
+ * (with a log) when the job is no longer PAYMENT_PENDING + FUNDED, e.g. it
+ * expired and was refunded meanwhile.
+ */
+export async function releaseDeferredSubmit(deps: Erc8183Deps, jobId: string): Promise<boolean> {
+  // Conditioned on a terminal binding: this is the single place a deferred
+  // submit leaves, so the "bind before submit" order cannot be broken by any
+  // caller (outcome handler, recovery scan) releasing too early.
+  const claimed = await deps.db.job.updateMany({
+    where: { id: jobId, deferredSubmitAt: { not: null }, providerAgentIdStatus: { in: [...TERMINAL_BINDING_STATUSES] } },
+    data: { deferredSubmitAt: null },
+  });
+  if (claimed.count === 0) return false;
+
+  const job = await loadEscrowJob(deps, jobId);
+  if (!job) return false;
+  if (job.status !== 'PAYMENT_PENDING' || job.onChainStatus !== 'FUNDED' || !job.onChainJobId || !job.escrowContract || !job.escrowChainId) {
+    deps.logger.warn(
+      { jobId, status: job.status, onChainStatus: job.onChainStatus },
+      'ERC-8183 deferred submit dropped — job is no longer PAYMENT_PENDING and Funded',
+    );
+    return false;
+  }
+
+  const deliverable = (job.deliverableHash as Hex | null) ?? deliverableHashOf(job.result);
+  try {
+    await sendSubmitStep(deps, job, deliverable);
+  } catch (err) {
+    const reason = `deferred submit could not be enqueued: ${(err as Error)?.message ?? String(err)}`;
+    await deps.db.job.update({ where: { id: job.id }, data: { status: 'ACCEPTED', escrowError: reason } });
+    deps.logger.error({ jobId, err: reason }, 'ERC-8183 deferred submit failed — job returned to ACCEPTED for retry');
+    return false;
+  }
+  deps.logger.info(
+    { jobId, providerAgentIdStatus: job.providerAgentIdStatus },
+    'ERC-8183 deferred submit released after the ERC-8004 binding ended',
+  );
+  return true;
 }
 
 // ── Cancellation (requester CANCELLED / provider FAILED) ───────────────────
@@ -1088,18 +1153,31 @@ export async function sweepExpiredEscrows(deps: Erc8183Deps): Promise<number> {
   return expired.length;
 }
 
-export type Erc8183RecoveryOutcome = 'resettled' | 'returnedToAccepted' | 'inFlight';
+export type Erc8183RecoveryOutcome = 'resettled' | 'returnedToAccepted' | 'inFlight' | 'awaitingBinding' | 'submitReleased';
 
 /**
  * Payment-recovery branch for a stale PAYMENT_PENDING escrow job. Never
  * finalizes as FAILED: the budget is on-chain, so the only safe moves are to
  * re-run the (idempotent) settlement or to let the provider retry `submit`.
+ *
+ * R2: a FUNDED job whose `submit` is deferred behind the ERC-8004 binding is
+ * not stuck while an identity transaction is in flight (`awaitingBinding`);
+ * otherwise the binding is resumed/closed and the deferred submit released.
  */
 export async function recoverErc8183Job(
   deps: Erc8183Deps,
   job: { id: string; onChainStatus: string | null },
 ): Promise<Erc8183RecoveryOutcome> {
   if (job.onChainStatus === 'FUNDED') {
+    const binding = await deps.db.job.findUnique({ where: { id: job.id }, select: { deferredSubmitAt: true } });
+    if (binding?.deferredSubmitAt) {
+      const resumed = await resumeBinding(deps, job.id);
+      for (const jobId of resumed.terminalJobIds) await releaseDeferredSubmit(deps, jobId);
+      if (resumed.waiting) return 'awaitingBinding';
+      // The binding is terminal (possibly ended before a crash): send the submit.
+      await releaseDeferredSubmit(deps, job.id);
+      return 'submitReleased';
+    }
     const submitTx = await deps.db.transaction.findFirst({
       where: { intentId: { startsWith: escrowIntentId('submit', job.id) } },
       orderBy: { createdAt: 'desc' },
@@ -1140,6 +1218,13 @@ export interface EscrowView {
   contestedAt: Date | null;
   contestReason: string | null;
   escrowError: string | null;
+  /** R2: ERC-8004 agent id bound to the on-chain job with setProviderAgentId (decimal string). */
+  providerAgentId: string | null;
+  /** R2: BINDING | BOUND | FAILED | SKIPPED; null for jobs funded before R2. */
+  providerAgentIdStatus: string | null;
+  providerAgentIdError: string | null;
+  /** R2: the provider completed while BINDING; `submit` is sent when the binding ends. */
+  deferredSubmitAt: Date | null;
 }
 
 const ESCROW_COLUMNS = [
@@ -1160,6 +1245,10 @@ const ESCROW_COLUMNS = [
   'contestedAt',
   'contestReason',
   'escrowError',
+  'providerAgentId',
+  'providerAgentIdStatus',
+  'providerAgentIdError',
+  'deferredSubmitAt',
 ] as const;
 
 /**
@@ -1189,6 +1278,10 @@ export function toJobResponse<T extends Record<string, unknown>>(job: T): Omit<T
           contestedAt: (job['contestedAt'] as Date | null) ?? null,
           contestReason: (job['contestReason'] as string | null) ?? null,
           escrowError: (job['escrowError'] as string | null) ?? null,
+          providerAgentId: (job['providerAgentId'] as string | null) ?? null,
+          providerAgentIdStatus: (job['providerAgentIdStatus'] as string | null) ?? null,
+          providerAgentIdError: (job['providerAgentIdError'] as string | null) ?? null,
+          deferredSubmitAt: (job['deferredSubmitAt'] as Date | null) ?? null,
         }
       : null;
   return { ...(rest as Omit<T, (typeof ESCROW_COLUMNS)[number]>), escrow };
