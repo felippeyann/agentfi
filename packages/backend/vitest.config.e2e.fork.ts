@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 import { config as loadDotenv } from 'dotenv';
 import { resolve } from 'path';
 
@@ -18,6 +18,9 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['src/__tests__/e2e/**/*.e2e.ts'],
+    // Base mainnet fork here; the Base Sepolia escrow rehearsal is
+    // `npm run test:e2e:escrow-fork` (vitest.config.e2e.escrow-fork.ts).
+    exclude: [...configDefaults.exclude, 'src/__tests__/e2e/escrow-erc8183.fork.e2e.ts'],
     globalSetup: ['src/__tests__/e2e/global-setup.ts'],
     testTimeout: 90_000,
     hookTimeout: 120_000,

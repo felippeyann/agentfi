@@ -8,12 +8,17 @@
  *    forked test worker inherits them.
  *
  * Teardown kills the Anvil process.
+ *
+ * The plumbing (Foundry binaries, Anvil lifecycle, migrations) is exported so
+ * other E2E harnesses reuse it instead of duplicating it — the ERC-8183
+ * escrow fork rehearsal (`escrow-fork.global-setup.ts`, C5a) starts its own
+ * Base Sepolia fork on another port with `startAnvil`.
  */
 
-import { spawn, exec } from 'child_process';
+import { spawn, exec, type ChildProcess } from 'child_process';
 import { promisify } from 'util';
 import { readFileSync, existsSync } from 'fs';
-import { join, resolve } from 'path';
+import { join } from 'path';
 import { homedir } from 'os';
 import {
   createPublicClient,
@@ -24,7 +29,7 @@ import {
 import { privateKeyToAccount } from 'viem/accounts';
 import { base } from 'viem/chains';
 
-const execAsync = promisify(exec);
+export const execAsync = promisify(exec);
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -42,7 +47,7 @@ export const DEPLOYER_ADDRESS: Address =
 // Foundry's installer puts binaries in ~/.foundry/bin/ which is not always
 // in PATH (especially on Windows git-bash / CI without PATH export).
 
-function resolveFoundryBin(name: string): string {
+export function resolveFoundryBin(name: string): string {
   // 1. Trust PATH first
   // We detect it's available by checking the well-known install dir directly.
   const candidates = [
@@ -57,20 +62,20 @@ function resolveFoundryBin(name: string): string {
   return name; // fall back to PATH — will fail with a clear OS error if absent
 }
 
-const FORGE_BIN = resolveFoundryBin('forge');
-const ANVIL_BIN = resolveFoundryBin('anvil');
+export const FORGE_BIN = resolveFoundryBin('forge');
+export const ANVIL_BIN = resolveFoundryBin('anvil');
 
 // ── State ──────────────────────────────────────────────────────────────────
 
-let anvilProcess: ReturnType<typeof spawn> | null = null;
+let anvilProcess: ChildProcess | null = null;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-async function waitForAnvil(timeout = 20_000): Promise<void> {
+export async function waitForAnvil(timeout = 20_000, rpcUrl: string = ANVIL_RPC): Promise<void> {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(ANVIL_RPC, {
+      const res = await fetch(rpcUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -87,6 +92,52 @@ async function waitForAnvil(timeout = 20_000): Promise<void> {
     await new Promise((r) => setTimeout(r, 250));
   }
   throw new Error(`Anvil did not start within ${timeout}ms`);
+}
+
+export interface StartAnvilOptions {
+  port: number;
+  chainId: number;
+  /** Fork this RPC (`--fork-url`); a plain local chain when absent. */
+  forkUrl?: string | undefined;
+  /** Pin the fork (`--fork-block-number`); ignored without `forkUrl`. */
+  forkBlockNumber?: string | undefined;
+  /** How long to wait for `eth_chainId` to answer (fork mode fetches state first). */
+  readyTimeoutMs?: number | undefined;
+}
+
+/** Spawns Anvil with `--silent` and resolves once it answers JSON-RPC. */
+export async function startAnvil(opts: StartAnvilOptions): Promise<ChildProcess> {
+  const args = ['--port', String(opts.port), '--chain-id', String(opts.chainId), '--silent'];
+  if (opts.forkUrl) {
+    args.push('--fork-url', opts.forkUrl);
+    if (opts.forkBlockNumber) args.push('--fork-block-number', opts.forkBlockNumber);
+  }
+
+  const child = spawn(ANVIL_BIN, args, { stdio: 'ignore', detached: false });
+  child.on('error', (err) => {
+    console.error('[e2e] Anvil process error:', err.message);
+  });
+
+  await waitForAnvil(opts.readyTimeoutMs ?? 20_000, `http://127.0.0.1:${opts.port}`);
+  return child;
+}
+
+/** Kills an Anvil started by `startAnvil` (no-op for null). */
+export function stopAnvil(child: ChildProcess | null): void {
+  child?.kill('SIGTERM');
+}
+
+/** `npx prisma migrate deploy` from packages/backend, against `databaseUrl` when given. */
+export async function runMigrations(databaseUrl?: string): Promise<void> {
+  try {
+    await execAsync('npx prisma migrate deploy', {
+      cwd: process.cwd(),
+      ...(databaseUrl ? { env: { ...process.env, DATABASE_URL: databaseUrl } } : {}),
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`[e2e] prisma migrate deploy failed: ${msg}`);
+  }
 }
 
 function readArtifact(contractsDir: string, contractName: string) {
@@ -131,13 +182,8 @@ export async function setup(): Promise<void> {
 
   // Run DB migrations before anything else
   console.log('[e2e] Running database migrations…');
-  try {
-    await execAsync('npx prisma migrate deploy', { cwd: process.cwd() });
-    console.log('[e2e] Migrations applied.');
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`[e2e] prisma migrate deploy failed: ${msg}`);
-  }
+  await runMigrations();
+  console.log('[e2e] Migrations applied.');
 
   // 1 ─ Build contracts (skip if artifacts already exist from a prior build)
   const policyArtifactPath = join(
@@ -165,17 +211,7 @@ export async function setup(): Promise<void> {
   }
 
   // 2 ─ Start Anvil
-  const anvilArgs = [
-    '--port', String(ANVIL_PORT),
-    '--chain-id', String(ANVIL_CHAIN_ID),
-    '--silent',
-  ];
-
   if (forkUrl) {
-    anvilArgs.push('--fork-url', forkUrl);
-    if (forkBlockNumber) {
-      anvilArgs.push('--fork-block-number', forkBlockNumber);
-    }
     process.env['E2E_ANVIL_MODE'] = 'fork';
     console.log(
       `[e2e] Starting Anvil fork on port ${ANVIL_PORT} (chain-id ${ANVIL_CHAIN_ID})…`,
@@ -185,16 +221,12 @@ export async function setup(): Promise<void> {
     console.log(`[e2e] Starting Anvil on port ${ANVIL_PORT} (chain-id ${ANVIL_CHAIN_ID})…`);
   }
 
-  anvilProcess = spawn(
-    ANVIL_BIN,
-    anvilArgs,
-    { stdio: 'ignore', detached: false },
-  );
-  anvilProcess.on('error', (err) => {
-    console.error('[e2e] Anvil process error:', err.message);
+  anvilProcess = await startAnvil({
+    port: ANVIL_PORT,
+    chainId: ANVIL_CHAIN_ID,
+    forkUrl,
+    forkBlockNumber,
   });
-
-  await waitForAnvil();
   console.log('[e2e] Anvil ready.');
 
   // 3 ─ Deploy contracts
@@ -266,7 +298,7 @@ export async function setup(): Promise<void> {
 
 export async function teardown(): Promise<void> {
   if (anvilProcess) {
-    anvilProcess.kill('SIGTERM');
+    stopAnvil(anvilProcess);
     anvilProcess = null;
     console.log('[e2e] Anvil stopped.');
   }
