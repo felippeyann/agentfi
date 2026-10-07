@@ -140,6 +140,14 @@ const envSchema = z.object({
   // alone would reject "" against `.url()` and abort boot.
   X402_FACILITATOR_URL: z.preprocess((v) => (v === '' ? undefined : v), z.string().url().optional()),
 
+  // POST /v1/jobs/:id/pay-resource outbound target policy (S4). By default
+  // the backend refuses to fetch a URL whose host is, or resolves to, a
+  // private / loopback / link-local / reserved address, in every
+  // environment. `true` lifts that refusal for local development against a
+  // resource server on loopback (DNS pinning and the no-redirect rule still
+  // apply). Refused at boot in production and staging.
+  RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS: z.preprocess(blankToUndefined, z.enum(['true', 'false']).default('false')),
+
   // Rate-limit overrides (requests/minute per tier)
   RATE_LIMIT_FREE: z.coerce.number().int().positive().default(30),
   RATE_LIMIT_PRO: z.coerce.number().int().positive().default(300),
@@ -209,6 +217,18 @@ if (parsed.data.NODE_ENV === 'production' || parsed.data.NODE_ENV === 'staging')
     console.error(
       `FATAL: NODE_ENV=${parsed.data.NODE_ENV} cannot run with a legacy AgentExecutor configured. ` +
         legacyExecutors.map(describeLegacyContract).join(' '),
+    );
+    process.exit(1);
+  }
+
+  // The private-host override turns pay-resource into a way for any provider
+  // agent to read internal services (cloud metadata, databases, the admin
+  // API on loopback). Development / test only.
+  if (parsed.data.RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS === 'true') {
+    console.error(
+      `FATAL: RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS=true cannot run with NODE_ENV=${parsed.data.NODE_ENV}. ` +
+        'It lets POST /v1/jobs/:id/pay-resource fetch private, loopback and link-local addresses ' +
+        '(development / test only). Unset it or set it to false.',
     );
     process.exit(1);
   }

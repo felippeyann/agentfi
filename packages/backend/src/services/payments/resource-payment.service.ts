@@ -41,14 +41,23 @@
  * the x402 `payment-identifier` extension so a cache-enabled server can
  * deduplicate on its side (the client itself re-signs on every attempt —
  * see docs/architecture/x402-payments.md §3).
+ *
+ * Outbound target (S4, `outbound-target.ts`): the URL is an agent-chosen
+ * destination the backend connects to, so before the fetch the hostname is
+ * resolved and refused if it is, or resolves to, a private / loopback /
+ * link-local / reserved address (`400 INVALID_URL`); the connection is then
+ * pinned to the resolved addresses through a per-request undici Agent; and
+ * redirects are never followed — any 3xx is `400 REDIRECT_REFUSED`. The
+ * range refusal is unconditional unless `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS`
+ * is `true` (development / test only; boot refuses it in production).
  */
 
 import { randomUUID } from 'node:crypto';
-import { isIP } from 'node:net';
 import type { Prisma, PrismaClient, ResourcePayment, ResourcePaymentStatus } from '@prisma/client';
+import type { Agent } from 'undici';
 import { formatUnits, parseUnits } from 'viem';
 import { logger } from '../../api/middleware/logger.js';
-import { isProductionLikeEnv } from '../../config/runtime-env.js';
+import { env } from '../../config/env.js';
 import { chainIdToNetwork } from '../../config/x402.js';
 import {
   getKnownTokenByAddress,
@@ -57,6 +66,13 @@ import {
 } from '../transaction/token-registry.js';
 import { toClientSigner, type TypedDataSigner } from '../wallet/signer.js';
 import {
+  OutboundTargetError,
+  assertPublicTarget,
+  createPinnedDispatcher,
+  type OutboundTargetPolicy,
+  type ValidatedTarget,
+} from './outbound-target.js';
+import {
   BudgetExceededError,
   NoAcceptableSchemeError,
   PaymentFailedError,
@@ -64,6 +80,7 @@ import {
   type AuthorizationInfo,
   type PayResourceResult,
   type SelectedPaymentOption,
+  type TransportRequestInit,
 } from './x402-client.service.js';
 
 // ── Errors ──────────────────────────────────────────────────────────────────
@@ -75,6 +92,7 @@ export type ResourcePaymentErrorCode =
   | 'AGENT_INACTIVE'
   | 'POLICY_PAUSED'
   | 'INVALID_URL'
+  | 'REDIRECT_REFUSED'
   | 'INVALID_BUDGET'
   | 'UNSUPPORTED_BUDGET_TOKEN'
   | 'UNSUPPORTED_ASSET'
@@ -163,6 +181,12 @@ export interface ResourcePaymentServiceDeps {
   /** Wallet provider (`getWalletService()`); only `getWalletAddress` + `signTypedData` are used. */
   wallet: TypedDataSigner;
   client: X402ClientService;
+  /**
+   * Outbound target policy overrides (tests inject a resolver). Defaults:
+   * `allowPrivateHosts` from `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS`, the
+   * system resolver.
+   */
+  targetPolicy?: OutboundTargetPolicy;
 }
 
 // ── Internals ───────────────────────────────────────────────────────────────
@@ -200,6 +224,8 @@ interface JobBudget {
 }
 
 interface Target {
+  /** Parsed request URL; its hostname is what the outbound target policy validates. */
+  url: URL;
   /** Sent as-is (query strings may carry the resource's API key). */
   requestUrl: string;
   /** Origin + path only — what gets stored and logged. */
@@ -283,34 +309,33 @@ function receiptTransaction(receipt: unknown): string | undefined {
   return typeof tx === 'string' && tx.length > 0 ? tx : undefined;
 }
 
-function isPrivateIpv4(ip: string): boolean {
-  const octets = ip.split('.').map(Number);
-  const [a, b] = octets;
-  if (a === undefined || b === undefined) return true;
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127)
-  );
+function isRedirect(status: number): boolean {
+  return status >= 300 && status < 400;
 }
 
-/** Loopback, private, link-local and unspecified hosts — never fetched in production-like environments. */
-export function isPrivateHost(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  if (host === 'localhost' || host.endsWith('.localhost')) return true;
-  const family = isIP(host);
-  if (family === 4) return isPrivateIpv4(host);
-  if (family === 6) {
-    if (host === '::' || host === '::1') return true;
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(host);
-    if (mapped?.[1]) return isPrivateIpv4(mapped[1]);
-    return /^f[cd]/.test(host) || /^fe[89ab]/.test(host);
+/** `Location` resolved against the request URL, stripped like `storedUrl`; `null` when absent or unparseable. */
+function redirectLocation(result: PayResourceResult, requestUrl: string): string | null {
+  const raw = result.headers['location'];
+  if (!raw) return null;
+  try {
+    const resolved = new URL(raw, requestUrl);
+    resolved.search = '';
+    resolved.hash = '';
+    resolved.username = '';
+    resolved.password = '';
+    return clip(resolved.toString());
+  } catch {
+    return null;
   }
-  return false;
+}
+
+/** Tears down the per-request pinned Agent; the response body has been read by then. */
+async function destroyDispatcher(dispatcher: Agent): Promise<void> {
+  try {
+    await dispatcher.destroy();
+  } catch (error) {
+    logger.debug({ err: error }, 'Could not destroy the pinned resource-payment dispatcher');
+  }
 }
 
 function truncateUtf8(text: string, maxBytes: number): string {
@@ -323,11 +348,16 @@ export class ResourcePaymentService {
   private readonly db: PrismaClient;
   private readonly wallet: TypedDataSigner;
   private readonly client: X402ClientService;
+  private readonly targetPolicy: OutboundTargetPolicy;
 
   constructor(deps: ResourcePaymentServiceDeps) {
     this.db = deps.db;
     this.wallet = deps.wallet;
     this.client = deps.client;
+    this.targetPolicy = {
+      allowPrivateHosts: env.RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS === 'true',
+      ...deps.targetPolicy,
+    };
   }
 
   async payForResource(input: PayForResourceInput): Promise<PayForResourceOutcome> {
@@ -436,6 +466,10 @@ export class ResourcePaymentService {
       );
     }
 
+    // Resolve before you connect: refuse a private / loopback / reserved
+    // destination (literal or resolved), and keep the addresses to pin to.
+    const validated = await this.validateTarget(target, paymentId);
+
     const signer = await toClientSigner(this.wallet, agent.walletId);
     const ctx: AttemptContext = {
       jobId: job.id,
@@ -450,12 +484,16 @@ export class ResourcePaymentService {
     };
     const attempt: AttemptState = {};
 
+    // Pin what you validated: every socket of this exchange (plain request
+    // and paid request alike) can only reach the resolved addresses.
+    const dispatcher = createPinnedDispatcher(validated);
+
     let result: PayResourceResult;
     try {
       result = await this.client.payResource({
         signer,
         url: target.requestUrl,
-        init: this.buildInit(input.method, input.body),
+        init: this.buildInit(input.method, input.body, dispatcher),
         maxAmountUsd: formatUnits(cap, budget.usdc.decimals),
         allowedNetworks: [budget.network],
         paymentId,
@@ -474,6 +512,8 @@ export class ResourcePaymentService {
       });
     } catch (error) {
       throw await this.recordFailure(error, ctx, attempt);
+    } finally {
+      await destroyDispatcher(dispatcher);
     }
 
     return this.recordOutcome(result, ctx, attempt);
@@ -486,6 +526,9 @@ export class ResourcePaymentService {
     ctx: AttemptContext,
     attempt: AttemptState,
   ): Promise<PayForResourceOutcome> {
+    // A redirect is never followed and never delivered as the resource (S4).
+    if (isRedirect(result.status)) return this.refuseRedirect(result, ctx, attempt);
+
     const resource = this.snapshot(result);
 
     if (!result.payment) {
@@ -493,43 +536,11 @@ export class ResourcePaymentService {
       return { payment: null, remainingBudget: await this.remainingBudget(ctx.jobId, ctx.budget), resource };
     }
 
-    const row = attempt.row;
-    if (!row) {
-      // The client only reports `payment` after the signing hooks ran.
-      throw new ResourcePaymentError('LEDGER_ERROR', 500, 'Payment reported without a ledger row', {
-        paymentId: ctx.paymentId,
-      });
-    }
+    const row = this.requireRow(attempt, ctx);
     const payment = result.payment;
 
     if (result.paid) {
-      const receiptUnverified = payment.receipt !== undefined && payment.receiptVerified === false;
-      const settled = await this.db.resourcePayment.update({
-        where: { id: row.id },
-        data: {
-          status: 'settled',
-          settlementTxHash: payment.txHash ?? receiptTransaction(payment.receipt) ?? null,
-          ...(payment.receipt !== undefined ? { receipt: payment.receipt as Prisma.InputJsonValue } : {}),
-          receiptVerified: payment.receiptVerified ?? null,
-          responseStatus: result.status,
-          error: null,
-        },
-      });
-      const log = {
-        jobId: ctx.jobId,
-        paymentId: ctx.paymentId,
-        agentId: ctx.agentId,
-        url: ctx.target.storedUrl,
-        amount: payment.amount,
-        network: payment.network,
-        txHash: settled.settlementTxHash,
-        receiptVerified: settled.receiptVerified,
-      };
-      if (receiptUnverified) {
-        logger.warn(log, 'Resource payment settled but the offer-receipt did not verify against the offer — marked unverified');
-      } else {
-        logger.info(log, 'Resource payment settled');
-      }
+      const settled = await this.markSettled(row, result, payment, ctx);
       return { payment: settled, remainingBudget: await this.remainingBudget(ctx.jobId, ctx.budget), resource };
     }
 
@@ -568,6 +579,120 @@ export class ResourcePaymentService {
       `The resource server answered HTTP ${result.status} to the signed payment without settling it`,
       { paymentId: ctx.paymentId, responseStatus: result.status, payment: refused, resource },
     );
+  }
+
+  /**
+   * A 3xx from a paid resource is refused (`400 REDIRECT_REFUSED`), before or
+   * after signing. It was not followed (`redirect: 'manual'`): following
+   * would send the request — and after signing the `PAYMENT-SIGNATURE` — to
+   * an origin that never went through the target policy. The ledger records
+   * what the money did: nothing signed → no row; signed without a settlement
+   * report → `refused` (like any non-2xx after signing); signed and reported
+   * settled → `settled`, because the amount is spent even though the resource
+   * was not delivered.
+   */
+  private async refuseRedirect(
+    result: PayResourceResult,
+    ctx: AttemptContext,
+    attempt: AttemptState,
+  ): Promise<never> {
+    const location = redirectLocation(result, ctx.target.requestUrl);
+    const where = location ? ` to ${location}` : '';
+    const details = { paymentId: ctx.paymentId, responseStatus: result.status, location };
+
+    if (!result.payment) {
+      throw new ResourcePaymentError(
+        'REDIRECT_REFUSED',
+        400,
+        `The resource answered HTTP ${result.status} (redirect${where}); redirects are not followed for paid resources. Nothing was signed.`,
+        { ...details, payment: null },
+      );
+    }
+
+    const row = this.requireRow(attempt, ctx);
+    if (result.paid) {
+      const settled = await this.markSettled(
+        row,
+        result,
+        result.payment,
+        ctx,
+        `Settled, but the resource answered HTTP ${result.status} (redirect${where}), which was not followed`,
+      );
+      throw new ResourcePaymentError(
+        'REDIRECT_REFUSED',
+        400,
+        `The resource server reported the payment settled but answered HTTP ${result.status} (redirect${where}) instead of the resource; redirects are not followed. The amount is spent — do not retry with a new paymentId.`,
+        { ...details, payment: settled },
+      );
+    }
+
+    const refused = await this.db.resourcePayment.update({
+      where: { id: row.id },
+      data: {
+        status: 'refused',
+        responseStatus: result.status,
+        error: clip(`HTTP ${result.status} redirect${where} after signing, not followed; no settlement reported`),
+      },
+    });
+    logger.warn(
+      { jobId: ctx.jobId, paymentId: ctx.paymentId, agentId: ctx.agentId, url: ctx.target.storedUrl, location, status: result.status },
+      'Paid resource answered a signed payment with a redirect — not followed, recorded as refused',
+    );
+    throw new ResourcePaymentError(
+      'REDIRECT_REFUSED',
+      400,
+      `The resource server answered the signed payment with HTTP ${result.status} (redirect${where}) without settling it; redirects are not followed for paid resources`,
+      { ...details, payment: refused },
+    );
+  }
+
+  /** The client only reports `payment` after the signing hooks ran, so a row must exist. */
+  private requireRow(attempt: AttemptState, ctx: AttemptContext): ResourcePayment {
+    if (!attempt.row) {
+      throw new ResourcePaymentError('LEDGER_ERROR', 500, 'Payment reported without a ledger row', {
+        paymentId: ctx.paymentId,
+      });
+    }
+    return attempt.row;
+  }
+
+  private async markSettled(
+    row: ResourcePayment,
+    result: PayResourceResult,
+    payment: NonNullable<PayResourceResult['payment']>,
+    ctx: AttemptContext,
+    note?: string,
+  ): Promise<ResourcePayment> {
+    const receiptUnverified = payment.receipt !== undefined && payment.receiptVerified === false;
+    const settled = await this.db.resourcePayment.update({
+      where: { id: row.id },
+      data: {
+        status: 'settled',
+        settlementTxHash: payment.txHash ?? receiptTransaction(payment.receipt) ?? null,
+        ...(payment.receipt !== undefined ? { receipt: payment.receipt as Prisma.InputJsonValue } : {}),
+        receiptVerified: payment.receiptVerified ?? null,
+        responseStatus: result.status,
+        error: note ? clip(note) : null,
+      },
+    });
+    const log = {
+      jobId: ctx.jobId,
+      paymentId: ctx.paymentId,
+      agentId: ctx.agentId,
+      url: ctx.target.storedUrl,
+      amount: payment.amount,
+      network: payment.network,
+      txHash: settled.settlementTxHash,
+      receiptVerified: settled.receiptVerified,
+    };
+    if (note) {
+      logger.warn({ ...log, status: result.status }, `Resource payment settled without delivering the resource: ${note}`);
+    } else if (receiptUnverified) {
+      logger.warn(log, 'Resource payment settled but the offer-receipt did not verify against the offer — marked unverified');
+    } else {
+      logger.info(log, 'Resource payment settled');
+    }
+    return settled;
   }
 
   /** Records what the ledger can about a failed attempt and returns the error to throw. */
@@ -956,28 +1081,58 @@ export class ResourcePaymentService {
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       throw new ResourcePaymentError('INVALID_URL', 400, 'url must use http or https');
     }
-    if (isProductionLikeEnv(process.env['NODE_ENV'] ?? 'development') && isPrivateHost(parsed.hostname)) {
-      throw new ResourcePaymentError(
-        'INVALID_URL',
-        400,
-        'url must not point at a private, loopback or link-local host',
-      );
-    }
+    // Where the URL may point is decided by `validateTarget` (resolved
+    // addresses, every environment), not here.
     const stored = new URL(parsed.toString());
     stored.search = '';
     stored.hash = '';
     stored.username = '';
     stored.password = '';
-    return { requestUrl: parsed.toString(), storedUrl: stored.toString() };
+    return { url: parsed, requestUrl: parsed.toString(), storedUrl: stored.toString() };
   }
 
-  private buildInit(method: 'GET' | 'POST', body: unknown): RequestInit {
+  /**
+   * Outbound target policy (S4): refuse a private / loopback / link-local /
+   * reserved destination — literal, or any address the hostname resolves to
+   * — and return the addresses the connection will be pinned to. Refusals
+   * are `400 INVALID_URL` with `refusal`, `hostname` and (for a resolved
+   * address) `address`; a transient resolver failure is `502 PAYMENT_FAILED`
+   * with `stage: "resolve"`. Nothing is recorded or signed either way.
+   */
+  private async validateTarget(target: Target, paymentId: string): Promise<ValidatedTarget> {
+    try {
+      return await assertPublicTarget(target.url, this.targetPolicy);
+    } catch (error) {
+      if (!(error instanceof OutboundTargetError)) throw error;
+      logger.warn(
+        { paymentId, url: target.storedUrl, refusal: error.refusal, hostname: error.hostname, address: error.address },
+        'Resource payment target refused by the outbound target policy',
+      );
+      if (error.refusal === 'resolver-failed') {
+        throw new ResourcePaymentError('PAYMENT_FAILED', 502, error.message, {
+          paymentId,
+          stage: 'resolve',
+          timedOut: false,
+          payment: null,
+        });
+      }
+      throw new ResourcePaymentError('INVALID_URL', 400, error.message, {
+        refusal: error.refusal,
+        hostname: error.hostname,
+        ...(error.address !== undefined ? { address: error.address } : {}),
+      });
+    }
+  }
+
+  private buildInit(method: 'GET' | 'POST', body: unknown, dispatcher: Agent): TransportRequestInit {
     const headers: Record<string, string> = { accept: 'application/json, text/plain;q=0.9, */*;q=0.8' };
+    // `redirect: 'manual'`: a 3xx comes back to `recordOutcome` and is refused.
+    const transport = { redirect: 'manual' as const, dispatcher };
     if (method === 'POST' && body !== undefined) {
       headers['content-type'] = 'application/json';
-      return { method, headers, body: JSON.stringify(body) };
+      return { method, headers, body: JSON.stringify(body), ...transport };
     }
-    return { method, headers };
+    return { method, headers, ...transport };
   }
 
   private snapshot(result: PayResourceResult): ResourceSnapshot {
