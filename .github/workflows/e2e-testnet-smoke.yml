@@ -5,26 +5,44 @@ on:
   schedule:
     - cron: '0 6 * * *'
 
+# The `secrets` context is not available in a job-level `if`, which made this
+# file invalid (GitHub reported a 0-second failure on every push). The secrets
+# are read into the job env instead and a first step decides whether the
+# smoke can run; without them the job succeeds with a notice.
 jobs:
   testnet-smoke:
     name: Base Sepolia Smoke
     runs-on: ubuntu-latest
-    if: ${{ secrets.E2E_TESTNET_RPC_URL != '' && secrets.E2E_TESTNET_POLICY_MODULE_ADDRESS != '' && secrets.E2E_TESTNET_EXECUTOR_ADDRESS != '' }}
+    env:
+      E2E_TESTNET_RPC_URL: ${{ secrets.E2E_TESTNET_RPC_URL }}
+      E2E_TESTNET_POLICY_MODULE_ADDRESS: ${{ secrets.E2E_TESTNET_POLICY_MODULE_ADDRESS }}
+      E2E_TESTNET_EXECUTOR_ADDRESS: ${{ secrets.E2E_TESTNET_EXECUTOR_ADDRESS }}
     steps:
+      - name: Check testnet secrets
+        id: check
+        run: |
+          if [ -n "$E2E_TESTNET_RPC_URL" ] && [ -n "$E2E_TESTNET_POLICY_MODULE_ADDRESS" ] && [ -n "$E2E_TESTNET_EXECUTOR_ADDRESS" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::E2E_TESTNET_* secrets are not configured; skipping the Base Sepolia smoke."
+          fi
+
       - uses: actions/checkout@v7
+        if: steps.check.outputs.ready == 'true'
 
       - uses: actions/setup-node@v7
+        if: steps.check.outputs.ready == 'true'
         with:
           node-version: '22'
           cache: 'npm'
 
       - run: npm ci
+        if: steps.check.outputs.ready == 'true'
 
       - run: npx prisma generate --schema=packages/backend/src/db/schema.prisma
+        if: steps.check.outputs.ready == 'true'
 
       - working-directory: packages/backend
-        env:
-          E2E_TESTNET_RPC_URL: ${{ secrets.E2E_TESTNET_RPC_URL }}
-          E2E_TESTNET_POLICY_MODULE_ADDRESS: ${{ secrets.E2E_TESTNET_POLICY_MODULE_ADDRESS }}
-          E2E_TESTNET_EXECUTOR_ADDRESS: ${{ secrets.E2E_TESTNET_EXECUTOR_ADDRESS }}
+        if: steps.check.outputs.ready == 'true'
         run: npm run test:e2e:testnet
