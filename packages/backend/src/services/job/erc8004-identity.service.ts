@@ -381,9 +381,11 @@ export async function startProviderBinding(deps: IdentityDeps, job: BindingJob):
     return failWaitingJobs(deps, job.provider.id, chainId, `ERC-8004 registration failed: ${identity.error ?? 'unknown error'}`);
   }
   if (identity.status === 'REGISTERING') {
-    // Someone else's registration: make sure it is still alive (a crash after
-    // the register confirmed would otherwise leave every later job waiting).
-    return claimed ? [] : repairRegistration(deps, identity, job.provider);
+    // Someone else's registration: join it. If its register already reached a
+    // terminal state whose outcome was lost (crash), replay it now; a register
+    // that is not even created yet is the concurrent claimer still enqueuing
+    // it, never a failure (the recovery scan handles a claimer that died).
+    return claimed ? [] : repairRegistration(deps, identity, job.provider, { failIfMissing: false });
   }
   return pumpBindings(deps, job.provider, chainId);
 }
@@ -492,21 +494,41 @@ export interface ResumeResult {
 }
 
 /**
+ * How long a REGISTERING row may exist without its `register` Transaction row
+ * before recovery declares the claimer dead (it creates the row right after
+ * claiming, so anything past a few seconds is a crash).
+ */
+export const REGISTER_CLAIM_GRACE_MS = 120_000;
+
+/**
  * A REGISTERING row: nothing to do while its `register` is in flight;
  * otherwise replay that transaction's outcome (a crash between confirmation
- * and the outcome handler, or a receipt read that failed).
+ * and the outcome handler, or a receipt read that failed). A row without any
+ * register transaction is failed only when `failIfMissing` (recovery, after
+ * `REGISTER_CLAIM_GRACE_MS`): a fresh claimer may still be enqueuing it.
  */
-async function repairRegistration(deps: IdentityDeps, identity: IdentityRow, provider: SigningAgent): Promise<string[]> {
+async function repairRegistration(
+  deps: IdentityDeps,
+  identity: IdentityRow,
+  provider: SigningAgent,
+  opts: { failIfMissing: boolean },
+): Promise<string[]> {
   const registerTx = await deps.db.transaction.findFirst({
     where: { agentId: provider.id, chainId: identity.chainId, intentId: { startsWith: registerIntentId(provider.id, identity.chainId) } },
     orderBy: { createdAt: 'desc' },
-    select: { id: true, agentId: true, chainId: true, txHash: true, status: true, error: true },
+    select: { id: true, agentId: true, chainId: true, txHash: true, status: true, error: true, createdAt: true },
   });
   if (registerTx && PENDING_TX.has(registerTx.status)) return [];
+  // A terminal tx older than the current claim belongs to a previous attempt
+  // (the row was re-claimed after it failed): the new one is still coming.
+  const staleAttempt = registerTx !== null && registerTx.createdAt < identity.updatedAt && registerTx.status !== 'CONFIRMED';
+  if (!registerTx || staleAttempt) {
+    if (!opts.failIfMissing) return [];
+    return onRegisterOutcome(deps, null, identity, { status: 'FAILED', error: 'REGISTERING without a live register transaction' });
+  }
 
-  const outcome: IdentityOutcome = !registerTx
-    ? { status: 'FAILED', error: 'REGISTERING without a register transaction' }
-    : registerTx.status === 'CONFIRMED'
+  const outcome: IdentityOutcome =
+    registerTx.status === 'CONFIRMED'
       ? { status: 'CONFIRMED' }
       : { status: registerTx.status === 'REVERTED' ? 'REVERTED' : 'FAILED', error: registerTx.error };
   return onRegisterOutcome(deps, registerTx, identity, outcome);
@@ -567,7 +589,12 @@ async function advanceBinding(
   if (!identity) {
     return (await endBinding(deps, jobId, 'FAILED', 'recovery: no ERC-8004 identity row for the provider')) ? [jobId] : [];
   }
-  if (identity.status === 'REGISTERING') return repairRegistration(deps, identity, provider);
+  if (identity.status === 'REGISTERING') {
+    const now = (deps.now?.() ?? new Date()).getTime();
+    return repairRegistration(deps, identity, provider, {
+      failIfMissing: now - identity.updatedAt.getTime() > REGISTER_CLAIM_GRACE_MS,
+    });
+  }
   if (identity.status === 'FAILED') {
     return failWaitingJobs(deps, provider.id, chainId, `ERC-8004 registration failed: ${identity.error ?? 'unknown error'}`);
   }
