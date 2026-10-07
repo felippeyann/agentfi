@@ -1,0 +1,79 @@
+/**
+ * ERC-8183 orchestrator — real dependency wiring.
+ *
+ * `escrow-erc8183.service.ts` holds the logic with injected deps; this module
+ * binds the process singletons (Prisma `db`, the transaction queue, the
+ * settlement queue, viem public clients, the evaluator signer, env) and
+ * exports the bound entry points the routes, the transaction processor, the
+ * pre-submit guard and the recovery worker call. Tests mock THIS module.
+ */
+
+import type { Hex } from 'viem';
+import { db } from '../../db/client.js';
+import { env, escrowEvaluatorAddress } from '../../config/env.js';
+import { getContracts } from '../../config/contracts.js';
+import { createChainPublicClient } from '../../config/chains.js';
+import { logger } from '../../api/middleware/logger.js';
+import { transactionQueue } from '../../queues/transaction.queue.js';
+import { addSettlementJob } from '../../queues/escrow-settlement.queue.js';
+import { getEvaluatorSigner } from '../escrow/evaluator-signer.js';
+import { releaseJobEscrow } from '../policy/escrow.service.js';
+import { finalizeA2APaymentJob } from './payment-finalizer.service.js';
+import * as svc from './escrow-erc8183.service.js';
+import type { Erc8183ChainConfig, Erc8183Config, Erc8183Deps } from './escrow-erc8183.service.js';
+
+export const erc8183Config: Erc8183Config = {
+  evaluatorAddress: escrowEvaluatorAddress,
+  jobTtlSeconds: env.ESCROW_JOB_TTL_SECONDS,
+  evaluationDelaySeconds: env.ESCROW_EVALUATION_DELAY_SECONDS,
+  backendPublicUrl: env.BACKEND_PUBLIC_URL.replace(/\/+$/, ''),
+  chain(chainId: number): Erc8183ChainConfig | null {
+    try {
+      const contracts = getContracts(chainId);
+      if (!contracts.agentJobEscrow) return null;
+      return { chainId, escrow: contracts.agentJobEscrow, hook: contracts.reputationHook ?? null };
+    } catch {
+      return null;
+    }
+  },
+};
+
+const publicClients = new Map<number, ReturnType<typeof createChainPublicClient>>();
+
+export function erc8183Deps(): Erc8183Deps {
+  return {
+    db,
+    queue: transactionQueue,
+    settlement: { add: addSettlementJob },
+    publicClient(chainId) {
+      let client = publicClients.get(chainId);
+      if (!client) {
+        client = createChainPublicClient(chainId);
+        publicClients.set(chainId, client);
+      }
+      return client;
+    },
+    evaluatorSigner(chainId) {
+      if (!env.ESCROW_EVALUATOR_PRIVATE_KEY) {
+        throw new Error('ESCROW_EVALUATOR_PRIVATE_KEY is not configured — cannot sign ERC-8183 settlements');
+      }
+      return getEvaluatorSigner(chainId, env.ESCROW_EVALUATOR_PRIVATE_KEY as Hex);
+    },
+    config: erc8183Config,
+    releaseJobEscrow,
+    finalize: finalizeA2APaymentJob,
+    logger,
+  };
+}
+
+/** True when `AGENT_JOB_ESCROW_ADDRESS_<chainId>` and the evaluator key are both configured. */
+export const isErc8183Enabled = (chainId: number): boolean => svc.isErc8183EnabledWith(erc8183Config, chainId);
+
+export const getEscrowToken = (chainId: number) => svc.getEscrowToken(erc8183Deps(), chainId);
+export const startEscrow = (params: svc.StartEscrowParams) => svc.startEscrow(erc8183Deps(), params);
+export const onEscrowTxOutcome = (outcome: svc.EscrowTxOutcome) => svc.onEscrowTxOutcome(erc8183Deps(), outcome);
+export const enqueueSubmit = (params: { jobId: string; result: unknown }) => svc.enqueueSubmit(erc8183Deps(), params);
+export const requestCancellationReject = (params: { jobId: string; reason: svc.CancellationReason }) =>
+  svc.requestCancellationReject(erc8183Deps(), params);
+export const recoverErc8183Job = (job: { id: string; onChainStatus: string | null }) =>
+  svc.recoverErc8183Job(erc8183Deps(), job);

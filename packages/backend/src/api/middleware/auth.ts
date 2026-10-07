@@ -58,6 +58,9 @@ const authPlugin: FastifyPluginCallback = (fastify, _opts, done) => {
     if (routeUrl === '/v1/agents/verify-handshake') return;
     if (routeUrl === '/v1/agents/:id/manifest') return;
     if (routeUrl === '/v1/agents/:id/trust-report') return;
+    // ERC-8004 feedback file: its keccak256 is committed on-chain by the
+    // ReputationHook and any reputation consumer must be able to fetch it.
+    if (routeUrl === '/v1/jobs/:id/feedback.json') return;
     if (routeUrl?.startsWith('/mcp')) return;
 
     // Agent registration uses the operator API_SECRET, not an agent key

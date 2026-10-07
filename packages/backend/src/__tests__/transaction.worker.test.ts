@@ -20,9 +20,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
 import type { Hex } from 'viem';
 
-const { finalizeMock, weiToUsdMock } = vi.hoisted(() => ({
+const { finalizeMock, weiToUsdMock, escrowOutcomeMock } = vi.hoisted(() => ({
   finalizeMock: vi.fn(),
   weiToUsdMock: vi.fn(),
+  escrowOutcomeMock: vi.fn(),
 }));
 
 // The finalizer pulls in the real `db` singleton, the logger/env chain and the
@@ -32,6 +33,10 @@ vi.mock('../services/job/payment-finalizer.service.js', () => ({
 }));
 vi.mock('../services/transaction/price.service.js', () => ({
   weiToUsd: weiToUsdMock,
+}));
+// The ERC-8183 runtime binds the real db / queues / signer. Stub the module.
+vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({
+  onEscrowTxOutcome: escrowOutcomeMock,
 }));
 
 import {
@@ -132,6 +137,7 @@ function expectSubmittedAlwaysWithHash(update: { mock: { calls: unknown[][] } })
 beforeEach(() => {
   finalizeMock.mockReset().mockResolvedValue(undefined);
   weiToUsdMock.mockReset().mockResolvedValue('0');
+  escrowOutcomeMock.mockReset().mockResolvedValue(undefined);
 });
 
 // ── Happy path ─────────────────────────────────────────────────────────────
@@ -401,6 +407,58 @@ describe('handleFailedTransactionJob', () => {
       expect.objectContaining({ transactionId: TX_ID }),
       'Failed to finalize A2A payment job after permanent broadcast failure',
     );
+  });
+});
+
+// ── ERC-8183 escrow steps (C3) ─────────────────────────────────────────────
+
+describe('ERC-8183 escrow steps route to the orchestrator, not the A2A finalizer', () => {
+  const ESCROW_META = { erc8183: true, jobId: 'job-7', escrowStep: 'fund' };
+
+  it('post-confirmation: CONFIRMED step → onEscrowTxOutcome(CONFIRMED)', async () => {
+    const { deps, monitor, row } = makeDeps(txRow({ metadata: ESCROW_META }));
+    monitor.waitForConfirmation.mockImplementation(async () => {
+      row.status = 'CONFIRMED';
+    });
+
+    await processTransactionJob(job(), deps);
+    await vi.waitFor(() => expect(escrowOutcomeMock).toHaveBeenCalledTimes(1));
+
+    expect(escrowOutcomeMock).toHaveBeenCalledWith({ transactionId: TX_ID, status: 'CONFIRMED', error: null });
+    expect(finalizeMock).not.toHaveBeenCalled();
+  });
+
+  it('post-confirmation: timed-out step → onEscrowTxOutcome(FAILED) with the recorded error', async () => {
+    const { deps, monitor, row } = makeDeps(txRow({ metadata: ESCROW_META }));
+    monitor.waitForConfirmation.mockImplementation(async () => {
+      row.status = 'FAILED';
+      row.error = 'Confirmation timeout after max polling attempts';
+    });
+
+    await processTransactionJob(job(), deps);
+    await vi.waitFor(() => expect(escrowOutcomeMock).toHaveBeenCalledTimes(1));
+
+    expect(escrowOutcomeMock).toHaveBeenCalledWith({
+      transactionId: TX_ID,
+      status: 'FAILED',
+      error: 'Confirmation timeout after max polling attempts',
+    });
+    expect(finalizeMock).not.toHaveBeenCalled();
+  });
+
+  it('failed handler, last attempt → FAILED + DLQ + onEscrowTxOutcome(FAILED); finalizer untouched', async () => {
+    const { db, row, deadLetterQueue, logger } = makeDeps(txRow({ metadata: ESCROW_META }));
+
+    await handleFailedTransactionJob(job({ attemptsMade: 3, opts: { attempts: 3 } }), new Error('rpc down'), {
+      db,
+      deadLetterQueue,
+      logger,
+    });
+
+    expect(row.status).toBe('FAILED');
+    expect(deadLetterQueue.add).toHaveBeenCalledTimes(1);
+    expect(escrowOutcomeMock).toHaveBeenCalledWith({ transactionId: TX_ID, status: 'FAILED', error: 'rpc down' });
+    expect(finalizeMock).not.toHaveBeenCalled();
   });
 });
 

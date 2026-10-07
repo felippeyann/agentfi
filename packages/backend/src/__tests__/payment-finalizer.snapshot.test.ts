@@ -79,6 +79,7 @@ vi.mock('../services/notification.service.js', () => ({
 const { finalizeA2APaymentJob } = await import(
   '../services/job/payment-finalizer.service.js'
 );
+const escrowService = await import('../services/policy/escrow.service.js');
 
 // ── Test setup ────────────────────────────────────────────────────────────
 
@@ -205,5 +206,55 @@ describe('finalizeA2APaymentJob — revenue snapshot capture', () => {
 
     // No write — guard returns before snapshot capture or status flip.
     expect(jobUpdateMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── ERC-8183 jobs (C3) ─────────────────────────────────────────────────────
+
+describe('finalizeA2APaymentJob — ERC-8183 escrow jobs', () => {
+  beforeEach(() => {
+    // The escrow.service mocks are module-level spies shared with the cases above.
+    for (const fn of Object.values(escrowService)) {
+      if (typeof fn === 'function' && 'mockClear' in fn) (fn as { mockClear: () => void }).mockClear();
+    }
+  });
+
+  const erc8183Job = (status: string) => ({
+    id: 'job-8183',
+    status,
+    providerId: 'provider-1',
+    requesterId: 'requester-1',
+    reservationStatus: 'PENDING',
+    reward: { amount: '12.5', token: 'USDC', chainId: 84532 },
+    escrowKind: 'erc8183',
+    provider: { name: 'Provider' },
+  });
+
+  it('CONFIRMED: marks the reservation RELEASED and COMPLETED but never queues the legacy EscrowModule release', async () => {
+    stubOracle(0);
+    jobFindUniqueMock.mockResolvedValue(erc8183Job('PAYMENT_PENDING'));
+
+    await finalizeA2APaymentJob({ jobId: 'job-8183', outcome: 'CONFIRMED', transactionId: null });
+
+    expect(escrowService.markEscrowReleased).toHaveBeenCalledWith('job-8183');
+    expect(escrowService.queueOnChainEscrowRelease).not.toHaveBeenCalled();
+    expect(jobUpdateMock.mock.calls[0][0].data.status).toBe('COMPLETED');
+  });
+
+  it('FAILED: releases the DB reservation and marks PAYMENT_FAILED but never queues the legacy EscrowModule refund', async () => {
+    jobFindUniqueMock.mockResolvedValue(erc8183Job('PAYMENT_PENDING'));
+
+    await finalizeA2APaymentJob({ jobId: 'job-8183', outcome: 'FAILED', transactionId: null, reason: 'rejected on-chain' });
+
+    expect(escrowService.releaseJobEscrow).toHaveBeenCalledWith('job-8183');
+    expect(escrowService.queueOnChainEscrowRefund).not.toHaveBeenCalled();
+    expect(jobUpdateMock.mock.calls[0][0].data.status).toBe('PAYMENT_FAILED');
+  });
+
+  it('legacy jobs still queue the EscrowModule release', async () => {
+    stubOracle(ETH_USD);
+    jobFindUniqueMock.mockResolvedValue({ ...erc8183Job('PAYMENT_PENDING'), escrowKind: null, reward: { amount: '0.01', token: 'ETH', chainId: 1 } });
+    await finalizeA2APaymentJob({ jobId: 'job-8183', outcome: 'CONFIRMED', transactionId: 'tx-1' });
+    expect(escrowService.queueOnChainEscrowRelease).toHaveBeenCalledWith({ jobId: 'job-8183', chainId: 1 });
   });
 });

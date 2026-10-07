@@ -1570,7 +1570,18 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Create a service request for another agent */
+        /**
+         * Create a service request for another agent
+         * @description On a chain where the ERC-8183 `AgentJobEscrow` is configured
+         *     (`AGENT_JOB_ESCROW_ADDRESS_<chainId>`), a paid job is **USDC-only**
+         *     (decision D8) and its budget is escrowed on-chain: the requester's wallet
+         *     runs `createJob → setBudget → approve → fund` from the transaction queue
+         *     and the response carries an `escrow` object whose `onChainStatus`
+         *     advances `CREATING → OPEN → BUDGET_SET → APPROVED → FUNDED`. The
+         *     provider may only accept once it is `FUNDED`. On other chains the
+         *     legacy flow (DB reservation + optional EscrowModule lock) is unchanged
+         *     and `escrow` is `null`.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -1593,14 +1604,35 @@ export interface paths {
                         "application/json": components["schemas"]["Job"];
                     };
                 };
-                /** @description Escrow reservation failed (daily volume would be exceeded). */
+                /**
+                 * @description Escrow reservation failed (daily volume would be exceeded), or on an
+                 *     ERC-8183 chain: `ERC8183_USDC_ONLY` (reward token is not USDC / the
+                 *     escrow token), `ERC8183_PROVIDER_IS_REQUESTER`,
+                 *     `ERC8183_PROVIDER_IS_EVALUATOR`.
+                 */
                 400: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
                 };
                 404: components["responses"]["NotFound"];
+                /**
+                 * @description ERC-8183 chain only. `ERC8183_UNAVAILABLE` (escrow token could not be
+                 *     resolved) or `ERC8183_START_FAILED` (the `createJob` step could not be
+                 *     queued; the job is left `FAILED` and the reservation released; `jobId`
+                 *     is included).
+                 */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
             };
         };
         delete?: never;
@@ -1734,8 +1766,16 @@ export interface paths {
          *     - `PENDING` → `ACCEPTED` | `CANCELLED`
          *     - `ACCEPTED` → `COMPLETED` | `FAILED` | `CANCELLED`
          *
-         *     When transitioning to `COMPLETED`, escrow is released and
-         *     `executeA2APayment()` runs automatically if a reward was set.
+         *     When transitioning to `COMPLETED` with a reward, the job moves to
+         *     `PAYMENT_PENDING` and is finalized by the worker: on a legacy chain
+         *     `executeA2APayment()` sends the reward directly; on an ERC-8183 chain the
+         *     provider's wallet calls `submit(jobId, keccak256(result))` and the
+         *     operator evaluator settles (`complete` → provider paid minus the platform
+         *     fee, or `reject` → requester refunded when contested).
+         *
+         *     ERC-8183 jobs: `ACCEPTED` requires `escrow.onChainStatus = FUNDED`
+         *     (409 `ESCROW_NOT_FUNDED`); `CANCELLED` / `FAILED` schedule an evaluator
+         *     `reject` that refunds the locked budget.
          */
         patch: {
             parameters: {
@@ -1769,8 +1809,150 @@ export interface paths {
                     content?: never;
                 };
                 403: components["responses"]["Forbidden"];
+                /**
+                 * @description `ESCROW_NOT_FUNDED` — ERC-8183 job accepted before the budget was
+                 *     locked on-chain (body carries `onChainStatus`); or the provider
+                 *     record is missing (legacy payment aborted).
+                 */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /**
+                 * @description ERC-8183 chain only. `ESCROW_SUBMIT_FAILED` — the provider's `submit`
+                 *     could not be queued; the job is returned to `ACCEPTED` so the
+                 *     completion can be retried.
+                 */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
             };
         };
+        trace?: never;
+    };
+    "/v1/jobs/{id}/contest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Contest a submitted deliverable (ERC-8183 jobs, requester only)
+         * @description Marks the job as contested so the operator evaluator sends `reject`
+         *     (full refund to the requester) instead of `complete`. Allowed only while
+         *     the job is `PAYMENT_PENDING`, the deliverable is `SUBMITTED` on-chain and
+         *     the settlement has not been claimed yet (`ESCROW_EVALUATION_DELAY_SECONDS`
+         *     is the window). The decision is final and recorded on-chain by the hook as
+         *     negative reputation for the provider.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["ContestJobRequest"];
+                };
+            };
+            responses: {
+                /** @description Job with `escrow.contestedAt` set. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Job"];
+                    };
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /**
+                 * @description `NOT_ESCROW_JOB` (legacy job) or `CONTEST_NOT_ALLOWED` (not
+                 *     `PAYMENT_PENDING` + `SUBMITTED`, or already contested / settling);
+                 *     the body carries the current `status`, `onChainStatus`, `contestedAt`.
+                 */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/jobs/{id}/feedback.json": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * ERC-8004 feedback file for a settled ERC-8183 job (public)
+         * @description The file whose `keccak256` the backend committed in the `complete` /
+         *     `reject` `optParams` and that the `ReputationHook` emitted as
+         *     `feedbackHash` (see `docs/architecture/erc-8004-integration.md` §4).
+         *     Served byte-for-byte (canonical JSON, recursively sorted keys) so
+         *     `keccak256(body)` equals the on-chain hash. No API key required.
+         *     `404` until the settlement worker has generated it.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Feedback file. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["FeedbackFile"];
+                    };
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/admin/stats": {
@@ -2490,8 +2672,14 @@ export interface components {
         AgentTier: "FREE" | "PRO" | "ENTERPRISE";
         /** @enum {string} */
         TxStatus: "SIMULATING" | "PENDING_APPROVAL" | "QUEUED" | "SUBMITTED" | "CONFIRMED" | "FAILED" | "REVERTED";
-        /** @enum {string} */
-        JobStatus: "PENDING" | "ACCEPTED" | "COMPLETED" | "FAILED" | "CANCELLED";
+        /**
+         * @description `PAYMENT_PENDING` — provider marked the work done; the payment (legacy
+         *     direct transfer) or the ERC-8183 `submit` → evaluator settlement is in
+         *     flight. `PAYMENT_FAILED` — the payment failed or the evaluator rejected
+         *     / the escrow expired; the budget was refunded to the requester.
+         * @enum {string}
+         */
+        JobStatus: "PENDING" | "ACCEPTED" | "COMPLETED" | "FAILED" | "CANCELLED" | "PAYMENT_PENDING" | "PAYMENT_FAILED";
         CreateAgentRequest: {
             name: string;
             /**
@@ -2880,10 +3068,80 @@ export interface components {
             reservedAt?: string | null;
             /** @enum {string|null} */
             reservationStatus?: "PENDING" | "RELEASED" | "CANCELLED" | null;
+            /** @description ERC-8183 on-chain escrow state; `null` for legacy and free jobs. */
+            escrow?: components["schemas"]["JobEscrow"] | null;
             /** Format: date-time */
             createdAt?: string;
             /** Format: date-time */
             updatedAt?: string;
+        };
+        /**
+         * @description Backend view of the `AgentJobEscrow` job backing this AgentFi job.
+         *     `onChainStatus` is the last confirmed step: `CREATING → OPEN → BUDGET_SET
+         *     → APPROVED → FUNDED → SUBMITTED → SETTLING → COMPLETED | REJECTED`;
+         *     `FUNDED`/`SUBMITTED → EXPIRED` after `expiresAt` (claimRefund); `FAILED`
+         *     when a step before `FUNDED` failed (nothing locked; job `FAILED`).
+         */
+        JobEscrow: {
+            /** @enum {string} */
+            kind?: "erc8183";
+            chainId?: number | null;
+            /** @description AgentJobEscrow address. */
+            contract?: string | null;
+            /** @description uint256 job id as a decimal string. */
+            onChainJobId?: string | null;
+            /** @enum {string|null} */
+            onChainStatus?: "CREATING" | "OPEN" | "BUDGET_SET" | "APPROVED" | "FUNDED" | "SUBMITTED" | "SETTLING" | "COMPLETED" | "REJECTED" | "EXPIRED" | "FAILED" | null;
+            /** @description Operator evaluator signer (decision D5). */
+            evaluator?: string | null;
+            /** @description Budget in token base units (USDC, 6 decimals). */
+            budgetAmount?: string | null;
+            /** @description Escrow ERC-20 (USDC) address. */
+            budgetToken?: string | null;
+            /**
+             * Format: date-time
+             * @description On-chain `expiredAt`; refundable after it.
+             */
+            expiresAt?: string | null;
+            /** @description keccak256 of the result JSON passed to `submit`. */
+            deliverableHash?: string | null;
+            /** @description Evaluator's complete / reject / claimRefund transaction. */
+            settleTxHash?: string | null;
+            /** @description Platform fee accrued on completion (base units). */
+            platformFeeAmount?: string | null;
+            /** @description ERC-8004 feedback outcome from the hook — `written`, `skipped:<reason>` or `failed`. */
+            feedbackStatus?: string | null;
+            /** Format: date-time */
+            contestedAt?: string | null;
+            /** @description Last escrow step or settlement error. */
+            escrowError?: string | null;
+        };
+        ContestJobRequest: {
+            reason?: string;
+        };
+        /** @description ERC-8004 feedback file (`feedback-v1`), hashed on-chain as `feedbackHash`. */
+        FeedbackFile: {
+            /** @example https://eips.ethereum.org/EIPS/eip-8004#feedback-v1 */
+            type?: string;
+            jobId?: string;
+            escrow?: {
+                chainId?: number;
+                contract?: string;
+                onChainJobId?: number;
+            };
+            /** @description The `fund` transaction that escrowed the budget. */
+            proofOfPayment?: {
+                chainId?: number;
+                txHash?: string | null;
+                fromAddress?: string;
+                toAddress?: string;
+            };
+            /** @enum {string} */
+            outcome?: "completed" | "rejected";
+            deliverableHash?: string | null;
+            evaluator?: string;
+            /** Format: date-time */
+            issuedAt?: string;
         };
     };
     responses: {

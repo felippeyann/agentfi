@@ -37,6 +37,7 @@ import type { PrismaClient } from '@prisma/client';
 import type { Address, Hex } from 'viem';
 import { preSubmitGuard } from '../services/transaction/pre-submit-guard.js';
 import { finalizeA2APaymentJob } from '../services/job/payment-finalizer.service.js';
+import { onEscrowTxOutcome } from '../services/job/escrow-erc8183.runtime.js';
 import { weiToUsd } from '../services/transaction/price.service.js';
 import type { SubmitterService } from '../services/transaction/submitter.service.js';
 import type { MonitorService } from '../services/transaction/monitor.service.js';
@@ -210,7 +211,9 @@ export async function processTransactionJob(
       // Issue #81: A2A payment Job lifecycle is driven by the on-chain
       // outcome here, not by executeA2APayment's resolution. The Transaction
       // worker is the sole source of truth for finalizing paid jobs.
-      const meta = (tx?.metadata ?? null) as { jobId?: string; a2aPayment?: boolean } | null;
+      const meta = (tx?.metadata ?? null) as
+        | { jobId?: string; a2aPayment?: boolean; erc8183?: boolean }
+        | null;
       if (meta?.a2aPayment === true && typeof meta.jobId === 'string') {
         if (tx?.status === 'CONFIRMED') {
           await finalizeA2APaymentJob({
@@ -227,6 +230,14 @@ export async function processTransactionJob(
             reason: tx?.error ?? `Transaction ${tx?.status ?? 'unknown'} on-chain`,
           });
         }
+      } else if (meta?.erc8183 === true) {
+        // C3: an ERC-8183 escrow step (create/setBudget/approve/fund/submit).
+        // The orchestrator advances or unwinds the Job from the chain outcome.
+        await onEscrowTxOutcome({
+          transactionId: data.transactionId,
+          status: tx?.status === 'CONFIRMED' ? 'CONFIRMED' : tx?.status === 'REVERTED' ? 'REVERTED' : 'FAILED',
+          error: tx?.error ?? (tx?.status === 'CONFIRMED' ? null : `Transaction ${tx?.status ?? 'unknown'} on-chain`),
+        });
       }
     })
     .catch((err) => {
@@ -297,13 +308,23 @@ export async function handleFailedTransactionJob(
       where: { id: transactionId },
       select: { metadata: true },
     });
-    const meta = (tx?.metadata ?? null) as { jobId?: string; a2aPayment?: boolean } | null;
+    const meta = (tx?.metadata ?? null) as
+      | { jobId?: string; a2aPayment?: boolean; erc8183?: boolean }
+      | null;
     if (meta?.a2aPayment === true && typeof meta.jobId === 'string') {
       await finalizeA2APaymentJob({
         jobId: meta.jobId,
         transactionId,
         outcome: 'FAILED',
         reason: err.message.slice(0, 500),
+      });
+    } else if (meta?.erc8183 === true) {
+      // C3: a permanently failed escrow step — FAILED + reservation release
+      // before FUNDED, or back to ACCEPTED for a failed provider `submit`.
+      await onEscrowTxOutcome({
+        transactionId,
+        status: 'FAILED',
+        error: err.message.slice(0, 500),
       });
     }
   } catch (finalizeErr) {

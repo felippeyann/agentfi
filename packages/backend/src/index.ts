@@ -20,6 +20,12 @@ import {
   startPaymentRecoveryWorker,
   schedulePaymentRecovery,
 } from './queues/payment-recovery.queue.js';
+import {
+  startEscrowSettlementWorker,
+  scheduleEscrowExpirySweep,
+} from './queues/escrow-settlement.queue.js';
+import { erc8183Deps } from './services/job/escrow-erc8183.runtime.js';
+import { configuredEscrowChainIds, escrowEvaluatorAddress } from './config/env.js';
 
 // Fastify v5 expects a logger CONFIG object (not a pino instance). We pass
 // the same options that middleware/logger.ts uses for its standalone export,
@@ -151,12 +157,41 @@ async function start() {
     }
   }
 
+  // ERC-8183 escrow (C3): the evaluator signer settles jobs from the
+  // settlement queue; the expiry sweep claims refunds for jobs past
+  // `expiresAt`. Runs wherever the transaction worker runs, for the same
+  // reason as payment recovery. Disabled (with a WARN) when an escrow address
+  // is configured without ESCROW_EVALUATOR_PRIVATE_KEY in development.
+  let escrowSettlementWorker: ReturnType<typeof startEscrowSettlementWorker> | undefined;
+  if (configuredEscrowChainIds.length > 0) {
+    if (escrowEvaluatorAddress) {
+      logger.info(
+        { escrowEvaluatorAddress, chainIds: configuredEscrowChainIds },
+        'ERC-8183 escrow enabled — evaluator signer configured',
+      );
+      if (env.TRANSACTION_WORKER_ENABLED === 'true') {
+        try {
+          escrowSettlementWorker = startEscrowSettlementWorker(erc8183Deps);
+          await scheduleEscrowExpirySweep();
+        } catch (err) {
+          logger.error({ err }, 'Escrow settlement worker failed to start');
+        }
+      }
+    } else {
+      logger.warn(
+        { chainIds: configuredEscrowChainIds },
+        'AGENT_JOB_ESCROW_ADDRESS_* is set but ESCROW_EVALUATOR_PRIVATE_KEY is not — ERC-8183 escrow DISABLED; paid jobs use the legacy flow',
+      );
+    }
+  }
+
   // Graceful shutdown
   const shutdown = async () => {
     logger.info('Shutting down...');
     if (worker) await worker.close();
     if (reputationWorker) await reputationWorker.close();
     if (paymentRecoveryWorker) await paymentRecoveryWorker.close();
+    if (escrowSettlementWorker) await escrowSettlementWorker.close();
     await fastify.close();
     process.exit(0);
   };

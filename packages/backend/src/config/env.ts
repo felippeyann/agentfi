@@ -1,6 +1,31 @@
 import { z } from 'zod';
 import 'dotenv/config';
+import { privateKeyToAccount } from 'viem/accounts';
+import type { Address, Hex } from 'viem';
 import { describeLegacyContract, findLegacyContractConfig } from './contracts.js';
+
+/** Chains the ERC-8183 escrow can be configured on (one address pair per chain). */
+export const ESCROW_CHAIN_IDS = [1, 8453, 42161, 137, 84532] as const;
+
+// dotenv and docker `env_file` deliver a blank `KEY=` line as "", which a
+// format-constrained optional field would reject and abort boot. Treat blank
+// as unset for every optional escrow variable (same trick as X402_FACILITATOR_URL).
+const blankToUndefined = (v: unknown) => (v === '' ? undefined : v);
+const optionalAddress = (label: string) =>
+  z.preprocess(
+    blankToUndefined,
+    z.string().regex(/^0x[0-9a-fA-F]{40}$/, `${label} must be a 0x Ethereum address`).optional(),
+  );
+
+const escrowAddressFields = Object.fromEntries(
+  ESCROW_CHAIN_IDS.flatMap((chainId) => [
+    [`AGENT_JOB_ESCROW_ADDRESS_${chainId}`, optionalAddress(`AGENT_JOB_ESCROW_ADDRESS_${chainId}`)],
+    [`REPUTATION_HOOK_ADDRESS_${chainId}`, optionalAddress(`REPUTATION_HOOK_ADDRESS_${chainId}`)],
+  ]),
+) as Record<
+  `AGENT_JOB_ESCROW_ADDRESS_${(typeof ESCROW_CHAIN_IDS)[number]}` | `REPUTATION_HOOK_ADDRESS_${(typeof ESCROW_CHAIN_IDS)[number]}`,
+  ReturnType<typeof optionalAddress>
+>;
 
 const transactionWorkerEnabledDefault: 'true' | 'false' =
   process.env['TRANSACTION_WORKER_ENABLED'] === 'true' ||
@@ -65,6 +90,30 @@ const envSchema = z.object({
   POLICY_MODULE_ADDRESS_84532: z.string().optional(),
   EXECUTOR_ADDRESS_84532: z.string().optional(),
   ESCROW_MODULE_ADDRESS_84532: z.string().optional(),
+
+  // ERC-8183 escrow (C3) — `AgentJobEscrow` / `ReputationHook` per chain, as
+  // printed by `script/DeployEscrow.s.sol`. Setting an escrow address enables
+  // the ERC-8183 flow for paid A2A jobs on that chain (USDC only, decision D8).
+  ...escrowAddressFields,
+  // Operator/backend signer that is the `evaluator` of every ERC-8183 job
+  // (decision D5): it signs `complete` / `reject` / `claimRefund`. Required in
+  // staging/production whenever an escrow address is configured; in
+  // development the escrow flow is simply disabled without it (WARN at boot).
+  ESCROW_EVALUATOR_PRIVATE_KEY: z.preprocess(
+    blankToUndefined,
+    z.string().regex(/^0x[0-9a-fA-F]{64}$/, 'ESCROW_EVALUATOR_PRIVATE_KEY must be 0x + 64 hex chars').optional(),
+  ),
+  // `expiredAt = now + TTL` on `createJob`; `claimRefund` becomes possible after it.
+  ESCROW_JOB_TTL_SECONDS: z.coerce.number().int().positive().default(604_800),
+  // Grace period between the provider's `submit` confirming and the evaluator
+  // sending `complete`, during which the requester may `POST /v1/jobs/:id/contest`.
+  ESCROW_EVALUATION_DELAY_SECONDS: z.coerce.number().int().min(0).default(0),
+  // Public base URL of this API, used to build the ERC-8004 `feedbackURI`
+  // (`<BACKEND_PUBLIC_URL>/v1/jobs/<id>/feedback.json`) and the on-chain job description.
+  BACKEND_PUBLIC_URL: z.preprocess(
+    blankToUndefined,
+    z.string().url().default('http://localhost:3000'),
+  ),
 
   // Revenue — fee collection wallet (0x Ethereum address)
   OPERATOR_FEE_WALLET: z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'Must be a valid 0x Ethereum address'),
@@ -185,4 +234,34 @@ if (parsed.data.WALLET_PROVIDER === 'turnkey') {
   }
 }
 
+// ERC-8183 evaluator signer (decision D5). Derive the address once at boot so
+// every module (routes, orchestrator, settlement worker) agrees on who the
+// evaluator is, and so operators can see it in the boot log and pass it as
+// TRUSTED_EVALUATOR to DeployEscrow.s.sol.
+const configuredEscrowChains = ESCROW_CHAIN_IDS.filter(
+  (chainId) => Boolean(parsed.data[`AGENT_JOB_ESCROW_ADDRESS_${chainId}`]),
+);
+let derivedEvaluatorAddress: Address | null = null;
+if (parsed.data.ESCROW_EVALUATOR_PRIVATE_KEY) {
+  derivedEvaluatorAddress = privateKeyToAccount(parsed.data.ESCROW_EVALUATOR_PRIVATE_KEY as Hex).address;
+}
+if (
+  configuredEscrowChains.length > 0 &&
+  !derivedEvaluatorAddress &&
+  (parsed.data.NODE_ENV === 'production' || parsed.data.NODE_ENV === 'staging')
+) {
+  console.error(
+    `FATAL: NODE_ENV=${parsed.data.NODE_ENV} has AGENT_JOB_ESCROW_ADDRESS_${configuredEscrowChains[0]} set ` +
+      'but no ESCROW_EVALUATOR_PRIVATE_KEY. The backend is the evaluator of every ERC-8183 job ' +
+      '(decision D5) and cannot settle or refund escrowed USDC without it.',
+  );
+  process.exit(1);
+}
+
 export const env = parsed.data;
+
+/** Address of the ERC-8183 evaluator signer, or null when no key is configured. */
+export const escrowEvaluatorAddress: Address | null = derivedEvaluatorAddress;
+
+/** Chain ids with an `AGENT_JOB_ESCROW_ADDRESS_<id>` configured (regardless of the evaluator key). */
+export const configuredEscrowChainIds: readonly number[] = configuredEscrowChains;

@@ -91,3 +91,67 @@ Events: `JobCreated, ProviderSet, BudgetSet, JobFunded, JobSubmitted, JobComplet
 - Protocol fee = `platformFeeBP` in USDC on `Completed`, default 30 bps (plan D6).
 - New jobs are USDC-only; legacy `EscrowModule` kept for ETH until retired (plan D8).
 - Fee bps tiering during validation is still open (plan §5.3).
+
+## 6. Backend flow (as implemented, task C3)
+
+Code: `packages/backend/src/services/job/escrow-erc8183.service.ts` (pure orchestrator, injected deps), `escrow-erc8183.runtime.ts` (real wiring), `services/escrow/evaluator-signer.ts`, `queues/escrow-settlement.queue.ts`, `api/routes/jobs.ts`. ABIs are generated from the Foundry source into `packages/backend/src/abi/AgentJobEscrow.abi.ts` and `ReputationHook.abi.ts` (`npm run abi:escrow`). Migration `0014_erc8183_escrow` adds the `Job` columns below.
+
+### 6.1 Enablement
+
+A chain is ERC-8183-enabled when `AGENT_JOB_ESCROW_ADDRESS_<chainId>` **and** `ESCROW_EVALUATOR_PRIVATE_KEY` are set (`isErc8183Enabled(chainId)`). `REPUTATION_HOOK_ADDRESS_<chainId>` is optional (zero hook when absent). Only **paid** jobs (`reward.amount`) on an enabled chain use the escrow; free jobs and paid jobs on other chains keep the legacy path (DB reservation + optional `EscrowModule` lock) unchanged. The reward must be USDC — symbol `USDC` or the escrow's `token()` address, case-insensitive — otherwise `400 ERC8183_USDC_ONLY` (D8). The escrow token is read once per chain from `token()` and cached (registry fallback when the RPC fails).
+
+### 6.2 Step chain and who signs
+
+```
+POST /v1/jobs (USDC reward, enabled chain)
+  │  DB reservation (DailyVolume) as before; Job.escrowKind = "erc8183", onChainStatus = CREATING
+  ▼
+requester wallet  ── createJob(provider, evaluator, now+TTL, "<BACKEND_PUBLIC_URL>/v1/jobs/<id>", hook) ──► OPEN   (JobCreated.jobId → Job.onChainJobId)
+requester wallet  ── setBudget(jobId, budget, "0x") ───────────────────────────────────────────────────► BUDGET_SET
+requester wallet  ── USDC.approve(escrow, budget) ─────────────────────────────────────────────────────► APPROVED
+requester wallet  ── fund(jobId, budget, "0x") ────────────────────────────────────────────────────────► FUNDED      ← provider may PATCH ACCEPTED only now (409 ESCROW_NOT_FUNDED before)
+provider wallet   ── submit(jobId, keccak256(JSON.stringify(result ?? {})), "0x") ──────────────────────► SUBMITTED   (PATCH COMPLETED → Job PAYMENT_PENDING)
+                       │ ESCROW_EVALUATION_DELAY_SECONDS (requester may POST /v1/jobs/:id/contest)
+evaluator signer  ── complete(jobId, keccak("agentfi.completed"), abi.encode(feedbackURI, feedbackHash)) ► COMPLETED → finalizer CONFIRMED → Job COMPLETED
+               or ── reject(jobId,   keccak("agentfi.contested"), abi.encode(feedbackURI, feedbackHash)) ► REJECTED  → finalizer FAILED    → Job PAYMENT_FAILED (refunded on-chain)
+```
+
+- **Requester and provider steps** are ordinary `Transaction` rows (`type = ESCROW_LOCK` for the four funding steps, `ESCROW_SUBMIT` for `submit`, `metadata = { erc8183: true, escrowStep, jobId }`) signed by the agent's wallet provider through the transaction queue, so the pre-submit guard, policy pause, retries and dead-lettering apply as to any other transaction. The orchestrator advances the chain from the worker's post-confirmation hook, the permanent-failure handler and the guard's fail path (`onEscrowTxOutcome`). Before enqueuing the next step it re-reads the Job and stops if it is no longer `PENDING`/`ACCEPTED`.
+- **Evaluator steps** (`complete`, `reject`, `claimRefund`) are signed by the operator key `ESCROW_EVALUATOR_PRIVATE_KEY` (its address is logged at boot as `escrowEvaluatorAddress` and must be the hook's `TRUSTED_EVALUATOR`). The evaluator is not an `Agent` row, so it never goes through the transaction queue; it has its own BullMQ queue `escrow-settlement` (3 attempts, exponential backoff, one job per `<action>:<jobId>`). Every settlement reads `getJob(onChainJobId).status` first and, when the chain is already terminal, reconciles the DB without sending anything — a crash after broadcast, a redelivery or the expiry race are therefore harmless.
+- `Job.onChainStatus` always records the last **confirmed** step; `SETTLING` marks a claimed settlement (contests are refused from then on).
+
+### 6.3 Settlement, feedback file and contest
+
+Before `complete`/`reject` the worker generates the ERC-8004 feedback file **once** ([erc-8004-integration.md](erc-8004-integration.md) §4: `jobId`, `escrow`, `proofOfPayment` = the `fund` tx, `outcome`, `deliverableHash`, `evaluator`, `issuedAt`), stores it in `Job.feedbackFile`, and commits `feedbackHash = keccak256(canonicalJSON(file))` in `optParams = abi.encode(string feedbackURI, bytes32 feedbackHash)` with `feedbackURI = <BACKEND_PUBLIC_URL>/v1/jobs/<id>/feedback.json`. The file is served byte-for-byte by that public endpoint; "canonical" means recursively sorted keys, because the `jsonb` column does not preserve key order. The file is only rebuilt if no settlement was mined yet **and** a contest changed the outcome in between.
+
+From the receipt the worker stores `settleTxHash`, `platformFeeAmount` (`PlatformFeeAccrued`), `feedbackStatus` (`written` / `skipped:<reason>` / `failed` from the hook events) and the terminal `onChainStatus`, then calls `finalizeA2APaymentJob` (`CONFIRMED` for `complete`, `FAILED` for `reject`), which keeps doing the DB reservation, reputation, USD snapshot and notifications but skips the legacy `EscrowModule` release/refund for `escrowKind = "erc8183"`.
+
+A reverted or unmined settlement throws so BullMQ retries against a fresh on-chain read; after the last attempt the Job stays `PAYMENT_PENDING` with `onChainStatus = SUBMITTED` and `escrowError` — it is **never** refunded in the DB because the USDC is on-chain. The payment-recovery scan re-enqueues the settlement for such jobs (and never calls the FAILED finalizer for them).
+
+`POST /v1/jobs/:id/contest` (requester, while `PAYMENT_PENDING` + `SUBMITTED`, before the worker claims the settlement) sets `contestedAt`/`contestReason`; the evaluator then sends `reject` with reason `keccak256("agentfi.contested")`. The claim is a conditional update (`SUBMITTED → SETTLING`), so exactly one of contest/settle wins.
+
+### 6.4 Failure, cancellation and expiry
+
+| Event | On-chain | Backend |
+|---|---|---|
+| Any step before `FUNDED` reverts / is blocked / exhausts retries | nothing locked (`fund` never confirmed); an `Open` job with no budget is inert and simply expires | `onChainStatus = FAILED`, `escrowError`, Job `FAILED`, DB reservation released. No on-chain `reject` is sent: it would cost the requester gas to close a job nobody can fund. |
+| `submit` reverts / is blocked / exhausts retries | still `Funded` | Job back to `ACCEPTED` with `escrowError`; the provider retries `PATCH COMPLETED` (a retry gets a fresh `intentId`). The reservation stays. |
+| Requester `CANCELLED` or provider `FAILED` while the budget is locked (`FUNDED`) | evaluator `reject(jobId, keccak("agentfi.cancelled" \| "agentfi.provider-failed"), "0x")` → full refund | Job status flips immediately (as today) and the DB reservation is released immediately (as today): the reservation is spending-limit accounting, the requester's decision is final and the funds are not spent — holding it until the refund confirms would only lock daily volume on an evaluator outage. `onChainStatus = REJECTED` on confirmation. |
+| Cancellation while the chain is still running | the chain stops before the next step; a `fund` that confirms *after* the cancellation triggers the same `reject` | |
+| `expiresAt` passed while `FUNDED`/`SUBMITTED` | repeatable sweep (every `PAYMENT_RECOVERY_INTERVAL_SEC`) enqueues `claimRefund(jobId)` (anyone may call; the evaluator does) | `onChainStatus = EXPIRED`; a `PAYMENT_PENDING` job is finalized `FAILED` (→ `PAYMENT_FAILED`), a `PENDING`/`ACCEPTED` one becomes `FAILED`; reservation released. The evaluator must settle before `expiresAt` (§3, expiry race); both paths reconcile from the chain. |
+
+### 6.5 Idempotency keys
+
+| What | Key |
+|---|---|
+| Agent-signed step | `Transaction.intentId = "erc8183:<create\|setBudget\|approve\|fund\|submit>:<jobId>"` (retried `submit`: `…#<timestamp>`) |
+| Settlement job | BullMQ `jobId = "<settle\|reject\|claimRefund>:<jobId>"`; completed/failed entries are removed before a re-add |
+| Expiry sweep | BullMQ repeatable `jobId = "escrow-expiry-sweep"` |
+| On-chain job | `@@unique([escrowContract, onChainJobId])` on `Job` |
+| Feedback file | generated once per job; hash recomputed from the stored file |
+
+### 6.6 Environment and API surface
+
+Env: `AGENT_JOB_ESCROW_ADDRESS_<chainId>`, `REPUTATION_HOOK_ADDRESS_<chainId>`, `ESCROW_EVALUATOR_PRIVATE_KEY` (required in staging/production when an escrow address is set), `ESCROW_JOB_TTL_SECONDS` (default 604800), `ESCROW_EVALUATION_DELAY_SECONDS` (default 0), `BACKEND_PUBLIC_URL` (default `http://localhost:3000`). API: `Job.escrow` object on every job response (`kind, chainId, contract, onChainJobId, onChainStatus, evaluator, budgetAmount, budgetToken, expiresAt, deliverableHash, settleTxHash, platformFeeAmount, feedbackStatus, contestedAt, escrowError`), `POST /v1/jobs/:id/contest`, public `GET /v1/jobs/:id/feedback.json`; error codes `ERC8183_USDC_ONLY`, `ERC8183_PROVIDER_IS_REQUESTER`, `ERC8183_PROVIDER_IS_EVALUATOR`, `ERC8183_START_FAILED`, `ESCROW_NOT_FUNDED`, `ESCROW_SUBMIT_FAILED`, `CONTEST_NOT_ALLOWED`, `NOT_ESCROW_JOB`.
+
+Not in C3: the platform-fee sweep (`withdrawPlatformFees`, plan C3b), `setProviderAgentId` (needs the ERC-8004 identity from R2 — until then the hook skips feedback with `no-agent-id`), MCP tools (X3/X4), and the testnet E2E (C5).
