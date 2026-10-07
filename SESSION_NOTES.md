@@ -1,4 +1,4 @@
-# Session Notes — 2026-10-06
+# Session Notes — 2026-10-07
 
 > Single-point handoff doc. Update on every substantive session, prune stale
 > sections aggressively. If this file is older than a few days when you read
@@ -12,95 +12,88 @@
 
 The project was **archived 2026-05-17** and **reactivated 2026-10-06** in
 exploratory mode (90-day validation, go/no-go 2027-01-05). Everything that
-matters is tracked in the execution plan; this file only records what this
-session did and what the next one should pick up.
+matters is tracked in the execution plan; this file only records what the last
+sessions did and what the next one should pick up.
 
 | Surface | Status |
 |---|---|
-| `main` | `b051077` — #141 (docs), #142 (A3b), #143 (C3), #144 (P2) merged on top of Week 0 fixes (#129 A2, #130 A3, #131 S1, #132 A1), C2 #135, P1 #134, docs #128/#133/#136/#138, adversarial-review fixes #137 (x402), #139 (backend), #140 (contracts), Dependabot #108/#112/#114/#121/#122/#126 |
-| Local CI reproduction on `main` | green on b051077 (2026-10-06 21:44): typecheck 4/4, backend 522 unit tests, E2E 3 pass / 4 skipped by design, admin 8, mcp-server build, Foundry 291, spec:lint. `spec:check` shows a Windows line-ending artifact only (see plan Appendix); GitHub CI on 270d146 is green |
-| In flight | **S4** (`fix/s4-pay-resource-ssrf`): SSRF hardening of `pay-resource` (DNS-resolved private-range check, pinned connect, no redirects, unconditional with a dev override), flagged by the automated security review of #144; a coding agent was building it when the session was cut. Review line by line before merging |
-| GitHub repo | un-archived 2026-10-06 (admin actions need the `felippeyann` gh account) |
-| npm `@agent_fi/mcp-server` | 0.5.0 (unchanged); 0.6.0 planned in WS6 (X3) |
-| Live infra | none (decommissioned in May; none planned during validation) |
-| Contracts | Base mainnet + Base Sepolia deployments are **legacy ABI**; redeploy (C4) is **blocked on the owner's deployer key** — there is no `.env` and no Foundry keystore on this machine yet. Runbook: [docs/project/testnet-log.md](docs/project/testnet-log.md) |
-| Local toolchain | Node 24.14.1, Docker 29.8.1 (Postgres + Redis from `docker-compose.dev.yml` running), Foundry 1.7.1 (`~/.foundry/bin`), graphify (`%APPDATA%\Python\Python314\Scripts`) |
+| `main` | `52e8d5a` — on top of yesterday's work: #145 (docs close of 2026-10-06), #146 (S4 SSRF hardening of `pay-resource`), #147 (S2 MCP annotations + error sanitizer), #148 (H13 testnet smoke workflow made valid), #149 (R2 ERC-8004 identity minted on the first funded job and bound with `setProviderAgentId`) |
+| Gates | **G1 (safety) complete**: A1, A2, A3, S1, S2 merged and hardened by review. **G2** is code-complete (C2 contracts, C3 backend escrow flow, R2 identity, R3 hook) and waits for C4 + C5 on testnet. G3–G5 not started |
+| Tests on `main` | backend 705 unit tests, mcp-server 59 (new suite, CI job `MCP Tests`), admin 8, Foundry 291; E2E 3 pass / 4 skipped by design |
+| Dev stack | validated on b051077 (5 services healthy, `smoke:dev` and the three examples green); re-validate after the next code merges |
+| In flight | **S5** (`fix/s5-backend-error-hygiene`): backend error hygiene for direct REST callers (raw upstream errors, RPC URL with the Alchemy key in viem errors, `/mcp/sse` messages, `INVALID_URL` echoing private addresses). **C5a** (`test/c5a-escrow-fork-e2e`): full escrow + identity + reputation rehearsal on an Anvil fork of Base Sepolia, plus `RPC_URL_<chainId>` overrides and `examples/escrow-erc8183/`. Both are coding agents in worktrees with their own DBs (`agentfi_s5`, `agentfi_c5a`); review line by line before merging |
+| Contracts | Base mainnet + Base Sepolia deployments are **legacy ABI**; redeploy (C4) is **blocked on the owner**: there is no `.env` and no Foundry keystore on this machine. Runbook: [docs/project/testnet-log.md](docs/project/testnet-log.md) |
+| npm `@agent_fi/mcp-server` | 0.5.0 published (31 tools); the repo now has 32 tools with annotations; 0.6.0 is task X3 |
+| Local toolchain | Node 24.14.1, Docker 29.8.1 (Postgres + Redis + the dev stack running), Foundry 1.7.1 (`~/.foundry/bin`), graphify (`%APPDATA%\Python\Python314\Scripts`) |
 
-## What this session did (2026-10-06, four passes)
+## What 2026-10-07 did
 
-1. Full review of repo, branches, infra, distribution and the September notes
-   (`~/agentfi-notas`, `~/agentfi-lab`) → `docs/project/reactivation-2026-10.md`.
-2. Market research (three parallel passes, 13 claims re-verified) →
-   `docs/project/market-signals-2026-10.md`; later extended with the McKinsey
-   *2026 Global Payments Report* (read in full) — it corroborates the
-   trust-layer positioning (D1) and B2B-first sequencing, and challenges the
-   bps revenue model (now open question §5.4 of the plan).
-3. Owner decisions D1–D8 recorded in the plan §0 (trust-layer positioning,
-   adopt new contract source + redeploy, README banner, credentials,
-   evaluator = operator, fee in escrow in USDC, ERC-8004 id on first funded
-   job, USDC-only jobs). VISION.md gained a dated "Reactivation (October
-   2026)" section stating what is being built now and the terms for
-   continuing.
-4. Housekeeping: lockfile fixed (#120), merged branches deleted, `develop`
-   synced, `launch.json` fixed, diagrams moved, empty worktree folders
-   removed, Foundry + graphify installed, dev stack validated from clean
-   volumes (Dockerfiles now `mkdir -p` the per-workspace `node_modules`, #136).
-5. Design drafts: `docs/architecture/erc-8183-mapping.md`,
-   `docs/architecture/erc-8004-integration.md`, `docs/architecture/x402-payments.md`.
-6. Safety fixes merged after line-by-line review and green CI: A2 #129,
-   A3 #130, S1 #131, A1 #132. Then C2 #135 (`AgentJobEscrow.sol`,
-   `ReputationHook.sol`, `DeployEscrow.s.sol`) and P1 #134 (`X402ClientService`).
-7. **Adversarial review of everything merged** (three independent reviewers:
-   backend, Solidity, x402). Four P1s found and fixed, all merged:
-   - #139 backend: empty-string policy value bypassed tighten-only and
-     disabled the per-tx limit; a tx was marked SUBMITTED before the
-     broadcast, so a failed broadcast stuck forever (now QUEUED until the
-     submit resolves, `SUBMITTED` + hash in one write); plus batch-route
-     token whitelist, revert classification order, staging guard, public
-     registration forced to the default policy, OpenAPI/CHANGELOG gaps.
-   - #140 contracts: ERC-8004 feedback was forgeable for free (self-evaluated
-     dust job + foreign `providerAgentId`) → hook now pins `trustedEvaluator`,
-     verifies identity ownership on the Identity Registry and requires
-     `minFeedbackBudget`; `setProvider` reverts when already set; platform
-     fees became pull-based with a rotatable `feeWallet`; strict ERC-165
-     probe; 291 Foundry tests, 100% line coverage kept.
-   - #137 x402: blank `X402_FACILITATOR_URL=` made the backend exit at boot;
-     EIP-3009 validity window capped at 600 s; `allowedNetworks` required;
-     authorization nonce surfaced; URL redaction; timeouts; 36 tests.
-   Escrowed funds were found safe in all three reviews.
-8. Full local CI reproduction on the merged `main` (270d146): green (table above).
-9. Launched C3 and P2 as parallel coding agents (worktrees, separate DBs);
-   removed the three merged `fix/review-*` worktrees and local branches.
+1. Resumed after yesterday's usage-limit cut: merged the docs close (#145),
+   re-validated the dev stack (smoke + three examples green; yesterday's smoke
+   failure was a timing artefact).
+2. The S4 agent had been cut mid-task with uncommitted work; resumed it twice
+   (once after a rate limit, once after an account access error that stopped
+   every agent at once). R2 and S2 had not committed anything and were
+   relaunched from scratch. Lesson recorded in the briefs: commit early.
+3. Reviewed and merged, line by line:
+   - **#146 S4**: DNS-resolved private-range refusal (IPv4, IPv6, mapped,
+     NAT64, reserved), connection pinned to the validated addresses through a
+     per-request undici Agent, no redirects (3xx before signing: no ledger
+     row; after signing without settlement: `refused`; after a reported
+     settlement: `settled`), unconditional with a dev-only override that is
+     fatal at boot in production/staging. The x402 client now uses undici's
+     own `fetch` so the dispatcher and the fetch come from one copy on Node
+     22 and 24. It also fixed a hole in the old literal check (hex-form
+     IPv4-mapped loopback).
+   - **#147 S2**: annotations on all 32 stdio tools from one table, a backend
+     test that keeps the 18 `/mcp/sse` tools consistent with it, one error
+     sanitizer at the single `tools/call` dispatcher (keeps business codes,
+     strips internal/credentialed URLs, stack frames, paths, secrets,
+     key-shaped hex only when labelled), `traceId` in results and stderr.
+     Fixed a real bug: dotenv 17 printed a non-JSON line on the stdio
+     protocol channel at startup.
+   - **#148 H13** (mine): `e2e-testnet-smoke.yml` used `secrets` in a
+     job-level `if` and was an invalid workflow failing on every push.
+   - **#149 R2**: verified the Identity Registry ABI against the official
+     repo and the deployed implementation (`0x7274e874…9c02`, v2.0.0, same on
+     Base and Base Sepolia); per-chain `AgentIdentity` table; provider wallet
+     mints on its first funded job and calls `setProviderAgentId`; one
+     identity transaction per provider wallet at a time; `submit` deferred
+     while binding and released when the binding ends; payment never blocked
+     by identity; public `GET /v1/agents/:id/erc8004.json`.
+4. New plan rows: H13, S5 (backend error hygiene), N1 (same-wallet nonce
+   concurrency), R2b (pin the Identity Registry implementation; provider gas
+   note for C5).
 
 ## Dependabot notes
 
-- `bullmq` 5.74 → 6.3.11 (#111) fails typecheck: `JobsOptions.repeat` was
-  removed; `payment-recovery.queue.ts:82` and `reputation.queue.ts:42` must
-  move to the job-scheduler API (`queue.upsertJobScheduler`). Own task in WS8;
-  C3 adds a third repeatable job (escrow expiry sweep), so do the migration
-  after C3 merges.
-- Left open with CI green for the owner to merge: #109 (`@aave/contract-helpers`
-  1.38), #123 (`@types/node` 26), #124 (`eslint` 10). The agent's merge of
-  these is blocked by the "merge without review" permission rule.
-- Majors kept as deliberate tasks (not auto-merges): #115 Turnkey 6 (CI green
-  but touches signing; do with W1), #125 TypeScript 7 (unstable), #127 Prisma 7
-  (failing; after migrations 0014–0016).
+- Still open for the owner, CI green, merge blocked for the agent by the
+  "merge without review" rule: #109 (`@aave/contract-helpers` 1.38), #123
+  (`@types/node` 26), #124 (`eslint` 10).
+- Deliberate tasks, not auto-merges: #111 bullmq 6 (scheduler API migration:
+  `payment-recovery.queue.ts`, `reputation.queue.ts` and now
+  `escrow-settlement.queue.ts` use `repeat`), #115 Turnkey 6 (with W1), #125
+  TypeScript 7, #127 Prisma 7 (after the migration burst settles).
 
 ## Next session (do this first)
 
-1. Review and merge the S4 PR (SSRF hardening of `pay-resource`, plan row S4). Re-run the dev stack validation on `main` (`docker compose -f docker-compose.dev.yml up --build -d --wait`, `npm run smoke:dev`, the three examples): it was still building when the session hit its usage limit on 2026-10-06. `graphify update .` only after code changes.
-2. **Owner:** C4 — add the Base Sepolia deployer key (keystore or `.env`) and
-   follow [docs/project/testnet-log.md](docs/project/testnet-log.md); also
-   generate the backend evaluator key (`ESCROW_EVALUATOR_PRIVATE_KEY`,
-   testnet-only) and fund it. Until then nothing real-chain can run.
-3. After C4: C5 (E2E on Base Sepolia, `examples/escrow-erc8183/`), then
-   C3b (fee sweep), R2 (ERC-8004 identity + `setProviderAgentId`), R4, W1–W3,
-   X1–X4.
-4. Follow-ups already in the plan: A6 (DailyVolume reserved but never released on FAILED), S2 (MCP
-   annotations + error sanitiser), S3 (delete legacy x402 v0.1 middleware),
-   P1b (file the x402 upstream issue), bullmq scheduler migration (#111).
-5. **Owner:** interviews (WS7 V1–V3, Day-30 checkpoint 2026-11-05), merge the
-   CI-green Dependabot PRs (#109, #123, #124), answer plan §5 (mainnet
-   addresses, Brazil assumption, fee tiers, revenue model per job vs bps).
+1. Review and merge S5 and C5a when their PRs arrive. C5a's fork run is the
+   best evidence available before C4; read its on-chain assertions.
+2. After the merges: `graphify update .`, re-validate the dev stack
+   (`docker compose -f docker-compose.dev.yml up --build -d --wait`, then
+   `npm run smoke:dev` and the three examples).
+3. **Owner:** C4. Add the Base Sepolia deployer key (keystore or
+   `packages/contracts/.env`), generate and fund the evaluator key
+   (`TRUSTED_EVALUATOR` = `ESCROW_EVALUATOR_PRIVATE_KEY`), give provider test
+   wallets a little gas, and follow
+   [docs/project/testnet-log.md](docs/project/testnet-log.md). Then C5 runs the
+   rehearsed flow for real and logs the tx hashes (gate G2).
+4. Next code items without owner input: X3a (MCP tools for the escrow flow:
+   `post_job` still defaults the reward to ETH and has no chain parameter, no
+   `contest_job` tool, job views should show the `escrow` object), C3b (fee
+   sweep), N1, R2b, A6, S3, T1, R4, then X1–X4 for the G3 demo.
+5. **Owner:** interviews (WS7, Day-30 checkpoint 2026-11-05), the open
+   questions in plan §5 (mainnet addresses, Brazil assumption, fee tiers,
+   revenue model per job vs bps), Dependabot #109/#123/#124.
 
-_Last touch: 2026-10-06 ~21:50 (session cut by the usage limit; S4 agent still running, dev stack validation still building)._
+_Last touch: 2026-10-07 ~20:30 (S5 and C5a agents running)._
