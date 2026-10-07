@@ -109,8 +109,9 @@ const WINDOWS_PATH = /\b[A-Za-z]:[\\/](?:[^\s"'<>|\\/]+[\\/])*[^\s"'<>|]*/g;
 
 /**
  * Unix absolute paths with at least two segments. Only redacted when they
- * look like the filesystem (see isFilesystemPath) so API routes such as
- * `/v1/jobs/:id` in a message survive.
+ * look like the filesystem (a known root in FS_ROOT, `node_modules`, or a
+ * source-file extension in SOURCE_FILE) so API routes such as
+ * `/v1/jobs/abc/pay-resource` in a message survive.
  */
 const UNIX_PATH = /(?<![\w.:/~@-])(?:\/[\w.@+-]+){2,}\/?(?::\d+(?::\d+)?)?/g;
 const FS_ROOT =
