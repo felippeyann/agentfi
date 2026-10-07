@@ -15,6 +15,11 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+/** BullMQ's (protected) option check, the one `Queue.add` runs before writing to Redis. */
+interface Validatable {
+  validateOptions(jobData: { data: string }): void;
+}
+
 const { fakeQueues } = vi.hoisted(() => ({ fakeQueues: new Map<string, unknown>() }));
 
 vi.mock('../config/env.js', () => ({ env: { REDIS_URL: 'redis://localhost:6379' } }));
@@ -51,7 +56,8 @@ vi.mock('bullmq', async (importOriginal) => {
     async add(name: string, data: unknown, opts: Record<string, unknown> = {}): Promise<void> {
       // The real BullMQ validation `Queue.add` runs before touching Redis.
       const job = new actual.Job(stubQueue as never, name, data, opts as never);
-      job.validateOptions({ data: JSON.stringify(data) } as never);
+      // `validateOptions` is protected in the typings; it is what `Queue.add` runs.
+      (job as unknown as Validatable).validateOptions({ data: JSON.stringify(data) });
       const id = String(opts['jobId']);
       const stored: StoredJob = {
         name,
@@ -90,7 +96,7 @@ function queue(): FakeQueueView {
 function bullmqAccepts(jobId: string): boolean {
   const stub = { keys: {}, toKey: (t: string) => t, qualifiedName: 'bull:q', opts: {}, client: Promise.resolve({}) };
   try {
-    new Job(stub as never, 'settle', {}, { jobId } as never).validateOptions({ data: '{}' } as never);
+    (new Job(stub as never, 'settle', {}, { jobId } as never) as unknown as Validatable).validateOptions({ data: '{}' });
     return true;
   } catch {
     return false;

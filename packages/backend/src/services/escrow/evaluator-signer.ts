@@ -44,6 +44,28 @@ export interface EvaluatorSigner {
 /** How long the settlement worker waits for a settlement tx to be mined before letting BullMQ retry. */
 export const EVALUATOR_RECEIPT_TIMEOUT_MS = 180_000;
 
+/**
+ * Gas added on top of `eth_estimateGas` for every evaluator transaction.
+ *
+ * `complete` / `reject` run the job's `ReputationHook.afterAction`, which
+ * calls the ERC-8004 Reputation Registry inside a try/catch so a registry
+ * failure can never block settlement. That makes the gas estimate wrong in a
+ * specific way: `eth_estimateGas` returns the LOWEST limit at which the tx
+ * succeeds, and at that limit `giveFeedback` runs out of gas, the hook
+ * catches it and emits `FeedbackFailed(jobId, "")` — settlement goes through,
+ * the feedback is silently lost. Found by the C5a fork rehearsal against the
+ * real Base Sepolia registry (v2.0.0): estimate 246 770 → FeedbackFailed;
+ * the full path uses 340 231 (`giveFeedback` alone 179 416). The headroom
+ * covers the feedback path with a wide margin (longer feedback URIs, registry
+ * upgrades); unused gas is not charged.
+ */
+export const EVALUATOR_GAS_HEADROOM = 400_000n;
+
+/** Gas limit of an evaluator transaction: the node's estimate plus `EVALUATOR_GAS_HEADROOM`. */
+export function evaluatorGasLimit(estimate: bigint): bigint {
+  return estimate + EVALUATOR_GAS_HEADROOM;
+}
+
 export function createEvaluatorSigner(chainId: number, privateKey: Hex): EvaluatorSigner {
   const chain = getChain(chainId);
   const transport = http(getPrimaryRpcUrl(chainId));
@@ -57,15 +79,18 @@ export function createEvaluatorSigner(chainId: number, privateKey: Hex): Evaluat
     async writeContract(params) {
       // `simulateContract` first: a revert surfaces as a decoded error (e.g.
       // InvalidStatus) before any gas is spent, and the same request object
-      // is then signed and broadcast.
-      const { request } = await publicClient.simulateContract({
+      // is then signed and broadcast — with an explicit gas limit, because the
+      // bare estimate starves the reputation hook (EVALUATOR_GAS_HEADROOM).
+      const call = {
         account,
         address: params.address,
         abi: params.abi,
         functionName: params.functionName,
         args: params.args as never,
-      });
-      return wallet.writeContract(request);
+      };
+      const { request } = await publicClient.simulateContract(call);
+      const estimate = await publicClient.estimateContractGas(call);
+      return wallet.writeContract({ ...request, gas: evaluatorGasLimit(estimate) });
     },
     waitForTransactionReceipt(hash) {
       return publicClient.waitForTransactionReceipt({ hash, timeout: EVALUATOR_RECEIPT_TIMEOUT_MS });
