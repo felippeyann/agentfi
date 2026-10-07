@@ -36,6 +36,7 @@ import {
 } from '@x402/extensions/payment-identifier';
 import type { TypedDataDefinition } from 'viem';
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
+import { undiciTransport } from '../../services/payments/x402-client.service.js';
 import type { ClientSigner } from '../../services/wallet/signer.js';
 
 // ── Fixture: x402 resource server with a fake facilitator ──────────────────
@@ -77,7 +78,17 @@ export interface FixtureOptions {
   rejectReason?: string;
   /** Never answer the plain request, or never answer the paid request. */
   stall?: 'first' | 'paid';
+  /**
+   * Answer `/paid` with a 302 to `/landing?token=…` instead of the resource:
+   * the plain request (`first`, before any 402), the signed request without
+   * settling (`paid`), or the signed request after a successful settlement
+   * whose `PAYMENT-RESPONSE` rides on the redirect (`settled`).
+   */
+  redirect?: 'first' | 'paid' | 'settled';
 }
+
+/** Where `redirect` points; requesting it is recorded in `paths` like any other path. */
+export const LANDING_PATH = '/landing';
 
 interface CachedReply {
   status: number;
@@ -264,11 +275,17 @@ export async function startResourceServer(options: FixtureOptions = {}) {
   await http.initialize();
 
   const cache = options.idempotencyCache ? new Map<string, CachedReply>() : undefined;
+  /** Every request path, in arrival order (plus the Host header each one carried). */
+  const paths: string[] = [];
+  const hosts: string[] = [];
   let base = '';
+  const redirectTo = () => `${base}${LANDING_PATH}?token=SECRET_REDIRECT_TOKEN`;
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const adapter = new NodeAdapter(req, base);
     const path = adapter.getPath();
+    paths.push(path);
+    hosts.push(req.headers.host ?? '');
     const paymentHeader = adapter.getHeader('payment-signature') ?? adapter.getHeader('x-payment');
     const context: HTTPRequestContext = {
       adapter,
@@ -280,11 +297,19 @@ export async function startResourceServer(options: FixtureOptions = {}) {
 
     if (path === '/free') return send(res, 200, { 'content-type': 'application/json' }, JSON.stringify({ free: true }));
     if (path === '/boom') return send(res, 500, { 'content-type': 'text/plain' }, 'kaboom');
+    if (path === LANDING_PATH) return send(res, 200, { 'content-type': 'application/json' }, JSON.stringify({ landed: true }));
     if (!http.requiresPayment(context)) return send(res, 404, {}, 'not found');
 
     // Stalled phases are never answered; `close()` tears the sockets down.
     if (options.stall === 'first' && paymentHeader === undefined) return;
     if (options.stall === 'paid' && paymentHeader !== undefined) return;
+
+    if (options.redirect === 'first' && paymentHeader === undefined) {
+      return send(res, 302, { location: redirectTo() }, 'moved');
+    }
+    if (options.redirect === 'paid' && paymentHeader !== undefined) {
+      return send(res, 302, { location: redirectTo() }, 'moved');
+    }
 
     // Application-level idempotency: replay a delivered response for a known
     // payment id without touching the facilitator again. Note the id only
@@ -322,6 +347,9 @@ export async function startResourceServer(options: FixtureOptions = {}) {
       const { response } = settle;
       return send(res, response.status, response.headers, JSON.stringify(response.body ?? {}));
     }
+    if (options.redirect === 'settled') {
+      return send(res, 302, { ...settle.headers, location: redirectTo() }, 'moved');
+    }
     const headers = { ...settle.headers, 'content-type': 'application/json' };
     if (cache) {
       const id = extractPaymentIdentifier(result.paymentPayload);
@@ -343,8 +371,11 @@ export async function startResourceServer(options: FixtureOptions = {}) {
   return {
     base,
     url: `${base}/paid`,
+    port: address.port,
     seller,
     counts,
+    paths,
+    hosts,
     close: () => {
       server.closeAllConnections();
       return new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
@@ -372,14 +403,19 @@ export function accountSigner(account: PrivateKeyAccount): CountingSigner {
   return signer;
 }
 
-/** Only the local resource server may be reached from these tests. */
-export function loopbackOnly(allowedBase: string): typeof fetch {
+/**
+ * Only the local resource server may be reached from these tests. The
+ * request goes out through the same transport production uses by default
+ * (`undiciTransport`), with `init` — including a pinned `dispatcher` —
+ * forwarded unchanged.
+ */
+export function loopbackOnly(allowedBase: string, inner: typeof fetch = undiciTransport): typeof fetch {
   return (input, init) => {
     const target = input instanceof Request ? input.url : String(input);
     if (!target.startsWith(allowedBase)) {
       return Promise.reject(new Error(`External network blocked: ${target}`));
     }
-    return fetch(input, init);
+    return inner(input, init);
   };
 }
 

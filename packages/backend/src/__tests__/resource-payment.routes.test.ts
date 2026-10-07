@@ -12,12 +12,18 @@
  * What the fake facilitator does NOT prove is listed in the P1 test header:
  * no signature/balance/nonce checks, no USDC moves, no real deduplication.
  * These tests prove the route's control flow and the ledger transitions.
+ *
+ * The resource server listens on 127.0.0.1, which the outbound target policy
+ * (S4) refuses by default; this suite turns the development override
+ * `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS` on explicitly. The default refusal
+ * is proven in `resource-payment.target-policy.test.ts`, where it is unset.
  */
 import { vi } from 'vitest';
 
 // config/env.ts calls process.exit() on missing required env vars at module
 // load time. Hoisted-stub the ones the route import chain requires.
 vi.hoisted(() => {
+  process.env['RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS'] = 'true';
   const required: Array<[string, string]> = [
     ['NODE_ENV', 'test'],
     ['API_SECRET', 'test-api-secret-must-be-long-enough-12345'],
@@ -156,11 +162,14 @@ import type { TypedDataDefinition } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { logger } from '../api/middleware/logger.js';
 import { resourcePaymentRoutes } from '../api/routes/resource-payments.js';
+import { env } from '../config/env.js';
+import type { OutboundTargetPolicy } from '../services/payments/outbound-target.js';
 import { ResourcePaymentService } from '../services/payments/resource-payment.service.js';
 import { X402ClientService } from '../services/payments/x402-client.service.js';
 import type { TypedDataSigner } from '../services/wallet/signer.js';
 import {
   BASE_MAINNET,
+  LANDING_PATH,
   NETWORK,
   NONCE_32,
   USDC_BASE_SEPOLIA,
@@ -222,7 +231,10 @@ const open: Array<() => Promise<void>> = [];
 interface AppOptions {
   base?: string;
   fetch?: typeof globalThis.fetch;
+  /** Use the client's real default transport (no loopback restriction, no injection). */
+  defaultTransport?: boolean;
   requestTimeoutMs?: number;
+  targetPolicy?: OutboundTargetPolicy;
 }
 
 async function buildApp(options: AppOptions = {}): Promise<FastifyInstance> {
@@ -232,11 +244,18 @@ async function buildApp(options: AppOptions = {}): Promise<FastifyInstance> {
     request.agentTier = 'FREE';
   });
   const client = new X402ClientService({
-    fetch: options.fetch ?? (options.base ? loopbackOnly(options.base) : neverFetch()),
+    ...(options.defaultTransport
+      ? {}
+      : { fetch: options.fetch ?? (options.base ? loopbackOnly(options.base) : neverFetch()) }),
     ...(options.requestTimeoutMs !== undefined ? { requestTimeoutMs: options.requestTimeoutMs } : {}),
   });
   await app.register(resourcePaymentRoutes, {
-    service: new ResourcePaymentService({ db: mockDb, wallet, client }),
+    service: new ResourcePaymentService({
+      db: mockDb,
+      wallet,
+      client,
+      ...(options.targetPolicy ? { targetPolicy: options.targetPolicy } : {}),
+    }),
   });
   open.push(() => app.close());
   return app;
@@ -741,6 +760,109 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
       expect(ftp.json().code).toBe('INVALID_URL');
 
       expect(wallet.signatures).toBe(0);
+    });
+  });
+
+  describe('outbound target (S4): pinning and redirects', () => {
+    it('runs with the development override on (the fixture listens on loopback)', () => {
+      expect(env.RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS).toBe('true');
+    });
+
+    it('a redirect before any 402 is refused (400 REDIRECT_REFUSED): not followed, nothing signed or recorded', async () => {
+      const f = await fixture({ redirect: 'first' });
+      const app = await buildApp({ base: f.base });
+
+      const res = await pay(app, { url: f.url });
+
+      expect(res.statusCode).toBe(400);
+      const body = res.json();
+      expect(body).toMatchObject({
+        code: 'REDIRECT_REFUSED',
+        responseStatus: 302,
+        location: `${f.base}${LANDING_PATH}`,
+        payment: null,
+      });
+      expect(body.error).toMatch(/redirects are not followed/);
+      // The Location's query string (often a token) is stripped like a stored URL.
+      expect(JSON.stringify(body)).not.toContain('SECRET_REDIRECT_TOKEN');
+      expect(f.paths).toEqual(['/paid']);
+      expect(wallet.signatures).toBe(0);
+      expect(ledger.all()).toHaveLength(0);
+    });
+
+    it('a redirect answering the signed payment is refused, recorded as refused and not counted against the budget', async () => {
+      const f = await fixture({ price: '$0.40', redirect: 'paid' });
+      const app = await buildApp({ base: f.base });
+
+      const res = await pay(app, { url: f.url, paymentId: PAYMENT_ID });
+
+      expect(res.statusCode).toBe(400);
+      const body = res.json();
+      expect(body).toMatchObject({
+        code: 'REDIRECT_REFUSED',
+        paymentId: PAYMENT_ID,
+        responseStatus: 302,
+        location: `${f.base}${LANDING_PATH}`,
+      });
+      expect(body.payment).toMatchObject({ status: 'refused', responseStatus: 302, amount: '400000' });
+      expect(body.payment.authorizationNonce).toMatch(NONCE_32);
+      expect(body.payment.error).toMatch(/redirect.*not followed/);
+      // Signed once; the signed request went to the validated origin only.
+      expect(wallet.signatures).toBe(1);
+      expect(f.paths).toEqual(['/paid', '/paid']);
+      expect(f.counts).toEqual({ verify: 0, settle: 0, deliver: 0 });
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ paymentId: PAYMENT_ID, status: 302 }),
+        expect.stringMatching(/redirect.*not followed/),
+      );
+
+      const free = await pay(app, { url: `${f.base}/free` });
+      expect(free.json().remainingBudget.remaining).toBe('1000000');
+    });
+
+    it('a redirect after a reported settlement is refused but the row is settled and counted (the money moved)', async () => {
+      const f = await fixture({ price: '$0.40', redirect: 'settled' });
+      const app = await buildApp({ base: f.base });
+
+      const res = await pay(app, { url: f.url, paymentId: PAYMENT_ID });
+
+      expect(res.statusCode).toBe(400);
+      const body = res.json();
+      expect(body).toMatchObject({ code: 'REDIRECT_REFUSED', responseStatus: 302 });
+      expect(body.error).toMatch(/amount is spent/);
+      expect(body.payment).toMatchObject({ status: 'settled', responseStatus: 302 });
+      expect(body.payment.settlementTxHash).toMatch(TX_HASH);
+      expect(body.payment.error).toMatch(/redirect.*not followed/);
+      expect(f.counts.settle).toBe(1);
+      expect(f.paths).not.toContain(LANDING_PATH);
+
+      // Same id: the settled row comes back, nothing re-signed; the spend counts.
+      const retry = await pay(app, { url: f.url, paymentId: PAYMENT_ID });
+      expect(retry.statusCode).toBe(200);
+      expect(retry.json()).toMatchObject({ replayed: true, resource: null });
+      expect(retry.json().remainingBudget).toMatchObject({ spent: '400000', remaining: '600000' });
+      expect(wallet.signatures).toBe(1);
+    });
+
+    it('connects only to the validated addresses: a name that exists in no DNS, pinned to the fixture, pays end to end and is resolved once', async () => {
+      const f = await fixture({ price: '$0.40' });
+      const lookup = vi.fn(async () => [{ address: '127.0.0.1', family: 4 }]);
+      // Real default transport (undici fetch + the pinned Agent), no injection.
+      const app = await buildApp({ defaultTransport: true, targetPolicy: { allowPrivateHosts: true, lookup } });
+      const host = `paid.agentfi.test:${f.port}`;
+
+      const res = await pay(app, { url: `http://${host}/paid` });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().payment).toMatchObject({ status: 'settled', url: `http://${host}/paid` });
+      // `.test` never resolves (RFC 6761): both requests reached the validated
+      // address through the pinned lookup, never the system resolver, and the
+      // Host header still names the hostname.
+      expect(lookup).toHaveBeenCalledTimes(1);
+      expect(lookup).toHaveBeenCalledWith('paid.agentfi.test');
+      expect(f.paths).toEqual(['/paid', '/paid']);
+      expect(f.hosts).toEqual([host, host]);
+      expect(wallet.signatures).toBe(1);
     });
   });
 });
