@@ -23,9 +23,10 @@ interface IReputationRegistryV2 {
 /**
  * @title ReputationHookForkTest
  * @notice R3c against the REAL ERC-8004 registries (UUPS proxies, implementation v2.0.0) on a Base
- *         Sepolia fork: the lowest gas at which `complete` / `reject` succeeds writes the feedback,
- *         one unit below reverts with `InsufficientGasForFeedback`, and the per-call gas of
- *         `ownerOf` / `getAgentWallet` / `giveFeedback` that justifies the deploy defaults.
+ *         Sepolia fork: the lowest gas at which `complete` / a verdict `reject` succeeds writes the
+ *         feedback, the lowest gas at which a provider's first `submit` succeeds records its
+ *         canonical id (C2b), one unit below each reverts with `InsufficientGasForFeedback`, and the
+ *         per-call gas of `ownerOf` / `getAgentWallet` / `giveFeedback` that justifies the deploy defaults.
  *
  * @dev Skipped unless `BASE_SEPOLIA_FORK_URL` is set (CI has no RPC):
  *        BASE_SEPOLIA_FORK_URL=https://sepolia.base.org forge test --match-contract ReputationHookForkTest -vv
@@ -41,6 +42,8 @@ contract ReputationHookForkTest is Test {
 
     uint256 internal constant BUDGET = 2_500_000; // 2.5 USDC, as in the C5a happy path
     bytes32 internal constant REASON = keccak256("reason");
+    /// @dev `ReputationHook.REASON_QUALITY_REJECTED`: since D9 the only reject reason that writes.
+    bytes32 internal constant VERDICT = keccak256("agentfi.quality-rejected");
     bytes32 internal constant FEEDBACK_HASH = keccak256("feedback-file");
     /// @dev Same shape and length as the backend's `feedbackURI` (`<BACKEND_PUBLIC_URL>/v1/jobs/<cuid>/feedback.json`).
     string internal constant FEEDBACK_URI =
@@ -80,13 +83,19 @@ contract ReputationHookForkTest is Test {
     // Helpers
     // ---------------------------------------------------------------------
 
-    function _submittedJob() internal returns (uint256 jobId) {
+    /// @dev Funded job whose provider has bound its identity (provider-only since C2b).
+    function _fundedJob() internal returns (uint256 jobId) {
         vm.startPrank(client);
         jobId = escrow.createJob(provider, evaluator, block.timestamp + 1 days, "fork", address(hook));
         escrow.setBudget(jobId, BUDGET, "");
-        escrow.setProviderAgentId(jobId, agentId);
         escrow.fund(jobId, BUDGET, "");
         vm.stopPrank();
+        vm.prank(provider);
+        escrow.setProviderAgentId(jobId, agentId);
+    }
+
+    function _submittedJob() internal returns (uint256 jobId) {
+        jobId = _fundedJob();
         vm.prank(provider);
         escrow.submit(jobId, keccak256("deliverable"), "");
     }
@@ -109,27 +118,38 @@ contract ReputationHookForkTest is Test {
         bytes memory params = abi.encode(FEEDBACK_URI, FEEDBACK_HASH);
         return completed
             ? abi.encodeCall(AgentJobEscrow.complete, (jobId, REASON, params))
-            : abi.encodeCall(AgentJobEscrow.reject, (jobId, REASON, params));
+            : abi.encodeCall(AgentJobEscrow.reject, (jobId, VERDICT, params));
     }
 
-    function _send(bytes memory callData, uint256 gasLimit) internal returns (bool ok, bytes memory ret) {
+    function _sendAs(address caller, bytes memory callData, uint256 gasLimit)
+        internal
+        returns (bool ok, bytes memory ret)
+    {
         _coolAll();
-        vm.prank(evaluator);
+        vm.prank(caller);
         (ok, ret) = address(escrow).call{gas: gasLimit}(callData);
     }
 
-    function _minimalGas(bytes memory callData) internal returns (uint256) {
+    function _send(bytes memory callData, uint256 gasLimit) internal returns (bool ok, bytes memory ret) {
+        return _sendAs(evaluator, callData, gasLimit);
+    }
+
+    function _minimalGasAs(address caller, bytes memory callData) internal returns (uint256) {
         uint256 lo = 0;
         uint256 hi = 3_000_000;
         while (hi - lo > 1) {
             uint256 mid = (lo + hi) / 2;
             uint256 snap = vm.snapshotState();
-            (bool ok,) = _send(callData, mid);
+            (bool ok,) = _sendAs(caller, callData, mid);
             vm.revertToStateAndDelete(snap);
             if (ok) hi = mid;
             else lo = mid;
         }
         return hi;
+    }
+
+    function _minimalGas(bytes memory callData) internal returns (uint256) {
+        return _minimalGasAs(evaluator, callData);
     }
 
     function _assertProperty(bool completed) internal returns (uint256 minimal) {
@@ -176,7 +196,35 @@ contract ReputationHookForkTest is Test {
 
     function test_Fork_MinimalGas_Reject_WritesFeedback() public {
         uint256 minimal = _assertProperty(false);
-        emit log_named_uint("minimal gas for reject (escrow call, real registries)", minimal);
+        emit log_named_uint("minimal gas for verdict reject (escrow call, real registries)", minimal);
+    }
+
+    /// @dev C2b: the provider's first `submit` verifies its identity against the real Identity
+    ///      Registry; at the estimated gas the canonical id is recorded, one unit below reverts.
+    function test_Fork_MinimalGas_FirstSubmit_Binds() public {
+        uint256 jobId = _fundedJob();
+        bytes memory callData = abi.encodeCall(AgentJobEscrow.submit, (jobId, keccak256("deliverable"), bytes("")));
+        uint256 minimal = _minimalGasAs(provider, callData);
+
+        (bool ok, bytes memory ret) = _sendAs(provider, callData, minimal - 1);
+        assertFalse(ok);
+        assertEq(bytes4(ret), ReputationHook.InsufficientGasForFeedback.selector);
+
+        vm.recordLogs();
+        (ok,) = _sendAs(provider, callData, minimal);
+        assertTrue(ok);
+        emit log_named_uint("gas used by that call (escrow + hook + identity registry)", vm.lastCallGas().gasTotalUsed);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool bound;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter != address(hook)) continue;
+            assertEq(logs[i].topics[0], ReputationHook.CanonicalAgentIdSet.selector, "binding lost at the estimated gas");
+            bound = true;
+        }
+        assertTrue(bound);
+        assertEq(hook.canonicalAgentId(provider), agentId);
+        emit log_named_uint("minimal gas for a provider's first submit (escrow call, real identity registry)", minimal);
+        emit log_named_uint("hook canonicalBindGasRequirement", hook.canonicalBindGasRequirement());
     }
 
     /// @dev Cold per-call gas of the three registry calls the hook makes (callee frame, as forwarded).
