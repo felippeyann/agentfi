@@ -43,7 +43,8 @@ contract ReputationHookForkTest is Test {
     bytes32 internal constant REASON = keccak256("reason");
     bytes32 internal constant FEEDBACK_HASH = keccak256("feedback-file");
     /// @dev Same shape and length as the backend's `feedbackURI` (`<BACKEND_PUBLIC_URL>/v1/jobs/<cuid>/feedback.json`).
-    string internal constant FEEDBACK_URI = "https://api.agentfi.example/v1/jobs/cmg8f0q1x0000abcd12345678/feedback.json";
+    string internal constant FEEDBACK_URI =
+        "https://api.agentfi.example/v1/jobs/cmg8f0q1x0000abcd12345678/feedback.json";
 
     AgentJobEscrow internal escrow;
     ReputationHook internal hook;
@@ -156,8 +157,8 @@ contract ReputationHookForkTest is Test {
 
         address[] memory clients = new address[](1);
         clients[0] = address(hook);
-        (uint64 count, int128 value,) =
-            IReputationRegistryV2(REPUTATION).getSummary(agentId, clients, "agentfi.job", completed ? "completed" : "rejected");
+        (uint64 count, int128 value,) = IReputationRegistryV2(REPUTATION)
+            .getSummary(agentId, clients, "agentfi.job", completed ? "completed" : "rejected");
         assertEq(count, 1);
         assertEq(value, completed ? int128(100) : int128(0));
     }
@@ -190,7 +191,8 @@ contract ReputationHookForkTest is Test {
         // First entry for a fresh agent from a fresh client: the most expensive case.
         _coolAll();
         vm.prank(address(hook));
-        IReputationRegistry(REPUTATION).giveFeedback(agentId, 100, 0, "agentfi.job", "completed", "", FEEDBACK_URI, FEEDBACK_HASH);
+        IReputationRegistry(REPUTATION)
+            .giveFeedback(agentId, 100, 0, "agentfi.job", "completed", "", FEEDBACK_URI, FEEDBACK_HASH);
         uint256 feedbackGas = vm.lastCallGas().gasTotalUsed;
 
         emit log_named_uint("ownerOf (cold)", ownerOfGas);

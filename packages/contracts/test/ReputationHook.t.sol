@@ -173,7 +173,9 @@ contract ReputationHookTest is Test {
 
     function test_Constructor_ZeroAcp_Reverts() public {
         vm.expectRevert(ReputationHook.ZeroAddress.selector);
-        new ReputationHook(address(0), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, IDENTITY_GAS);
+        new ReputationHook(
+            address(0), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, IDENTITY_GAS
+        );
     }
 
     function test_Constructor_ZeroRegistry_Reverts() public {
@@ -847,7 +849,8 @@ contract ReputationHookTest is Test {
         internal
         returns (uint256 available, uint256 required)
     {
-        (bool ok, bytes memory ret) = _sendWithGas(h, evaluator, _settleCall(jobId, completed, REASON, params), gasLimit);
+        (bool ok, bytes memory ret) =
+            _sendWithGas(h, evaluator, _settleCall(jobId, completed, REASON, params), gasLimit);
         assertFalse(ok, "settlement should revert");
         assertEq(ret.length, 68, "revert data must be InsufficientGasForFeedback(uint256,uint256)");
         assertEq(bytes4(ret), ReputationHook.InsufficientGasForFeedback.selector);
@@ -900,16 +903,24 @@ contract ReputationHookTest is Test {
         uint256 min = hook.MIN_FEEDBACK_GAS_LIMIT();
         uint256 max = hook.MAX_FEEDBACK_GAS_LIMIT();
         vm.expectRevert(abi.encodeWithSelector(ReputationHook.InvalidFeedbackGasLimit.selector, min - 1));
-        new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, min - 1, IDENTITY_GAS);
+        new ReputationHook(
+            address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, min - 1, IDENTITY_GAS
+        );
         vm.expectRevert(abi.encodeWithSelector(ReputationHook.InvalidFeedbackGasLimit.selector, max + 1));
-        new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, max + 1, IDENTITY_GAS);
+        new ReputationHook(
+            address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, max + 1, IDENTITY_GAS
+        );
         vm.expectRevert(abi.encodeWithSelector(ReputationHook.InvalidFeedbackGasLimit.selector, 0));
-        new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, 0, IDENTITY_GAS);
+        new ReputationHook(
+            address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, 0, IDENTITY_GAS
+        );
 
-        ReputationHook atMin =
-            new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, min, IDENTITY_GAS);
-        ReputationHook atMax =
-            new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, max, IDENTITY_GAS);
+        ReputationHook atMin = new ReputationHook(
+            address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, min, IDENTITY_GAS
+        );
+        ReputationHook atMax = new ReputationHook(
+            address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, max, IDENTITY_GAS
+        );
         assertEq(atMin.feedbackGasLimit(), min);
         assertEq(atMax.feedbackGasLimit(), max);
     }
@@ -918,14 +929,20 @@ contract ReputationHookTest is Test {
         uint256 min = hook.MIN_IDENTITY_CALL_GAS_LIMIT();
         uint256 max = hook.MAX_IDENTITY_CALL_GAS_LIMIT();
         vm.expectRevert(abi.encodeWithSelector(ReputationHook.InvalidIdentityCallGasLimit.selector, min - 1));
-        new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, min - 1);
+        new ReputationHook(
+            address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, min - 1
+        );
         vm.expectRevert(abi.encodeWithSelector(ReputationHook.InvalidIdentityCallGasLimit.selector, max + 1));
-        new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, max + 1);
+        new ReputationHook(
+            address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, max + 1
+        );
 
-        ReputationHook atMin =
-            new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, min);
-        ReputationHook atMax =
-            new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, max);
+        ReputationHook atMin = new ReputationHook(
+            address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, min
+        );
+        ReputationHook atMax = new ReputationHook(
+            address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, max
+        );
         assertEq(atMin.identityCallGasLimit(), min);
         assertEq(atMax.identityCallGasLimit(), max);
         assertEq(atMax.feedbackGasRequirement(), 2 * max + _feedbackCallRequirement(atMax) + atMax.GAS_RESERVE());
@@ -1135,7 +1152,9 @@ contract ReputationHookTest is Test {
     function test_OwnerOfBurnsGas_AgentWalletStillVerified_Written() public {
         // A burning `ownerOf` costs exactly its cap and cannot starve the `getAgentWallet` check.
         GasGriefingIdentityRegistry griefer = new GasGriefingIdentityRegistry();
-        griefer.set(GasGriefingIdentityRegistry.Mode.Loop, address(0), GasGriefingIdentityRegistry.Mode.Answer, provider);
+        griefer.set(
+            GasGriefingIdentityRegistry.Mode.Loop, address(0), GasGriefingIdentityRegistry.Mode.Answer, provider
+        );
         ReputationHook h = _newHook(address(registry), address(griefer), evaluator, MIN_BUDGET);
         uint256 jobId = _submitted(address(h), AGENT_ID);
         uint256 minimal = _minimalGas(h, jobId, true, _params());

@@ -237,8 +237,7 @@ contract ReputationHook is IACPHook {
         minFeedbackBudget = minFeedbackBudget_;
         feedbackGasLimit = feedbackGasLimit_;
         identityCallGasLimit = identityCallGasLimit_;
-        feedbackGasRequirement =
-            2 * identityCallGasLimit_ + _feedbackCallRequirement(feedbackGasLimit_) + GAS_RESERVE;
+        feedbackGasRequirement = 2 * identityCallGasLimit_ + _feedbackCallRequirement(feedbackGasLimit_) + GAS_RESERVE;
     }
 
     // =========================================================================
