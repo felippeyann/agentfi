@@ -1,9 +1,10 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
-import { env } from './config/env.js';
+import { env, trustProxySetting } from './config/env.js';
 import { describeLegacyContract, findLegacyContractConfig } from './config/contracts.js';
 import { logger } from './api/middleware/logger.js';
+import { requestSerializer } from './api/middleware/log-serializers.js';
 import { authMiddleware } from './api/middleware/auth.js';
 import { registerRateLimit } from './api/middleware/rateLimit.js';
 import { registerJsonBodyParser } from './api/middleware/json-body.js';
@@ -36,8 +37,13 @@ import { configuredEscrowChainIds, escrowEvaluatorAddress } from './config/env.j
 // just from two pino instances rather than one. The shared `logger` import
 // is still used by route handlers that log directly.
 const fastify = Fastify({
+  // S6: explicit (TRUST_PROXY, default false — X-Forwarded-For ignored). The
+  // admin loopback gate does not use request.ip either way.
+  trustProxy: trustProxySetting,
   logger: {
     level: env.NODE_ENV === 'production' ? 'info' : 'debug',
+    // S6: Fastify logs req.url; credential-like query parameters are redacted.
+    serializers: { req: requestSerializer },
     redact: {
       paths: [
         'req.headers.authorization',

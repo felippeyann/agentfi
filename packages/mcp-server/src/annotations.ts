@@ -148,7 +148,8 @@ export const TOOL_ANNOTATIONS = {
   get_agent_manifest: { title: "Get another agent's manifest", ...READ_OPEN_WORLD },
   // Reputation metrics and name of another agent.
   get_agent_trust_report: { title: "Get another agent's trust report", ...READ_OPEN_WORLD },
-  // Signs an arbitrary message with the agent wallet (Turnkey). Changes no
+  // Signs the AgentFi handshake envelope (EIP-712, S6) over the agent's
+  // message with the agent wallet (Turnkey). Changes no
   // state, but it is NOT read-only: it uses the wallet's signing authority and
   // returns a credential third parties can rely on, so clients should not
   // auto-approve it. Not destructive (overwrites nothing); idempotent (a

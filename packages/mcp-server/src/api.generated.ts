@@ -52,7 +52,10 @@ export interface paths {
         };
         /**
          * Readiness probe
-         * @description Checks the Postgres, Redis, RPC, and Turnkey dependencies.
+         * @description Checks the Postgres, Redis, RPC, and Turnkey dependencies. One probe
+         *     result is reused for 5 seconds (concurrent callers share it), and each
+         *     client IP may call it 30 times per minute (an in-process limit, so it
+         *     keeps answering when Redis is down). `timestamp` is when the probe ran.
          */
         get: {
             parameters: {
@@ -70,6 +73,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": components["schemas"]["ReadinessStatus"];
+                    };
+                };
+                /** @description More than 30 calls per minute from this client IP (`Retry-After` header). */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
                     };
                 };
                 /** @description One or more dependencies is down. */
@@ -387,12 +399,21 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Sign a message with the agent's wallet (EIP-191 personal_sign)
-         * @description Signs an arbitrary string message with the agent's wallet
-         *     (LocalWalletService via viem, or TurnkeyService via
-         *     `signRawPayload`). Used by peer agents to prove identity or
-         *     sign service agreements. Returns a 65-byte r||s||v signature
-         *     that any EIP-191-compatible verifier can check.
+         * Sign an AgentFi handshake (EIP-712 envelope) with the agent's wallet
+         * @description Signs the fixed, versioned EIP-712 envelope
+         *     `AgentFiHandshake(address agent,string message,uint64 issuedAt)` under
+         *     the domain `{ name: "AgentFi Handshake", version: "1" }` with the
+         *     agent's wallet (LocalWalletService via viem, or TurnkeyService via
+         *     `signRawPayload` of the EIP-712 digest). `agent` is the signing
+         *     address and `issuedAt` (unix seconds) is set by the server; the caller
+         *     chooses only `message`, which is hashed inside the struct.
+         *
+         *     The wallet never signs the message bytes themselves. Before S6 this
+         *     route signed `personal_sign(message)`, and for a 32-byte message that
+         *     is Safe's `eth_sign` owner signature over that digest (a Safe-mode
+         *     agent key is its Safe's 1/1 owner). Peers verify with
+         *     `verify-handshake` (send them `message`, `issuedAt`, `signature` and
+         *     `address`) or with any EIP-712 library from `typedData`.
          */
         post: {
             parameters: {
@@ -409,18 +430,13 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Signed handshake payload. */
+                /** @description Signed handshake. */
                 200: {
                     headers: {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": {
-                            message?: string;
-                            signature?: string;
-                            address?: string;
-                            safeAddress?: string;
-                        };
+                        "application/json": components["schemas"]["SignedHandshake"];
                     };
                 };
                 400: components["responses"]["BadRequest"];
@@ -452,12 +468,18 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Verify a peer's signature (ECDSA + EIP-1271 fallback)
-         * @description Accepts either `{ message, signature, address }` or `{ message,
-         *     signature, agentId }`. Tries ECDSA recovery first; if the
-         *     recovered address matches, returns `verifiedVia: 'ecdsa'`.
-         *     Otherwise, if the target is a contract (e.g., a Safe smart
-         *     wallet), falls back to EIP-1271 via the chain's public client.
+         * Verify a peer's handshake (ECDSA + EIP-1271 fallback)
+         * @description Accepts either `{ message, issuedAt, signature, address }` or
+         *     `{ message, issuedAt, signature, agentId }` (the peer's registered
+         *     `safeAddress`). Rebuilds the EIP-712 envelope
+         *     `AgentFiHandshake{agent: <target address>, message, issuedAt}`
+         *     (domain `AgentFi Handshake` v1) and checks the signature over its
+         *     digest: ECDSA recovery first (`verifiedVia: 'ecdsa'`); otherwise, if
+         *     the target is a contract (e.g. a Safe whose owners signed the
+         *     envelope), EIP-1271 `isValidSignature(digest, signature)` via the
+         *     chain's public client. A personal_sign of the bare message is not a
+         *     handshake and answers `valid: false`. Freshness is the verifier's
+         *     call: compare `issuedAt` with your own clock.
          */
         post: {
             parameters: {
@@ -470,7 +492,10 @@ export interface paths {
                 content: {
                     "application/json": {
                         message: string;
+                        /** @description Unix seconds returned by `sign-handshake` together with the signature. */
+                        issuedAt: number;
                         signature: string;
+                        /** @description The address the handshake was signed for (the `address` returned by `sign-handshake`). */
                         address?: string;
                         agentId?: string;
                         /** @default 1 */
@@ -2835,6 +2860,15 @@ export interface paths {
          * @description Opens an SSE stream. Clients post JSON-RPC messages to
          *     `/mcp/messages?sessionId=<id>` and receive results here.
          *
+         *     Authentication: the agent key in the `x-api-key` header (optional:
+         *     without it the session can list tools but every call fails). A key
+         *     in the query string (`?apiKey=`, `?api_key=`, `?key=`, `?token=`) is
+         *     refused with 400 `API_KEY_IN_QUERY` — URLs reach access logs. The
+         *     session is bound to the key that opened it. Sessions are capped
+         *     (`MCP_SSE_MAX_SESSIONS`, default 200; `MCP_SSE_MAX_SESSIONS_PER_KEY`,
+         *     default 5, per client IP for keyless sessions) and closed after
+         *     `MCP_SSE_IDLE_TIMEOUT_SECONDS` (default 900) without a message.
+         *
          *     **Note:** This endpoint exposes a thin 18-tool proxy. The
          *     standalone `@agent_fi/mcp-server` package offers 28 tools including
          *     A2A collaboration, agent profile, and P&L checks — prefer it when
@@ -2858,6 +2892,33 @@ export interface paths {
                         "text/event-stream": string;
                     };
                 };
+                /** @description `API_KEY_IN_QUERY` (key in the query string) or `INVALID_API_KEY_HEADER` (repeated header). */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `MCP_SESSION_LIMIT` — this key (or, keyless, this IP) already has the maximum number of open sessions. */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `MCP_SESSIONS_FULL` — the server-wide session cap is reached (`Retry-After: 30`). */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
             };
         };
         put?: never;
@@ -2877,7 +2938,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** JSON-RPC message handler (paired with /mcp/sse) */
+        /**
+         * JSON-RPC message handler (paired with /mcp/sse)
+         * @description Send the same `x-api-key` header that opened the session (none for a
+         *     keyless session): a session only answers the key that opened it.
+         */
         post: {
             parameters: {
                 query: {
@@ -2902,6 +2967,25 @@ export interface paths {
                     };
                     content?: never;
                 };
+                /** @description `API_KEY_IN_QUERY` — a key in the query string. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `MCP_SESSION_KEY_MISMATCH` — the session was opened with another key. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                404: components["responses"]["NotFound"];
             };
         };
         delete?: never;
@@ -3111,6 +3195,44 @@ export interface components {
             lastActiveAt?: string;
             /** Format: date-time */
             createdAt?: string;
+        };
+        /**
+         * @description An AgentFi handshake (S6): `signature` is over the EIP-712 digest of
+         *     `typedData` — domain `{ name: "AgentFi Handshake", version: "1" }`,
+         *     primary type `AgentFiHandshake(address agent,string message,uint64 issuedAt)`.
+         */
+        SignedHandshake: {
+            message: string;
+            /** @description Unix seconds at signing (set by the server). */
+            issuedAt: number;
+            /** @description 65-byte r||s||v ECDSA signature. */
+            signature: string;
+            /** @description The signing address (the envelope's `agent`). For a Safe-mode agent this is the Safe's owner key, not the Safe. */
+            address: string;
+            safeAddress: string;
+            /** @description EIP-712 digest that was signed. */
+            digest: string;
+            typedData: {
+                domain: {
+                    /** @enum {string} */
+                    name?: "AgentFi Handshake";
+                    /** @enum {string} */
+                    version?: "1";
+                };
+                types: {
+                    [key: string]: {
+                        name?: string;
+                        type?: string;
+                    }[];
+                };
+                /** @enum {string} */
+                primaryType: "AgentFiHandshake";
+                message: {
+                    agent?: string;
+                    message?: string;
+                    issuedAt?: number;
+                };
+            };
         };
         PnLBreakdown: {
             agentId?: string;

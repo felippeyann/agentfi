@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { api } from '../api-client.js';
+import { pathIdSchema } from '../path-ids.js';
 import { resolveSwapToken } from './token-map.js';
 
 export const swapTools = [
@@ -79,9 +80,7 @@ export const swapTools = [
       amount_in: z.string().describe('Amount to sell. Must match simulate_swap call.'),
       chain_id: z.number().default(1).describe('Chain ID. Default: 1 (Ethereum mainnet).'),
       slippage_tolerance: z.number().min(0.01).max(50).default(0.5).describe('Max slippage tolerance in percentage. Example: 0.5 = 0.5%.'),
-      simulation_id: z
-        .string()
-        .describe('The simulation_id returned by simulate_swap. Required for safety.'),
+      simulation_id: pathIdSchema('simulation', 'The simulation_id returned by simulate_swap. Required for safety.'),
     }),
     handler: async (input: {
       from_token: string;

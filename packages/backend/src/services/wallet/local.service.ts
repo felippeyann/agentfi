@@ -10,7 +10,7 @@
  *   - Private keys live in process memory only (Map keyed by walletId)
  *   - Keys are lost on every restart — intentional, so no persistence risk
  *   - A runtime guard in env.ts refuses to boot with
- *     WALLET_PROVIDER=local + NODE_ENV=production
+ *     WALLET_PROVIDER=local + NODE_ENV=production or staging
  *   - Every method logs a WARN-level line noting the provider is local
  *
  * Matches the TurnkeyService surface (createWallet, getWalletAddress,
@@ -117,34 +117,15 @@ export class LocalWalletService {
     return signed;
   }
 
-  /**
-   * Signs an arbitrary string message with the wallet's private key using
-   * EIP-191 personal_sign format. Used for A2A handshake identity proofs.
-   * Returns `0x`-prefixed hex signature.
-   */
-  async signMessage(params: {
-    walletId: string;
-    message: string;
-  }): Promise<{ signature: `0x${string}`; address: Address }> {
-    const entry = wallets.get(params.walletId);
-    if (!entry) {
-      throw new Error(
-        `[local-wallet] wallet ${params.walletId} not found (in-memory store is cleared on restart)`,
-      );
-    }
-    const signature = await entry.account.signMessage({
-      message: params.message,
-    });
-    return {
-      signature,
-      address: getAddress(entry.account.address),
-    };
-  }
+  // S6: no `signMessage` (EIP-191 personal_sign of caller bytes) — see the
+  // note in turnkey.service.ts. Handshakes go through `signTypedData` with
+  // the fixed envelope in services/identity/handshake.ts.
 
   /**
    * Signs an EIP-712 typed-data payload (domain + types + message). Used by
    * the x402 client to authorize ERC-3009 / Permit2 token transfers without
-   * broadcasting a transaction. Returns `0x`-prefixed hex signature.
+   * broadcasting a transaction, and by `sign-handshake` for the AgentFi
+   * handshake envelope. Returns `0x`-prefixed hex signature.
    */
   async signTypedData(params: {
     walletId: string;

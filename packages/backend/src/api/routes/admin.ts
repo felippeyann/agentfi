@@ -12,6 +12,7 @@ import { db } from '../../db/client.js';
 import { getAddress, type Address } from 'viem';
 import { AGENT_EXECUTOR_ABI } from '../../abi/AgentExecutor.abi.js';
 import { logger } from '../middleware/logger.js';
+import { isLocalOnlyRequest } from '../middleware/local-request.js';
 import { publicErrorMessage } from '../errors/sanitize.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
 import { getContracts } from '../../config/contracts.js';
@@ -30,11 +31,6 @@ const operatorService = new OperatorService(db);
 const ADMIN_SECRET = process.env['ADMIN_SECRET'] ?? '';
 const ADMIN_ALLOW_REMOTE = process.env['ADMIN_ALLOW_REMOTE'] === 'true';
 
-function isLoopbackIp(ipRaw: string): boolean {
-  const ip = ipRaw.replace(/^::ffff:/, '');
-  return ip === '127.0.0.1' || ip === '::1';
-}
-
 function requireAdmin(request: any, reply: any): boolean {
   const secret = request.headers['x-admin-secret'];
   if (!secret || !ADMIN_SECRET || Buffer.byteLength(secret) !== Buffer.byteLength(ADMIN_SECRET) || !timingSafeEqual(Buffer.from(secret), Buffer.from(ADMIN_SECRET))) {
@@ -42,7 +38,10 @@ function requireAdmin(request: any, reply: any): boolean {
     return false;
   }
 
-  if (!ADMIN_ALLOW_REMOTE && !isLoopbackIp(request.ip ?? '')) {
+  // S6: never `request.ip` — with TRUST_PROXY on it comes from a
+  // client-chosen X-Forwarded-For. The TCP peer and every forwarded hop must
+  // be loopback (api/middleware/local-request.ts).
+  if (!ADMIN_ALLOW_REMOTE && !isLocalOnlyRequest(request)) {
     reply.code(403).send({ error: 'Admin routes are local-only. Set ADMIN_ALLOW_REMOTE=true to enable remote access.' });
     return false;
   }

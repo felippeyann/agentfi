@@ -1,7 +1,6 @@
 import { Turnkey } from '@turnkey/sdk-server';
 import {
   getAddress,
-  hashMessage,
   hashTypedData,
   type Address,
   type Hex,
@@ -131,35 +130,20 @@ export class TurnkeyService {
     return signedTransaction;
   }
 
-  /**
-   * Signs an arbitrary string message with EIP-191 personal_sign format.
-   * Used for A2A handshake identity proofs.
-   *
-   * Implementation: hash the message with viem's `hashMessage` (which
-   * applies the standard `\x19Ethereum Signed Message:\n<len><msg>` prefix),
-   * then sign the hash via Turnkey's `signRawPayload` with
-   * `HASH_FUNCTION_NO_OP` (we pre-hashed). Assemble the r||s||v
-   * 65-byte signature that viem's `verifyMessage` / `recoverMessageAddress`
-   * accepts.
-   */
-  async signMessage(params: {
-    walletId: string;
-    message: string;
-  }): Promise<{ signature: `0x${string}`; address: Address }> {
-    const address = await this.getWalletAddress(params.walletId);
-
-    // EIP-191 personal_sign prefix + keccak256
-    const digest = hashMessage(params.message);
-    const signature = await this.signDigest(address, digest);
-
-    return { signature, address };
-  }
+  // S6: there is deliberately NO `signMessage` (EIP-191 personal_sign of a
+  // caller-chosen string). For a Safe-mode agent this key is the Safe's 1/1
+  // owner, and personal_sign of a 32-byte string is Safe's `eth_sign` owner
+  // signature over that digest. A2A handshakes sign the domain-separated
+  // EIP-712 envelope in services/identity/handshake.ts through
+  // `signTypedData`; nothing in the backend signs raw caller bytes.
 
   /**
    * Signs an EIP-712 typed-data payload (domain + types + message). Used by
-   * the x402 client to authorize ERC-3009 / Permit2 token transfers.
+   * the x402 client to authorize ERC-3009 / Permit2 token transfers (behind
+   * its scheme / asset / cap gates) and by `sign-handshake` for the fixed
+   * AgentFi handshake envelope. Callers build the typed data server-side.
    *
-   * Same technique as `signMessage`: viem computes the EIP-712 digest
+   * viem computes the EIP-712 digest
    * (`\x19\x01 || domainSeparator || hashStruct(message)`) locally, Turnkey
    * signs the pre-hashed 32 bytes with `HASH_FUNCTION_NO_OP`, and the
    * r||s||v signature is assembled so `recoverTypedDataAddress` accepts it.

@@ -23,7 +23,7 @@ Rate limits are tier-based (FREE / PRO / ENTERPRISE) and keyed by `agentId` or I
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/health` | None | Liveness check |
-| GET | `/health/ready` | None | Readiness check (DB, Redis, RPC, Turnkey) |
+| GET | `/health/ready` | None | Readiness check (DB, Redis, RPC, Turnkey); result cached 5 s, 30 calls/min per client IP (429) |
 
 ---
 
@@ -41,9 +41,31 @@ Rate limits are tier-based (FREE / PRO / ENTERPRISE) and keyed by `agentId` or I
 | PATCH | `/v1/agents/me/manifest` | Agent | Update own service manifest |
 | GET | `/v1/agents/:id/trust-report` | Public | Reputation score, A2A tx count |
 | GET | `/v1/agents/me/pnl` | Agent | Profit & loss breakdown (earnings, costs incl. gas, breakeven) |
-| POST | `/v1/agents/me/sign-handshake` | Agent | Sign a message with the agent's wallet (EIP-191 personal_sign) |
-| POST | `/v1/agents/verify-handshake` | Public | Verify a peer's signature (ECDSA recovery, EIP-1271 fallback) |
+| POST | `/v1/agents/me/sign-handshake` | Agent | Sign an AgentFi handshake: EIP-712 envelope `AgentFiHandshake{agent, message, issuedAt}` (see below) |
+| POST | `/v1/agents/verify-handshake` | Public | Verify a peer's handshake envelope (ECDSA recovery, EIP-1271 fallback) |
 | DELETE | `/v1/agents/:id` | Agent (owner) | Soft deactivate + emergency pause |
+
+### POST /v1/agents/me/sign-handshake and POST /v1/agents/verify-handshake
+
+Since S6 (2026-10-08) the wallet signs only a fixed EIP-712 envelope, never the message bytes: domain `{ name: "AgentFi Handshake", version: "1" }`, type `AgentFiHandshake(address agent,string message,uint64 issuedAt)`. The former `personal_sign(message)` was a Safe owner-signature oracle (details and the collision argument: [a2a-interoperability.md §2.1](a2a-interoperability.md#21-handshake-envelope-v1)).
+
+```json
+POST /v1/agents/me/sign-handshake        { "message": "deal #42: 10 USDC for a summary" }
+200 {
+  "message": "deal #42: 10 USDC for a summary",
+  "issuedAt": 1791417600,
+  "signature": "0x…65 bytes…",
+  "address": "0x…signing key (the envelope's agent)…",
+  "safeAddress": "0x…",
+  "digest": "0x…EIP-712 digest…",
+  "typedData": { "domain": { "name": "AgentFi Handshake", "version": "1" }, "types": { "AgentFiHandshake": [ … ] }, "primaryType": "AgentFiHandshake", "message": { "agent": "0x…", "message": "…", "issuedAt": 1791417600 } }
+}
+
+POST /v1/agents/verify-handshake         { "message": "…", "issuedAt": 1791417600, "signature": "0x…", "address": "0x…" }
+200 { "valid": true, "address": "0x…", "verifiedVia": "ecdsa" }
+```
+
+`issuedAt` is required on verify (breaking change: a signature from before S6 no longer verifies). `agentId` may replace `address` to check against the peer's registered `safeAddress` (EIP-1271). `valid: false` is a 200; a malformed signature is a 400.
 
 ### GET /v1/agents/me/pnl
 
@@ -346,8 +368,10 @@ All admin routes require `x-admin-secret` header. Local-only by default.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/mcp/sse` | Agent (optional) | SSE stream for tool calls |
-| POST | `/mcp/messages?sessionId=` | Session | JSON-RPC message handler |
+| GET | `/mcp/sse` | Agent (optional), `x-api-key` header only | SSE stream for tool calls |
+| POST | `/mcp/messages?sessionId=` | Session + the same `x-api-key` | JSON-RPC message handler |
+
+**Authentication and limits (S6).** Send the agent key in the `x-api-key` header. A key in the query string (`?apiKey=`, `?api_key=`, `?key=`, `?token=`) is refused with `400 API_KEY_IN_QUERY`, because URLs reach access logs (credential-like query parameters are also redacted from the request log). Without a key the session can list tools (directory scans) but every tool call fails. Each session is bound to the key that opened it: `POST /mcp/messages` with another key, or without the key, is `403 MCP_SESSION_KEY_MISMATCH`. Open sessions are capped per key (`MCP_SSE_MAX_SESSIONS_PER_KEY`, default 5; per client IP for keyless sessions; `429 MCP_SESSION_LIMIT`) and server-wide (`MCP_SSE_MAX_SESSIONS`, default 200; `503 MCP_SESSIONS_FULL` with `Retry-After`), and a session with no message for `MCP_SSE_IDLE_TIMEOUT_SECONDS` (default 900) is closed. `get_transaction_status` accepts only an id of letters, digits, `_` and `-`.
 
 **Backend MCP Proxy Tools** (16):
 `get_wallet`, `get_balance`, `get_allowances`, `simulate_swap`, `execute_swap`, `execute_transfer`, `supply_aave`, `withdraw_aave`, `supply_compound`, `withdraw_compound`, `deposit_erc4626`, `withdraw_erc4626`, `swap_curve`, `get_transaction_status`, `list_transactions`, `get_agent_policy`

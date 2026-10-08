@@ -26,6 +26,9 @@ export async function registerRateLimit(fastify: FastifyInstance) {
       return RATE_LIMITS[tier] ?? RATE_LIMITS['FREE']!;
     },
     keyGenerator: (request) => request.agentId || request.ip,
+    // `/health*` stays out of the Redis-backed limiter so probes keep working
+    // when Redis is down. `/health/ready` (which calls the dependencies) has
+    // its own in-process per-IP limit and a short result cache (S6, health.ts).
     allowList: (request) => {
       const url = request.routeOptions?.url ?? '';
       return url.startsWith('/health') || url.startsWith('/.well-known');

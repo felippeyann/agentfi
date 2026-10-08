@@ -1,8 +1,16 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
+import { getAddress, recoverAddress } from 'viem';
 import { db } from '../../db/client.js';
 import { env } from '../../config/env.js';
 import { getWalletService } from '../../services/wallet/index.js';
+import type { Eip712TypedData } from '../../services/wallet/signer.js';
+import {
+  HANDSHAKE_MESSAGE_MAX_LENGTH,
+  buildHandshakeTypedData,
+  handshakeDigest,
+  handshakeTypedDataJson,
+} from '../../services/identity/handshake.js';
 import { SafeService } from '../../services/wallet/safe.service.js';
 import { generateApiKey } from '../middleware/auth.js';
 import { PolicyService } from '../../services/policy/policy.service.js';
@@ -559,11 +567,18 @@ export async function agentRoutes(fastify: FastifyInstance) {
   });
 
   /**
-   * POST /v1/agents/me/sign-handshake — sign a message using the agent's wallet.
-   * Returns the signature + address so peers can verify-handshake.
+   * POST /v1/agents/me/sign-handshake — sign a handshake with the agent's wallet.
+   *
+   * S6: the wallet signs ONLY the fixed EIP-712 envelope
+   * `AgentFiHandshake(address agent,string message,uint64 issuedAt)` under the
+   * domain `{ name: "AgentFi Handshake", version: "1" }`
+   * (services/identity/handshake.ts) — never the agent's bytes as such. The
+   * former personal_sign of the raw message was a Safe owner-signature oracle.
+   * Returns the signature, the fields a peer needs to verify it
+   * (`message`, `issuedAt`, `address`) and the full typed data.
    */
   fastify.post('/v1/agents/me/sign-handshake', async (request, reply) => {
-    const schema = z.object({ message: z.string().min(1).max(4096) });
+    const schema = z.object({ message: z.string().min(1).max(HANDSHAKE_MESSAGE_MAX_LENGTH) });
     const parsed = schema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'Invalid body', details: parsed.error.flatten() });
@@ -576,15 +591,31 @@ export async function agentRoutes(fastify: FastifyInstance) {
     if (!agent) return reply.code(404).send({ error: 'Agent not found' });
 
     try {
-      const { signature, address } = await turnkey.signMessage({
+      const address = getAddress(await turnkey.getWalletAddress(agent.walletId));
+      const fields = {
+        agent: address,
+        message: parsed.data.message,
+        issuedAt: Math.floor(Date.now() / 1000),
+      };
+      const digest = handshakeDigest(fields);
+      const { signature } = await turnkey.signTypedData({
         walletId: agent.walletId,
-        message: parsed.data.message,
+        // Structurally the x402 typed-data shape both providers sign.
+        typedData: buildHandshakeTypedData(fields) as unknown as Eip712TypedData,
       });
+      // Never hand out a signature that does not verify as this envelope.
+      const recovered = await recoverAddress({ hash: digest, signature });
+      if (getAddress(recovered) !== address) {
+        throw new Error('Wallet provider returned a handshake signature that does not recover to the agent wallet');
+      }
       return reply.send({
-        message: parsed.data.message,
+        message: fields.message,
+        issuedAt: fields.issuedAt,
         signature,
         address,
         safeAddress: agent.safeAddress,
+        digest,
+        typedData: handshakeTypedDataJson(fields),
       });
     } catch (err) {
       logger.error({ err, agentId: request.agentId }, 'sign-handshake failed');
@@ -597,21 +628,27 @@ export async function agentRoutes(fastify: FastifyInstance) {
   });
 
   /**
-   * POST /v1/agents/verify-handshake — verify a peer's signature.
+   * POST /v1/agents/verify-handshake — verify a peer's handshake.
    *
    * Accepts either:
-   *   - { message, signature, address }  — verifies signature at the
-   *     given address (EOA via ECDSA recovery, or contract via EIP-1271)
-   *   - { message, signature, agentId }  — looks the peer up in our DB
-   *     and verifies against their registered safeAddress
+   *   - { message, issuedAt, signature, address }  — verifies the envelope
+   *     signed for the given address (EOA via ECDSA recovery, or contract via
+   *     EIP-1271)
+   *   - { message, issuedAt, signature, agentId }  — looks the peer up in our
+   *     DB and verifies against their registered safeAddress
    *
-   * Returns { valid, address, verifiedVia: 'ecdsa' | 'eip1271' } on 200.
-   * Rejects with 400 on bad input; does NOT return 200 when `valid: false`
-   * to keep the API unambiguous.
+   * The envelope `AgentFiHandshake{agent, message, issuedAt}` is rebuilt with
+   * `agent` = the target address and the signature is checked over its EIP-712
+   * digest (S6) — a personal_sign of the bare message no longer verifies.
+   *
+   * Returns { valid, address, verifiedVia: 'ecdsa' | 'eip1271' } on 200;
+   * `valid: false` is still a 200. Rejects with 400 on bad input or when the
+   * signature cannot be checked.
    */
   fastify.post('/v1/agents/verify-handshake', async (request, reply) => {
     const schema = z.object({
-      message: z.string().min(1).max(4096),
+      message: z.string().min(1).max(HANDSHAKE_MESSAGE_MAX_LENGTH),
+      issuedAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
       signature: z.string().regex(/^0x[0-9a-fA-F]+$/),
       address: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional(),
       agentId: z.string().min(1).optional(),
@@ -623,7 +660,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
     if (!parsed.success) {
       return reply.code(400).send({ error: 'Invalid body', details: parsed.error.flatten() });
     }
-    const { message, signature, chainId } = parsed.data;
+    const { message, issuedAt, signature, chainId } = parsed.data;
 
     let resolvedAddress = parsed.data.address;
     if (!resolvedAddress && parsed.data.agentId) {
@@ -638,16 +675,16 @@ export async function agentRoutes(fastify: FastifyInstance) {
     }
 
     try {
-      const { createPublicClient, http, getAddress, recoverMessageAddress } =
-        await import('viem');
+      const { createPublicClient, http } = await import('viem');
       const { getChain, getPrimaryRpcUrl } = await import('../../config/chains.js');
 
       const targetAddress = getAddress(resolvedAddress!);
+      const digest = handshakeDigest({ agent: targetAddress, message, issuedAt });
 
       // First try ECDSA recovery (works for EOA). If the recovered address
       // matches the target, the target IS the signer.
-      const recovered = await recoverMessageAddress({
-        message,
+      const recovered = await recoverAddress({
+        hash: digest,
         signature: signature as `0x${string}`,
       });
       if (getAddress(recovered) === targetAddress) {
@@ -672,9 +709,10 @@ export async function agentRoutes(fastify: FastifyInstance) {
         chain: getChain(chainId),
         transport: http(rpcUrl),
       });
-      const valid = await publicClient.verifyMessage({
+      // EIP-1271 over the same envelope digest (`isValidSignature(digest, sig)`).
+      const valid = await publicClient.verifyHash({
         address: targetAddress,
-        message,
+        hash: digest,
         signature: signature as `0x${string}`,
       });
       return reply.send({
