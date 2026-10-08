@@ -15,38 +15,122 @@ Constructor parameters actually used (fill in after the broadcast): `EXPECTED_CH
 
 ## 2. C4 runbook (owner runs it; the agent prepared it)
 
-Prerequisites on the maintainer's machine (checked 2026-10-06): Foundry 1.7.1 at `~/.foundry/bin`; no `.env` and no keystore yet. Full reference: [docs/operations/contract-deployment.md](../operations/contract-deployment.md), sections "Deployment" and "ERC-8183 escrow and ERC-8004 hook".
+Deploys `AgentPolicyModule` + `AgentExecutor` (`script/Deploy.s.sol`) and `AgentJobEscrow` + `ReputationHook` (`script/DeployEscrow.s.sol`) on Base Sepolia. Run it in **Git Bash** (any bash works) from the repository root of an up-to-date `main` checkout. Background and every option: [docs/operations/contract-deployment.md](../operations/contract-deployment.md). This runbook was dry-run as written on an Anvil fork on 2026-10-08 (§5.5).
 
-1. **Keys and addresses (testnet only).**
-   - Deployer EOA with Base Sepolia ETH (about 0.05 ETH covers both scripts; faucets: Coinbase Developer Platform faucet, Alchemy Base Sepolia faucet).
-   - Backend evaluator EOA: generate a fresh key with `cast wallet new`, fund it with a little test ETH (it pays gas for `complete`/`reject`/`claimRefund`). This is the `TRUSTED_EVALUATOR` of the hook and the `ESCROW_EVALUATOR_PRIVATE_KEY` of the backend (C3). On testnet it is acceptable to also use it as `OPERATOR_ADDRESS`; on mainnet use separate keys.
-   - `FEE_WALLET` = the address you want fees swept to (`OPERATOR_FEE_WALLET` in the backend `.env`).
-   - `BASESCAN_API_KEY` for verification (optional but recommended).
-2. **Signer.** Preferred: `cast wallet import agentfi-deployer --interactive` (encrypted keystore, key never in the environment). `Deploy.s.sol` only reads `PRIVATE_KEY` from the environment, so for step 4 export it in the shell session (or put it in `packages/contracts/.env`, which is git-ignored) and unset it afterwards.
-3. **Tests.** In `packages/contracts`: `forge test` must show 312 passed, 1 skipped (the skipped one is the R3c fork suite; optionally run it against the real registries with `BASE_SEPOLIA_FORK_URL=https://sepolia.base.org forge test --match-contract ReputationHookForkTest -vv`: 3 passed).
-4. **Policy module + executor (new ABI).**
+### 2.0 Prerequisites
 
-   ```bash
-   cd packages/contracts
-   export OPERATOR_ADDRESS=0x... FEE_WALLET=0x... FEE_BPS=30 PRIVATE_KEY=0x...
-   forge script script/Deploy.s.sol --rpc-url base_sepolia --broadcast --verify --etherscan-api-key $BASESCAN_API_KEY
-   unset PRIVATE_KEY
-   ```
+```bash
+git submodule update --init --recursive        # packages/contracts/lib/forge-std (pinned submodule)
+export PATH="$HOME/.foundry/bin:$PATH"
+forge --version                                # forge Version: 1.7.1
+```
 
-   Ignore the `EscrowModule` address this script also prints (legacy, kept only for ETH jobs).
-5. **Escrow + hook.**
+Without the submodule `forge build` fails on `forge-std/Script.sol`. Do not run `forge install`: the dependency is the pinned submodule.
 
-   ```bash
-   export OPERATOR_ADDRESS=0x... FEE_WALLET=0x... TRUSTED_EVALUATOR=0x...
-   forge script script/DeployEscrow.s.sol --rpc-url base_sepolia --account agentfi-deployer --broadcast --verify --etherscan-api-key $BASESCAN_API_KEY
-   ```
+The two password prompts below (`cast wallet import --interactive` and `forge script --account`) read from the terminal: type them yourself in a terminal window (Git Bash, Windows Terminal, PowerShell). They do not work through a coding agent's shell or CI, which have no terminal attached.
 
-   Leave `FEEDBACK_GAS_LIMIT` (500000) and `IDENTITY_CALL_GAS_LIMIT` (50000) unset unless there is a reason to change them (R3c; the script refuses values outside 250000–2000000 / 20000–200000 before broadcasting). The script prints `Hook gas requirement: 597937` and `Hook bind requirement: 140794` with the defaults (C2b; 667937 before).
+### 2.1 Keys and addresses (testnet only)
 
-6. **Checks.** Run the `cast call` list from the deployment doc ("Post-deployment checks") and `scripts/verify-deployment.sh https://sepolia.base.org <policyModule> <executor> <operator> <feeWallet> 30`.
-7. **Record.** Fill section 1 of this file, update `STATE.md` §3 and the address registry in `docs/operations/contract-deployment.md`, and set in the backend `.env`: `POLICY_MODULE_ADDRESS_84532`, `EXECUTOR_ADDRESS_84532`, `AGENT_JOB_ESCROW_ADDRESS_84532`, `REPUTATION_HOOK_ADDRESS_84532`, `ESCROW_EVALUATOR_PRIVATE_KEY`, `ALCHEMY_API_KEY`.
+| What | How | Used as |
+|---|---|---|
+| Deployer | `cast wallet import agentfi-deployer --interactive` (paste the private key, choose a password; stored encrypted under `~/.foundry/keystores/agentfi-deployer`). `cast wallet address --account agentfi-deployer` shows its address. Fund it with ~0.01 Base Sepolia ETH: both scripts together need about 7.1 M gas (forge estimated 0.00007 ETH at the fork's gas price in the dry-run) | `--account agentfi-deployer` on both `forge script` commands |
+| Evaluator | `cast wallet new` prints a fresh address and private key. Fund the address with ~0.01 ETH: it pays the gas of every `complete` / `reject` / `claimRefund` (the backend alerts below 0.0005 ETH) | address → `TRUSTED_EVALUATOR` (hook, below); private key → `ESCROW_EVALUATOR_PRIVATE_KEY`, only in `packages/backend/.env` (§5.4, plan D5) |
+| Operator | the evaluator address is acceptable on testnet; use a separate key on mainnet | `OPERATOR_ADDRESS` |
+| Fee wallet | any address you control | `FEE_WALLET` (= backend `OPERATOR_FEE_WALLET`) |
+| Etherscan key (optional) | one Etherscan API V2 key from <https://etherscan.io/myapikey>; it covers Base Sepolia. Basescan V1 keys / endpoints no longer work | `ETHERSCAN_API_KEY` |
 
-Alternative: if you prefer the agent to broadcast, put the deployer key in `packages/contracts/.env` as `PRIVATE_KEY=` (git-ignored) together with the three addresses above and say so in chat; the agent runs steps 3–7 and fills this file. The key is never pasted in chat.
+Base Sepolia ETH faucets: Coinbase Developer Platform (<https://portal.cdp.coinbase.com/products/faucet>), Alchemy (<https://www.alchemy.com/faucets/base-sepolia>).
+
+### 2.2 Signer: the keystore *or* `PRIVATE_KEY`, never both
+
+The commands below sign with the keystore (`--account`). Forge also reads `packages/contracts/.env` on its own, so make sure neither the shell nor that file carries a `PRIVATE_KEY`:
+
+```bash
+unset PRIVATE_KEY
+grep -s PRIVATE_KEY packages/contracts/.env    # must print nothing
+```
+
+If a `PRIVATE_KEY` is still present, both scripts print a `WARNING: PRIVATE_KEY is set …` block; when it belongs to a different address than `--account`, they stop before broadcasting with `SignerConflict(<keystore address>, <PRIVATE_KEY address>)`. Remove it and rerun: nothing was sent. (The alternative without a keystore is `PRIVATE_KEY` in the shell and no `--account`; the scripts accept it with the warning, but the key then sits in your environment. It is the only option when an agent runs the deploy for you, because an agent cannot answer the password prompt; delete the key from the shell or file afterwards.)
+
+### 2.3 Tests
+
+```bash
+cd packages/contracts
+forge test
+```
+
+Last line: `341 tests passed, 0 failed, 2 skipped (343 total tests)`. The two skipped suites are the Base Sepolia fork suites; to run them against the real registries: `BASE_SEPOLIA_FORK_URL=https://sepolia.base.org forge test --match-path "test/*.fork.t.sol"` → `14 tests passed, 0 failed, 0 skipped` (the public RPC sometimes rate-limits: rerun).
+
+### 2.4 Environment (same shell for both scripts)
+
+```bash
+export EXPECTED_CHAIN_ID=84532
+export OPERATOR_ADDRESS=0x...        # 2.1
+export FEE_WALLET=0x...              # 2.1
+export TRUSTED_EVALUATOR=0x...       # the evaluator ADDRESS from 2.1 (never its key)
+export EXECUTOR_FEE_BPS=30           # Deploy.s.sol only; the escrow fee FEE_BPS defaults to 30
+export ETHERSCAN_API_KEY=...         # only with --verify (2.1)
+```
+
+Leave every other variable unset: the escrow script then uses USDC `0x036C…CF7e`, the ERC-8004 registries of Base Sepolia, `FEE_BPS=30`, `EVALUATOR_FEE_BPS=0`, `MIN_FEEDBACK_BUDGET=1000000`, `FEEDBACK_GAS_LIMIT=500000` and `IDENTITY_CALL_GAS_LIMIT=50000` (R3c; values outside 250000–2000000 / 20000–200000 are refused before broadcasting). Both scripts stop before sending anything if the RPC is not chain 84532 (`WrongChain`) or `EXPECTED_CHAIN_ID` is missing.
+
+### 2.5 Policy module + executor
+
+```bash
+forge script script/Deploy.s.sol --rpc-url base_sepolia --account agentfi-deployer --broadcast --verify
+```
+
+Without an Etherscan key, drop `--verify` (the contracts work unverified; see "Verify later" below). Enter the keystore password when asked. The output ends with:
+
+```
+--- Copy to .env ---
+POLICY_MODULE_ADDRESS_84532=0x…
+EXECUTOR_ADDRESS_84532=0x…
+OPERATOR_FEE_WALLET=0x…
+--------------------
+```
+
+There is no `EscrowModule` line: the legacy ETH escrow is deployed only with `DEPLOY_LEGACY_ESCROW_MODULE=true` (plan D8; C4 and C5 do not need it), so leave `ESCROW_MODULE_ADDRESS_84532` unset in the backend.
+
+### 2.6 Escrow + hook
+
+```bash
+forge script script/DeployEscrow.s.sol --rpc-url base_sepolia --account agentfi-deployer --broadcast --verify
+```
+
+(Same `--verify` rule.) The output prints the configuration, then `Hook gas requirement:  597937` and `Hook bind requirement: 140794` with the default gas limits, and ends with:
+
+```
+--- Copy to .env ---
+AGENT_JOB_ESCROW_ADDRESS_84532=0x…
+REPUTATION_HOOK_ADDRESS_84532=0x…
+--------------------
+```
+
+**Verify later.** If you deployed without `--verify` and get a key afterwards, export `ETHERSCAN_API_KEY` and run the same command with `--resume --verify` instead of `--broadcast --verify` (once per script). `--resume` reads `broadcast/<script>/84532/run-latest.json` and sends no new transaction when the deployment already went through.
+
+### 2.7 Post-deployment checks
+
+Still in `packages/contracts`, with the variables from 2.4 and the addresses from the two copy blocks:
+
+```bash
+RPC=https://sepolia.base.org
+POLICY=0x...      # POLICY_MODULE_ADDRESS_84532
+EXECUTOR=0x...    # EXECUTOR_ADDRESS_84532
+ESCROW=0x...      # AGENT_JOB_ESCROW_ADDRESS_84532
+HOOK=0x...        # REPUTATION_HOOK_ADDRESS_84532
+bash ../../scripts/verify-deployment.sh "$RPC" "$POLICY" "$EXECUTOR" "$OPERATOR_ADDRESS" "$FEE_WALLET" "$EXECUTOR_FEE_BPS"
+```
+
+Expected: `=== Results: 4 passed, 0 failed ===`. Then paste the second block of [contract-deployment.md, "Post-deployment checks"](../operations/contract-deployment.md#post-deployment-checks), the `cast call` reads, into the same shell (it uses the `ESCROW`, `HOOK`, `RPC` and `TRUSTED_EVALUATOR` set above; its first block only defines those variables); every line carries its expected value as a comment, including the hook's gas requirements, `canonicalAgentId` and `penalties` (both 0 on a fresh hook). `cast` prints large numbers with their scientific form appended (`1000000 [1e6]`).
+
+### 2.8 Record
+
+1. Section 1 of this file: addresses, deploy tx hashes (`broadcast/Deploy.s.sol/84532/run-latest.json` and `broadcast/DeployEscrow.s.sol/84532/run-latest.json`, field `transactions[].hash`), deployer address, constructor parameters.
+2. `STATE.md` §3 (Base Sepolia row) and the address registry in `docs/operations/contract-deployment.md`.
+3. Keep both copy blocks and the evaluator key for the backend `.env` of C5 (§5.4).
+
+**Backend boot check (C3d).** Once C3d is merged, the backend compares the hook's on-chain configuration (`acp`, `trustedEvaluator`, `identityRegistry`) with its own env at boot (`AGENT_JOB_ESCROW_ADDRESS_84532`, the address of `ESCROW_EVALUATOR_PRIVATE_KEY`, `IDENTITY_REGISTRY_ADDRESS_84532` or its default), so a hook deployed with the wrong `TRUSTED_EVALUATOR` shows up at the first boot of §5.4 instead of as silently skipped feedback. Details: [erc-8183-mapping.md](../architecture/erc-8183-mapping.md) §6.
 
 ## 3. Jobs settled on testnet (tasks C5, G2, G5)
 
@@ -60,9 +144,9 @@ Alternative: if you prefer the agent to broadcast, put the deployer key in `pack
 |---|---|---|---|---|
 | | | | | |
 
-## 5. Fork rehearsal (C5a) — local Anvil fork, no real funds
+## 5. C5: fork rehearsal (C5a), runbook (§5.4) and dry-run (§5.5)
 
-Everything C5 will do on Base Sepolia, rehearsed on a local Anvil fork of Base Sepolia so the real run only needs the owner's keys. Not testnet evidence: nothing below was broadcast to a public network, and the tables above stay empty until C4/C5.
+Everything C5 will do on Base Sepolia, rehearsed on a local Anvil fork of Base Sepolia so the real run only needs the owner's keys (§5.1–5.3, §5.5), and the runbook for the real run (§5.4). Not testnet evidence: nothing in this section was broadcast to a public network, and the tables above stay empty until C4/C5.
 
 **What is real and what is not.** The fork (chain id 84532) carries the real state: Circle's testnet USDC `0x036C…CF7e`, the ERC-8004 Identity Registry `0x8004A818…BD9e` and Reputation Registry `0x8004B663…8713` (both implementation v2.0.0). `AgentJobEscrow` + `ReputationHook` are deployed fresh on the fork with the **same script and env names as the C4 runbook** (`script/DeployEscrow.s.sol`, `OPERATOR_ADDRESS`, `FEE_WALLET`, `TRUSTED_EVALUATOR`), signed with an Anvil test key (`--private-key`, the runbook's `--account` equivalent). The backend is the real `src/index.ts` (API + transaction worker + escrow settlement worker + payment recovery) in a child process with `WALLET_PROVIDER=local`, `RPC_URL_84532` pointing at Anvil, `AGENT_JOB_ESCROW_ADDRESS_84532` / `REPUTATION_HOOK_ADDRESS_84532` from the deploy and `ESCROW_EVALUATOR_PRIVATE_KEY` = an Anvil test key; the test drives it over HTTP like two agents.
 
@@ -77,7 +161,7 @@ Cheat codes (fork only): native ETH with `anvil_setBalance`; **USDC with `anvil_
 
 ### 5.1 Commands
 
-Prerequisites: Foundry 1.7.1 (`forge`, `anvil`), `git submodule update --init packages/contracts/lib/forge-std`, Postgres + Redis (`docker compose -f docker-compose.dev.yml up -d postgres redis`), `npm ci`. The public RPC `https://sepolia.base.org` serves archive state for the pinned block (occasional rate limiting: rerun).
+Prerequisites: Foundry 1.7.1 (`forge`, `anvil`), `git submodule update --init --recursive`, Postgres + Redis (`docker compose -f docker-compose.dev.yml up -d postgres redis`), `npm ci`. The public RPC `https://sepolia.base.org` serves archive state for the pinned block (occasional rate limiting: rerun).
 
 ```bash
 cd packages/backend
@@ -117,8 +201,115 @@ Deployment (deterministic for the pinned block): `AgentJobEscrow` `0x70449abF99B
 
 **Observation (not a bug).** On Base Sepolia CoinGecko has no prices, so a USDC reward resolves to $0: the requester's daily-volume reservation is skipped (`Escrow: USD value resolved to 0`) and the revenue snapshot stays NULL. Expected on testnet; on Base mainnet USDC is priced.
 
-### 5.4 What C5 on Base Sepolia still needs from the owner
+### 5.4 C5 runbook — Base Sepolia (owner runs it after C4)
 
-1. C4: deployer key/keystore with Base Sepolia ETH, a fresh evaluator EOA (`cast wallet new`, a little ETH), the fee wallet address, `BASESCAN_API_KEY` (optional) — section 2 above.
-2. Backend `.env`: `ALCHEMY_API_KEY` (or `RPC_URL_84532`), `AGENT_JOB_ESCROW_ADDRESS_84532`, `REPUTATION_HOOK_ADDRESS_84532`, `ESCROW_EVALUATOR_PRIVATE_KEY`, `BACKEND_PUBLIC_URL` reachable from the internet if the `feedbackURI` / `agentURI` should resolve for third parties, transaction worker enabled.
-3. Faucet funds for the two agents of `examples/escrow-erc8183`: ≥ 1 USDC (Circle faucet) on the requester, ~0.0005 ETH on each wallet; then `node examples/escrow-erc8183/index.mjs` against that backend (happy path) and again with `AGENTFI_FLOW=cancel` (failure path: full refund), and record the rows of sections 3 and 4. A contest on testnet needs the backend's `ESCROW_EVALUATION_DELAY_SECONDS` > 0 and a `POST /v1/jobs/:id/contest` inside that window (the fork suite automates it).
+The real-network version of the rehearsal: the backend on your machine, **Turnkey** agent wallets (D11: keys survive restarts, the production signing path is exercised), on-chain URIs pointing at `http://localhost:3000` (D10), funds from faucets. Run from the repository root in Git Bash unless a step says otherwise; it needs C4 (§2) done and its two copy blocks plus the evaluator key at hand, Docker, Node 22+ and `npm ci` at the repository root.
+
+**1. Turnkey (D11).** Sign up at <https://app.turnkey.com>; sign-up creates your organization. In the dashboard copy the organization id (a UUID) and create an API key for your user (an API key pair generated in the browser): the public key is 66 hex characters starting with `02` or `03`, the private key 64 hex characters and is shown only once. Use your root user's key, or a user whose Turnkey policies allow creating wallets, signing transactions and signing raw payloads. Wrong or swapped values boot fine and fail at the first registration with `invalid public key. Did you switch your public and private key?`. What the backend does with it: every `POST /v1/agents` creates one Turnkey wallet named `agentfi-<agent name>-<timestamp>` holding one Ethereum account (`m/44'/60'/0'/0/0`); that account is the agent's wallet (`safeAddress` in the registration response, `walletAddress` in `/v1/agents/me`) and signs the agent's escrow and ERC-8004 transactions inside Turnkey. Agents and their funds therefore survive backend restarts and can be reused across runs.
+
+**2. Postgres, Redis and the dev stack.** The dev compose stack provides Postgres and Redis, but its `api` container already listens on port 3000 and runs a transaction worker on Redis DB 0 under the same queue names, so it would take C5's jobs. Keep the databases, stop the dev API, and give C5 its own database and Redis DB:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d postgres redis
+docker compose -f docker-compose.dev.yml stop api
+docker compose -f docker-compose.dev.yml exec -T postgres psql -U agentfi -d postgres -c "CREATE DATABASE agentfi_c5"
+```
+
+`-T` keeps `exec` from asking for a TTY, which Git Bash (mintty) cannot provide. Compose names the stack after the folder of the checkout (`agentfi` for the usual clone); if the dev stack was started from a folder with another name, add `-p <that name>` (`docker ps` shows it as the prefix of `…-postgres-1`) or these commands address an empty project. If you need the dev API to keep running, use another port instead (`API_PORT=3010` and `BACKEND_PUBLIC_URL=http://localhost:3010` in step 3; the on-chain URIs then carry that port, still localhost as D10 intends) and the dedicated Redis DB all the same. Start the dev API again after the run: `docker compose -f docker-compose.dev.yml start api`.
+
+**3. `packages/backend/.env`.** The backend loads `.env` from the directory it is started in, and it is started from `packages/backend`, so the file is `packages/backend/.env` (git-ignored; not the repository-root `.env`). Create it with:
+
+```env
+NODE_ENV=development
+API_PORT=3000
+BACKEND_PUBLIC_URL=http://localhost:3000
+# openssl rand -hex 32, twice (>= 32 characters each)
+API_SECRET=<random>
+ADMIN_SECRET=<random>
+DATABASE_URL=postgresql://agentfi:agentfi@localhost:5432/agentfi_c5
+REDIS_URL=redis://localhost:6379/5
+# Always required: any non-empty value boots. A real Alchemy key with Base Sepolia
+# enabled adds base-sepolia.g.alchemy.com behind RPC_URL_84532; the public
+# https://sepolia.base.org is always the last fallback.
+ALCHEMY_API_KEY=<your Alchemy key>
+# Optional primary RPC for chain 84532 (e.g. your Alchemy or another provider's https URL)
+RPC_URL_84532=
+WALLET_PROVIDER=turnkey
+TURNKEY_API_PUBLIC_KEY=<step 1>
+TURNKEY_API_PRIVATE_KEY=<step 1>
+TURNKEY_ORGANIZATION_ID=<step 1>
+# Leave empty: escrow steps are signed by the agent's own EOA
+SAFE_DEPLOYER_PRIVATE_KEY=
+# C4 copy blocks (§2.5, §2.6)
+OPERATOR_FEE_WALLET=<FEE_WALLET>
+POLICY_MODULE_ADDRESS_84532=<§2.5>
+EXECUTOR_ADDRESS_84532=<§2.5>
+AGENT_JOB_ESCROW_ADDRESS_84532=<§2.6>
+REPUTATION_HOOK_ADDRESS_84532=<§2.6>
+# The evaluator private key from §2.1 (its address is the hook's TRUSTED_EVALUATOR)
+ESCROW_EVALUATOR_PRIVATE_KEY=<0x + 64 hex>
+```
+
+That is the full list the boot needs (`API_SECRET`, `ADMIN_SECRET`, `DATABASE_URL`, `REDIS_URL`, `ALCHEMY_API_KEY`, `OPERATOR_FEE_WALLET`, and the three `TURNKEY_*` with `WALLET_PROVIDER=turnkey`) plus what C5 uses. Everything else keeps its default: `ESCROW_EVALUATION_DELAY_SECONDS=0` (settle as soon as `submit` confirms), `ESCROW_JOB_TTL_SECONDS=604800`, `IDENTITY_REGISTRY_ADDRESS_84532` = the official registry the hook was deployed with, `RATE_LIMIT_FREE=30` requests/min per agent (the example polls every 3 s). `NODE_ENV=development` is explicit on purpose: unset it means development too, with a loud warning.
+
+**4. Prisma client and schema** (once per checkout / database):
+
+```bash
+cd packages/backend
+npx prisma generate          # npm ci does not generate the client
+npx prisma migrate deploy    # applies every migration (0001…0018) to agentfi_c5
+```
+
+Both read `DATABASE_URL` from `packages/backend/.env`.
+
+**5. API and worker, two terminals in `packages/backend`** (the C3c topology: the worker process signs, settles, recovers and sweeps; the API only queues):
+
+```bash
+# terminal A — API
+TRANSACTION_WORKER_ENABLED=false npx tsx src/index.ts
+# terminal B — worker
+TRANSACTION_WORKER_ENABLED=true npx tsx src/worker.ts
+```
+
+The value on the command line wins over `.env` (dotenv never overrides a variable that is already set), so one `.env` serves both. Expected: the API logs `Transaction worker disabled for this process (TRANSACTION_WORKER_ENABLED=false)`, `ERC-8183 escrow enabled — evaluator signer configured` with `escrowEvaluatorAddress` = your `TRUSTED_EVALUATOR`, and `AgentFi API running on port 3000`; the worker logs `Transaction worker started`, `Payment recovery worker started`, `Escrow settlement worker started`, `Escrow expiry sweep scheduled` and `Transaction worker process is running`. `curl http://localhost:3000/health/ready` answers `"turnkey":true` once the Turnkey credentials work (its `rpc` check reads Ethereum mainnet through Alchemy, so it says `false` with a placeholder `ALCHEMY_API_KEY`; that does not affect Base Sepolia).
+
+**6. Happy path** (third terminal, repository root):
+
+```bash
+AGENTFI_API_URL=http://localhost:3000 AGENTFI_OPERATOR_SECRET=<API_SECRET> node examples/escrow-erc8183/index.mjs
+```
+
+The script registers a requester and a provider (two Turnkey wallets), prints both API keys (keep them for step 7) and waits up to 15 minutes for funds: send the **requester** at least 1 USDC (Circle faucet, <https://faucet.circle.com>, network Base Sepolia) and 0.0005 ETH, the **provider** 0.0005 ETH (faucets in §2.1). It then runs `createJob → setBudget → approve → fund`, the provider's ERC-8004 `register` + `setProviderAgentId`, `submit`, and the evaluator's `complete`, and ends with `✓ Escrow flow completed end to end.` (`feedback written`).
+
+**7. Failure path** (same two agents; the happy run spent the requester's USDC, so the script waits until you send it 1 USDC again):
+
+```bash
+AGENTFI_FLOW=cancel AGENTFI_REQUESTER_API_KEY=agfi_... AGENTFI_PROVIDER_API_KEY=agfi_... AGENTFI_API_URL=http://localhost:3000 node examples/escrow-erc8183/index.mjs
+```
+
+Ends with `✓ Escrow cancellation refunded end to end.` (requester refunded in full, no feedback). Contest handling: see [erc-8183-mapping.md](../architecture/erc-8183-mapping.md) §6.
+
+**8. Record** one row per run in section 3 (AgentFi job id, `onChainJobId`, settle tx and fee as printed; the fund tx is `proofOfPayment.txHash` in `GET /v1/jobs/<job id>/feedback.json` for the happy run, and the requester wallet's `fund` transaction on <https://sepolia.basescan.org> for both) and the provider's identity in section 4 (the ERC-8004 agent id printed in step 6; its `register` tx on the provider wallet's Basescan page; `agentURI` = `http://localhost:3000/v1/agents/<provider id>/erc8004.json`).
+
+**Local wallet provider: fork rehearsal only.** `WALLET_PROVIDER=local` (the fork harness of §5.1, and the dry-run of §5.5) keeps each agent's key in the memory of the process that created it. Every restart loses the keys, so agents registered before can no longer sign (register new ones), and an API and a worker in separate processes cannot share them: the worker fails with `[local-wallet] wallet … not found`. With the local provider run one process that does both (`TRANSACTION_WORKER_ENABLED=true npx tsx src/index.ts`, no `worker.ts`), as the harness does. `NODE_ENV=production` and `staging` refuse it.
+
+### 5.5 Dry-run of §2 and §5.4 on 2026-10-08 (H14) — local fork, no real funds
+
+The two runbooks above were executed as written on `main` 90bb831 + the H14 branch, against `anvil --fork-url https://sepolia.base.org --chain-id 84532 --port 8548` (fork of block 47 860 069). Substitutions, and nothing else: the RPC (`http://127.0.0.1:8548` for `base_sepolia` / `https://sepolia.base.org`); a throwaway keystore holding Anvil account 0 (`cast wallet import … --private-key … --unsafe-password …`, then `--account … --password …`, because a coding agent has no terminal for the prompts; deleted afterwards); fresh `cast wallet new` keys for the evaluator (= operator) and the fee wallet; faucets → `anvil_setBalance` and the example's `AGENTFI_FORK_FUNDING=true`; no `--verify` and no Etherscan key; **`WALLET_PROVIDER=local` instead of Turnkey** (no Turnkey credentials exist for the dry-run); the dev stack was left running, so the step-2 alternative was used (`API_PORT=3160`, `BACKEND_PUBLIC_URL=http://localhost:3160`), with database `agentfi_h14` and Redis DB 6.
+
+| Step | Result |
+|---|---|
+| §2.0–2.3 | submodule present; forge 1.7.1; `forge test` 341 passed, 2 skipped; fork suites with `BASE_SEPOLIA_FORK_URL` 14 passed; no `PRIVATE_KEY` anywhere |
+| §2.5 `Deploy.s.sol` | `Legacy EscrowModule: skip`, copy block with `POLICY_MODULE_ADDRESS_84532` / `EXECUTOR_ADDRESS_84532` / `OPERATOR_FEE_WALLET` only; no `ETHERSCAN_API_KEY` needed without `--verify` |
+| §2.6 `DeployEscrow.s.sol` | `Hook gas requirement: 597937`, `Hook bind requirement: 140794`, copy block as documented; deployer nonce +4 for both scripts (forge estimated 2.25 M + 4.87 M gas) |
+| §2.6 "Verify later" | `--resume` (without `--verify`) sent nothing: deployer nonce unchanged |
+| §2.2 negative checks | `PRIVATE_KEY` of another address in `packages/contracts/.env` + `--account … --broadcast` → `SignerConflict(0xf39F…2266, 0x7099…79C8)`, nonce unchanged; the same address → the `WARNING: PRIVATE_KEY is set` block and `Deployer (PRIVATE_KEY)` |
+| §2.7 | `verify-deployment.sh` from `packages/contracts`: 4 passed, 0 failed; all 23 `cast call` checks of contract-deployment.md returned the documented values |
+| §5.4 steps 3–4 | `.env` generated from the step-3 block (only the substitutions above); `npx prisma generate`; `npx prisma migrate deploy` printed `Environment variables loaded from .env` and applied 18 migrations to the empty database |
+| §5.4 step 5 (API + worker) | both processes booted with the documented log lines and `escrowEvaluatorAddress` = the evaluator; `/health/ready` `turnkey: true` (local provider), `rpc: false` (placeholder Alchemy key, as noted in step 5) |
+| §5.4 step 6 on API + worker **with the local provider** | failed as the local-provider note predicts: `create FAILED: [local-wallet] wallet … not found` (the wallet was created in the API process, the worker signs). Not a Turnkey problem; it is why the local provider runs as one process |
+| §5.4 steps 6–7, single process (`TRANSACTION_WORKER_ENABLED=true npx tsx src/index.ts`) | happy: on-chain job #1 Completed, provider +0.997 USDC, ERC-8004 agent #9604 bound, `feedback written`, `getSummary(9604, [hook], "agentfi.job", "")` = (1, 100, 0), `canonicalAgentId(provider)` = 9604, `pendingPlatformFees` = 3000; API keys printed in step 1; cancel with the reused keys: job #2 Rejected, 1.000000 USDC refunded, `feedback skipped:no-params` |
+
+Observation (not a runbook defect): in the cancel run the provider already had identity #9604, so its `setProviderAgentId` for job #2 was broadcast after the evaluator's `reject` and reverted on-chain (31 590 gas paid by the provider wallet; binding `FAILED`, payment unaffected). In the C5a rehearsal the same race ended `SKIPPED` because the identity was still being registered.
+
+Not verified here: anything Turnkey does (wallet creation, signing, the `turnkey` readiness check against the real API), the faucets, Etherscan verification (`--verify`, `--resume --verify`), the interactive password prompts, and the dev-stack `up -d` / `stop api` / `start api` commands (the dev stack served other work and stayed up; the database was created with the documented `exec -T … psql` command, run with `-p agentfi` because the dry-run checkout's folder has another name).

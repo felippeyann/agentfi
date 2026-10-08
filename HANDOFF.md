@@ -2,7 +2,7 @@
 
 > Live pending tasks, credentials inventory, and working conventions. For _what the project is_, read [STATE.md](STATE.md). For _why_, read [VISION.md](VISION.md). This file is the shortest path from "resuming work" → "executing something useful."
 
-**Last updated**: 2026-10-06 · **main baseline verified** `5b317c5` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0, **reactivated in exploratory mode on 2026-10-06** after being archived 2026-05-17) · **Release**: [mcp-server-v0.5.0](https://github.com/felippeyann/agentfi/releases/tag/mcp-server-v0.5.0) · **npm**: [`@agent_fi/mcp-server@0.5.0`](https://www.npmjs.com/package/@agent_fi/mcp-server) (published 2026-05-15)
+**Last updated**: 2026-10-08 · **main baseline verified** `90bb831` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0, **reactivated in exploratory mode on 2026-10-06** after being archived 2026-05-17) · **Release**: [mcp-server-v0.5.0](https://github.com/felippeyann/agentfi/releases/tag/mcp-server-v0.5.0) · **npm**: [`@agent_fi/mcp-server@0.5.0`](https://www.npmjs.com/package/@agent_fi/mcp-server) (published 2026-05-15)
 
 > **Resuming work?** Read, in order: [VISION.md](VISION.md) → [STATE.md](STATE.md) → [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md) (the live plan with task status) → this file. The review that led to reactivation is [docs/project/reactivation-2026-10.md](docs/project/reactivation-2026-10.md) and the market evidence is [docs/project/market-signals-2026-10.md](docs/project/market-signals-2026-10.md) (both in Portuguese).
 
@@ -28,7 +28,7 @@
 | Active branches        | `main`, `develop` (mirrors main post-merge); task branches `<type>/<task-id>-<slug>` per the execution plan |
 | Open PRs               | Dependabot bumps (see execution plan WS8) + task PRs in flight     |
 | Open issues            | 0                                                                  |
-| CI                     | green on `main` (6 jobs: 5 required + OpenAPI Spec)                |
+| CI                     | green on `main` (`ci.yml`, 7 jobs: 4 required + MCP Tests, OpenAPI Spec, E2E Tests) |
 | npm vulnerabilities    | 0 critical, 0 high                                                 |
 | Secrets in git history | None                                                               |
 | Live infrastructure    | **None.** Fly.io backend and Upstash Redis were decommissioned on 2026-05-17. No hosted instance is planned for the 90-day validation. |
@@ -67,14 +67,18 @@
 | Task | Plan ID | Notes |
 |---|---|---|
 | Demand validation interviews | WS7 V1–V3 | Three operator interviews by Day 30; the Day-30 checkpoint can stop the technical workstreams. |
-| Deploy contracts on Base Sepolia (then mainnet) | WS2 C4, C6 | Needs the deployer key in local `.env`; agents prepare the exact `forge script` command. |
+| Deploy the contracts on Base Sepolia | WS2 C4 | Foundry keystore for the deployer (`cast wallet import`, password typed in a real terminal) with Base Sepolia ETH, a fresh evaluator EOA, the fee wallet, optionally an Etherscan API V2 key. Runbook: [testnet-log.md §2](docs/project/testnet-log.md) (dry-run on a fork on 2026-10-08). |
+| Testnet E2E with two agents | WS2 C5 | Turnkey organization + API key (D11), faucet USDC and ETH for the two agent wallets, the backend `.env` from the C4 output. Runbook: [testnet-log.md §5.4](docs/project/testnet-log.md). |
+| Base mainnet redeploy | WS2 C6 | Decision after C5 (plan §5 question 1). |
 | Record the demo screencast | WS6 X2 | Agents prepare the script and prompts. |
 | Directory listings | WS6 X3 | mcp.so listing returns 404; the awesome-mcp-servers entry (PR #5091, merged 2026-05-27) was pruned after the archive and must be resubmitted. |
-| Answer the open questions | Plan §5 | Evaluator role, fee model, ERC-8004 identity opt-in, mainnet redeploy, Brazil "software only" assumption, native-ETH jobs. |
+| Dependabot PRs left open | WS0 H4, WS8 | #109, #123, #124 are green and wait for an owner merge; #115 (Turnkey 6), #111 (bullmq 6), #125 (TypeScript 7), #127 (Prisma 7) need their own code tasks. |
+| Confirm P6's two policy readings | WS4 P6 | Per-transaction cap read in USD for USDC, daily volume counting x402 payments ([#158](https://github.com/felippeyann/agentfi/pull/158), "Decisions"). |
+| Answer the open questions | Plan §5 | Mainnet redeploy and its addresses, Brazil "software only" assumption, fee bps / tiers, revenue model (per job vs bps), hosting of the on-chain URIs before mainnet (from D10). |
 
-### 3.2 Known defects being fixed (Week 0)
+### 3.2 Defects fixed and in flight
 
-A1 (backend ABI vs contract source), A2 (mock simulation accepted in production), A3 (pause not re-validated before signing) and S1 (agent can relax its own policy) are **merged** (#132, #129, #130, #131) and were hardened by an adversarial review (#139 backend, #140 contracts, #137 x402). Open follow-ups found on the way are plan rows A3b, A6, S2, S3, A4, A5 and C3b. Real funds still wait for the Base Sepolia redeploy (C4) and the testnet E2E (C5).
+The Week-0 defects A1, A2, A3 and S1 are merged (#132, #129, #130, #131) and were hardened by the first adversarial review (#139 backend, #140 contracts, #137 x402). The second adversarial review (2026-10-08) found 5 P1 and about 20 P2, none losing escrowed funds in the contracts; its fixes C2b (#159), C3c (#160), S6 (#157) and P6 (#158) are merged, C3d (contest → operator review, escrow policy, hook boot check) and H14 (runbooks and docs) are in flight. The other open follow-ups are the `todo` rows of the plan (A4, A5, A6, S3, T1, C3b, R2b, R4, P4, W1–W3). Real funds still wait for the Base Sepolia deploy (C4) and the testnet E2E (C5).
 
 ### 3.3 Blocked externally
 
@@ -92,15 +96,17 @@ The project reached complete plumbing with zero external users in May 2026. The 
 
 | Credential                               | When needed                                               | Where to get                             |
 | ---------------------------------------- | --------------------------------------------------------- | ---------------------------------------- |
-| Alchemy API Key                          | Any real-chain interaction                                | https://dashboard.alchemy.com            |
-| Turnkey keys (public + private + org ID) | Production wallets                                        | https://app.turnkey.com                  |
+| Alchemy API Key                          | Every backend boot (`ALCHEMY_API_KEY` is required; any non-empty value boots, a real key is needed for real-chain RPC) | https://dashboard.alchemy.com            |
+| Turnkey keys (public + private + org ID) | Agent wallets in C5 on Base Sepolia (D11) and in production | https://app.turnkey.com (runbook: [testnet-log.md §5.4](docs/project/testnet-log.md)) |
 | Tenderly access key                      | Pre-broadcast tx simulation (optional; graceful fallback) | https://dashboard.tenderly.co            |
 | Postgres URL                             | Always                                                    | Local Docker, Neon, Supabase, Railway PG |
 | Redis URL                                | Always                                                    | Local Docker, Upstash, Railway Redis     |
 | npm publish access to `@agent_fi`        | Publishing mcp-server                                     | https://www.npmjs.com (invite-only org)                                          |
 | `gh auth login`                          | PR + release ops                                          | GitHub CLI                               |
-| Etherscan-family API keys                | Contract verification                                     | Per-chain block explorer                 |
-| Funded deployer EOA                      | Contract deployment                                       | Hot wallet with gas                      |
+| Etherscan API V2 key (`ETHERSCAN_API_KEY`) | Contract verification (`forge script --verify`), optional | https://etherscan.io/myapikey — one key for every chain; Basescan V1 keys no longer work |
+| Deployer key in a Foundry keystore       | Contract deployment (C4, C6); never `PRIVATE_KEY` together with `--account` | `cast wallet import agentfi-deployer --interactive` |
+| Evaluator EOA                            | Settles every escrowed job: its address is the hook's `TRUSTED_EVALUATOR` at deploy, its key the backend's `ESCROW_EVALUATOR_PRIVATE_KEY` (D5); needs a little native gas | `cast wallet new` (fresh key, testnet only) |
+| Base Sepolia faucets                     | Gas for the deployer, the evaluator and agent wallets; USDC for requester agents | ETH: https://portal.cdp.coinbase.com/products/faucet, https://www.alchemy.com/faucets/base-sepolia · USDC: https://faucet.circle.com |
 
 **Dev quickstart path** (for evaluation, no real credentials): `WALLET_PROVIDER=local` + stub Alchemy + docker-compose.dev.yml. See [docs/dev-quickstart.md](docs/dev-quickstart.md). For real-chain local or production setup, use [docs/operations/setup-checklist.md](docs/operations/setup-checklist.md).
 
@@ -149,7 +155,7 @@ git checkout develop && git pull origin main && git push origin develop  # sync 
 
 - Full CI ~3 min when cached.
 - Required: Lint & Type Check, Admin Tests, Backend Tests, Foundry Tests (ruleset on `main`).
-- Not required but run: E2E Tests, OpenAPI Spec.
+- Not required but run: MCP Tests, OpenAPI Spec, E2E Tests.
 - Vercel preview sometimes fails — ignore, not part of required checks.
 
 ---
@@ -211,7 +217,7 @@ Large features that were in the roadmap but had no external demand (GMX adapter,
 
 - Migrations are **never auto-generated** — write them manually in `packages/backend/src/db/migrations/NNNN_name/migration.sql`.
 - After editing `schema.prisma`, run `npx prisma generate --schema=packages/backend/src/db/schema.prisma`.
-- Latest migration: `0013_operator_revenue_sharing` (Operator, OperatorRevenue, OperatorSettlement). The reactivation plan reserves 0014 (ERC-8183 job fields), 0015 (ERC-8004 agent id) and 0016 (ResourcePayment).
+- Latest migration (2026-10-08): `0018_resource_payment_valid_before` (P6). The reactivation added 0014 (ERC-8183 job fields), 0015 (ERC-8004 identities), 0016 (ResourcePayment), 0017 (policy pause marker) and 0018. Apply them with `npx prisma migrate deploy` from `packages/backend` (it reads `DATABASE_URL` from `packages/backend/.env`).
 
 ### Dependency quirks
 
@@ -226,7 +232,7 @@ Large features that were in the roadmap but had no external demand (GMX adapter,
 
 ### Known non-issues (don't "fix" these)
 
-- `e2e-testnet-smoke.yml` fails daily when testnet secrets are unset — intentional gate (`if: secrets.E2E_TESTNET_RPC_URL != ''`).
+- `e2e-testnet-smoke.yml` skips with a notice when the `E2E_TESTNET_*` secrets are unset (fixed in H13, #148; it used to fail every run) — expected until the owner adds them.
 - `ethers v5` remains in use for Aave helper integration; do not remove it just because Safe protocol-kit v7 migrated away from `SafeFactory`.
 - Vercel preview deploy failures on PRs — separate pipeline for admin dashboard, not a required check.
 

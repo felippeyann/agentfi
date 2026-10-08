@@ -16,14 +16,16 @@ Welcome to the AgentFi documentation. This hub is designed for both human operat
 - **[ERC-8183 mapping](architecture/erc-8183-mapping.md)** — how AgentFi jobs map onto the Agentic Commerce escrow standard.
 - **[ERC-8004 integration](architecture/erc-8004-integration.md)** — identity and settlement-anchored reputation design.
 - **[x402 payments](architecture/x402-payments.md)** — buyer-side client: spend caps, idempotency, receipt verification, what the fake-facilitator tests do not prove.
+- **[Testnet log and runbooks](project/testnet-log.md)** — Base Sepolia evidence tables, the C4 deploy runbook, the C5 runbook (Turnkey wallets, faucets) and the fork rehearsal.
 
 ### 🚀 Run the thing (fastest path)
 - **[Dev Quickstart](dev-quickstart.md)** — `docker compose up` → stack running in ~3 minutes, **zero external accounts**.
 - **[Claude Desktop MCP Demo](demos/claude-desktop-mcp.md)** — two local AgentFi MCP identities running discovery, A2A job flow, trust, and P&L.
-- **[Examples](../examples/)** — three runnable demos:
+- **[Examples](../examples/)** — four runnable demos:
   - [`a2a-collab`](../examples/a2a-collab/README.md) — two-agent A2A loop
   - [`swap-planner`](../examples/swap-planner/README.md) — DeFi planning pipeline
   - [`delegation-chain`](../examples/delegation-chain/README.md) — three-agent cascade
+  - [`escrow-erc8183`](../examples/escrow-erc8183/README.md) — paid job with USDC escrowed in `AgentJobEscrow` and ERC-8004 feedback (local Base Sepolia fork now; Base Sepolia after C4)
 
 ### 🏗️ Architecture
 - **[System Overview](architecture/overview.md)** — the 4-layer stack.
@@ -34,7 +36,7 @@ Welcome to the AgentFi documentation. This hub is designed for both human operat
 ### ⚙️ Operations
 - **[Setup Checklist](operations/setup-checklist.md)** — third-party accounts needed for a real deployment.
 - **[Self-Hosted Production Deployment](operations/production-deploy.md)** — provider-agnostic guide (Railway / Fly.io / Render / Docker).
-- **[Contract Deployment](operations/contract-deployment.md)** — deploying `AgentPolicyModule` + `AgentExecutor` to new chains.
+- **[Contract Deployment](operations/contract-deployment.md)** — deploying `AgentPolicyModule` + `AgentExecutor` (`Deploy.s.sol`) and the ERC-8183 `AgentJobEscrow` + ERC-8004 `ReputationHook` (`DeployEscrow.s.sol`): keystore signer, chain guard, Etherscan V2 verification, post-deployment checks. The Base Sepolia run is the C4 runbook in the [testnet log](project/testnet-log.md).
 - **[Funding Wallets](operations/funding-wallets.md)** — moving ETH around for testing.
 - **[Release Runbook](operations/release-runbook.md)** — release + rollback procedures.
 - **[Go/No-Go Template](operations/templates/go-no-go.md)** — release sign-off checklist.

@@ -41,7 +41,7 @@ Every variable below must be configured on the **backend service** of your host.
 |---|---|---|
 | `CORS_ORIGIN` | `https://admin.yourdomain.com` | Allows admin frontend to call API |
 | `ADMIN_URL` | `https://admin.yourdomain.com` | Stripe redirect URLs |
-| `TRANSACTION_WORKER_ENABLED` | `true` on worker, `false` on API replicas | Prevents every API replica from polling Redis |
+| `TRANSACTION_WORKER_ENABLED` | `true` on the worker service, `false` on API replicas | **Defaults to `false` when `NODE_ENV=production`**: without a worker service (or `true` on exactly one API instance) nothing is signed, settled or recovered. Keeping it off on the API replicas also stops every replica from polling Redis |
 | `TENDERLY_ACCESS_KEY` | Your key | `dashboard.tenderly.co` → API Access |
 | `TENDERLY_ACCOUNT` | Your slug | visible in Tenderly dashboard URL |
 | `TENDERLY_PROJECT` | Your project slug | visible in Tenderly dashboard URL |
@@ -211,15 +211,15 @@ curl https://api.yourdomain.com/health/ready
 
 If `health/ready` returns any `false`, check the service logs for the failing dependency.
 
-### Recommended queue topology for metered Redis
+### Queue topology: API + worker service
 
-If you use Upstash or any metered Redis plan, run a dedicated worker service:
+With `NODE_ENV=production` the API process does not run the transaction worker unless told to (`TRANSACTION_WORKER_ENABLED` defaults to `false` there), so a production deployment needs a worker:
 
 1. API service: `TRANSACTION_WORKER_ENABLED=false`
 2. Worker service (same repo/environment): start command `cd packages/backend && npm run worker`
 3. Worker service: `TRANSACTION_WORKER_ENABLED=true`
 
-This avoids N API replicas polling BullMQ marker keys and helps prevent Redis request quota exhaustion.
+This also keeps N API replicas from polling BullMQ marker keys (Redis request quota on Upstash or any metered plan). A single-instance deployment may instead set `TRANSACTION_WORKER_ENABLED=true` on its one API process, which then runs everything below itself; never with more than one API replica. The daily reputation recompute cron always runs in the API process. With `WALLET_PROVIDER=local` (development only) the API and the worker cannot be split: each process keeps its own in-memory keys.
 
 **What the worker service runs (C3c).** `npm run worker` starts the transaction worker, the **payment-recovery** worker (and its repeatable schedule), and — when an `AGENT_JOB_ESCROW_ADDRESS_<chainId>` and `ESCROW_EVALUATOR_PRIVATE_KEY` are set — the ERC-8183 settlement worker and expiry sweep. Before C3c payment recovery only started inside the API process with `TRANSACTION_WORKER_ENABLED=true`, so this recommended topology never ran it. An API process with `TRANSACTION_WORKER_ENABLED=true` still runs it too; the BullMQ repeat id (`payment-recovery-scan`) keeps one schedule per Redis and each tick runs once, so any number of processes may register it. Every tick (`PAYMENT_RECOVERY_INTERVAL_SEC`, default 120 s):
 

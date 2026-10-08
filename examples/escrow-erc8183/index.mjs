@@ -226,9 +226,7 @@ async function ensureFunded(requester, provider) {
   }
   log('2', `Fund the agent wallets on ${chain?.name ?? `chain ${CHAIN_ID}`} (testnet faucets: Circle USDC faucet, Coinbase/Alchemy Base Sepolia ETH faucet):`);
   for (const line of missing) console.log(`       - ${line}`);
-  console.log(`       Waiting up to ${FUNDING_TIMEOUT_MS / 1000}s… (re-run later with AGENTFI_REQUESTER_API_KEY / AGENTFI_PROVIDER_API_KEY to reuse these agents)`);
-  console.log(`       requester API key: ${requester.apiKey}`);
-  console.log(`       provider  API key: ${provider.apiKey}`);
+  console.log(`       Waiting up to ${FUNDING_TIMEOUT_MS / 1000}s… (or stop and re-run later with the API keys from step 1 to reuse these agents)`);
   const deadline = Date.now() + FUNDING_TIMEOUT_MS;
   while (missing.length > 0) {
     if (Date.now() > deadline) throw new Error(`wallets not funded in time:\n  ${missing.join('\n  ')}`);
@@ -249,6 +247,11 @@ async function main() {
   const provider = PROVIDER_API_KEY ? await loadAgent(PROVIDER_API_KEY) : await registerAgent(`escrow-provider-${stamp}`);
   log('1', `requester ${requester.id} wallet ${requester.address}`);
   log('1', `provider  ${provider.id} wallet ${provider.address}`);
+  // The backend shows a new agent's API key once: print it so the next run
+  // (AGENTFI_REQUESTER_API_KEY / AGENTFI_PROVIDER_API_KEY) or an MCP client
+  // can reuse the same agents and their funded wallets.
+  if (!REQUESTER_API_KEY) log('1', `requester API key ${requester.apiKey} (reuse: AGENTFI_REQUESTER_API_KEY)`);
+  if (!PROVIDER_API_KEY) log('1', `provider  API key ${provider.apiKey} (reuse: AGENTFI_PROVIDER_API_KEY)`);
 
   await ensureFunded(requester, provider);
   const providerUsdcBefore = await usdcBalance(provider.address);

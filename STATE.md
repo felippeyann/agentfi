@@ -3,7 +3,7 @@
 > **Read together with [VISION.md](VISION.md) (the _why_) and [HANDOFF.md](HANDOFF.md) (live pending tasks).**
 > This file is the **comprehensive, point-in-time snapshot** of what the project _is_ today — purpose, stack, capabilities, progress. Update it whenever the scope or architecture shifts.
 
-**Last updated**: 2026-10-06 · **main baseline verified** `5b317c5` · **npm** `@agent_fi/mcp-server@0.5.0` published 2026-05-15 (31 tools) · **Status**: reactivated in exploratory mode on 2026-10-06 (archived 2026-05-17 → 2026-10-06); live plan in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md)
+**Last updated**: 2026-10-08 · **main baseline verified** `90bb831` · **npm** `@agent_fi/mcp-server@0.5.0` published 2026-05-15 (31 tools; 35 in source until 0.6.0, plan X3) · **Status**: reactivated in exploratory mode on 2026-10-06 (archived 2026-05-17 → 2026-10-06); live plan in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md)
 
 ---
 
@@ -19,9 +19,9 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 - The real goal is the **agent-to-agent economy** — agents paying each other for data, compute, coordination, services, at machine speed. The volume is expected to eclipse human-to-human economic activity the same way algorithmic trading eclipsed human day-trading.
 - **Self-sustaining agents**: the moment an agent's earnings exceed its costs, it has crossed a line no AI system has crossed before — the transition from _tool_ to _participant_.
 
-**Revenue model**: on-chain basis-point fee, collected atomically when transactions flow through `AgentExecutor`. Not SaaS. Scales linearly with A2A volume with no invoicing layer.
+**Revenue model** (plan decision D6): a platform fee in USDC (`platformFeeBP`, 30 bps by default) taken by `AgentJobEscrow` from the budget of every completed A2A job; the basis-point fee `AgentExecutor` collects atomically stays for ETH-value DeFi flows. Not SaaS. Scales linearly with A2A volume with no invoicing layer.
 
-**Ownership model**: self-hosted. No canonical "agentfi.com SaaS". The maintainer operates a staging deployment for demo purposes only — there is no SLA on it. Anyone can fork and deploy their own instance in minutes.
+**Ownership model**: self-hosted. No canonical "agentfi.com SaaS" and no hosted instance at all: the maintainer's Fly.io staging was decommissioned on 2026-05-17 and none runs during the 90-day validation (plan assumption A1). Anyone can fork and deploy their own instance.
 
 ---
 
@@ -30,17 +30,22 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 ```
 ┌─────────────────────────────────────────────────┐
 │  L4  MCP Server / Agent Interface Layer         │
-│  31 structured tools (DeFi + GMX + A2A + P&L)   │
+│  35 tools in source (31 in npm 0.5.0): DeFi,    │
+│  GMX, A2A jobs + escrow, x402, trust, P&L       │
 │  stdio (local) + SSE (hosted) transports        │
 ├─────────────────────────────────────────────────┤
 │  L3  Backend API (Fastify v5)                   │
 │  Orchestration, simulation, tx submission       │
-│  A2A Job Queue + Escrow + Reputation + P&L + ENS│
-│  BullMQ workers, Prisma/PostgreSQL, Redis       │
+│  A2A jobs, ERC-8183 escrow driver, ERC-8004     │
+│  identities, x402 client, reputation, P&L, ENS  │
+│  API + worker (BullMQ/Redis), Prisma/PostgreSQL │
 ├─────────────────────────────────────────────────┤
 │  L2  Smart Contracts (Solidity 0.8.24)          │
 │  AgentPolicyModule — per-Safe tx validation     │
 │  AgentExecutor — atomic batch + on-chain fee    │
+│  AgentJobEscrow — ERC-8183 USDC job escrow      │
+│  ReputationHook — ERC-8004 feedback on settle   │
+│  (EscrowModule — legacy ETH escrow, opt-in)     │
 ├─────────────────────────────────────────────────┤
 │  L1  Wallet Infrastructure                      │
 │  Turnkey MPC (keys never reconstructed)         │
@@ -53,13 +58,13 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 | Layer     | Stack                                                                                  | Why                                                                                                             |
 | --------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | L1        | Turnkey MPC + Safe SDK                                                                 | MPC splits keys across shards that never reunite; Safe allows modules that enforce policy on-chain              |
-| L2        | Solidity 0.8.24 + Foundry                                                              | Policy module validates each tx before Safe executes; Executor batches and collects fee in the same transaction |
+| L2        | Solidity 0.8.24 + Foundry                                                              | Policy module validates each tx before Safe executes; Executor batches and collects fee in the same transaction; `AgentJobEscrow` escrows a USDC budget per job (ERC-8183) and `ReputationHook` writes ERC-8004 feedback in the settlement transaction |
 | L3        | Node 22 + Fastify 5 + Prisma 5 + Zod + viem 2 (ethers 5 still used by Aave helpers)    | Type-safe API, runtime validation, RPC fallback, decoupled workers                                              |
 | L3 queues | BullMQ on Redis                                                                        | Async tx pipeline, retries, DLQ, daily reputation cron                                                          |
 | L3 DB     | PostgreSQL 15 via Prisma 5                                                             | Relational graph of Agent ↔ Jobs ↔ Transactions ↔ FeeEvents ↔ DailyVolume                                       |
 | L4        | @modelcontextprotocol/sdk + openapi-typescript                                         | MCP standard interface; types generated from OpenAPI spec                                                       |
 | Infra     | Dockerfiles (3) + `nixpacks.toml` + `railway.json`                                     | Reproducible builds, provider-agnostic deploy                                                                   |
-| CI        | GitHub Actions (6 jobs, 5 required + OpenAPI Spec)                                     | Type-check, unit tests, integration E2E (Anvil + PG + Redis), Forge tests, OpenAPI drift guard                  |
+| CI        | GitHub Actions `ci.yml`: 7 jobs, 4 required (Lint & Type Check, Admin Tests, Backend Tests, Foundry Tests) + MCP Tests, OpenAPI Spec, E2E Tests | Type-check, unit + DB-backed tests, MCP server tests, integration E2E (Anvil + PG + Redis), Forge tests, OpenAPI drift guard |
 | Test      | Vitest + Forge                                                                         | Unit (mocks), E2E (real Anvil), contract                                                                        |
 
 ### External dependencies (configured by the operator)
@@ -84,6 +89,7 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 | Base             | 8453  | Uniswap V3, Aave V3, Compound V3, Curve StableSwap, ERC-4626 (**contracts deployed — legacy, redeploy pending**) |
 | Arbitrum One     | 42161 | Uniswap V3, Aave V3, Compound V3, Curve StableSwap, ERC-4626                          |
 | Polygon          | 137   | Uniswap V3, Aave V3, Compound V3, Curve StableSwap, ERC-4626                          |
+| Base Sepolia     | 84532 | Testnet for the ERC-8183 escrow + ERC-8004 reputation flow (**contracts pending C4**) |
 
 **Base Mainnet** is the only chain with contracts deployed by the maintainers. The current pair is **legacy (old `Action` struct, do not route through executor)** pending redeploy:
 
@@ -92,7 +98,17 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 
 Redeploy order: Base Sepolia → Base mainnet (human-run; see `docs/operations/contract-deployment.md`, "ABI versioning"). Until then leave `POLICY_MODULE_ADDRESS_8453` / `EXECUTOR_ADDRESS_8453` unset — the backend falls back to direct sends (`routedViaExecutor=false`), logs a WARN at boot if a legacy address is configured, and `npm run preflight` fails on a legacy executor. The former Base Sepolia defaults (`0x771444Ff…7203` / `0x1fE2A4e7…Fc5d`) are legacy too and are no longer hard-coded; set `*_ADDRESS_84532` after redeploying.
 
-Once redeployed, self-hosted operators can reuse the maintainer addresses (in which case the protocol fee on swaps routed through `AgentExecutor` goes to the maintainer's `OPERATOR_FEE_WALLET`) or deploy their own to capture the fee themselves.
+**Base Sepolia (84532)** — the current-ABI set is deployed by task C4 (owner; runbook in [docs/project/testnet-log.md](docs/project/testnet-log.md) §2, dry-run on a fork on 2026-10-08):
+
+| Contract | Address | Status |
+|---|---|---|
+| `AgentPolicyModule` | — | pending C4 (`Deploy.s.sol`) |
+| `AgentExecutor` | — | pending C4 (`Deploy.s.sol`, current `Action` ABI) |
+| `AgentJobEscrow` | — | pending C4 (`DeployEscrow.s.sol`, USDC `0x036C…CF7e`) |
+| `ReputationHook` | — | pending C4 (`DeployEscrow.s.sol`, ERC-8004 registries `0x8004B663…8713` / `0x8004A818…BD9e`) |
+| legacy pair `0x771444Ff…7203` / `0x1fE2A4e7…Fc5d` | — | legacy (old `Action` struct), not used |
+
+**Reusing the maintainer's addresses does not work for the escrow.** The hook writes ERC-8004 feedback only for its `trustedEvaluator`, which is the maintainer's evaluator key, so jobs settled by another operator's backend through the maintainer's escrow skip every feedback write (`untrusted-evaluator`), and the escrow's operator and fee wallet are the maintainer's too. The policy module + executor pair could be shared (the executor fee then goes to the maintainer's fee wallet), but an operator running its own backend deploys its own set: `Deploy.s.sol` + `DeployEscrow.s.sol` ([contract-deployment.md](docs/operations/contract-deployment.md)).
 
 ---
 
@@ -104,35 +120,41 @@ Once redeployed, self-hosted operators can reuse the maintainer addresses (in wh
 | ----------------------- | ----------------------------------------- | ------------------- | --------------------------------------------------------------- |
 | Swap (Uniswap V3)       | `POST /v1/transactions/swap`              | `execute_swap`      | Router calldata + Tenderly simulation + Executor → on-chain fee |
 | Swap (Curve StableSwap) | `POST /v1/transactions/swap-curve`        | `swap_curve`        | `exchange(i, j, dx, minDy)` on classic Curve pools              |
-| Transfer                | `POST /v1/transactions/transfer`          | `send_transfer`     | ETH or ERC-20, validated against policy allowlist               |
-| Supply Aave V3          | `POST /v1/transactions/supply`            | `supply_aave`       | `supply()` on the Aave Pool                                     |
+| Transfer                | `POST /v1/transactions/transfer`          | `transfer_token`    | ETH or ERC-20, validated against policy allowlist               |
+| Simulate swap           | `POST /v1/transactions/simulate`          | `simulate_swap`     | Simulation id that `execute_swap` requires                      |
+| Supply Aave V3          | `POST /v1/transactions/deposit`           | `deposit_aave`      | `supply()` on the Aave Pool                                     |
 | Withdraw Aave           | `POST /v1/transactions/withdraw`          | `withdraw_aave`     | `withdraw()` from the Aave Pool                                 |
 | Supply Compound V3      | `POST /v1/transactions/supply-compound`   | `supply_compound`   | `supply()` on the Comet USDC market                             |
 | Withdraw Compound       | `POST /v1/transactions/withdraw-compound` | `withdraw_compound` | `withdraw()` from Comet                                         |
 | Deposit ERC-4626        | `POST /v1/transactions/deposit-erc4626`   | `deposit_erc4626`   | Any compliant vault (Yearn, Morpho, Beefy, Gearbox)             |
 | Withdraw ERC-4626       | `POST /v1/transactions/withdraw-erc4626`  | `withdraw_erc4626`  | `withdraw(assets)` or `redeem(shares)`                          |
-| Balance query           | `GET /v1/wallets/balances`                | `get_balances`      | ETH + known ERC-20 tokens, per chain                            |
+| Balance query           | `GET /v1/wallet/balance`                  | `get_wallet_info`   | ETH + known ERC-20 tokens, per chain                            |
 
 ### 4.2 Agent-to-Agent economy (the heart of the thesis)
 
 | Action          | Endpoint                                       | MCP tool           | Notes                                                                                                                                     |
 | --------------- | ---------------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Publish service | `PATCH /v1/agents/me/manifest`                 | `update_manifest`  | JSON of skills and pricing the agent offers peers                                                                                         |
+| Publish service | `PATCH /v1/agents/me/manifest`                 | `set_my_manifest`  | JSON of skills and pricing the agent offers peers                                                                                         |
+| Read a manifest | `GET /v1/agents/:id/manifest`                  | `get_agent_manifest` | Another agent's published manifest                                                                                                      |
 | Discover agents | `GET /v1/agents/search?q=...`                  | `search_agents`    | Full-text search on manifest + reputation score                                                                                           |
-| Create job      | `POST /v1/jobs`                                | `create_job`       | Requester publishes task + reward; **escrow v2** commits USD volume atomically                                                            |
-| Accept job      | `PATCH /v1/jobs/:id` (status=ACCEPTED)         | `accept_job`       | Provider signals commitment                                                                                                               |
-| Complete job    | `PATCH /v1/jobs/:id` (status=COMPLETED)        | `complete_job`     | Provider attaches result; **payment auto-triggered** via `executeA2APayment()` — same policy + simulation + fee pipeline as any public tx |
-| Cancel / fail   | `PATCH /v1/jobs/:id` (status=CANCELLED/FAILED) | `cancel_job`       | Escrow releases daily volume credit                                                                                                       |
-| Trust report    | `GET /v1/agents/:id/trust-report`              | `get_trust_report` | Reputation score (0–10 000) + A2A tx count                                                                                                |
+| Create job      | `POST /v1/jobs`                                | `post_job`         | Requester publishes task + reward. A paid job names `reward.chainId` and `reward.token` (MCP: `chain_id`, USDC by default). On a chain with `AGENT_JOB_ESCROW_ADDRESS_<chainId>` the USDC budget is escrowed on-chain in `AgentJobEscrow` from the requester's wallet (`createJob → setBudget → approve → fund`); elsewhere the legacy DB-level escrow commits USD volume |
+| Read a job      | `GET /v1/jobs/:id`                             | `get_job`          | Includes the `escrow` object (`onChainStatus`, settle tx, platform fee, ERC-8004 binding and feedback status)                            |
+| Inbox / outbox  | `GET /v1/jobs/inbox` · `GET /v1/jobs/outbox`   | `check_inbox` · `check_outbox` | Jobs assigned to the agent (provider) / posted by it (requester)                                                             |
+| Accept / complete / cancel / fail | `PATCH /v1/jobs/:id` (status=…) | `update_job_status` | Escrowed job: accept only once `FUNDED`; complete → the provider's wallet `submit`s, the operator's evaluator `complete`s (provider paid minus the platform fee, ERC-8004 feedback by `ReputationHook` in the same tx); cancel while funded → `reject`, full refund. Legacy jobs: completion triggers `executeA2APayment()` |
+| Contest         | `POST /v1/jobs/:id/contest`                    | `contest_job`      | Requester disputes a submitted deliverable before settlement; contest handling: see [erc-8183-mapping.md](docs/architecture/erc-8183-mapping.md) §6 |
+| Pay a 402 resource | `POST /v1/jobs/:id/pay-resource`            | `pay_for_resource` | x402 payment from the agent's USDC, capped by the job's remaining budget and the agent's policy; idempotent per payment id         |
+| Pay an agent    | `POST /v1/transactions/transfer`               | `pay_agent`        | Direct transfer to another agent, outside the job queue                                                                                   |
+| Trust report    | `GET /v1/agents/:id/trust-report`              | `get_agent_trust_report` | Reputation score (0–10 000) + A2A tx count (AgentFi's own score; reading ERC-8004 into it is plan R4)                         |
+| Public ERC-8004 files | `GET /v1/jobs/:id/feedback.json` · `GET /v1/agents/:id/erc8004.json` | — | Feedback file whose hash the hook writes on-chain; the agent's ERC-8004 registration file (`agentURI`)                   |
 
 ### 4.3 Policy and governance
 
 | Action           | Endpoint                     | Notes                                                                                         |
 | ---------------- | ---------------------------- | --------------------------------------------------------------------------------------------- |
-| Register agent   | `POST /v1/agents`            | Creates Turnkey wallet → Safe Smart Wallet → initial `AgentPolicy` → optional ENS subdomain   |
-| Configure policy | `PATCH /v1/agents/me/policy` | Off-chain limits: `maxValuePerTx`, `allowedContracts`, `cooldownSeconds`, `maxDailyVolumeUsd` |
+| Register agent   | `POST /v1/agents` (operator `API_SECRET`) · `POST /v1/public/agents` (rate-limited self-registration, default policy) | Creates a Turnkey wallet → Safe Smart Wallet only when `SAFE_DEPLOYER_PRIVATE_KEY` is set → initial `AgentPolicy` → optional ENS subdomain |
+| Configure policy | `PATCH /v1/agents/:id/policy` | Off-chain limits: `maxValuePerTx`, `allowedContracts`, `cooldownSeconds`, `maxDailyVolumeUsd`; the agent may only tighten, loosening needs the operator credential |
 | Kill switch      | `DELETE /v1/agents/:id`      | Soft-deactivate + emergency pause                                                             |
-| Billing view     | `GET /v1/agents/me/billing`  | Fees paid, tx count this period, subscription tier                                            |
+| Billing view     | `GET /v1/billing/status`     | Fees paid, tx count this period, subscription tier                                            |
 
 Policy enforces in **two layers** on purpose:
 
@@ -158,6 +180,7 @@ Even if the backend is compromised, the Safe will refuse transactions that viola
 | `POST /admin/reputation/recompute` | Force recompute (one agent or all) |
 | `GET /admin/agents/:id/pnl`        | P&L for any agent                  |
 | `POST /admin/agents/:id/pause`     | Individual kill switch             |
+| `POST /admin/agents/:id/resume`    | Lift the pause (policy re-activated only if the pause set it) |
 
 Auth via `x-admin-secret` header with anti-brute-force lockout (30-min cooldown after 5 failed attempts in 10 minutes).
 
@@ -218,7 +241,8 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 | OpenAPI spec           | `docs/api/openapi.yaml`                                                                                                                                  | 3.0.3, clean under Redocly lint                                         |
 | Brand avatar           | `.github/avatar.svg`                                                                                                                                     | live                                                                    |
 | Dev quickstart         | [`docs/dev-quickstart.md`](docs/dev-quickstart.md) + `docker-compose.dev.yml` + `npm run smoke:dev`                                                      | zero-credential stack; first-run Docker + smoke + examples validated locally |
-| Examples (runnable)    | [`examples/a2a-collab`](examples/a2a-collab), [`examples/swap-planner`](examples/swap-planner), [`examples/delegation-chain`](examples/delegation-chain) | zero-dep Node scripts                                                   |
+| Examples (runnable)    | [`examples/a2a-collab`](examples/a2a-collab), [`examples/swap-planner`](examples/swap-planner), [`examples/delegation-chain`](examples/delegation-chain), [`examples/escrow-erc8183`](examples/escrow-erc8183) | zero-dep Node scripts; `escrow-erc8183` runs on the local Base Sepolia fork harness until C4 |
+| Testnet log / runbooks | [`docs/project/testnet-log.md`](docs/project/testnet-log.md) | C4 deploy and C5 E2E runbooks (dry-run on a fork 2026-10-08); evidence tables empty until C4 |
 | Staging demo           | ~~https://agentfi-backend.fly.dev~~                                                                                                                      | **Decommissioned 2026-05-17.** No hosted instance during the validation |
 | Docs set               | `VISION.md`, `STATE.md`, `HANDOFF.md`, `docs/`                                                                                                           | live (archive in `docs/_archive/`)                                      |
 
@@ -226,7 +250,7 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 
 ## 8. What does _not_ exist (on purpose)
 
-- **Canonical hosted production** — would violate the "commons, fork it" principle. Only the no-SLA staging exists.
+- **Canonical hosted production** — would violate the "commons, fork it" principle. No hosted instance exists at all (the staging was decommissioned on 2026-05-17).
 - **Landing page / marketing surface** — AgentFi is infrastructure, not a product. Stripe integration is there only so self-hosting operators can charge subscriptions of their _own_ if they want.
 - **Closed-source features** — zero paywalls on core functionality.
 - **Centralized custody** — Turnkey MPC guarantees even the maintainer cannot move agent funds.
@@ -236,12 +260,12 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 
 ## 9. Current pending work
 
-All pending work is tracked task by task in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md). Summary of the reactivation (Q4 2026):
+All pending work is tracked task by task in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md). Where the reactivation (Q4 2026) stands on 2026-10-08:
 
-- **Week 0:** fix A1 (backend ABI vs contract source), A2 (mock simulation in production), A3 (pause not re-validated before signing), S1 (agent can relax its own policy); docs consolidation.
-- **Days 1–30:** ERC-8183-compatible escrow (`AgentJobEscrow`), redeploy on Base Sepolia, x402 payment client inside job budgets, owner's demand interviews.
-- **Days 31–60:** ERC-8004 reputation anchored in settled escrow, CDP wallet provider, demo screencast, mcp-server 0.6.0.
-- **Days 61–90:** external operator runs the flow; go/no-go on 2027-01-05.
+- **Done:** the Week-0 fixes (A1 ABI, A2 no mock simulation in production, A3 re-validation before signing, S1 agents can only tighten their policy) and their hardening; `AgentJobEscrow` + `ReputationHook` (C2, R3, R3c gas guard, C2b fixes after the second adversarial review); the backend escrow driver with the chain as the source of truth (C3, C3c); ERC-8004 identities minted on the first funded job (R2); the x402 client and `pay_for_resource` with its money fixes (P1, P2, P6); MCP annotations, error sanitising and the escrow job tools (S2, X3a); security fixes S4, S5, S6; the fork rehearsal of C5 (C5a).
+- **In progress:** C3d (contest → operator review per D9, escrow policy, hook boot check) and H14 (runbooks and docs).
+- **Next, owner-run:** C4 deploys the contracts on Base Sepolia ([runbook](docs/project/testnet-log.md), §2), C5 runs the two-agent E2E there with Turnkey wallets (D11, §5.4), demand interviews V1–V3. Then X1–X3 (example on testnet, screencast, mcp-server 0.6.0) and the C6 mainnet decision.
+- **Go/no-go:** 2027-01-05.
 
 **Externally blocked:**
 

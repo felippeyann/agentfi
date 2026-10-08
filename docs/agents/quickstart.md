@@ -13,13 +13,22 @@ For Claude Desktop, the lowest-friction path is the local stdio MCP server:
       "command": "npx",
       "args": ["-y", "@agent_fi/mcp-server"],
       "env": {
-        "AGENTFI_API_URL": "https://agentfi-backend.fly.dev",
+        "AGENTFI_API_URL": "http://localhost:3000",
         "AGENTFI_API_KEY": "agfi_live_your_key_here"
       }
     }
   }
 }
 ```
+
+`AGENTFI_API_URL` is the AgentFi backend you run: there is no hosted instance
+(the `agentfi-backend.fly.dev` staging was decommissioned on 2026-05-17). Start
+one locally with the [Dev Quickstart](../dev-quickstart.md) or deploy your own
+([Self-Hosted Production Deployment](../operations/production-deploy.md)).
+`npx` runs the published `@agent_fi/mcp-server@0.5.0` (31 tools). The escrow
+flow in §4 needs the source version (`post_job` with `chain_id`, `get_job`,
+`check_outbox`, `contest_job`; they ship with 0.6.0), so for §4 run the server
+from a checkout (below).
 
 On native Windows, use `cmd /c npx` as shown by
 [`npm run demo:claude-mcp`](../demos/claude-desktop-mcp.md).
@@ -37,17 +46,30 @@ cd packages/mcp-server && npm run dev
 
 ## 2. Register an Agent (get your API key)
 
+Registration is operator-gated: `POST /v1/agents` needs the backend's
+`API_SECRET` in `x-api-key` (the dev stack's value is in
+`docker-compose.dev.yml`).
+
 ```bash
-curl -X POST https://agentfi-backend.fly.dev/v1/agents \
+curl -X POST http://localhost:3000/v1/agents \
   -H "Content-Type: application/json" \
+  -H "x-api-key: $API_SECRET" \
   -d '{"name": "my-agent", "chainIds": [1, 8453]}'
 ```
+
+Without the operator secret, an agent can self-register with
+`POST /v1/public/agents` (same body): it is rate-limited per IP
+(`PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR`, default 5), always FREE tier and
+always gets the server's default policy; loosening that policy later needs the
+operator.
 
 Response includes your `apiKey` — shown **once**, store it securely.
 
 ## 3. Your Agent Can Now Execute Transactions
 
-The agent receives a Safe smart wallet automatically. Example Claude prompt:
+The agent receives its own wallet (a key held by Turnkey, or in memory on the
+dev stack's local provider; a Safe smart wallet when the operator sets
+`SAFE_DEPLOYER_PRIVATE_KEY`). Example Claude prompt:
 
 > "Check my ETH balance and swap 0.1 ETH to USDC on Ethereum."
 
@@ -94,11 +116,25 @@ walkthrough, prerequisites and expected statuses:
 
 ## Fee Structure
 
-| Tier | Monthly | Protocol Fee | Tx Limit |
+Two separate fees (plan decision D6):
+
+- **Escrowed A2A jobs:** the escrow's platform fee, set when the operator
+  deploys `AgentJobEscrow` (30 bps by default), is taken from the USDC budget
+  when a job completes; the provider receives the rest. A refunded job
+  (cancellation, expiry) pays no fee. It is the same for every tier.
+- **DeFi transactions** (swaps, transfers, deposits): the tier rate below is
+  recorded for each transaction; it is collected on-chain only when the
+  transaction is routed through `AgentExecutor`, on its ETH value, at the
+  executor's deployed `EXECUTOR_FEE_BPS`.
+
+| Tier | Monthly | DeFi fee rate | Tx Limit |
 |------|---------|-------------|----------|
 | FREE | $0 | 0.30% | 100/month |
 | PRO | $99 | 0.15% | 10,000/month |
 | ENTERPRISE | Custom | 0.05% | Unlimited |
+
+Whether the tiers survive the validation period is an open question for the
+owner ([execution plan §5](../project/execution-plan-2026-10.md#5-open-questions-ask-the-owner-do-not-assume)).
 
 ## Security Guarantees
 

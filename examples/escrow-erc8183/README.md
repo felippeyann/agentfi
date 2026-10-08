@@ -2,11 +2,11 @@
 
 Two agents, one paid job, settled on-chain: the requester's USDC is escrowed in AgentFi's ERC-8183 `AgentJobEscrow`, the provider's wallet gets an ERC-8004 identity on its first funded job, and when the backend evaluator completes the job the provider is paid (budget minus the 30 bps platform fee) and the escrow's `ReputationHook` writes ERC-8004 feedback in the same transaction.
 
-This is the groundwork for task X1 of the [execution plan](../../docs/project/execution-plan-2026-10.md). Today it runs against the **local Base Sepolia fork harness** (task C5a); once the contracts are deployed on Base Sepolia (task C4) the same script runs against the real testnet.
+This is the groundwork for task X1 of the [execution plan](../../docs/project/execution-plan-2026-10.md). Today it runs against the **local Base Sepolia fork harness** (task C5a); once the contracts are deployed on Base Sepolia (task C4) the same script is task C5 on the real testnet, with the step-by-step runbook in [docs/project/testnet-log.md §5.4](../../docs/project/testnet-log.md#54-c5-runbook--base-sepolia-owner-runs-it-after-c4).
 
 ## What it does
 
-1. Registers a requester and a provider (or reuses two agents you pass in)
+1. Registers a requester and a provider and prints their API keys (the backend shows a key only once), or reuses two agents you pass in
 2. Makes sure their wallets are funded — USDC for the requester's budget, a little ETH for gas on both
 3. Requester creates a job with a USDC reward → the backend runs `createJob → setBudget → approve → fund` from the requester's wallet
 4. Provider accepts (the API only allows it once the budget is locked: `escrow.onChainStatus = FUNDED`)
@@ -16,11 +16,11 @@ This is the groundwork for task X1 of the [execution plan](../../docs/project/ex
 
 `AGENTFI_FLOW=cancel` runs the failure path instead: once the budget is locked the requester cancels, the evaluator `reject`s and the full budget comes back to the requester (no feedback is written for a job nobody delivered).
 
-The script never handles a private key. Agent wallets live in the backend (Turnkey, or the development-only local provider); the script talks to the AgentFi REST API and reads balances over JSON-RPC.
+The script never handles a private key. Agent wallets live in the backend (Turnkey on Base Sepolia, decision D11; the in-memory local provider only on the fork); the script talks to the AgentFi REST API and reads balances over JSON-RPC.
 
 ## Run it against the fork harness (now)
 
-Needs Foundry (`forge`, `anvil`), Postgres and Redis (`docker compose -f docker-compose.dev.yml up -d postgres redis`), and `npm ci` at the repository root.
+Needs Foundry 1.7.1 (`forge`, `anvil`), the contracts submodule (`git submodule update --init --recursive`), Postgres and Redis (`docker compose -f docker-compose.dev.yml up -d postgres redis`), and `npm ci` at the repository root.
 
 ```bash
 # Terminal 1 — Base Sepolia fork + AgentJobEscrow/ReputationHook (deployed with
@@ -39,24 +39,21 @@ node examples/escrow-erc8183/index.mjs
 
 The automated version of the same run (plus the contest, cancellation and expiry paths) is `npm run test:e2e:escrow-fork` — see "Fork rehearsal (C5a)" in [docs/project/testnet-log.md](../../docs/project/testnet-log.md). That suite also runs this script.
 
-## Run it against Base Sepolia (after C4)
+## Run it against Base Sepolia (task C5, after C4)
 
-Prerequisites on the backend you point it at: `AGENT_JOB_ESCROW_ADDRESS_84532`, `REPUTATION_HOOK_ADDRESS_84532` and `ESCROW_EVALUATOR_PRIVATE_KEY` set (the C4 runbook in [docs/project/testnet-log.md](../../docs/project/testnet-log.md)), an RPC for chain 84532 (`ALCHEMY_API_KEY`, or `RPC_URL_84532`), and the transaction and escrow settlement workers running.
-
-```bash
-AGENTFI_API_URL=https://<your backend> \
-AGENTFI_OPERATOR_SECRET=<that backend's API_SECRET> \
-node examples/escrow-erc8183/index.mjs
-```
-
-On a first run the script registers two new agents, prints their wallet addresses and waits (up to `AGENTFI_FUNDING_TIMEOUT_SEC`, default 900 s) until you fund them from faucets: at least `AGENTFI_REWARD_USDC` testnet USDC (Circle faucet) on the requester, and about 0.0005 ETH (Coinbase or Alchemy Base Sepolia faucet) on each wallet. It also prints the two agents' AgentFi API keys so the next run can reuse the funded wallets:
+Set up the backend exactly as in [docs/project/testnet-log.md §5.4](../../docs/project/testnet-log.md#54-c5-runbook--base-sepolia-owner-runs-it-after-c4): `packages/backend/.env` with `WALLET_PROVIDER=turnkey` and the Turnkey credentials, the C4 addresses (`AGENT_JOB_ESCROW_ADDRESS_84532`, `REPUTATION_HOOK_ADDRESS_84532`), `ESCROW_EVALUATOR_PRIVATE_KEY`, `ALCHEMY_API_KEY` (always required; `RPC_URL_84532` optional), `BACKEND_PUBLIC_URL=http://localhost:3000` (D10); migrations applied; the API and the worker process both running. Then, from the repository root:
 
 ```bash
-AGENTFI_REQUESTER_API_KEY=agfi_… AGENTFI_PROVIDER_API_KEY=agfi_… \
-AGENTFI_API_URL=https://<your backend> node examples/escrow-erc8183/index.mjs
+AGENTFI_API_URL=http://localhost:3000 AGENTFI_OPERATOR_SECRET=<that backend's API_SECRET> node examples/escrow-erc8183/index.mjs
 ```
 
-For C5's failure path, run it again with `AGENTFI_FLOW=cancel` (with the same keys; a happy run spent the requester's budget, so the script waits until you top its USDC up again). Record each run in section 3 of `docs/project/testnet-log.md` (job id, on-chain id, fund and settle tx, fee, feedback status) and the provider's identity in section 4.
+On a first run the script registers two new agents, prints their wallet addresses and API keys, and waits (up to `AGENTFI_FUNDING_TIMEOUT_SEC`, default 900 s) until you fund them from faucets: at least `AGENTFI_REWARD_USDC` testnet USDC (Circle faucet, <https://faucet.circle.com>) and about 0.0005 ETH on the requester, about 0.0005 ETH on the provider (Coinbase Developer Platform or Alchemy Base Sepolia faucet). The next run can reuse the two agents and their funded Turnkey wallets with the printed keys:
+
+```bash
+AGENTFI_REQUESTER_API_KEY=agfi_... AGENTFI_PROVIDER_API_KEY=agfi_... AGENTFI_API_URL=http://localhost:3000 node examples/escrow-erc8183/index.mjs
+```
+
+For C5's failure path, run it again with `AGENTFI_FLOW=cancel` and the same keys (a happy run paid the requester's USDC to the provider, so the script waits until you top the requester up again). Record each run in section 3 of `docs/project/testnet-log.md` and the provider's identity in section 4 (§5.4 step 8 says where each value comes from).
 
 ## Environment
 

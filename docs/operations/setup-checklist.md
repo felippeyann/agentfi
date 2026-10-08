@@ -166,7 +166,10 @@ Production: use a managed Redis provider such as Railway Redis or Upstash:
 REDIS_URL=rediss://default:password@your-endpoint.upstash.io:6379
 ```
 
-For metered Redis plans, run one dedicated worker process:
+Run one dedicated worker process. With `NODE_ENV=production`,
+`TRANSACTION_WORKER_ENABLED` defaults to `false`, so without it nothing is
+signed, settled or recovered; it also keeps API replicas from polling Redis
+(request quota on metered plans):
 
 ```env
 # API replicas
