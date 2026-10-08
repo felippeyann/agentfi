@@ -1,19 +1,27 @@
 /**
  * ResourcePaymentService — job-scoped x402 payments (execution plan task P2,
- * with the P5 ledger state machine).
+ * with the P5 ledger state machine; money fixes P6).
  *
  * Who pays: the job's PROVIDER — the agent doing the work — from its own
  * wallet, through `X402ClientService`. The requester cannot call this. The
  * job must be `ACCEPTED` and the payer active with a non-paused policy.
  *
  * Budget: the job reward must be denominated in USDC on the job's chain.
- *   remaining = reward − Σ amount of this job's rows in
- *               (reserved, pending, settled, unknown)
+ *   remaining = reward − Σ amount of this job's COUNTED rows
+ * Counted (`resource-payment-ledger.ts`): reserved, pending, settled, unknown,
+ * and refused until the refused authorization's `validBefore` has passed.
  * `remaining`, lowered by the caller's optional `maxAmount`, is the
  * per-payment cap handed to `X402ClientService`, which refuses an above-cap
- * price BEFORE anything is signed. The reservation re-checks the budget
- * inside a transaction holding a row lock on the Job, so two concurrent
- * payments cannot both pass on the same remaining amount.
+ * price BEFORE anything is signed. The reservation re-checks everything
+ * inside a transaction holding row locks on the Job and the paying Agent, so
+ * two concurrent payments cannot both pass on the same remaining amount or
+ * the same daily volume.
+ *
+ * Agent policy (P6, `services/policy/usdc-spend-policy.ts`): under the same
+ * locks, before anything is signed, the payment must pass the provider's
+ * policy — per-transaction cap (read in USD for USDC), daily volume (x402
+ * rows + `DailyVolume`), `allowedTokens` (USDC) and `allowedContracts`
+ * (the `payTo`) — or it is `403 POLICY_VIOLATION`.
  *
  * State machine, durable in `ResourcePayment.status`:
  *
@@ -23,42 +31,60 @@
  *                      │             signing: money may have moved. NO
  *                      │             automatic retry; surfaced to the
  *                      │             caller (502) and the operator (log).
- *                      └──► refused  server answered 4xx/5xx after signing,
- *                                    no settlement.
- *   failed_before_signing             402 parse / budget / scheme error
- *                                     before any signature.
+ *                      └──► refused  server answered 4xx/5xx/3xx after
+ *                                    signing without reporting a settlement.
+ *                                    It still holds a valid authorization
+ *                                    until `validBefore` and can settle it
+ *                                    anyway, so the row COUNTS until then
+ *                                    and no new authorization to the same
+ *                                    `payTo` is signed on this job before
+ *                                    then (409 OUTSTANDING_AUTHORIZATION).
+ *   failed_before_signing             402 parse / budget / scheme / policy
+ *                                     error before any signature.
  *
  * Terminal states never change. `unknown → settled` is reserved for the
  * reconciliation task (out of scope here — see the TODO at the bottom): the
- * stored `authorizationNonce` and the authorization window are what it
+ * stored `authorizationNonce` and `authorizationValidBefore` are what it
  * needs to match an on-chain USDC transfer or to cancel the authorization.
  *
  * Idempotency: `(jobId, paymentId)` is unique. A retry with the same id
  * returns the existing row WITHOUT a second payment when it is `pending`,
  * `settled` or `unknown`; a `reserved` row means an attempt is in flight
- * (409); only `refused` / `failed_before_signing` rows may be retried, and
- * the retry reuses the same row. The id also travels to the server inside
- * the x402 `payment-identifier` extension so a cache-enabled server can
- * deduplicate on its side (the client itself re-signs on every attempt —
- * see docs/architecture/x402-payments.md §3).
+ * (409); a refused row whose authorization is still live is 409
+ * OUTSTANDING_AUTHORIZATION; only `failed_before_signing` rows and refused
+ * rows whose authorization expired may be retried, and the retry reuses the
+ * same row. Under the locks the row is moved retryable → `reserved` with a
+ * conditional update, so concurrent retries of one id pay at most once (P6).
+ * The id also travels to the server inside the x402 `payment-identifier`
+ * extension so a cache-enabled server can deduplicate on its side (the
+ * client itself re-signs on every attempt — see
+ * docs/architecture/x402-payments.md §3).
  *
  * Outbound target (S4, `outbound-target.ts`): the URL is an agent-chosen
- * destination the backend connects to, so before the fetch the hostname is
- * resolved and refused if it is, or resolves to, a private / loopback /
- * link-local / reserved address (`400 INVALID_URL`); the connection is then
- * pinned to the resolved addresses through a per-request undici Agent; and
- * redirects are never followed — any 3xx is `400 REDIRECT_REFUSED`. The
- * range refusal is unconditional unless `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS`
- * is `true` (development / test only; boot refuses it in production).
+ * destination the backend connects to, so before the fetch the port is
+ * checked (P6), the hostname is resolved and refused if it is, or resolves
+ * to, a private / loopback / link-local / reserved address (`400
+ * INVALID_URL`); the connection is then pinned to the resolved addresses
+ * through a per-request undici Agent; and redirects are never followed — any
+ * 3xx is `400 REDIRECT_REFUSED`. The range refusal is unconditional unless
+ * `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS` is `true` (development / test only;
+ * boot refuses it in production).
  */
 
 import { randomUUID } from 'node:crypto';
-import type { Prisma, PrismaClient, ResourcePayment, ResourcePaymentStatus } from '@prisma/client';
+import type { Prisma, PrismaClient, ResourcePayment } from '@prisma/client';
 import type { Agent } from 'undici';
 import { formatUnits, parseUnits } from 'viem';
+import { sanitizeContextFromEnv, sanitizeText, type SanitizeOptions } from '../../api/errors/sanitize.js';
 import { logger } from '../../api/middleware/logger.js';
 import { env } from '../../config/env.js';
 import { chainIdToNetwork } from '../../config/x402.js';
+import {
+  evaluateUsdcSpend,
+  formatMicroUsd,
+  usdTextToMicroCeil,
+  type UsdcSpendVerdict,
+} from '../policy/usdc-spend-policy.js';
 import {
   getKnownTokenByAddress,
   getKnownTokenBySymbol,
@@ -69,11 +95,25 @@ import {
   OutboundTargetError,
   assertPublicTarget,
   createPinnedDispatcher,
+  publicRefusal,
+  resolveAllowedPorts,
   type OutboundTargetPolicy,
   type ValidatedTarget,
 } from './outbound-target.js';
 import {
+  countedWhere,
+  isLiveRefusal,
+  isRetryable,
+  liveRefusalWhere,
+  refusalLiveUntil,
+  resourcePaymentSpentToday,
+  retryableWhere,
+  sumBaseUnits,
+  utcDay,
+} from './resource-payment-ledger.js';
+import {
   BudgetExceededError,
+  MAX_AUTHORIZATION_WINDOW_SECONDS,
   NoAcceptableSchemeError,
   PaymentFailedError,
   X402ClientService,
@@ -91,6 +131,7 @@ export type ResourcePaymentErrorCode =
   | 'JOB_NOT_ACTIVE'
   | 'AGENT_INACTIVE'
   | 'POLICY_PAUSED'
+  | 'POLICY_VIOLATION'
   | 'INVALID_URL'
   | 'REDIRECT_REFUSED'
   | 'INVALID_BUDGET'
@@ -99,6 +140,7 @@ export type ResourcePaymentErrorCode =
   | 'BUDGET_EXCEEDED'
   | 'PAYMENT_IN_PROGRESS'
   | 'PAYMENT_ID_CONFLICT'
+  | 'OUTSTANDING_AUTHORIZATION'
   | 'PAYMENT_REFUSED'
   | 'PAYMENT_FAILED'
   | 'PAYMENT_OUTCOME_UNKNOWN'
@@ -123,6 +165,23 @@ export class ResourcePaymentError extends Error {
     this.details = details;
   }
 }
+
+/** Refusals raised before signing that leave a `failed_before_signing` row (the price is known). */
+const RECORDED_PRE_SIGNING_CODES: ReadonlySet<ResourcePaymentErrorCode> = new Set([
+  'UNSUPPORTED_ASSET',
+  'BUDGET_EXCEEDED',
+  'POLICY_VIOLATION',
+]);
+
+/** Refusals raised under the reservation lock that must not touch any row (another attempt owns it, or nothing to record). */
+const UNRECORDED_CODES: ReadonlySet<ResourcePaymentErrorCode> = new Set([
+  'PAYMENT_IN_PROGRESS',
+  'PAYMENT_ID_CONFLICT',
+  'OUTSTANDING_AUTHORIZATION',
+  'JOB_NOT_ACTIVE',
+  'JOB_NOT_FOUND',
+  'POLICY_PAUSED',
+]);
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -161,7 +220,7 @@ export interface ResourceSnapshot {
   headers: Record<string, string>;
   /** Parsed JSON when the response is JSON and fits the cap; otherwise text. */
   body: unknown;
-  /** True when the body exceeded `MAX_RESOURCE_BODY_BYTES` and was cut. */
+  /** True when the body exceeded `MAX_RESOURCE_BODY_BYTES` and was cut (the transfer was aborted there). */
   truncated?: boolean;
 }
 
@@ -183,7 +242,8 @@ export interface ResourcePaymentServiceDeps {
   client: X402ClientService;
   /**
    * Outbound target policy overrides (tests inject a resolver). Defaults:
-   * `allowPrivateHosts` from `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS`, the
+   * `allowPrivateHosts` from `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS`,
+   * `allowedPorts` from `NODE_ENV` + `RESOURCE_PAYMENT_ALLOWED_PORTS`, the
    * system resolver.
    */
   targetPolicy?: OutboundTargetPolicy;
@@ -191,12 +251,10 @@ export interface ResourcePaymentServiceDeps {
 
 // ── Internals ───────────────────────────────────────────────────────────────
 
-/** Statuses that count against the budget: money reserved, in flight, moved, or possibly moved. */
-const COUNTED_STATUSES: ResourcePaymentStatus[] = ['reserved', 'pending', 'settled', 'unknown'];
 /** A retry with the same id returns these rows as-is — never pay twice. */
-const REPLAYABLE_STATUSES: ReadonlySet<ResourcePaymentStatus> = new Set(['pending', 'settled', 'unknown']);
+const REPLAYABLE_STATUSES: ReadonlySet<string> = new Set(['pending', 'settled', 'unknown']);
 
-/** Resource bodies returned to the caller are cut at this many bytes. */
+/** Resource bodies returned to the caller are cut at this many bytes (and never read further). */
 export const MAX_RESOURCE_BODY_BYTES = 64 * 1024;
 
 const RESPONSE_HEADER_WHITELIST = [
@@ -243,8 +301,6 @@ interface AttemptContext {
   remaining: bigint;
   /** Effective per-payment cap (base units). */
   cap: bigint;
-  /** A `refused` / `failed_before_signing` row being retried. */
-  retryRowId?: string;
 }
 
 interface AttemptState {
@@ -260,17 +316,17 @@ interface StoredOption {
   payTo: string;
 }
 
-function clip(text: string, max = MAX_STORED_ERROR_LENGTH): string {
-  const flat = text.replace(/\s+/g, ' ');
+/**
+ * Sanitizes, then bounds, text that is stored on a row or returned (P6). The
+ * sanitizer runs on the whole text first: clipping first could cut a secret
+ * (an RPC key, a token) at the boundary and leave a prefix the route's
+ * sanitizer no longer recognises. `keepNetworkLocations` only for the agent's
+ * own target and the redirect location it is told about (the route keeps
+ * them for `INVALID_URL` / `REDIRECT_REFUSED` too); every secret rule applies.
+ */
+function clip(text: string, max = MAX_STORED_ERROR_LENGTH, options: SanitizeOptions = {}): string {
+  const flat = sanitizeText(text, sanitizeContextFromEnv(), options).replace(/\s+/g, ' ');
   return flat.length <= max ? flat : `${flat.slice(0, max)}…`;
-}
-
-function sumAmounts(rows: Array<{ amount: string }>): bigint {
-  let total = 0n;
-  for (const row of rows) {
-    if (/^\d+$/.test(row.amount)) total += BigInt(row.amount);
-  }
-  return total;
 }
 
 function optionFrom(value: unknown): StoredOption | undefined {
@@ -323,7 +379,7 @@ function redirectLocation(result: PayResourceResult, requestUrl: string): string
     resolved.hash = '';
     resolved.username = '';
     resolved.password = '';
-    return clip(resolved.toString());
+    return clip(resolved.toString(), MAX_STORED_ERROR_LENGTH, { keepNetworkLocations: true });
   } catch {
     return null;
   }
@@ -342,6 +398,17 @@ function truncateUtf8(text: string, maxBytes: number): string {
   return Buffer.from(text, 'utf8').subarray(0, maxBytes).toString('utf8');
 }
 
+/** Unix seconds (decimal string) → Date; `null` when unreadable. */
+function unixSecondsToDate(raw: string | undefined): Date | null {
+  if (!raw || !/^\d{1,12}$/.test(raw)) return null;
+  const date = new Date(Number(raw) * 1000);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function iso(date: Date | null): string | null {
+  return date ? date.toISOString() : null;
+}
+
 // ── Service ─────────────────────────────────────────────────────────────────
 
 export class ResourcePaymentService {
@@ -356,6 +423,7 @@ export class ResourcePaymentService {
     this.client = deps.client;
     this.targetPolicy = {
       allowPrivateHosts: env.RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS === 'true',
+      allowedPorts: resolveAllowedPorts(env.NODE_ENV, env.RESOURCE_PAYMENT_ALLOWED_PORTS),
       ...deps.targetPolicy,
     };
   }
@@ -387,7 +455,12 @@ export class ResourcePaymentService {
 
     const agent = await this.db.agent.findUnique({
       where: { id: input.agentId },
-      select: { id: true, active: true, walletId: true, policy: { select: { active: true, expiresAt: true } } },
+      select: {
+        id: true,
+        active: true,
+        walletId: true,
+        policy: { select: { active: true, expiresAt: true, allowedTokens: true } },
+      },
     });
     if (!agent || !agent.active) {
       throw new ResourcePaymentError('AGENT_INACTIVE', 403, 'Agent is deactivated');
@@ -406,18 +479,32 @@ export class ResourcePaymentService {
     const budget = this.resolveBudget(job.reward);
     const paymentId = input.paymentId ?? randomUUID();
 
-    // Idempotency: one row per (job, paymentId).
+    // Policy, before anything is fetched: a token allowlist that does not
+    // list USDC refuses every payment. The rest of the policy (per-payment
+    // cap, daily volume, payTo allowlist) needs the price and is checked
+    // under the reservation lock.
+    const allowedTokens = agent.policy?.allowedTokens ?? [];
+    if (
+      allowedTokens.length > 0 &&
+      !allowedTokens.some((token) => token.toLowerCase() === budget.usdc.address.toLowerCase())
+    ) {
+      throw new ResourcePaymentError(
+        'POLICY_VIOLATION',
+        403,
+        `Token ${budget.usdc.address} (USDC) is not in the agent's allowed tokens whitelist`,
+        { paymentId, rule: 'allowedTokens', payment: null },
+      );
+    }
+
+    // Idempotency: one row per (job, paymentId). Read without a lock — the
+    // reservation re-checks the row under the Job lock before it takes it.
+    const now = new Date();
     const existing = await this.db.resourcePayment.findUnique({
       where: { jobId_paymentId: { jobId: job.id, paymentId } },
     });
     if (existing) {
       if (existing.url !== target.storedUrl || existing.method !== input.method) {
-        throw new ResourcePaymentError(
-          'PAYMENT_ID_CONFLICT',
-          409,
-          'paymentId was already used for a different resource on this job',
-          { paymentId, url: existing.url, method: existing.method },
-        );
+        throw this.paymentIdConflict(existing, paymentId);
       }
       if (REPLAYABLE_STATUSES.has(existing.status)) {
         logger.info(
@@ -432,18 +519,16 @@ export class ResourcePaymentService {
           ...(existing.status === 'unknown' ? { warning: UNKNOWN_OUTCOME_WARNING } : {}),
         };
       }
-      if (existing.status === 'reserved') {
-        throw new ResourcePaymentError(
-          'PAYMENT_IN_PROGRESS',
-          409,
-          'A payment with this paymentId is already in progress on this job',
-          { paymentId },
-        );
-      }
-      // refused / failed_before_signing: a fresh attempt on the same row.
+      if (existing.status === 'reserved') throw this.inProgress(paymentId);
+      // The server still holds a live authorization for this very id:
+      // re-signing is exactly how a server that answers "refused" and
+      // settles anyway would drain the wallet. Nothing is fetched.
+      if (isLiveRefusal(existing, now)) throw this.outstandingAuthorization(existing, paymentId);
+      // failed_before_signing, or a refusal whose authorization expired: a
+      // fresh attempt on the same row.
     }
 
-    const spent = await this.spent(job.id);
+    const spent = await this.spent(job.id, now);
     const remaining = budget.total - spent;
     let cap = remaining;
     if (input.maxAmount !== undefined) {
@@ -466,8 +551,9 @@ export class ResourcePaymentService {
       );
     }
 
-    // Resolve before you connect: refuse a private / loopback / reserved
-    // destination (literal or resolved), and keep the addresses to pin to.
+    // Resolve before you connect: refuse a disallowed port or a private /
+    // loopback / reserved destination (literal or resolved), and keep the
+    // addresses to pin to.
     const validated = await this.validateTarget(target, paymentId);
 
     const signer = await toClientSigner(this.wallet, agent.walletId);
@@ -480,7 +566,6 @@ export class ResourcePaymentService {
       budget,
       remaining,
       cap,
-      ...(existing ? { retryRowId: existing.id } : {}),
     };
     const attempt: AttemptState = {};
 
@@ -497,15 +582,18 @@ export class ResourcePaymentService {
         maxAmountUsd: formatUnits(cap, budget.usdc.decimals),
         allowedNetworks: [budget.network],
         paymentId,
+        // Bounded read (P6): the client stops (and aborts the transfer) as
+        // soon as the body is longer than what we return.
+        maxBodyBytes: MAX_RESOURCE_BODY_BYTES,
         // Before any signature: USDC-only check, then the durable reservation
-        // (re-checks the budget under a Job row lock).
+        // (re-checks row, payee, budget and policy under the locks).
         onBeforeSign: async (selected) => {
           attempt.selected = selected;
           this.assertUsdc(selected, budget);
           attempt.row = await this.reserve(ctx, selected);
         },
-        // After signing, before sending: record the nonce. If this write
-        // fails the signed payload never leaves the process.
+        // After signing, before sending: record the nonce and the window. If
+        // this write fails the signed payload never leaves the process.
         onAuthorizationSigned: async (authorization) => {
           attempt.row = await this.markPending(attempt.row, authorization);
         },
@@ -564,20 +652,28 @@ export class ResourcePaymentService {
       };
     }
 
-    // 4xx/5xx after signing with no settlement report: refused.
+    // 4xx/5xx after signing with no settlement report: refused — but the
+    // server holds the authorization, so it keeps counting until it expires.
     const refused = await this.db.resourcePayment.update({
       where: { id: row.id },
-      data: {
-        status: 'refused',
+      data: this.refusedData(row, attempt, payment.authorization, {
         responseStatus: result.status,
         error: `HTTP ${result.status} after signing, no settlement reported`,
-      },
+      }),
     });
+    this.logRefusedAfterSigning(ctx, refused, `HTTP ${result.status}`);
     throw new ResourcePaymentError(
       'PAYMENT_REFUSED',
       402,
-      `The resource server answered HTTP ${result.status} to the signed payment without settling it`,
-      { paymentId: ctx.paymentId, responseStatus: result.status, payment: refused, resource },
+      `The resource server answered HTTP ${result.status} to the signed payment without reporting a settlement. ` +
+        this.refusalConsequence(refused),
+      {
+        paymentId: ctx.paymentId,
+        responseStatus: result.status,
+        countedUntil: iso(refusalLiveUntil(refused)),
+        payment: refused,
+        resource,
+      },
     );
   }
 
@@ -587,9 +683,9 @@ export class ResourcePaymentService {
    * would send the request — and after signing the `PAYMENT-SIGNATURE` — to
    * an origin that never went through the target policy. The ledger records
    * what the money did: nothing signed → no row; signed without a settlement
-   * report → `refused` (like any non-2xx after signing); signed and reported
-   * settled → `settled`, because the amount is spent even though the resource
-   * was not delivered.
+   * report → `refused` (like any non-2xx after signing, counted until the
+   * authorization expires); signed and reported settled → `settled`, because
+   * the amount is spent even though the resource was not delivered.
    */
   private async refuseRedirect(
     result: PayResourceResult,
@@ -628,21 +724,28 @@ export class ResourcePaymentService {
 
     const refused = await this.db.resourcePayment.update({
       where: { id: row.id },
-      data: {
-        status: 'refused',
-        responseStatus: result.status,
-        error: clip(`HTTP ${result.status} redirect${where} after signing, not followed; no settlement reported`),
-      },
+      data: this.refusedData(
+        row,
+        attempt,
+        result.payment.authorization,
+        {
+          responseStatus: result.status,
+          error: `HTTP ${result.status} redirect${where} after signing, not followed; no settlement reported`,
+        },
+        { keepNetworkLocations: true },
+      ),
     });
     logger.warn(
       { jobId: ctx.jobId, paymentId: ctx.paymentId, agentId: ctx.agentId, url: ctx.target.storedUrl, location, status: result.status },
       'Paid resource answered a signed payment with a redirect — not followed, recorded as refused',
     );
+    this.logRefusedAfterSigning(ctx, refused, `HTTP ${result.status} redirect`);
     throw new ResourcePaymentError(
       'REDIRECT_REFUSED',
       400,
-      `The resource server answered the signed payment with HTTP ${result.status} (redirect${where}) without settling it; redirects are not followed for paid resources`,
-      { ...details, payment: refused },
+      `The resource server answered the signed payment with HTTP ${result.status} (redirect${where}) without reporting a settlement; redirects are not followed for paid resources. ` +
+        this.refusalConsequence(refused),
+      { ...details, countedUntil: iso(refusalLiveUntil(refused)), payment: refused },
     );
   }
 
@@ -672,7 +775,7 @@ export class ResourcePaymentService {
         ...(payment.receipt !== undefined ? { receipt: payment.receipt as Prisma.InputJsonValue } : {}),
         receiptVerified: payment.receiptVerified ?? null,
         responseStatus: result.status,
-        error: note ? clip(note) : null,
+        error: note ? clip(note, MAX_STORED_ERROR_LENGTH, { keepNetworkLocations: true }) : null,
       },
     });
     const log = {
@@ -700,12 +803,15 @@ export class ResourcePaymentService {
     const { paymentId } = ctx;
 
     if (error instanceof ResourcePaymentError) {
-      if (error.code === 'UNSUPPORTED_ASSET' || error.code === 'BUDGET_EXCEEDED') {
+      if (RECORDED_PRE_SIGNING_CODES.has(error.code)) {
         // Raised by our own pre-signing hook; the selected option is known.
         const row = attempt.selected ? await this.recordRefusalBeforeSigning(ctx, attempt.selected, error.message) : null;
         return new ResourcePaymentError(error.code, error.httpStatus, error.message, { ...error.details, payment: row });
       }
-      if (error.code === 'PAYMENT_IN_PROGRESS') return error;
+      // Raised under the reservation lock: another attempt owns the row, the
+      // payee still holds a live authorization, or the job / policy changed.
+      // This attempt reserved nothing; nothing to write.
+      if (UNRECORDED_CODES.has(error.code)) return error;
       // LEDGER_ERROR from `markPending`: signed, but the payload never left.
       if (attempt.row) {
         await this.safeUpdate(attempt.row.id, { status: 'failed_before_signing', error: clip(error.message) });
@@ -744,9 +850,14 @@ export class ResourcePaymentService {
 
     if (error instanceof PaymentFailedError) {
       const details = error.details;
+      // The operator copy: the row and the response carry sanitized text only.
+      logger.warn(
+        { jobId: ctx.jobId, paymentId, url: ctx.target.storedUrl, stage: details['stage'], cause: details['cause'] },
+        `Resource payment failed: ${error.message}`,
+      );
       if (details['authorizationSent'] !== true) {
-        // 402 unparseable, library refused to create the payment, or the plain
-        // request failed / timed out: nothing was signed.
+        // 402 unparseable or oversized, library refused to create the
+        // payment, or the plain request failed / timed out: nothing was signed.
         let row: ResourcePayment | null = attempt.row ?? null;
         if (row) row = await this.safeUpdate(row.id, { status: 'failed_before_signing', error: clip(error.message) });
         return new ResourcePaymentError('PAYMENT_FAILED', 502, error.message, {
@@ -766,29 +877,42 @@ export class ResourcePaymentService {
 
       if (typeof details['status'] === 'number') {
         // The server answered the signed payment: rejected at verification or
-        // settlement failed. No settlement happened.
+        // settlement reported failed. It still holds the authorization until
+        // `validBefore` — its word is not proof nothing settled — so the row
+        // keeps counting until then.
         const reason = typeof details['reason'] === 'string' ? details['reason'] : error.message;
         if (row) {
-          row = await this.safeUpdate(row.id, {
-            status: 'refused',
-            responseStatus: details['status'],
-            ...(authorization ? { authorizationNonce: authorization.nonce } : {}),
-            error: clip(reason),
-          });
+          row = await this.safeUpdate(
+            row.id,
+            this.refusedData(row, attempt, authorization, { responseStatus: details['status'], error: reason }),
+          );
+          if (row) this.logRefusedAfterSigning(ctx, row, `HTTP ${details['status']}: ${clip(reason, 200)}`);
         }
-        return new ResourcePaymentError('PAYMENT_REFUSED', 402, error.message, {
-          paymentId,
-          responseStatus: details['status'],
-          reason,
-          payment: row,
-        });
+        return new ResourcePaymentError(
+          'PAYMENT_REFUSED',
+          402,
+          `${error.message}. ${row ? this.refusalConsequence(row) : ''}`.trim(),
+          {
+            paymentId,
+            responseStatus: details['status'],
+            reason,
+            ...(row ? { countedUntil: iso(refusalLiveUntil(row)) } : {}),
+            ...(authorization ? { authorization: this.publicAuthorization(authorization) } : {}),
+            payment: row,
+          },
+        );
       }
 
       // Transport failure or timeout after the signed payload left: unknown.
       if (row) {
         row = await this.safeUpdate(row.id, {
           status: 'unknown',
-          ...(authorization ? { authorizationNonce: authorization.nonce } : {}),
+          ...(authorization
+            ? {
+                authorizationNonce: authorization.nonce,
+                authorizationValidBefore: unixSecondsToDate(authorization.validBefore) ?? row.authorizationValidBefore,
+              }
+            : {}),
           error: clip(error.message),
         });
         this.logUnknown(ctx, row, authorization);
@@ -800,24 +924,16 @@ export class ResourcePaymentService {
         {
           paymentId,
           timedOut: details['timedOut'] === true,
-          ...(authorization
-            ? {
-                authorization: {
-                  method: authorization.method,
-                  nonce: authorization.nonce,
-                  validAfter: authorization.validAfter,
-                  validBefore: authorization.validBefore,
-                },
-              }
-            : {}),
+          ...(authorization ? { authorization: this.publicAuthorization(authorization) } : {}),
           payment: row,
         },
       );
     }
 
     // Anything else (signer failure, DB error, library bug).
+    logger.warn({ jobId: ctx.jobId, paymentId, err: error }, 'Resource payment attempt failed');
     if (attempt.row) {
-      const next: ResourcePaymentStatus = attempt.row.status === 'pending' ? 'unknown' : 'failed_before_signing';
+      const next = attempt.row.status === 'pending' ? 'unknown' : 'failed_before_signing';
       const row = await this.safeUpdate(attempt.row.id, {
         status: next,
         error: clip(error instanceof Error ? error.message : String(error)),
@@ -830,20 +946,71 @@ export class ResourcePaymentService {
   // ── Ledger writes ─────────────────────────────────────────────────────────
 
   /**
-   * Creates (or, on a retry, resets) the row as `reserved`, re-checking the
-   * budget under a row lock on the Job so concurrent reservations serialize.
+   * Creates the row as `reserved`, or moves a retryable row with the same id
+   * back to `reserved`, after re-checking — under row locks on the Job and the
+   * paying Agent, so concurrent reservations serialize —
+   *   1. the row itself (a concurrent attempt may have taken it),
+   *   2. that no live refused authorization to the same payee exists on the job,
+   *   3. the job budget,
+   *   4. the agent policy (per-payment cap, daily volume, allowlists).
+   * The retry transition is a conditional update that must match exactly one
+   * retryable row, so of N concurrent retries of one id at most one signs.
    */
   private async reserve(ctx: AttemptContext, selected: SelectedPaymentOption): Promise<ResourcePayment> {
     const price = BigInt(selected.amount);
     const decimals = ctx.budget.usdc.decimals;
     try {
       return await this.db.$transaction(async (tx) => {
-        await tx.$queryRaw`SELECT "id" FROM "Job" WHERE "id" = ${ctx.jobId} FOR UPDATE`;
-        const rows = await tx.resourcePayment.findMany({
-          where: { jobId: ctx.jobId, status: { in: COUNTED_STATUSES } },
+        const now = new Date();
+        // Lock order everywhere in this service: the Job (its budget), then
+        // the paying Agent (its daily volume across all its jobs).
+        const jobs = await tx.$queryRaw<Array<{ status: string }>>`
+          SELECT "status" FROM "Job" WHERE "id" = ${ctx.jobId} FOR UPDATE`;
+        const jobStatus = jobs[0]?.status;
+        if (jobStatus !== 'ACCEPTED') {
+          throw new ResourcePaymentError(
+            jobStatus ? 'JOB_NOT_ACTIVE' : 'JOB_NOT_FOUND',
+            jobStatus ? 409 : 404,
+            jobStatus
+              ? `Job is ${jobStatus}; resources can only be paid for while the job is ACCEPTED`
+              : 'Job not found',
+            { paymentId: ctx.paymentId, ...(jobStatus ? { status: jobStatus } : {}) },
+          );
+        }
+        await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${ctx.agentId} FOR UPDATE`;
+
+        // 1. The row: only a retryable row may be taken over.
+        const current = await tx.resourcePayment.findUnique({
+          where: { jobId_paymentId: { jobId: ctx.jobId, paymentId: ctx.paymentId } },
+        });
+        if (current) {
+          if (current.url !== ctx.target.storedUrl || current.method !== ctx.method) {
+            throw this.paymentIdConflict(current, ctx.paymentId);
+          }
+          if (!isRetryable(current, now)) {
+            throw isLiveRefusal(current, now)
+              ? this.outstandingAuthorization(current, ctx.paymentId)
+              : this.inProgress(ctx.paymentId, current.status);
+          }
+        }
+
+        // 2. No second live authorization to a payee that refused one.
+        const outstanding = await tx.resourcePayment.findFirst({
+          where: {
+            jobId: ctx.jobId,
+            payTo: { equals: selected.payTo, mode: 'insensitive' },
+            ...liveRefusalWhere(now),
+          },
+          orderBy: { updatedAt: 'desc' },
+        });
+        if (outstanding) throw this.outstandingAuthorization(outstanding, ctx.paymentId);
+
+        // 3. The job budget.
+        const counted = await tx.resourcePayment.findMany({
+          where: { jobId: ctx.jobId, ...countedWhere(now) },
           select: { amount: true },
         });
-        const remaining = ctx.budget.total - sumAmounts(rows);
+        const remaining = ctx.budget.total - sumBaseUnits(counted);
         if (price > remaining) {
           throw new ResourcePaymentError(
             'BUDGET_EXCEEDED',
@@ -857,6 +1024,22 @@ export class ResourcePaymentService {
             },
           );
         }
+
+        // 4. The agent policy (no row = no restrictions, as for transactions).
+        const policy = await tx.agentPolicy.findUnique({ where: { agentId: ctx.agentId } });
+        if (policy) {
+          const spentToday = await this.spentTodayMicroUsd(tx, ctx.agentId, now);
+          const verdict = evaluateUsdcSpend(policy, {
+            amount: price,
+            token: selected.asset,
+            counterparty: selected.payTo,
+            spentTodayMicroUsd: spentToday,
+            now,
+          });
+          if (!verdict.allowed) throw this.policyRefusal(verdict, ctx, selected, spentToday);
+        }
+
+        // 5. Write.
         const data = {
           status: 'reserved' as const,
           url: ctx.target.storedUrl,
@@ -865,28 +1048,28 @@ export class ResourcePaymentService {
           asset: selected.asset,
           amount: selected.amount,
           payTo: selected.payTo,
+          reservedAt: now,
           authorizationNonce: null,
+          authorizationValidBefore: null,
           receiptVerified: null,
           settlementTxHash: null,
           responseStatus: null,
           error: null,
         };
-        if (ctx.retryRowId) {
-          return tx.resourcePayment.update({ where: { id: ctx.retryRowId }, data });
+        if (current) {
+          const claimed = await tx.resourcePayment.updateMany({
+            where: { id: current.id, ...retryableWhere(now) },
+            data,
+          });
+          if (claimed.count !== 1) throw this.inProgress(ctx.paymentId);
+          return tx.resourcePayment.findUniqueOrThrow({ where: { id: current.id } });
         }
         return tx.resourcePayment.create({
           data: { jobId: ctx.jobId, agentId: ctx.agentId, paymentId: ctx.paymentId, ...data },
         });
       });
     } catch (error) {
-      if (isUniqueViolation(error)) {
-        throw new ResourcePaymentError(
-          'PAYMENT_IN_PROGRESS',
-          409,
-          'A payment with this paymentId is already in progress on this job',
-          { paymentId: ctx.paymentId },
-        );
-      }
+      if (isUniqueViolation(error)) throw this.inProgress(ctx.paymentId);
       throw error;
     }
   }
@@ -901,7 +1084,11 @@ export class ResourcePaymentService {
     try {
       return await this.db.resourcePayment.update({
         where: { id: row.id },
-        data: { status: 'pending', authorizationNonce: authorization.nonce },
+        data: {
+          status: 'pending',
+          authorizationNonce: authorization.nonce,
+          authorizationValidBefore: unixSecondsToDate(authorization.validBefore),
+        },
       });
     } catch (error) {
       throw new ResourcePaymentError(
@@ -913,7 +1100,38 @@ export class ResourcePaymentService {
     }
   }
 
-  /** Best-effort `failed_before_signing` row for a refusal where the price is known. */
+  /**
+   * Fields of a post-signature refusal. `authorizationValidBefore` is the
+   * signed window when known (from the client or `markPending`); otherwise an
+   * upper bound — now + the option's `maxTimeoutSeconds` (signing happened
+   * before now, and the client signs `validBefore = signing time + that`).
+   */
+  private refusedData(
+    row: ResourcePayment,
+    attempt: AttemptState,
+    authorization: AuthorizationInfo | undefined,
+    fields: { responseStatus: unknown; error: string },
+    clipOptions: SanitizeOptions = {},
+  ): Prisma.ResourcePaymentUpdateInput {
+    const windowSeconds = attempt.selected?.maxTimeoutSeconds || MAX_AUTHORIZATION_WINDOW_SECONDS;
+    const validBefore =
+      unixSecondsToDate(authorization?.validBefore) ??
+      row.authorizationValidBefore ??
+      new Date(Date.now() + windowSeconds * 1000);
+    return {
+      status: 'refused',
+      ...(typeof fields.responseStatus === 'number' ? { responseStatus: fields.responseStatus } : {}),
+      ...(authorization ? { authorizationNonce: authorization.nonce } : {}),
+      authorizationValidBefore: validBefore,
+      error: clip(fields.error, MAX_STORED_ERROR_LENGTH, clipOptions),
+    };
+  }
+
+  /**
+   * Best-effort `failed_before_signing` row for a refusal where the price is
+   * known. Never overwrites a row another attempt is using or one that still
+   * counts: it creates the row, or updates it only while it is retryable.
+   */
   private async recordRefusalBeforeSigning(
     ctx: AttemptContext,
     option: StoredOption,
@@ -928,17 +1146,39 @@ export class ResourcePaymentService {
       payTo: option.payTo,
       status: 'failed_before_signing' as const,
       authorizationNonce: null,
+      authorizationValidBefore: null,
       receiptVerified: null,
       settlementTxHash: null,
       responseStatus: null,
       error: clip(error),
     };
+    const key = { jobId_paymentId: { jobId: ctx.jobId, paymentId: ctx.paymentId } };
     try {
-      return await this.db.resourcePayment.upsert({
-        where: { jobId_paymentId: { jobId: ctx.jobId, paymentId: ctx.paymentId } },
-        create: { jobId: ctx.jobId, agentId: ctx.agentId, paymentId: ctx.paymentId, ...fields },
-        update: fields,
+      try {
+        return await this.db.resourcePayment.create({
+          data: { jobId: ctx.jobId, agentId: ctx.agentId, paymentId: ctx.paymentId, ...fields },
+        });
+      } catch (createError) {
+        if (!isUniqueViolation(createError)) throw createError;
+      }
+      const { count } = await this.db.resourcePayment.updateMany({
+        where: {
+          jobId: ctx.jobId,
+          paymentId: ctx.paymentId,
+          url: ctx.target.storedUrl,
+          method: ctx.method,
+          ...retryableWhere(new Date()),
+        },
+        data: fields,
       });
+      if (count !== 1) {
+        logger.warn(
+          { jobId: ctx.jobId, paymentId: ctx.paymentId },
+          'Refusal before signing not recorded: the row is in use by another attempt or still counts',
+        );
+        return null;
+      }
+      return await this.db.resourcePayment.findUnique({ where: key });
     } catch (dbError) {
       logger.error(
         { jobId: ctx.jobId, paymentId: ctx.paymentId, err: dbError },
@@ -973,10 +1213,110 @@ export class ResourcePaymentService {
         network: row?.network,
         payTo: row?.payTo,
         nonce: authorization?.nonce ?? row?.authorizationNonce,
-        validBefore: authorization?.validBefore,
+        validBefore: authorization?.validBefore ?? iso(row?.authorizationValidBefore ?? null),
       },
       'Resource payment outcome UNKNOWN after signing — amount stays reserved; manual reconciliation required (no automatic retry)',
     );
+  }
+
+  /** Operator signal for a post-signature refusal: the server may still settle it. */
+  private logRefusedAfterSigning(ctx: AttemptContext, row: ResourcePayment, what: string): void {
+    logger.warn(
+      {
+        jobId: ctx.jobId,
+        paymentId: ctx.paymentId,
+        agentId: ctx.agentId,
+        resourcePaymentId: row.id,
+        url: ctx.target.storedUrl,
+        amount: row.amount,
+        network: row.network,
+        payTo: row.payTo,
+        nonce: row.authorizationNonce,
+        validBefore: iso(row.authorizationValidBefore),
+      },
+      `Resource server refused a signed payment (${what}) without reporting a settlement — it holds the authorization until validBefore; counted against the budget until then, no new signature to this payTo on the job`,
+    );
+  }
+
+  // ── Typed refusals ────────────────────────────────────────────────────────
+
+  private inProgress(paymentId: string, status?: string): ResourcePaymentError {
+    const done = status !== undefined && REPLAYABLE_STATUSES.has(status);
+    return new ResourcePaymentError(
+      'PAYMENT_IN_PROGRESS',
+      409,
+      done
+        ? 'A concurrent request with this paymentId has already paid; retry with the same paymentId to read the recorded payment'
+        : 'A payment with this paymentId is already in progress on this job',
+      { paymentId },
+    );
+  }
+
+  private paymentIdConflict(row: ResourcePayment, paymentId: string): ResourcePaymentError {
+    return new ResourcePaymentError(
+      'PAYMENT_ID_CONFLICT',
+      409,
+      'paymentId was already used for a different resource on this job',
+      { paymentId, url: row.url, method: row.method },
+    );
+  }
+
+  /** What a post-signature refusal means for the caller. */
+  private refusalConsequence(row: ResourcePayment): string {
+    const until = refusalLiveUntil(row);
+    return (
+      `The server still holds the signed authorization and could settle it until ${until?.toISOString() ?? 'it expires'}: ` +
+      `the amount stays counted against the job budget until then, and no new payment to ${row.payTo} is signed on this job before it expires.`
+    );
+  }
+
+  private outstandingAuthorization(row: ResourcePayment, paymentId: string): ResourcePaymentError {
+    const until = refusalLiveUntil(row);
+    return new ResourcePaymentError(
+      'OUTSTANDING_AUTHORIZATION',
+      409,
+      `The resource server at ${row.payTo} refused a signed payment from this job (paymentId ${row.paymentId}) without ` +
+        `reporting a settlement and can still settle it until ${until?.toISOString() ?? 'it expires'}. ` +
+        'Nothing new is signed to that payee on this job before then; the amount stays counted against the budget until it expires. Nothing was fetched or signed.',
+      {
+        paymentId,
+        payTo: row.payTo,
+        outstandingPaymentId: row.paymentId,
+        validBefore: iso(until),
+        payment: row.paymentId === paymentId ? row : null,
+      },
+    );
+  }
+
+  private policyRefusal(
+    verdict: Extract<UsdcSpendVerdict, { allowed: false }>,
+    ctx: AttemptContext,
+    selected: SelectedPaymentOption,
+    spentToday: bigint,
+  ): ResourcePaymentError {
+    if (verdict.rule === 'policyPaused' || verdict.rule === 'policyExpired') {
+      return new ResourcePaymentError('POLICY_PAUSED', 403, verdict.reason, { paymentId: ctx.paymentId });
+    }
+    const decimals = ctx.budget.usdc.decimals;
+    return new ResourcePaymentError('POLICY_VIOLATION', 403, verdict.reason, {
+      paymentId: ctx.paymentId,
+      rule: verdict.rule,
+      ...(verdict.limit !== undefined ? { limit: verdict.limit } : {}),
+      price: selected.amount,
+      priceFormatted: formatUnits(BigInt(selected.amount), decimals),
+      payTo: selected.payTo,
+      ...(verdict.rule === 'maxDailyVolume' ? { spentToday: formatMicroUsd(spentToday) } : {}),
+    });
+  }
+
+  /** Nonce and window of a signed authorization — never the signature. */
+  private publicAuthorization(authorization: AuthorizationInfo) {
+    return {
+      method: authorization.method,
+      nonce: authorization.nonce,
+      validAfter: authorization.validAfter,
+      validBefore: authorization.validBefore,
+    };
   }
 
   // ── Budget ────────────────────────────────────────────────────────────────
@@ -1034,16 +1374,30 @@ export class ResourcePaymentService {
     }
   }
 
-  private async spent(jobId: string): Promise<bigint> {
+  private async spent(jobId: string, now: Date): Promise<bigint> {
     const rows = await this.db.resourcePayment.findMany({
-      where: { jobId, status: { in: COUNTED_STATUSES } },
+      where: { jobId, ...countedWhere(now) },
       select: { amount: true },
     });
-    return sumAmounts(rows);
+    return sumBaseUnits(rows);
+  }
+
+  /**
+   * Everything the agent committed today in micro-USD: its counted x402 rows
+   * (USDC base units = micro-USD) plus the `DailyVolume` the transaction
+   * path keeps.
+   */
+  private async spentTodayMicroUsd(tx: Prisma.TransactionClient, agentId: string, now: Date): Promise<bigint> {
+    const x402 = await resourcePaymentSpentToday(tx, agentId, now);
+    const volume = await tx.dailyVolume.findUnique({
+      where: { agentId_date: { agentId, date: utcDay(now) } },
+      select: { volumeUsd: true },
+    });
+    return x402 + usdTextToMicroCeil(volume?.volumeUsd);
   }
 
   private async remainingBudget(jobId: string, budget: JobBudget): Promise<RemainingBudget> {
-    const spent = await this.spent(jobId);
+    const spent = await this.spent(jobId, new Date());
     const remaining = budget.total - spent;
     return {
       asset: budget.usdc.address,
@@ -1092,13 +1446,16 @@ export class ResourcePaymentService {
   }
 
   /**
-   * Outbound target policy (S4): refuse a private / loopback / link-local /
-   * reserved destination — literal, or any address the hostname resolves to
-   * — and return the addresses the connection will be pinned to. Refusals
-   * are `400 INVALID_URL` with `refusal` and `hostname`; the offending
-   * resolved `address` is only logged (S5); a transient resolver failure is
-   * `502 PAYMENT_FAILED` with `stage: "resolve"`. Nothing is recorded or
-   * signed either way.
+   * Outbound target policy (S4, P6): refuse a port the port policy does not
+   * allow, a private / loopback / link-local / reserved destination —
+   * literal, or any address the hostname resolves to — and return the
+   * addresses the connection will be pinned to. Refusals are `400
+   * INVALID_URL` with `refusal` and `hostname`. A name that does not resolve
+   * and one that resolves to a refused address get the same public refusal
+   * (`no-public-address`) so an agent cannot probe which internal names
+   * exist; the precise reason and the resolved `address` are only logged
+   * (S5). A transient resolver failure is `502 PAYMENT_FAILED` with `stage:
+   * "resolve"`. Nothing is recorded or signed either way.
    */
   private async validateTarget(target: Target, paymentId: string): Promise<ValidatedTarget> {
     try {
@@ -1106,7 +1463,14 @@ export class ResourcePaymentService {
     } catch (error) {
       if (!(error instanceof OutboundTargetError)) throw error;
       logger.warn(
-        { paymentId, url: target.storedUrl, refusal: error.refusal, hostname: error.hostname, address: error.address },
+        {
+          paymentId,
+          url: target.storedUrl,
+          refusal: error.refusal,
+          hostname: error.hostname,
+          address: error.address,
+          port: error.port,
+        },
         'Resource payment target refused by the outbound target policy',
       );
       if (error.refusal === 'resolver-failed') {
@@ -1117,12 +1481,11 @@ export class ResourcePaymentService {
           payment: null,
         });
       }
-      // S5: no `address`. The private address an agent-supplied name resolved
-      // to would let an agent map internal DNS names; it stays in the warn
-      // log above. `refusal` and `hostname` (the agent's own input) remain.
-      throw new ResourcePaymentError('INVALID_URL', 400, error.message, {
-        refusal: error.refusal,
+      const shown = publicRefusal(error);
+      throw new ResourcePaymentError('INVALID_URL', 400, shown.message, {
+        refusal: shown.refusal,
         hostname: error.hostname,
+        ...(shown.refusal === 'port-not-allowed' && error.port !== undefined ? { port: error.port } : {}),
       });
     }
   }
@@ -1145,7 +1508,9 @@ export class ResourcePaymentService {
       if (value !== undefined) headers[name] = value;
     }
     let text = result.body;
-    let truncated = false;
+    // The client stopped reading at MAX_RESOURCE_BODY_BYTES (P6); the byte
+    // check stays as a guard for a client configured with a larger cap.
+    let truncated = result.bodyTruncated === true;
     if (Buffer.byteLength(text, 'utf8') > MAX_RESOURCE_BODY_BYTES) {
       text = truncateUtf8(text, MAX_RESOURCE_BODY_BYTES);
       truncated = true;
