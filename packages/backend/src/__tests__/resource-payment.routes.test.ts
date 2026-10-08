@@ -209,6 +209,8 @@ vi.mock('../services/wallet/index.js', () => ({
   getWalletService: () => ({}),
 }));
 
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { PaymentRequirements } from '@x402/core/types';
@@ -1129,6 +1131,49 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
       expect(f.paths).toEqual(['/paid', '/paid']);
       expect(f.hosts).toEqual([host, host]);
       expect(wallet.signatures).toBe(1);
+    });
+  });
+
+  describe('bounded resource body (P6)', () => {
+    it('a resource answering 8 MiB is returned cut at 64 KiB with truncated: true, and the transfer is aborted', async () => {
+      let written = 0;
+      let aborted = false;
+      const chunk = Buffer.alloc(256 * 1024, 0x7a);
+      const server = createServer((_req, res) => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.on('close', () => {
+          aborted = !res.writableFinished;
+        });
+        const pump = () => {
+          while (written < 8 * 1024 * 1024) {
+            if (res.destroyed) return;
+            written += chunk.length;
+            if (!res.write(chunk)) return void res.once('drain', pump);
+          }
+          res.end();
+        };
+        pump();
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      open.push(
+        () =>
+          new Promise<void>((resolve) => {
+            server.closeAllConnections();
+            server.close(() => resolve());
+          }),
+      );
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const app = await buildApp({ base });
+
+      const res = await pay(app, { url: `${base}/big` });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().payment).toBeNull();
+      expect(res.json().resource).toMatchObject({ status: 200, truncated: true });
+      expect(res.json().resource.body).toHaveLength(64 * 1024);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(aborted).toBe(true);
+      expect(written).toBeLessThan(8 * 1024 * 1024);
     });
   });
 

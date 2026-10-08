@@ -17,6 +17,14 @@ vi.mock('../middleware/auth.js', () => ({
 
 const db = new PrismaClient();
 
+/**
+ * This suite's own agents. Cleanup is scoped to them: other DB-backed suites
+ * (resource-payment.ledger.db.test.ts) run in parallel against the same
+ * database, and wiping every agent would cascade-delete their jobs and
+ * payments mid-test.
+ */
+const SEARCH_AGENT_IDS = ['agent-1', 'agent-2', 'agent-inactive'];
+
 describe('Agent Search Integration', () => {
   const app = fastify();
 
@@ -25,14 +33,17 @@ describe('Agent Search Integration', () => {
   });
 
   beforeEach(async () => {
-    // Clear the database in order to avoid FK violations
-    await db.feeEvent.deleteMany();
-    await db.job.deleteMany();
-    await db.transaction.deleteMany();
-    await db.dailyVolume.deleteMany();
-    await db.agentPolicy.deleteMany();
-    await db.agentBilling.deleteMany();
-    await db.agent.deleteMany();
+    // Clear this suite's rows, children first to avoid FK violations.
+    const mine = { in: SEARCH_AGENT_IDS };
+    await db.feeEvent.deleteMany({
+      where: { OR: [{ transaction: { agentId: mine } }, { billing: { agentId: mine } }] },
+    });
+    await db.job.deleteMany({ where: { OR: [{ requesterId: mine }, { providerId: mine }] } });
+    await db.transaction.deleteMany({ where: { agentId: mine } });
+    await db.dailyVolume.deleteMany({ where: { agentId: mine } });
+    await db.agentPolicy.deleteMany({ where: { agentId: mine } });
+    await db.agentBilling.deleteMany({ where: { agentId: mine } });
+    await db.agent.deleteMany({ where: { id: mine } });
     
     // Seed with test agents
     await db.agent.createMany({
