@@ -75,7 +75,7 @@ Replace `api.example.com` with your deployed API hostname.
 3. Core API smoke test — verify one authenticated endpoint returns expected schema.
 
 4. Queue/worker sanity
-   - Dedicated worker service running if using metered Redis.
+   - Dedicated worker service running (`TRANSACTION_WORKER_ENABLED` defaults to `false` in production, so without it nothing is signed, settled or recovered).
    - API replicas use `TRANSACTION_WORKER_ENABLED=false`.
 
 5. Error budget check (first 10–15 min)
@@ -132,7 +132,7 @@ If Redis quota exhaustion is observed:
 
 ## 6. Operational Defaults
 
-Recommended production topology for metered Redis:
+Production topology (required in production, where `TRANSACTION_WORKER_ENABLED` defaults to `false`; it also protects a metered Redis quota):
 
 1. API services:
    - `TRANSACTION_WORKER_ENABLED=false`
