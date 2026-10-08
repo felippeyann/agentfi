@@ -50,14 +50,9 @@ cd packages/contracts
 forge install foundry-rs/forge-std --no-commit
 ```
 
-### Get block explorer API keys
+### Get a block explorer API key (Etherscan API V2)
 
-| Chain | Explorer | API key URL |
-|-------|----------|-------------|
-| Ethereum | Etherscan | https://etherscan.io/myapikey |
-| Base | Basescan | https://basescan.org/myapikey |
-| Arbitrum | Arbiscan | https://arbiscan.io/myapikey |
-| Polygon | Polygonscan | https://polygonscan.com/myapikey |
+Verification uses **Etherscan API V2**: one key from an etherscan.io account (https://etherscan.io/myapikey) works for every chain, selected by chain id. Export it as `ETHERSCAN_API_KEY`; `foundry.toml` `[etherscan]` maps every RPC alias (`base_sepolia`, `base`, …) to that key and its chain id, so `--verify` needs no `--etherscan-api-key`. The per-explorer V1 endpoints (`api-sepolia.basescan.org/api`, `api.basescan.org/api`, …) and their `BASESCAN_API_KEY`-style keys are no longer used: V1 answers "You are using a deprecated V1 endpoint" (found by the second adversarial review, 2026-10-08; forge 1.7.1 posts to `https://api.etherscan.io/v2/api?chainid=<id>`).
 
 ---
 
@@ -68,27 +63,38 @@ forge install foundry-rs/forge-std --no-commit
 Fund a deployer wallet with native gas token on the target chain. Deployment costs ~$0.50–$2.00 per chain.
 
 ```bash
-# Private key of the deployer wallet (use a dedicated wallet, not your main one)
-export PRIVATE_KEY="0x..."
+# Chain the deployment is meant for (mandatory): 84532 Base Sepolia, 8453 Base, …
+# The scripts refuse to broadcast when the RPC answers another chain (WrongChain).
+export EXPECTED_CHAIN_ID="84532"
 
 # Operator address — can set/pause policies on any agent Safe
 export OPERATOR_ADDRESS="0x..."
 
-# Wallet that receives protocol fees
+# Wallet that receives the executor's protocol fees (backend OPERATOR_FEE_WALLET)
 export FEE_WALLET="0x..."
 
-# Fee in basis points: 30 = 0.30% (FREE tier)
-export FEE_BPS="30"
+# Executor fee in basis points (mandatory, < 10000): 30 = 0.30% (FREE tier).
+# Its own variable: FEE_BPS is the escrow's platform fee (DeployEscrow.s.sol).
+export EXECUTOR_FEE_BPS="30"
+
+# Optional: also deploy the legacy ETH EscrowModule (not deployed by default, plan D8)
+# export DEPLOY_LEGACY_ESCROW_MODULE="true"
+
+# Explorer key for --verify (Etherscan API V2, every chain)
+export ETHERSCAN_API_KEY="..."
 ```
 
 **PowerShell equivalent:**
 
 ```powershell
-$env:PRIVATE_KEY = "0x..."
+$env:EXPECTED_CHAIN_ID = "84532"
 $env:OPERATOR_ADDRESS = "0x..."
 $env:FEE_WALLET = "0x..."
-$env:FEE_BPS = "30"
+$env:EXECUTOR_FEE_BPS = "30"
+$env:ETHERSCAN_API_KEY = "..."
 ```
+
+**Signer:** import the deployer key once into Foundry's encrypted keystore (`cast wallet import agentfi-deployer --interactive`) and pass `--account agentfi-deployer`; do not export `PRIVATE_KEY`. Forge auto-loads `packages/contracts/.env`: a `PRIVATE_KEY` there used to override `--account` silently. Both scripts now print a warning whenever `PRIVATE_KEY` is set and refuse to run when it belongs to a different address than the CLI signer (`SignerConflict`).
 
 ### Step 2 — Run tests
 
@@ -106,9 +112,9 @@ cd packages/contracts
 
 forge script script/Deploy.s.sol \
   --rpc-url <chain_alias> \
+  --account agentfi-deployer \
   --broadcast \
-  --verify \
-  --etherscan-api-key $EXPLORER_API_KEY
+  --verify
 ```
 
 Replace `<chain_alias>` with one of the configured RPC aliases:
@@ -135,17 +141,18 @@ Testnets use public endpoints and don't need Alchemy.
 
 ### Step 4 — Capture output
 
-The deploy script prints env-ready output:
+The deploy script prints env-ready output (names as in `packages/backend/src/config/env.ts`; the `ESCROW_MODULE_ADDRESS_<chainId>` line only with `DEPLOY_LEGACY_ESCROW_MODULE=true`):
 
 ```
+Chain (EXPECTED_CHAIN_ID matches): 8453
+Deployer (CLI signer): 0x...
 AgentPolicyModule: 0xABCD...
 AgentExecutor:     0xEFGH...
-EscrowModule:      0xIJKL...
 
 --- Copy to .env ---
 POLICY_MODULE_ADDRESS_8453=0xABCD...
 EXECUTOR_ADDRESS_8453=0xEFGH...
-ESCROW_MODULE_ADDRESS_8453=0xIJKL...
+OPERATOR_FEE_WALLET=0x...
 --------------------
 ```
 
@@ -161,20 +168,21 @@ Copy those lines to your `.env` (local) or hosting provider's secret manager (pr
 
 | Contract | Constructor | Role |
 |----------|-------------|------|
-| `AgentJobEscrow` | `(token, feeWallet, operator, evaluatorFeeBP, platformFeeBP)` | Implements the published ERC-8183 interface verbatim (`createJob`, `setProvider`, `setBudget`, `fund`, `submit`, `complete`, `reject`, `claimRefund`, `getJob` + events). One ERC-20 per contract (USDC). `setProvider` works once only (reverts `ProviderAlreadySet` if a provider is already named). On `complete` the provider receives `budget − platformFee − evaluatorFee`; the platform fee is **accrued** in `pendingPlatformFees` (pull-based) and swept with `withdrawPlatformFees()` by `feeWallet` or `operator`; rejection after funding and expiry refund the client in full. AgentFi extensions outside the standard: `setProviderAgentId` / `providerAgentId(jobId)` (ERC-8004 id, set by the client or the provider, verified by the hook), `submittedAt(jobId)`, `pendingPlatformFees()`, `withdrawPlatformFees()`, `setFeeWallet()` (operator), `pause()` / `unpause()` by `operator` (blocks `createJob` and `fund` only, never settlement, refunds or fee withdrawal), `jobCount()`. |
-| `ReputationHook` | `(acp, reputationRegistry, identityRegistry, trustedEvaluator, minFeedbackBudget, feedbackGasLimit, identityCallGasLimit)` | `IACPHook` attached per job at `createJob(..., hook)`. On `afterAction` for `complete` it calls `giveFeedback(providerAgentId, 100, 0, "agentfi.job", "completed", "", feedbackURI, feedbackHash)`; on `reject` of a job that had been `Submitted` it writes value `0` with tag `"rejected"`. It writes **only** when `job.evaluator == trustedEvaluator`, the Identity Registry reports `ownerOf(agentId)` or `getAgentWallet(agentId)` equal to `job.provider`, and `job.budget >= minFeedbackBudget`; otherwise it emits `FeedbackSkipped(reason)`. `optParams` of `complete`/`reject` must be `abi.encode(string feedbackURI, bytes32 feedbackHash)`. A `reject` with reason `REASON_PAYOUT_BLOCKED = keccak256("agentfi.payout-blocked")` writes nothing. Registry failures emit `FeedbackFailed` and never block settlement. Every registry call forwards a fixed gas cap (`feedbackGasLimit` to `giveFeedback`, `identityCallGasLimit` to each identity static call), and once the gates pass the hook reverts the whole `complete`/`reject` with `InsufficientGasForFeedback(available, required)` if the caller's gas cannot cover those caps (`feedbackGasRequirement`), so gas estimation can no longer drop the feedback (R3c, [erc-8004-integration.md §4](../architecture/erc-8004-integration.md#4-agentfi-design-feedback-written-by-the-escrow-hook) "Gas policy"). `revokeFeedback(agentId, feedbackIndex)` (trusted evaluator only) forwards to the registry. Only the escrow may call the hook entry points (`onlyACP`). |
+| `AgentJobEscrow` | `(token, feeWallet, operator, evaluatorFeeBP, platformFeeBP)` | Implements the published ERC-8183 interface verbatim (`createJob`, `setProvider`, `setBudget`, `fund`, `submit`, `complete`, `reject`, `claimRefund`, `getJob` + events). One ERC-20 per contract (USDC). `setProvider` works once only (reverts `ProviderAlreadySet` if a provider is already named). On `complete` the provider receives `budget − platformFee − evaluatorFee`; the platform fee is **accrued** in `pendingPlatformFees` (pull-based) and swept with `withdrawPlatformFees()` by `feeWallet` or `operator`; rejection after funding and expiry refund the client in full. AgentFi extensions outside the standard: `setProviderAgentId` / `providerAgentId(jobId)` (ERC-8004 id, set by the **provider only** since C2b, verified by the hook on the provider's first `submit`), `submittedAt(jobId)`, `pendingPlatformFees()`, `withdrawPlatformFees()`, `setFeeWallet()` (operator), `pause()` / `unpause()` by `operator` (blocks `createJob` and `fund` only, never settlement, refunds or fee withdrawal), `jobCount()`. |
+| `ReputationHook` | `(acp, reputationRegistry, identityRegistry, trustedEvaluator, minFeedbackBudget, feedbackGasLimit, identityCallGasLimit)` | `IACPHook` attached per job at `createJob(..., hook)`. On `afterAction` for `submit` it binds the provider address to one **canonical** ERC-8004 id (the first `providerAgentId` the Identity Registry confirms as owned by, or agent-wallet-bound to, the provider; never replaced). On `complete` it calls `giveFeedback(canonicalAgentId, 100, 0, "agentfi.job", "completed", "", feedbackURI, feedbackHash)`; on `reject` it writes value `0` with tag `"rejected"` **only** for the evaluator's quality verdict `REASON_QUALITY_REJECTED = keccak256("agentfi.quality-rejected")` on a job that had been `Submitted` (D9) — a contest, cancellation, provider failure, `REASON_PAYOUT_BLOCKED = keccak256("agentfi.payout-blocked")` or any other reason writes nothing. It writes only when `job.evaluator == trustedEvaluator`, the provider has a canonical id and `job.budget >= minFeedbackBudget`; otherwise it emits `FeedbackSkipped(reason)`. `optParams` of `complete`/`reject` must be `abi.encode(string feedbackURI, bytes32 feedbackHash)`. Registry failures emit `FeedbackFailed` and never block settlement; a verdict the registry did not record (e.g. the provider approved the hook on the Identity Registry) also emits `AgentPenalized` and the id gets no further positive entries until the trusted evaluator calls `clearPenalties`. Every registry call forwards a fixed gas cap (`feedbackGasLimit` to `giveFeedback`, `identityCallGasLimit` to each identity static call on `submit`), and the hook reverts with `InsufficientGasForFeedback(available, required)` if the caller's gas cannot cover those caps (`feedbackGasRequirement` on `complete`/`reject`, `canonicalBindGasRequirement` on a provider's first `submit`), so gas estimation can no longer drop the feedback or the binding (R3c / C2b, [erc-8004-integration.md §4](../architecture/erc-8004-integration.md#4-agentfi-design-feedback-written-by-the-escrow-hook)). `revokeFeedback(agentId, feedbackIndex)` and `clearPenalties(agentId)` (trusted evaluator only). Only the escrow may call the hook entry points (`onlyACP`). |
 
 Both contracts are non-upgradeable and every constructor parameter is immutable **except the escrow's `feeWallet`**, which the operator can rotate with `setFeeWallet`. Changing the fee bps, the token, the trusted evaluator or the registries means redeploying the escrow (and the hook, since it is bound to the escrow address). Changing only the hook's gas limits or `minFeedbackBudget` means deploying a new hook bound to the same escrow; it applies to jobs created afterwards (the hook is fixed per job).
 
 ### Environment variables
 
 ```bash
+export EXPECTED_CHAIN_ID="84532"      # mandatory: must equal the RPC's chain id or nothing is broadcast (WrongChain)
 export OPERATOR_ADDRESS="0x..."       # may pause/unpause createJob + fund, rotate the fee wallet and sweep fees; cannot move escrowed budgets
 export FEE_WALLET="0x..."             # initial receiver of accrued platform fees (withdrawPlatformFees); rotatable later
 export TRUSTED_EVALUATOR="0x..."      # backend signer that calls complete/reject (D5); the only evaluator whose jobs write ERC-8004 feedback
 
 # Optional — defaults shown
-export FEE_BPS="30"                   # platformFeeBP (D6: 30 bps during validation)
+export FEE_BPS="30"                   # escrow platformFeeBP (D6: 30 bps during validation); the executor's fee is EXECUTOR_FEE_BPS
 export EVALUATOR_FEE_BPS="0"          # evaluatorFeeBP (D5: evaluator = backend signer, no fee)
 export MIN_FEEDBACK_BUDGET="1000000"  # smallest job budget (token units, 1 USDC) that may write feedback
 export FEEDBACK_GAS_LIMIT="500000"    # gas the hook forwards to giveFeedback (allowed 250000..2000000; v2.0.0 uses ~180k)
@@ -183,6 +191,7 @@ export USDC_ADDRESS="0x..."           # defaults per chain, see table
 export REPUTATION_REGISTRY_ADDRESS="0x..."  # defaults per chain, see table
 export IDENTITY_REGISTRY_ADDRESS="0x..."    # defaults per chain, see table
 # export PRIVATE_KEY="0x..."          # discouraged: prefer `--account <keystore>` / `--ledger` on the forge command (see below)
+export ETHERSCAN_API_KEY="..."        # for --verify (Etherscan API V2, one key for every chain)
 ```
 
 Defaults resolved from `block.chainid` when the variable is unset (any other chain requires all three to be set explicitly):
@@ -192,16 +201,16 @@ Defaults resolved from `block.chainid` when the variable is unset (any other cha
 | Base (8453) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `0x8004BAa17C55a88189AE136b182e5fdA19dE9b63` | `0x8004A169FB4a3325136EB29fA0ceB6D2e539a432` |
 | Base Sepolia (84532) | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | `0x8004B663056A597Dffe9eCcC1965A193B7388713` | `0x8004A818BFB912233c491871b3d84c89A494BD9e` |
 
-The script validates everything **before** broadcasting: `FEE_BPS + EVALUATOR_FEE_BPS` must be below 10 000 (`InvalidFees`), the token and both registries must have code on the target chain (`NotAContract`), and `FEEDBACK_GAS_LIMIT` / `IDENTITY_CALL_GAS_LIMIT` must be within the hook's bounds (`InvalidGasLimit(name, value, min, max)`; the constructor enforces the same bounds with `InvalidFeedbackGasLimit` / `InvalidIdentityCallGasLimit`). Keep the defaults unless a registry upgrade makes `giveFeedback` more expensive: the measurements behind them are in [erc-8004-integration.md §4](../architecture/erc-8004-integration.md#4-agentfi-design-feedback-written-by-the-escrow-hook). `TRUSTED_EVALUATOR`, `OPERATOR_ADDRESS` and `FEE_WALLET` must be non-zero (constructor `ZeroAddress`).
+The script validates everything **before** broadcasting: the RPC's chain id must equal `EXPECTED_CHAIN_ID` (`WrongChain`; `MissingEnv("EXPECTED_CHAIN_ID")` when unset — `--rpc-url base` instead of `base_sepolia` used to deploy against real USDC with mainnet defaults), `PRIVATE_KEY` must not contradict the CLI signer (`SignerConflict`), `FEE_BPS + EVALUATOR_FEE_BPS` must be below 10 000 (`InvalidFees`), the token and both registries must have code on the target chain (`NotAContract`), and `FEEDBACK_GAS_LIMIT` / `IDENTITY_CALL_GAS_LIMIT` must be within the hook's bounds (`InvalidGasLimit(name, value, min, max)`; the constructor enforces the same bounds with `InvalidFeedbackGasLimit` / `InvalidIdentityCallGasLimit`). Keep the defaults unless a registry upgrade makes `giveFeedback` more expensive: the measurements behind them are in [erc-8004-integration.md §4](../architecture/erc-8004-integration.md#4-agentfi-design-feedback-written-by-the-escrow-hook). `TRUSTED_EVALUATOR`, `OPERATOR_ADDRESS` and `FEE_WALLET` must be non-zero (constructor `ZeroAddress`).
 
 **Signer.** Import the deployer key once into Foundry's encrypted keystore and pass `--account` instead of exporting `PRIVATE_KEY`:
 
 ```bash
 cast wallet import agentfi-deployer --interactive     # prompts for the key, stores it encrypted under ~/.foundry/keystores
-forge script script/DeployEscrow.s.sol --rpc-url base_sepolia --account agentfi-deployer --broadcast --verify --etherscan-api-key $BASESCAN_API_KEY
+EXPECTED_CHAIN_ID=84532 forge script script/DeployEscrow.s.sol --rpc-url base_sepolia --account agentfi-deployer --broadcast --verify
 ```
 
-`--ledger` / `--trezor` / `--private-key` work the same way. When `PRIVATE_KEY` is unset (or `0`) the script calls `vm.startBroadcast()` without a key and Foundry uses the CLI signer; when it is set, the script broadcasts with it (kept for backwards compatibility).
+`--ledger` / `--trezor` / `--private-key` work the same way. When `PRIVATE_KEY` is unset (or `0`) the script calls `vm.startBroadcast()` without a key and Foundry uses the CLI signer. When it is set (environment or `packages/contracts/.env`, which forge loads automatically) the script prints a `WARNING` and broadcasts with it — unless a CLI signer for a different address is also given, in which case it stops with `SignerConflict(cliSigner, privateKeySigner)` (forge runs the script with `tx.origin` = the CLI signer). Both behaviours were checked with forge 1.7.1 on an Anvil fork of Base Sepolia with a throwaway keystore (C2b).
 
 ### Deployment order
 
@@ -215,19 +224,22 @@ The script does all of it in one broadcast:
 cd packages/contracts
 forge test -vvv                                   # must be green
 
-forge script script/DeployEscrow.s.sol \
+EXPECTED_CHAIN_ID=84532 forge script script/DeployEscrow.s.sol \
   --rpc-url base_sepolia \
   --account agentfi-deployer \
   --broadcast \
-  --verify \
-  --etherscan-api-key $BASESCAN_API_KEY
+  --verify
 ```
 
 Output (copy to `.env` / hosting secrets):
 
 ```
+Chain (EXPECTED_CHAIN_ID matches): 84532
+Deployer (CLI signer): 0x...
 AgentJobEscrow: 0x...
 ReputationHook: 0x...
+Hook gas requirement:  597937
+Hook bind requirement: 140794
 
 --- Copy to .env ---
 AGENT_JOB_ESCROW_ADDRESS_84532=0x...
@@ -252,7 +264,9 @@ cast call $HOOK   "trustedEvaluator()(address)" --rpc-url $RPC   # == TRUSTED_EV
 cast call $HOOK   "minFeedbackBudget()(uint256)" --rpc-url $RPC  # == MIN_FEEDBACK_BUDGET (1000000)
 cast call $HOOK   "feedbackGasLimit()(uint256)" --rpc-url $RPC   # == FEEDBACK_GAS_LIMIT (500000)
 cast call $HOOK   "identityCallGasLimit()(uint256)" --rpc-url $RPC  # == IDENTITY_CALL_GAS_LIMIT (50000)
-cast call $HOOK   "feedbackGasRequirement()(uint256)" --rpc-url $RPC # 667937 with the defaults (also printed by the script)
+cast call $HOOK   "feedbackGasRequirement()(uint256)" --rpc-url $RPC # 597937 with the defaults (also printed by the script)
+cast call $HOOK   "canonicalBindGasRequirement()(uint256)" --rpc-url $RPC # 140794 with the defaults (also printed)
+cast call $HOOK   "REASON_QUALITY_REJECTED()(bytes32)" --rpc-url $RPC # 0x0ec25635…dbc64e281 = keccak256("agentfi.quality-rejected")
 cast call $HOOK   "supportsInterface(bytes4)(bool)" 0x7ff6bc9e --rpc-url $RPC  # true (IACPHook id)
 cast call $HOOK   "supportsInterface(bytes4)(bool)" 0xffffffff --rpc-url $RPC  # false (the escrow probes this too)
 ```
@@ -283,10 +297,10 @@ Regenerate the backend ABIs after any Solidity change: `npm run abi:escrow` (or 
 - **Blacklisted client or provider (no escape hatch by design).** A blacklisted client makes `reject` (after funding) and `claimRefund` revert; `complete` (pay the provider) is the only exit and the budget otherwise stays escrowed until the client is cleared. A blacklisted provider makes `complete` revert; the evaluator unwinds with `reject(jobId, keccak256("agentfi.payout-blocked"), …)`, which refunds the client and makes the hook skip the negative feedback (`payout-blocked`), or anyone calls `claimRefund` after expiry.
 - **Expiry.** `claimRefund(jobId)` is permissionless once `block.timestamp >= expiredAt` for `Funded`/`Submitted` jobs and is never hooked, so no hook failure can trap funds. On a `Submitted` job it **races** the evaluator's `complete`/`reject` once expired (first mined tx wins, the other reverts `InvalidStatus`): the backend must settle before `expiredAt`.
 - **Single provider.** `setProvider` only works while `job.provider == address(0)`; a job created with a provider cannot have it changed (`ProviderAlreadySet`).
-- **Reputation writes** happen only when all gates pass: the job's evaluator is `TRUSTED_EVALUATOR`, `providerAgentId` is set (by the client **or** the provider, while `Open`/`Funded`; cleared by `setProvider`) **and** the Identity Registry reports that id as owned by, or agent-wallet-bound to, `job.provider`, the budget is at least `MIN_FEEDBACK_BUDGET`, and `optParams` is `abi.encode(feedbackURI, feedbackHash)`. Anything else emits `FeedbackSkipped(jobId, reason)` (`untrusted-evaluator`, `no-params`, `not-submitted`, `payout-blocked`, `no-agent-id`, `budget-too-small`, `bad-params`, `agent-not-provider`) and settlement proceeds. Alert on `FeedbackFailed` (registry revert / no code / out of its gas cap; the reason carries at most 256 bytes of revert data).
-- **Gas for settlements that write feedback.** When the gates pass, `complete` / `reject` need enough gas for the hook to call the registries with their full caps: about 0.8 M as a transaction gas limit with the default caps (they *use* about 340 k on Base Sepolia; unused gas is not charged). `eth_estimateGas` returns that limit, so any evaluator client that estimates is fine; a call sent with less reverts with `InsufficientGasForFeedback(available, required)` and nothing moves — resend with more gas. The backend adds `EVALUATOR_GAS_HEADROOM` (400 000) on top of the estimate. Skipped jobs (any gate above) and `claimRefund` never need this gas.
-- **Correcting a wrong entry.** `ReputationHook.revokeFeedback(agentId, feedbackIndex)` from the `TRUSTED_EVALUATOR` key forwards to the registry (`FeedbackRevoked`). Feedback is otherwise immutable; keep the `feedbackIndex` from the registry's `NewFeedback` event.
-- **Reading reputation:** `getSummary(agentId, [REPUTATION_HOOK_ADDRESS], "agentfi.job", "")` on the registry returns only feedback written by the hook, i.e. backed by a settled escrow payment decided by the operator signer for an identity the paid provider controls.
+- **Reputation writes** happen only when all gates pass: the job's evaluator is `TRUSTED_EVALUATOR`; for a `reject`, the job had been `Submitted` and the reason is `REASON_QUALITY_REJECTED` (D9: a contest, cancellation or provider failure is not a verdict); the provider address has a canonical id (set on its first `submit` whose `providerAgentId` — bound by the **provider** while `Open`/`Funded` — the Identity Registry reports as owned by, or agent-wallet-bound to, the provider); the budget is at least `MIN_FEEDBACK_BUDGET`; for a `complete`, the id is not penalized; and `optParams` is `abi.encode(feedbackURI, feedbackHash)`. Anything else emits `FeedbackSkipped(jobId, reason)` (`untrusted-evaluator`, `no-params`, `not-submitted`, `payout-blocked`, `not-verdict`, `no-agent-id`, `budget-too-small`, `agent-not-provider`, `penalized`, `bad-params`) and settlement proceeds. Alert on `FeedbackFailed` (registry revert / no code / out of its gas cap; the reason carries at most 256 bytes of revert data) and on `AgentPenalized` (a verdict the registry did not record; `Error("Self-feedback not allowed")` in the matching `FeedbackFailed` means the provider approved the hook on the Identity Registry).
+- **Gas for settlements that write feedback.** When the gates pass, `complete` / `reject` need enough gas for the hook to call the registry with its full cap: about 0.73 M as a transaction gas limit with the default caps (Foundry on the Base Sepolia fork: 708 084 for the escrow call of `complete`, 667 222 for a verdict `reject`; they *use* about 290 k / 230 k; unused gas is not charged). A provider's **first** `submit` (the one that binds its canonical id) needs about 0.23 M (206 743 for the escrow call; uses ~94 k); later submits stay cheap. `eth_estimateGas` returns these limits, so any client that estimates is fine; a call sent with less reverts with `InsufficientGasForFeedback(available, required)` and nothing moves — resend with more gas. The backend adds `EVALUATOR_GAS_HEADROOM` (400 000) on top of the evaluator's estimate and sends agent transactions with the bare estimate. Skipped jobs (any gate above) and `claimRefund` never need this gas.
+- **Correcting a wrong entry.** `ReputationHook.revokeFeedback(agentId, feedbackIndex)` from the `TRUSTED_EVALUATOR` key forwards to the registry (`FeedbackRevoked`). Feedback is otherwise immutable; keep the `feedbackIndex` from the registry's `NewFeedback` event. `ReputationHook.clearPenalties(agentId)` (same key) lifts a penalty that a registry outage caused (`PenaltiesCleared`).
+- **Reading reputation:** `getSummary(agentId, [REPUTATION_HOOK_ADDRESS], "agentfi.job", "")` on the registry returns only feedback written by the hook, i.e. backed by a USDC budget escrowed and settled through `AgentJobEscrow` and decided by the operator signer, for an identity that the paid provider controlled when it bound it. Also read `penalties(agentId)` on the hook: a non-zero value counts negative verdicts the registry did not record.
 
 ---
 
@@ -298,12 +312,13 @@ When expanding beyond a single chain, deploy to each chain separately and track 
 
 ```
 [ ] Deployer wallet funded with gas on chain (imported into the Foundry keystore: `cast wallet import`)
-[ ] Explorer API key obtained
+[ ] Etherscan API V2 key obtained (ETHERSCAN_API_KEY; one key for every chain)
+[ ] EXPECTED_CHAIN_ID exported for the chain (both scripts refuse to broadcast without it)
 [ ] Backend ABI matches the source: `npm run abi:executor` produces no git diff (see "ABI versioning")
 [ ] forge test passes
 [ ] forge script Deploy.s.sol --rpc-url <alias> --account <keystore> --broadcast --verify
 [ ] USDC_ADDRESS / REPUTATION_REGISTRY_ADDRESS / IDENTITY_REGISTRY_ADDRESS known for the chain (defaults exist for Base + Base Sepolia only)
-[ ] TRUSTED_EVALUATOR, OPERATOR_ADDRESS, FEE_WALLET exported
+[ ] TRUSTED_EVALUATOR, OPERATOR_ADDRESS, FEE_WALLET (and EXECUTOR_FEE_BPS for Deploy.s.sol) exported; no PRIVATE_KEY in the shell or packages/contracts/.env
 [ ] forge script DeployEscrow.s.sol --rpc-url <alias> --account <keystore> --broadcast --verify
 [ ] Output addresses recorded (see Address Registry below)
 [ ] .env / hosting secrets updated with POLICY_MODULE_ADDRESS_<chainId>, EXECUTOR_ADDRESS_<chainId>,
@@ -324,7 +339,7 @@ When expanding beyond a single chain, deploy to each chain separately and track 
 
 Fee BPS is immutable after deployment. Choose based on chain economics:
 
-| Chain | Suggested FEE_BPS | Rationale |
+| Chain | Suggested EXECUTOR_FEE_BPS | Rationale |
 |-------|------------------|-----------|
 | Base | 30 (0.30%) | Default tier, low gas |
 | Arbitrum | 30 (0.30%) | Default tier, low gas |
@@ -347,7 +362,7 @@ For each deployed chain, open the contract on the block explorer:
 
 2. Navigate to the `AgentExecutor` address → **Contract** → **Read Contract**
    - `feeWallet()` → should return your `FEE_WALLET`
-   - `feeBps()` → should return your `FEE_BPS` (e.g. `30`)
+   - `feeBps()` → should return your `EXECUTOR_FEE_BPS` (e.g. `30`)
    - `policyModule()` → should return the `AgentPolicyModule` address
 
 ### Automated verification script
@@ -615,7 +630,7 @@ cast send <POLICY_MODULE_ADDRESS> \
 
 To change the fee structure on an existing chain:
 
-1. Deploy new contracts with updated `FEE_BPS`
+1. Deploy new contracts with updated `EXECUTOR_FEE_BPS` (`Deploy.s.sol`; the escrow's `FEE_BPS` is separate)
 2. Update `.env` with new addresses
 3. Restart the backend — new transactions route through the new executor
 4. Existing agent Safe policies must be re-set on the new PolicyModule
@@ -690,4 +705,4 @@ From `packages/contracts/foundry.toml`:
 | Fuzz runs (local) | 256 |
 | Fuzz runs (CI) | 1000 |
 
-RPC endpoints and etherscan integrations are configured for all supported chains. See the file for env var names.
+RPC endpoints and etherscan integrations are configured for all supported chains. See the file for env var names. Verification uses Etherscan API V2: one `ETHERSCAN_API_KEY` for every chain, each `[etherscan]` entry carries its chain id and no URL.

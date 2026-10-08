@@ -356,7 +356,9 @@ function deployEnv(): NodeJS.ProcessEnv {
   ]) {
     delete env[key];
   }
-  // C4 runbook step 5, verbatim variable names.
+  // C4 runbook step 5, verbatim variable names. EXPECTED_CHAIN_ID is mandatory since C2b (the
+  // script refuses to broadcast when it differs from the RPC's chain id).
+  env['EXPECTED_CHAIN_ID'] = String(BASE_SEPOLIA_CHAIN_ID);
   env['OPERATOR_ADDRESS'] = ANVIL_ACCOUNTS.operator.address;
   env['FEE_WALLET'] = ANVIL_ACCOUNTS.feeWallet.address;
   env['TRUSTED_EVALUATOR'] = ANVIL_ACCOUNTS.evaluator.address;

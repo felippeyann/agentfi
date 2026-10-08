@@ -3,16 +3,23 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {DeployEscrowScript} from "../script/DeployEscrow.s.sol";
+import {DeployScript} from "../script/Deploy.s.sol";
+import {DeployGuards} from "../script/DeployGuards.sol";
 import {AgentJobEscrow} from "../src/AgentJobEscrow.sol";
 import {ReputationHook} from "../src/ReputationHook.sol";
+import {AgentPolicyModule} from "../src/AgentPolicyModule.sol";
+import {AgentExecutor} from "../src/AgentExecutor.sol";
+import {EscrowModule} from "../src/EscrowModule.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockReputationRegistry} from "./mocks/MockReputationRegistry.sol";
 import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 
 /// @dev `vm.setEnv` is process-global and Foundry runs tests in parallel, so every env-dependent
-///      scenario lives in the single sequential test below; the other tests never touch env.
+///      scenario (both deploy scripts) lives in the single sequential test below; the other tests
+///      never touch env.
 contract DeployEscrowScriptTest is Test {
     DeployEscrowScript internal script;
+    DeployScript internal coreScript;
 
     address internal operator = makeAddr("operator");
     address internal feeWallet = makeAddr("feeWallet");
@@ -20,6 +27,7 @@ contract DeployEscrowScriptTest is Test {
 
     function setUp() public {
         script = new DeployEscrowScript();
+        coreScript = new DeployScript();
     }
 
     function test_DefaultAddresses() public view {
@@ -66,7 +74,7 @@ contract DeployEscrowScriptTest is Test {
     }
 
     function test_ResolveContract_MissingEnvAndZeroFallback_Reverts() public {
-        vm.expectRevert(abi.encodeWithSelector(DeployEscrowScript.MissingEnv.selector, "AGENTFI_TEST_UNSET_VAR"));
+        vm.expectRevert(abi.encodeWithSelector(DeployGuards.MissingEnv.selector, "AGENTFI_TEST_UNSET_VAR"));
         script.resolveContract("AGENTFI_TEST_UNSET_VAR", address(0));
     }
 
@@ -82,13 +90,31 @@ contract DeployEscrowScriptTest is Test {
         assertEq(script.resolveContract("AGENTFI_TEST_UNSET_VAR", withCode), withCode);
     }
 
-    function test_Run_DefaultsThenOverridesThenValidation() public {
+    function test_Run_EnvScenarios_Sequential() public {
+        // `Deploy.s.sol`: EXECUTOR_FEE_BPS has no default (it used to share FEE_BPS with the escrow).
+        // Checked first, while no scenario has set it (skipped if the shell exports it).
+        if (vm.envOr("EXECUTOR_FEE_BPS", type(uint256).max) == type(uint256).max) {
+            vm.setEnv("EXPECTED_CHAIN_ID", vm.toString(block.chainid));
+            vm.setEnv("PRIVATE_KEY", "0");
+            vm.setEnv("OPERATOR_ADDRESS", vm.toString(operator));
+            vm.setEnv("FEE_WALLET", vm.toString(feeWallet));
+            vm.expectRevert(abi.encodeWithSelector(DeployGuards.MissingEnv.selector, "EXECUTOR_FEE_BPS"));
+            coreScript.readConfig();
+        }
+        _deployEscrowScenarios();
+        _chainGuardScenarios();
+        _signerScenarios();
+        _coreDeployScenarios();
+    }
+
+    function _deployEscrowScenarios() internal {
         vm.setEnv("PRIVATE_KEY", vm.toString(uint256(0xA11CE)));
         vm.setEnv("OPERATOR_ADDRESS", vm.toString(operator));
         vm.setEnv("FEE_WALLET", vm.toString(feeWallet));
         vm.setEnv("TRUSTED_EVALUATOR", vm.toString(trustedEvaluator));
         vm.setEnv("FEE_BPS", "30");
         vm.setEnv("EVALUATOR_FEE_BPS", "0");
+        vm.setEnv("EXPECTED_CHAIN_ID", "84532");
 
         // 1. Base Sepolia: token and both registries resolve from the chain-id defaults, which must have code.
         vm.chainId(84532);
@@ -113,7 +139,8 @@ contract DeployEscrowScriptTest is Test {
         assertEq(hook.minFeedbackBudget(), 1_000_000);
         assertEq(hook.feedbackGasLimit(), 500_000);
         assertEq(hook.identityCallGasLimit(), 50_000);
-        assertEq(hook.feedbackGasRequirement(), 667_937);
+        assertEq(hook.feedbackGasRequirement(), 597_937);
+        assertEq(hook.canonicalBindGasRequirement(), 140_794);
 
         // 2. Explicit env vars override the defaults (and allow any chain); PRIVATE_KEY=0 selects the
         //    CLI signer path (`--account` / `--ledger`), i.e. `vm.startBroadcast()` without a key.
@@ -130,6 +157,7 @@ contract DeployEscrowScriptTest is Test {
         vm.setEnv("FEEDBACK_GAS_LIMIT", "600000");
         vm.setEnv("IDENTITY_CALL_GAS_LIMIT", "60000");
         vm.chainId(31337);
+        vm.setEnv("EXPECTED_CHAIN_ID", "31337");
 
         (escrow, hook) = script.run();
 
@@ -189,6 +217,106 @@ contract DeployEscrowScriptTest is Test {
         vm.setEnv("FEE_BPS", "9994");
         (escrow,) = script.run();
         assertEq(escrow.platformFeeBP() + escrow.evaluatorFeeBP(), 9_999);
+        vm.setEnv("FEE_BPS", "30");
+    }
+
+    /// @dev C2b: `EXPECTED_CHAIN_ID` is mandatory and must match the RPC, for both scripts, before
+    ///      anything is broadcast (`--rpc-url base` instead of `base_sepolia` used to deploy against
+    ///      real USDC with mainnet defaults).
+    function _chainGuardScenarios() internal {
+        vm.setEnv("EXECUTOR_FEE_BPS", "30");
+        vm.chainId(8453); // the RPC answers Base mainnet ...
+        vm.setEnv("EXPECTED_CHAIN_ID", "84532"); // ... but the operator meant Base Sepolia
+        bytes memory wrong = abi.encodeWithSelector(DeployGuards.WrongChain.selector, 84532, 8453);
+        vm.expectRevert(wrong);
+        script.readConfig();
+        vm.expectRevert(wrong);
+        script.run();
+        vm.expectRevert(wrong);
+        coreScript.readConfig();
+        vm.expectRevert(wrong);
+        coreScript.run();
+
+        // Unset (0 is treated as unset: forge cannot unset an env var once a test set it).
+        vm.setEnv("EXPECTED_CHAIN_ID", "0");
+        bytes memory missing = abi.encodeWithSelector(DeployGuards.MissingEnv.selector, "EXPECTED_CHAIN_ID");
+        vm.expectRevert(missing);
+        script.run();
+        vm.expectRevert(missing);
+        coreScript.run();
+
+        vm.setEnv("EXPECTED_CHAIN_ID", "8453");
+        assertEq(script.requireExpectedChain(), 8453);
+        vm.chainId(31337);
+        vm.setEnv("EXPECTED_CHAIN_ID", "31337");
+    }
+
+    /// @dev C2b: a `PRIVATE_KEY` (environment or the auto-loaded `packages/contracts/.env`) that differs
+    ///      from the CLI signer is refused; `PRIVATE_KEY` unset (or 0) uses the CLI signer (keystore path).
+    function _signerScenarios() internal {
+        uint256 key = 0xA11CE;
+        address keySigner = vm.addr(key);
+        address keystoreSigner = makeAddr("keystore-signer");
+        vm.setEnv("PRIVATE_KEY", vm.toString(key));
+
+        // `forge script --account <keystore>` runs the script with tx.origin = the keystore address.
+        bytes memory conflict =
+            abi.encodeWithSelector(DeployGuards.SignerConflict.selector, keystoreSigner, keySigner);
+        vm.prank(keystoreSigner, keystoreSigner);
+        vm.expectRevert(conflict);
+        script.readConfig();
+        vm.prank(keystoreSigner, keystoreSigner);
+        vm.expectRevert(conflict);
+        coreScript.readConfig();
+
+        // The same address on both sides is not a conflict, and no CLI signer (DEFAULT_SENDER) uses the key.
+        vm.prank(keySigner, keySigner);
+        assertEq(script.readConfig().deployerKey, key);
+        assertEq(script.resolveDeployerKey(), key);
+
+        // Keystore path: PRIVATE_KEY unset -> no key, `vm.startBroadcast()` with the CLI signer.
+        vm.setEnv("PRIVATE_KEY", "0");
+        vm.prank(keystoreSigner, keystoreSigner);
+        assertEq(script.readConfig().deployerKey, 0);
+        (AgentJobEscrow escrow,) = script.run();
+        assertEq(escrow.operator(), operator);
+    }
+
+    /// @dev C2b: `Deploy.s.sol` — own `EXECUTOR_FEE_BPS`, keystore signer, legacy `EscrowModule` opt-in.
+    function _coreDeployScenarios() internal {
+        // EXECUTOR_FEE_BPS is independent of the escrow's FEE_BPS.
+        vm.setEnv("FEE_BPS", "15");
+        vm.setEnv("EXECUTOR_FEE_BPS", "25");
+        vm.setEnv("DEPLOY_LEGACY_ESCROW_MODULE", "false");
+        (AgentPolicyModule policy, AgentExecutor executor, EscrowModule legacy) = coreScript.run();
+        assertEq(policy.operator(), operator);
+        assertEq(address(executor.policyModule()), address(policy));
+        assertEq(executor.feeWallet(), feeWallet);
+        assertEq(executor.feeBps(), 25);
+        assertEq(address(legacy), address(0), "the legacy EscrowModule is not deployed by default");
+
+        vm.setEnv("DEPLOY_LEGACY_ESCROW_MODULE", "true");
+        (,, legacy) = coreScript.run();
+        assertTrue(address(legacy) != address(0));
+        assertEq(legacy.operator(), operator);
+        vm.setEnv("DEPLOY_LEGACY_ESCROW_MODULE", "false");
+
+        // PRIVATE_KEY set: broadcasts with the key (no CLI signer in a test).
+        vm.setEnv("PRIVATE_KEY", vm.toString(uint256(0xB0B)));
+        (, executor,) = coreScript.run();
+        assertEq(executor.feeBps(), 25);
+        vm.setEnv("PRIVATE_KEY", "0");
+
+        // Fee bounds: 9 999 deploys, 10 000 is refused before broadcasting.
+        vm.setEnv("EXECUTOR_FEE_BPS", "9999");
+        (, executor,) = coreScript.run();
+        assertEq(executor.feeBps(), 9_999);
+        vm.setEnv("EXECUTOR_FEE_BPS", "10000");
+        vm.expectRevert(abi.encodeWithSelector(DeployScript.InvalidExecutorFee.selector, 10_000));
+        coreScript.run();
+        vm.setEnv("EXECUTOR_FEE_BPS", "0");
+        (, executor,) = coreScript.run();
+        assertEq(executor.feeBps(), 0);
     }
 
     /// @dev Sets `name` to `value` and expects both `readConfig` and `run` to refuse it.

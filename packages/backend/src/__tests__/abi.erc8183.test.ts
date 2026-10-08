@@ -12,7 +12,16 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { getAbiItem, toEventSelector, toFunctionSelector, type Abi, type AbiEvent, type AbiFunction } from 'viem';
+import {
+  getAbiItem,
+  keccak256,
+  toBytes,
+  toEventSelector,
+  toFunctionSelector,
+  type Abi,
+  type AbiEvent,
+  type AbiFunction,
+} from 'viem';
 import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
 import { REPUTATION_HOOK_ABI } from '../abi/ReputationHook.abi.js';
 
@@ -124,10 +133,46 @@ describe('ReputationHook ABI', () => {
       | undefined;
     expect(error?.type).toBe('error');
     expect(error!.inputs.map((i) => `${i.type} ${i.name}`)).toEqual(['uint256 available', 'uint256 required']);
-    for (const name of ['feedbackGasLimit', 'identityCallGasLimit', 'feedbackGasRequirement']) {
+    for (const name of ['feedbackGasLimit', 'identityCallGasLimit', 'feedbackGasRequirement', 'canonicalBindGasRequirement']) {
       const item = getAbiItem({ abi: HOOK_ABI, name }) as AbiFunction | undefined;
       expect(item?.type, `${name} missing from the generated ABI`).toBe('function');
       expect(item?.outputs.map((o) => o.type)).toEqual(['uint256']);
+    }
+  });
+
+  it('exposes the D9 verdict reason: the only reject reason that writes negative feedback (C2b)', () => {
+    const item = getAbiItem({ abi: HOOK_ABI, name: 'REASON_QUALITY_REJECTED' }) as AbiFunction | undefined;
+    expect(item?.type).toBe('function');
+    expect(item?.outputs.map((o) => o.type)).toEqual(['bytes32']);
+    // The value the evaluator must send as `reject(jobId, reason, …)` for a quality verdict (C3d).
+    expect(keccak256(toBytes('agentfi.quality-rejected'))).toBe(
+      '0x0ec256357691b70fc22a1ea701b9b2c298924a0f2ba5275b8d2d638dbc64e281',
+    );
+    // A contest is not a verdict: its reason is distinct and writes nothing (FeedbackSkipped "not-verdict").
+    expect(keccak256(toBytes('agentfi.contested'))).not.toBe(keccak256(toBytes('agentfi.quality-rejected')));
+  });
+
+  it('declares the C2b canonical-identity and penalty surface', () => {
+    const events: Record<string, string[]> = {
+      CanonicalAgentIdSet: ['address indexed provider', 'uint256 indexed agentId', 'uint256 indexed jobId'],
+      AgentIdNotVerified: ['uint256 indexed jobId', 'address indexed provider', 'uint256 indexed agentId'],
+      AgentPenalized: ['uint256 indexed agentId', 'uint256 indexed jobId', 'uint256 penalties'],
+      PenaltiesCleared: ['uint256 indexed agentId', 'uint256 cleared'],
+    };
+    for (const [name, inputs] of Object.entries(events)) {
+      const item = getAbiItem({ abi: HOOK_ABI, name }) as AbiEvent | undefined;
+      expect(item?.type, `${name} missing from the generated ABI`).toBe('event');
+      expect(item!.inputs.map((i) => `${i.type}${i.indexed ? ' indexed' : ''} ${i.name}`)).toEqual(inputs);
+    }
+    const functions: Record<string, string> = {
+      canonicalAgentId: 'canonicalAgentId(address)',
+      penalties: 'penalties(uint256)',
+      clearPenalties: 'clearPenalties(uint256)',
+    };
+    for (const [name, signature] of Object.entries(functions)) {
+      const item = getAbiItem({ abi: HOOK_ABI, name }) as AbiFunction | undefined;
+      expect(item?.type, `${name} missing from the generated ABI`).toBe('function');
+      expect(toFunctionSelector(item!)).toBe(toFunctionSelector(signature));
     }
   });
 });

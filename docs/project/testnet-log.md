@@ -6,12 +6,12 @@
 
 | Date | Contract | Address | Deploy tx | Deployer | Notes |
 |---|---|---|---|---|---|
-| pending | `AgentPolicyModule` | | | | `script/Deploy.s.sol` (new `Action` struct pair) |
-| pending | `AgentExecutor` | | | | same broadcast; `FEE_BPS=30` |
-| pending | `AgentJobEscrow` | | | | `script/DeployEscrow.s.sol`; token USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e`; `platformFeeBP=30`, `evaluatorFeeBP=0` |
-| pending | `ReputationHook` | | | | bound to the escrow; `trustedEvaluator` = backend evaluator EOA; `minFeedbackBudget=1000000`; `feedbackGasLimit=500000`, `identityCallGasLimit=50000` (R3c) |
+| pending | `AgentPolicyModule` | | | | `script/Deploy.s.sol` (new `Action` struct pair; `EXPECTED_CHAIN_ID=84532`; legacy `EscrowModule` not deployed unless `DEPLOY_LEGACY_ESCROW_MODULE=true`) |
+| pending | `AgentExecutor` | | | | same broadcast; `EXECUTOR_FEE_BPS=30` (its own variable since C2b; `FEE_BPS` is the escrow's) |
+| pending | `AgentJobEscrow` | | | | `script/DeployEscrow.s.sol` (`EXPECTED_CHAIN_ID=84532`); token USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e`; `platformFeeBP=30`, `evaluatorFeeBP=0` |
+| pending | `ReputationHook` | | | | bound to the escrow; `trustedEvaluator` = backend evaluator EOA; `minFeedbackBudget=1000000`; `feedbackGasLimit=500000`, `identityCallGasLimit=50000` (R3c); C2b: `feedbackGasRequirement()` = 597937, `canonicalBindGasRequirement()` = 140794, `REASON_QUALITY_REJECTED()` = `keccak256("agentfi.quality-rejected")` |
 
-Constructor parameters actually used (fill in after the broadcast): `OPERATOR_ADDRESS`, `FEE_WALLET`, `TRUSTED_EVALUATOR`, `FEE_BPS`, `EVALUATOR_FEE_BPS`, `MIN_FEEDBACK_BUDGET`, `FEEDBACK_GAS_LIMIT` (default `500000`), `IDENTITY_CALL_GAS_LIMIT` (default `50000`), `REPUTATION_REGISTRY_ADDRESS` (default `0x8004B663056A597Dffe9eCcC1965A193B7388713`), `IDENTITY_REGISTRY_ADDRESS` (default `0x8004A818BFB912233c491871b3d84c89A494BD9e`).
+Constructor parameters actually used (fill in after the broadcast): `EXPECTED_CHAIN_ID` (mandatory, both scripts), `OPERATOR_ADDRESS`, `FEE_WALLET`, `EXECUTOR_FEE_BPS` (`Deploy.s.sol`), `TRUSTED_EVALUATOR`, `FEE_BPS`, `EVALUATOR_FEE_BPS`, `MIN_FEEDBACK_BUDGET`, `FEEDBACK_GAS_LIMIT` (default `500000`), `IDENTITY_CALL_GAS_LIMIT` (default `50000`), `REPUTATION_REGISTRY_ADDRESS` (default `0x8004B663056A597Dffe9eCcC1965A193B7388713`), `IDENTITY_REGISTRY_ADDRESS` (default `0x8004A818BFB912233c491871b3d84c89A494BD9e`).
 
 ## 2. C4 runbook (owner runs it; the agent prepared it)
 
@@ -41,7 +41,7 @@ Prerequisites on the maintainer's machine (checked 2026-10-06): Foundry 1.7.1 at
    forge script script/DeployEscrow.s.sol --rpc-url base_sepolia --account agentfi-deployer --broadcast --verify --etherscan-api-key $BASESCAN_API_KEY
    ```
 
-   Leave `FEEDBACK_GAS_LIMIT` (500000) and `IDENTITY_CALL_GAS_LIMIT` (50000) unset unless there is a reason to change them (R3c; the script refuses values outside 250000–2000000 / 20000–200000 before broadcasting). The script prints `Hook gas requirement: 667937` with the defaults.
+   Leave `FEEDBACK_GAS_LIMIT` (500000) and `IDENTITY_CALL_GAS_LIMIT` (50000) unset unless there is a reason to change them (R3c; the script refuses values outside 250000–2000000 / 20000–200000 before broadcasting). The script prints `Hook gas requirement: 597937` and `Hook bind requirement: 140794` with the defaults (C2b; 667937 before).
 
 6. **Checks.** Run the `cast call` list from the deployment doc ("Post-deployment checks") and `scripts/verify-deployment.sh https://sepolia.base.org <policyModule> <executor> <operator> <feeWallet> 30`.
 7. **Record.** Fill section 1 of this file, update `STATE.md` §3 and the address registry in `docs/operations/contract-deployment.md`, and set in the backend `.env`: `POLICY_MODULE_ADDRESS_84532`, `EXECUTOR_ADDRESS_84532`, `AGENT_JOB_ESCROW_ADDRESS_84532`, `REPUTATION_HOOK_ADDRESS_84532`, `ESCROW_EVALUATOR_PRIVATE_KEY`, `ALCHEMY_API_KEY`.
