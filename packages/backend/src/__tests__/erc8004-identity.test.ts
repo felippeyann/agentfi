@@ -330,9 +330,11 @@ function makeDeps(seed: { jobs?: Row[]; identities?: Row[]; txs?: Row[] } = {}) 
   const settlement = { add: vi.fn().mockResolvedValue(undefined) };
   const receipts = new Map<string, Log[]>();
   const getTransactionReceipt = vi.fn(async ({ hash }: { hash: Hex }) => ({ status: 'success', logs: receipts.get(hash) ?? [] }));
+  /** On-chain status `getJob` reports (tests set it; settlement tests run against Submitted). */
+  const chain: { status: number } = { status: CHAIN_JOB_STATUS.Submitted };
   const readContract = vi.fn(async ({ functionName }: { functionName: string }) => {
     if (functionName === 'token') return USDC;
-    if (functionName === 'getJob') return { status: CHAIN_JOB_STATUS.Submitted, budget: BUDGET };
+    if (functionName === 'getJob') return { status: chain.status, budget: BUDGET };
     throw new Error(`unexpected read ${functionName}`);
   });
   const signer = {
@@ -387,7 +389,7 @@ function makeDeps(seed: { jobs?: Row[]; identities?: Row[]; txs?: Row[] } = {}) 
     return confirm(id);
   }
 
-  return { ...store, deps, queue, settlement, getTransactionReceipt, signer, logger, receipts, confirm, txFor, fundConfirmed };
+  return { ...store, deps, queue, settlement, getTransactionReceipt, signer, logger, receipts, confirm, txFor, fundConfirmed, chain };
 }
 
 function registeredIdentity(overrides: Partial<Row> = {}): Row {
@@ -794,6 +796,7 @@ describe('payment recovery of a job whose submit is deferred', () => {
 
   it('keeps the C3 behaviour for a FUNDED job without a deferred submit', async () => {
     const h = makeDeps({ jobs: [fundedJob({ status: 'PAYMENT_PENDING', onChainStatus: 'FUNDED', providerAgentIdStatus: 'BOUND' })] });
+    h.chain.status = CHAIN_JOB_STATUS.Funded; // C3c: handed back only when the chain confirms nothing was submitted
     expect(await recoverErc8183Job(h.deps, { id: 'job-1', onChainStatus: 'FUNDED' })).toBe('returnedToAccepted');
     expect(h.jobs.get('job-1')!['status']).toBe('ACCEPTED');
   });

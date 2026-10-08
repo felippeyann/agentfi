@@ -146,47 +146,72 @@ function makeLog(abi: Abi, eventName: string, args: Record<string, unknown>, add
   } as unknown as Log;
 }
 
+/**
+ * Prisma `where` matcher for the stand-in: equality, `in`, `notIn`, `not`,
+ * `lt`, `lte`, `startsWith`, `OR`, `AND` — the shapes the orchestrator issues.
+ */
+function matchesWhere(row: Record<string, unknown>, where: Record<string, unknown> | undefined): boolean {
+  if (!where) return true;
+  for (const [key, cond] of Object.entries(where)) {
+    if (key === 'OR') {
+      if (!(cond as Record<string, unknown>[]).some((w) => matchesWhere(row, w))) return false;
+      continue;
+    }
+    if (key === 'AND') {
+      if (!(cond as Record<string, unknown>[]).every((w) => matchesWhere(row, w))) return false;
+      continue;
+    }
+    const value = row[key] ?? null;
+    if (cond !== null && typeof cond === 'object' && !(cond instanceof Date)) {
+      const c = cond as { in?: unknown[]; notIn?: unknown[]; not?: unknown; lt?: Date; lte?: Date; startsWith?: string };
+      if ('in' in c && !c.in!.includes(value)) return false;
+      if ('notIn' in c && c.notIn!.includes(value)) return false;
+      if ('not' in c && value === (c.not ?? null)) return false;
+      if ('lt' in c && !(value instanceof Date && value < c.lt!)) return false;
+      if ('lte' in c && !(value instanceof Date && value <= c.lte!)) return false;
+      if ('startsWith' in c && !(typeof value === 'string' && value.startsWith(c.startsWith!))) return false;
+    } else if (value !== cond) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Applies `orderBy: { createdAt }` to rows kept in insertion order (rows carry no timestamps). */
+function ordered<T>(rows: T[], orderBy?: { createdAt?: 'asc' | 'desc' }): T[] {
+  return orderBy?.createdAt === 'desc' ? [...rows].reverse() : rows;
+}
+
 /** In-memory Prisma stand-in covering the queries the orchestrator issues. */
 function makeDb(jobs: JobRow[], txs: TxRow[] = []) {
   const jobTable = new Map(jobs.map((j) => [j.id, j]));
   const txTable = new Map(txs.map((t) => [t.id, t]));
   let txSeq = txTable.size;
 
-  const matchesJobWhere = (row: JobRow, where: Record<string, unknown>): boolean => {
-    for (const [key, cond] of Object.entries(where)) {
-      const value = row[key];
-      if (cond && typeof cond === 'object' && !(cond instanceof Date)) {
-        const c = cond as { in?: unknown[]; lt?: Date; startsWith?: string };
-        if (c.in && !c.in.includes(value)) return false;
-        if (c.lt && !((value as Date) < c.lt)) return false;
-      } else if (value !== cond) {
-        return false;
-      }
-    }
-    return true;
-  };
+  type Args = { where?: Record<string, unknown>; data?: Record<string, unknown>; take?: number; orderBy?: { createdAt?: 'asc' | 'desc' } };
 
   const db = {
     job: {
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) => jobTable.get(where.id) ?? null),
+      findFirst: vi.fn(async ({ where, orderBy }: Args) => ordered([...jobTable.values()], orderBy).find((row) => matchesWhere(row, where)) ?? null),
       update: vi.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
         const row = jobTable.get(where.id);
         if (!row) throw new Error(`job ${where.id} not found`);
         Object.assign(row, data);
         return row;
       }),
-      updateMany: vi.fn(async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+      updateMany: vi.fn(async ({ where, data }: Args) => {
         let count = 0;
         for (const row of jobTable.values()) {
-          if (matchesJobWhere(row, where)) {
+          if (matchesWhere(row, where)) {
             Object.assign(row, data);
             count++;
           }
         }
         return { count };
       }),
-      findMany: vi.fn(async ({ where, take }: { where: Record<string, unknown>; take?: number }) => {
-        const rows = [...jobTable.values()].filter((row) => matchesJobWhere(row, where));
+      findMany: vi.fn(async ({ where, take }: Args) => {
+        const rows = [...jobTable.values()].filter((row) => matchesWhere(row, where));
         return typeof take === 'number' ? rows.slice(0, take) : rows;
       }),
     },
@@ -195,14 +220,20 @@ function makeDb(jobs: JobRow[], txs: TxRow[] = []) {
         if (where.id) return txTable.get(where.id) ?? null;
         return [...txTable.values()].find((t) => t.intentId === where.intentId) ?? null;
       }),
-      findFirst: vi.fn(async ({ where }: { where: { intentId: { startsWith: string } } }) => {
-        const rows = [...txTable.values()].filter((t) => t.intentId?.startsWith(where.intentId.startsWith));
-        return rows[rows.length - 1] ?? null;
-      }),
+      // Default order: newest first (the orchestrator always asks for the latest attempt).
+      findFirst: vi.fn(async ({ where, orderBy }: Args) =>
+        ordered([...txTable.values()], orderBy ?? { createdAt: 'desc' }).find((t) => matchesWhere(t, where)) ?? null,
+      ),
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
         const row = { id: `tx-${++txSeq}`, txHash: null, ...data } as unknown as TxRow;
         txTable.set(row.id, row);
         return { id: row.id };
+      }),
+      update: vi.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+        const row = txTable.get(where.id);
+        if (!row) throw new Error(`transaction ${where.id} not found`);
+        Object.assign(row, data);
+        return row;
       }),
     },
   };
@@ -211,14 +242,23 @@ function makeDb(jobs: JobRow[], txs: TxRow[] = []) {
 
 function makeDeps(
   jobs: JobRow[],
-  opts: { txs?: TxRow[]; chainStatus?: number; receiptLogs?: Log[]; settleLogs?: Log[]; settleStatus?: 'success' | 'reverted' } = {},
+  opts: {
+    txs?: TxRow[];
+    chainStatus?: number;
+    chainBudget?: bigint;
+    allowance?: bigint;
+    receiptLogs?: Log[];
+    settleLogs?: Log[];
+    settleStatus?: 'success' | 'reverted';
+  } = {},
 ) {
   const store = makeDb(jobs, opts.txs);
   const queue = { add: vi.fn().mockResolvedValue(undefined) };
   const settlement = { add: vi.fn().mockResolvedValue(undefined) };
   const readContract = vi.fn(async ({ functionName }: { functionName: string }) => {
     if (functionName === 'token') return USDC;
-    if (functionName === 'getJob') return { status: opts.chainStatus ?? CHAIN_JOB_STATUS.Submitted, budget: BUDGET };
+    if (functionName === 'getJob') return { status: opts.chainStatus ?? CHAIN_JOB_STATUS.Submitted, budget: opts.chainBudget ?? BUDGET };
+    if (functionName === 'allowance') return opts.allowance ?? 0n;
     throw new Error(`unexpected read ${functionName}`);
   });
   const getTransactionReceipt = vi.fn(async () => ({ status: 'success', logs: opts.receiptLogs ?? [] }));
@@ -231,19 +271,22 @@ function makeDeps(
   const releaseJobEscrow = vi.fn().mockResolvedValue(undefined);
   const finalize = vi.fn().mockResolvedValue(undefined);
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  const getBalance = vi.fn(async () => 10n ** 18n);
+  const alert = vi.fn();
   const deps: Erc8183Deps = {
     db: store.db,
     queue: queue as never,
     settlement,
-    publicClient: () => ({ readContract, getTransactionReceipt }) as never,
+    publicClient: () => ({ readContract, getTransactionReceipt, getBalance }) as never,
     evaluatorSigner: () => signer as never,
     config,
     releaseJobEscrow,
     finalize,
     logger,
     now: () => NOW,
+    alert,
   };
-  return { ...store, deps, queue, settlement, readContract, getTransactionReceipt, signer, releaseJobEscrow, finalize, logger };
+  return { ...store, deps, queue, settlement, readContract, getTransactionReceipt, getBalance, signer, releaseJobEscrow, finalize, logger, alert };
 }
 
 /** Transaction row for a step, as `enqueueStep` would have created it. */
@@ -430,9 +473,10 @@ describe('onEscrowTxOutcome — funding chain happy path', () => {
 });
 
 describe('onEscrowTxOutcome — failures and cancellation', () => {
-  it('a step REVERTED before FUNDED → onChainStatus FAILED, Job FAILED, reservation released, no next step', async () => {
+  it('a step REVERTED before FUNDED (chain still Open, no allowance) → onChainStatus FAILED, Job FAILED, reservation released, no next step', async () => {
     const { deps, jobs, queue, releaseJobEscrow } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'BUDGET_SET', status: 'PENDING' })], {
       txs: [stepTx('approve', 'job-1', { status: 'REVERTED' })],
+      chainStatus: CHAIN_JOB_STATUS.Open,
     });
 
     await onEscrowTxOutcome(deps, { transactionId: 'tx-approve', status: 'REVERTED', error: 'execution reverted' });
@@ -473,9 +517,10 @@ describe('onEscrowTxOutcome — failures and cancellation', () => {
     expect(settlement.add).toHaveBeenCalledWith({ jobId: 'job-1', action: 'reject', reason: 'cancelled' });
   });
 
-  it('submit FAILED → job back to ACCEPTED with escrowError, onChainStatus stays FUNDED, reservation kept', async () => {
+  it('submit FAILED (chain still Funded) → job back to ACCEPTED with escrowError, onChainStatus stays FUNDED, reservation kept', async () => {
     const { deps, jobs, releaseJobEscrow, finalize } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'FUNDED', status: 'PAYMENT_PENDING' })], {
       txs: [stepTx('submit', 'job-1', { status: 'FAILED', txHash: null })],
+      chainStatus: CHAIN_JOB_STATUS.Funded,
     });
 
     await onEscrowTxOutcome(deps, { transactionId: 'tx-submit', status: 'FAILED', error: 'Agent paused before submission' });
@@ -540,13 +585,23 @@ describe('enqueueSubmit + submit confirmation', () => {
 // ── Cancellation request ───────────────────────────────────────────────────
 
 describe('requestCancellationReject', () => {
-  it('schedules an evaluator reject only when the budget is locked (FUNDED/SUBMITTED)', async () => {
-    const { deps, settlement } = makeDeps([escrowJob({ id: 'funded', onChainStatus: 'FUNDED' }), escrowJob({ id: 'open', onChainStatus: 'OPEN' }), escrowJob({ id: 'legacy', escrowKind: null })]);
+  it('schedules an evaluator reject for every job that exists on-chain and is not final (the reject reads the chain)', async () => {
+    const { deps, settlement } = makeDeps([
+      escrowJob({ id: 'funded', onChainJobId: '7', onChainStatus: 'FUNDED' }),
+      // C3c: the DB may lag the chain (a fund whose monitor was lost) — the reject action decides from getJob.
+      escrowJob({ id: 'approved', onChainJobId: '8', onChainStatus: 'APPROVED' }),
+      escrowJob({ id: 'creating', onChainJobId: null, onChainStatus: 'CREATING' }),
+      escrowJob({ id: 'rejected', onChainJobId: '9', onChainStatus: 'REJECTED' }),
+      escrowJob({ id: 'legacy', escrowKind: null }),
+    ]);
     expect(await requestCancellationReject(deps, { jobId: 'funded', reason: 'provider-failed' })).toBe(true);
     expect(settlement.add).toHaveBeenCalledWith({ jobId: 'funded', action: 'reject', reason: 'provider-failed' });
-    expect(await requestCancellationReject(deps, { jobId: 'open', reason: 'cancelled' })).toBe(false);
+    expect(await requestCancellationReject(deps, { jobId: 'approved', reason: 'cancelled' })).toBe(true);
+    expect(settlement.add).toHaveBeenCalledWith({ jobId: 'approved', action: 'reject', reason: 'cancelled' });
+    expect(await requestCancellationReject(deps, { jobId: 'creating', reason: 'cancelled' })).toBe(false);
+    expect(await requestCancellationReject(deps, { jobId: 'rejected', reason: 'cancelled' })).toBe(false);
     expect(await requestCancellationReject(deps, { jobId: 'legacy', reason: 'cancelled' })).toBe(false);
-    expect(settlement.add).toHaveBeenCalledTimes(1);
+    expect(settlement.add).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -805,24 +860,30 @@ describe('processSettlementJob — reject (cancellation) and claimRefund (expiry
 // ── Expiry sweep + recovery ────────────────────────────────────────────────
 
 describe('sweepExpiredEscrows', () => {
-  it('enqueues claimRefund only for FUNDED/SUBMITTED escrow jobs past expiresAt', async () => {
+  it('C3c: enqueues claimRefund for every on-chain escrow job past expiresAt that is not final, whatever the DB step', async () => {
     const past = new Date(NOW.getTime() - 1000);
     const future = new Date(NOW.getTime() + 1000);
     const { deps, settlement } = makeDeps([
-      escrowJob({ id: 'expired-funded', onChainStatus: 'FUNDED', expiresAt: past }),
-      escrowJob({ id: 'expired-submitted', onChainStatus: 'SUBMITTED', expiresAt: past }),
-      escrowJob({ id: 'expired-settling', onChainStatus: 'SETTLING', expiresAt: past }),
-      escrowJob({ id: 'expired-open', onChainStatus: 'OPEN', expiresAt: past }),
-      escrowJob({ id: 'live', onChainStatus: 'FUNDED', expiresAt: future }),
-      escrowJob({ id: 'legacy', escrowKind: null, onChainStatus: 'FUNDED', expiresAt: past }),
+      escrowJob({ id: 'expired-funded', onChainJobId: '1', onChainStatus: 'FUNDED', expiresAt: past }),
+      escrowJob({ id: 'expired-submitted', onChainJobId: '2', onChainStatus: 'SUBMITTED', expiresAt: past }),
+      // The fund monitor was lost: the DB still says APPROVED while the chain may be Funded.
+      escrowJob({ id: 'expired-approved', onChainJobId: '3', onChainStatus: 'APPROVED', expiresAt: past }),
+      // Unwound as FAILED but the fund may have mined afterwards.
+      escrowJob({ id: 'expired-failed', status: 'FAILED', onChainJobId: '4', onChainStatus: 'FAILED', expiresAt: past }),
+      escrowJob({ id: 'expired-settling', onChainJobId: '5', onChainStatus: 'SETTLING', expiresAt: past }),
+      escrowJob({ id: 'expired-final', onChainJobId: '6', onChainStatus: 'EXPIRED', expiresAt: past }),
+      escrowJob({ id: 'expired-closed', onChainJobId: '10', onChainStatus: 'EXPIRED_UNFUNDED', expiresAt: past }),
+      escrowJob({ id: 'expired-no-chain-job', onChainJobId: null, onChainStatus: 'CREATING', expiresAt: past }),
+      escrowJob({ id: 'live', onChainJobId: '7', onChainStatus: 'FUNDED', expiresAt: future }),
+      escrowJob({ id: 'legacy', escrowKind: null, onChainJobId: '8', onChainStatus: 'FUNDED', expiresAt: past }),
     ]);
 
     const result = await processSettlementJob(deps, { data: { jobId: '*', action: 'sweep' } });
 
-    expect(result).toEqual({ outcome: 'swept', enqueued: 2 });
-    expect(settlement.add).toHaveBeenCalledTimes(2);
-    expect(settlement.add).toHaveBeenCalledWith({ jobId: 'expired-funded', action: 'claimRefund' });
-    expect(settlement.add).toHaveBeenCalledWith({ jobId: 'expired-submitted', action: 'claimRefund' });
+    expect(result).toEqual({ outcome: 'swept', enqueued: 4 });
+    expect(settlement.add.mock.calls.map((call) => (call[0] as { jobId: string }).jobId).sort()).toEqual(
+      ['expired-approved', 'expired-failed', 'expired-funded', 'expired-submitted'].sort(),
+    );
     expect(await sweepExpiredEscrows({ ...deps, now: () => new Date(0) })).toBe(0);
   });
 });
@@ -839,12 +900,15 @@ describe('recoverErc8183Job (payment-recovery branch)', () => {
     expect(releaseJobEscrow).not.toHaveBeenCalled();
   });
 
-  it('FUNDED with a dead submit → back to ACCEPTED; with an in-flight submit → left alone', async () => {
-    const dead = makeDeps([escrowJob({ onChainStatus: 'FUNDED', status: 'PAYMENT_PENDING' })], { txs: [stepTx('submit', 'job-1', { status: 'FAILED', error: 'rpc down' })] });
+  it('FUNDED with a dead submit (chain still Funded) → back to ACCEPTED; with an in-flight submit → left alone', async () => {
+    const dead = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'FUNDED', status: 'PAYMENT_PENDING' })], {
+      txs: [stepTx('submit', 'job-1', { status: 'FAILED', error: 'rpc down' })],
+      chainStatus: CHAIN_JOB_STATUS.Funded,
+    });
     expect(await recoverErc8183Job(dead.deps, { id: 'job-1', onChainStatus: 'FUNDED' })).toBe('returnedToAccepted');
     expect(dead.jobs.get('job-1')).toMatchObject({ status: 'ACCEPTED', escrowError: 'Recovery: submit FAILED (rpc down)' });
 
-    const orphan = makeDeps([escrowJob({ onChainStatus: 'FUNDED', status: 'PAYMENT_PENDING' })]);
+    const orphan = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'FUNDED', status: 'PAYMENT_PENDING' })], { chainStatus: CHAIN_JOB_STATUS.Funded });
     expect(await recoverErc8183Job(orphan.deps, { id: 'job-1', onChainStatus: 'FUNDED' })).toBe('returnedToAccepted');
 
     const inFlight = makeDeps([escrowJob({ onChainStatus: 'FUNDED', status: 'PAYMENT_PENDING' })], { txs: [stepTx('submit', 'job-1', { status: 'SUBMITTED' })] });

@@ -148,6 +148,8 @@ beforeEach(() => {
   escrowMock.queueOnChainEscrowLock.mockResolvedValue(null);
   reputationMock.recordJobOutcome.mockResolvedValue(undefined);
   mockDb.job.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => escrowJob(data));
+  // C3c: PATCH transitions are conditional (`updateMany where status = <read>`); default: this request wins.
+  mockDb.job.updateMany.mockReset().mockResolvedValue({ count: 1 });
   mockDb.job.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'job-1', ...data, escrowKind: null }));
 });
 
@@ -269,29 +271,61 @@ describe('PATCH /v1/jobs/:id on an ERC-8183 job', () => {
     expect(mockDb.job.update).not.toHaveBeenCalled();
   });
 
-  it('ACCEPTED succeeds once FUNDED', async () => {
+  it('ACCEPTED succeeds once FUNDED — conditional on the read status AND on the budget still being FUNDED (C3c)', async () => {
     mockDb.job.findUnique.mockResolvedValue(escrowJob({ onChainStatus: 'FUNDED' }));
-    mockDb.job.update.mockResolvedValue(escrowJob({ status: 'ACCEPTED' }));
     const app = await buildApp(PROVIDER.id);
 
     const res = await patch(app, { status: 'ACCEPTED' });
 
     expect(res.statusCode).toBe(200);
-    expect(mockDb.job.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'ACCEPTED' } }));
+    expect(mockDb.job.updateMany).toHaveBeenCalledWith({
+      where: { id: 'job-1', status: 'PENDING', onChainStatus: 'FUNDED' },
+      data: { status: 'ACCEPTED' },
+    });
+  });
+
+  it('C3c: a transition that lost a race answers 409 JOB_STATUS_CONFLICT and runs none of its side effects', async () => {
+    mockDb.job.findUnique
+      .mockResolvedValueOnce(escrowJob({ status: 'ACCEPTED' }))
+      .mockResolvedValueOnce(escrowJob({ status: 'PAYMENT_PENDING' }));
+    mockDb.job.updateMany.mockResolvedValue({ count: 0 });
+    const app = await buildApp(PROVIDER.id);
+
+    const res = await patch(app, { status: 'COMPLETED', result: { answer: 1 } });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ error: 'JOB_STATUS_CONFLICT', status: 'PAYMENT_PENDING' });
+    expect(runtimeMock.enqueueSubmit).not.toHaveBeenCalled();
+    expect(mockDb.job.update).not.toHaveBeenCalled();
+    expect(escrowMock.releaseJobEscrow).not.toHaveBeenCalled();
+    expect(runtimeMock.requestCancellationReject).not.toHaveBeenCalled();
+  });
+
+  it('C3c: a cancellation that lost a race releases nothing and schedules no reject', async () => {
+    mockDb.job.findUnique
+      .mockResolvedValueOnce(escrowJob({ status: 'ACCEPTED', onChainStatus: 'FUNDED' }))
+      .mockResolvedValueOnce(escrowJob({ status: 'PAYMENT_PENDING', onChainStatus: 'FUNDED' }));
+    mockDb.job.updateMany.mockResolvedValue({ count: 0 });
+    const app = await buildApp(REQUESTER.id);
+
+    const res = await patch(app, { status: 'CANCELLED' });
+
+    expect(res.statusCode).toBe(409);
+    expect(escrowMock.releaseJobEscrow).not.toHaveBeenCalled();
+    expect(runtimeMock.requestCancellationReject).not.toHaveBeenCalled();
   });
 
   it('paid COMPLETED → PAYMENT_PENDING + provider submit; the legacy direct transfer is never fired', async () => {
     const result = { answer: 42 };
     mockDb.job.findUnique
-      .mockResolvedValueOnce(escrowJob({ status: 'ACCEPTED' }))
-      .mockResolvedValueOnce(escrowJob({ status: 'PAYMENT_PENDING', result }));
-    mockDb.job.update.mockResolvedValue(escrowJob({ status: 'PAYMENT_PENDING', result }));
+      .mockResolvedValue(escrowJob({ status: 'PAYMENT_PENDING', result }))
+      .mockResolvedValueOnce(escrowJob({ status: 'ACCEPTED' }));
     const app = await buildApp(PROVIDER.id);
 
     const res = await patch(app, { status: 'COMPLETED', result });
 
     expect(res.statusCode).toBe(200);
-    expect(mockDb.job.update).toHaveBeenCalledWith({ where: { id: 'job-1' }, data: { status: 'PAYMENT_PENDING', result } });
+    expect(mockDb.job.updateMany).toHaveBeenCalledWith({ where: { id: 'job-1', status: 'ACCEPTED' }, data: { status: 'PAYMENT_PENDING', result } });
     expect(runtimeMock.enqueueSubmit).toHaveBeenCalledWith({ jobId: 'job-1', result });
     expect(paymentMock.executeA2APayment).not.toHaveBeenCalled();
     expect(escrowMock.markEscrowReleased).not.toHaveBeenCalled();
@@ -302,11 +336,10 @@ describe('PATCH /v1/jobs/:id on an ERC-8183 job', () => {
     const result = { answer: 42 };
     const deferredAt = new Date('2026-10-07T12:00:00.000Z');
     mockDb.job.findUnique
-      .mockResolvedValueOnce(escrowJob({ status: 'ACCEPTED', providerAgentIdStatus: 'BINDING', providerAgentId: '9598' }))
-      .mockResolvedValueOnce(
+      .mockResolvedValue(
         escrowJob({ status: 'PAYMENT_PENDING', result, providerAgentIdStatus: 'BINDING', providerAgentId: '9598', deferredSubmitAt: deferredAt }),
-      );
-    mockDb.job.update.mockResolvedValue(escrowJob({ status: 'PAYMENT_PENDING', result }));
+      )
+      .mockResolvedValueOnce(escrowJob({ status: 'ACCEPTED', providerAgentIdStatus: 'BINDING', providerAgentId: '9598' }));
     runtimeMock.enqueueSubmit.mockResolvedValue({ deferred: true });
     const app = await buildApp(PROVIDER.id);
 
@@ -321,7 +354,7 @@ describe('PATCH /v1/jobs/:id on an ERC-8183 job', () => {
     });
   });
 
-  it('a submit that cannot be enqueued returns the job to ACCEPTED and answers 503', async () => {
+  it('a submit that cannot be enqueued answers 503; the route never writes ACCEPTED itself (enqueueSubmit hands back only without a live submit, C3c)', async () => {
     mockDb.job.findUnique.mockResolvedValueOnce(escrowJob({ status: 'ACCEPTED' }));
     runtimeMock.enqueueSubmit.mockRejectedValue(new Error('no on-chain id'));
     const app = await buildApp(PROVIDER.id);
@@ -330,10 +363,7 @@ describe('PATCH /v1/jobs/:id on an ERC-8183 job', () => {
 
     expect(res.statusCode).toBe(503);
     expect(res.json()).toMatchObject({ error: 'ESCROW_SUBMIT_FAILED' });
-    expect(mockDb.job.update).toHaveBeenLastCalledWith({
-      where: { id: 'job-1' },
-      data: { status: 'ACCEPTED', escrowError: expect.stringContaining('no on-chain id') },
-    });
+    expect(mockDb.job.update).not.toHaveBeenCalled();
   });
 
   it('requester CANCELLED while FUNDED → reservation released now, evaluator reject scheduled', async () => {
