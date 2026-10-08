@@ -117,6 +117,19 @@ describe('ReputationHook ABI', () => {
     const item = getAbiItem({ abi: HOOK_ABI, name: 'FeedbackSkipped' }) as AbiEvent;
     expect(item.inputs.map((i) => i.type)).toEqual(['uint256', 'bytes32']);
   });
+
+  it('declares the R3c gas guard error and the gas-limit getters read by the post-deploy checks', () => {
+    const error = getAbiItem({ abi: HOOK_ABI, name: 'InsufficientGasForFeedback' }) as
+      | { type: string; inputs: ReadonlyArray<{ type: string; name?: string }> }
+      | undefined;
+    expect(error?.type).toBe('error');
+    expect(error!.inputs.map((i) => `${i.type} ${i.name}`)).toEqual(['uint256 available', 'uint256 required']);
+    for (const name of ['feedbackGasLimit', 'identityCallGasLimit', 'feedbackGasRequirement']) {
+      const item = getAbiItem({ abi: HOOK_ABI, name }) as AbiFunction | undefined;
+      expect(item?.type, `${name} missing from the generated ABI`).toBe('function');
+      expect(item?.outputs.map((o) => o.type)).toEqual(['uint256']);
+    }
+  });
 });
 
 describe('generated ABI files match the Foundry artifacts (when built locally)', () => {

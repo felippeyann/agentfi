@@ -74,3 +74,63 @@ contract InvalidOpcodeRegistry {
         }
     }
 }
+
+/// @dev Registry whose `giveFeedback` loops forever: it consumes whatever gas it is given (R3c: a
+///      third-party registry upgraded to burn gas).
+contract GasBurningRegistry {
+    fallback() external {
+        assembly {
+            for {} 1 {} {}
+        }
+    }
+}
+
+/// @dev Registry that needs almost all of the forwarded gas and then succeeds: it burns gas down to
+///      `LEAVE` and records the call (one SSTORE). Exercises the hook's accounting after the call.
+contract GasHungryRegistry {
+    uint256 internal constant LEAVE = 30_000;
+    uint256 public callCount;
+
+    fallback() external {
+        while (gasleft() > LEAVE) {}
+        callCount++;
+    }
+}
+
+/// @dev Registry that accepts any payload for almost no gas (counts calls only), so huge feedback
+///      URIs can be tested without the storage cost of `MockReputationRegistry`.
+contract CountingRegistry {
+    uint256 public callCount;
+
+    fallback() external {
+        callCount++;
+    }
+}
+
+/// @dev Registry whose `giveFeedback` reverts with `size` bytes of data (word i = i + 1): a revert-data
+///      bomb the hook must truncate instead of copying and emitting in full.
+contract LongRevertRegistry {
+    uint256 public immutable size;
+
+    constructor(uint256 size_) {
+        size = size_;
+    }
+
+    /// @dev The revert data this registry produces (what a copy-everything caller would see).
+    function revertData() public view returns (bytes memory data) {
+        data = new bytes(size);
+        for (uint256 i = 0; i < size; i += 32) {
+            assembly {
+                mstore(add(add(data, 0x20), i), add(i, 1))
+            }
+        }
+    }
+
+    fallback() external {
+        uint256 n = size;
+        assembly {
+            for { let i := 0 } lt(i, n) { i := add(i, 0x20) } { mstore(i, add(i, 1)) }
+            revert(0, n)
+        }
+    }
+}

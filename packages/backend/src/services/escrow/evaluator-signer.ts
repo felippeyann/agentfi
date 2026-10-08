@@ -58,6 +58,15 @@ export const EVALUATOR_RECEIPT_TIMEOUT_MS = 180_000;
  * the full path uses 340 231 (`giveFeedback` alone 179 416). The headroom
  * covers the feedback path with a wide margin (longer feedback URIs, registry
  * upgrades); unused gas is not charged.
+ *
+ * R3c fixed the root cause in the contract: the hook now forwards a fixed gas
+ * cap to every registry call and reverts the whole settlement with
+ * `InsufficientGasForFeedback` when the caller's gas cannot cover those caps,
+ * so the estimate already includes the feedback path and can no longer drop
+ * it silently. The headroom stays as cheap insurance: the estimate is now the
+ * exact minimum, and any drift between estimation and inclusion (e.g. storage
+ * that is warm in the simulation and cold on-chain) would otherwise cost a
+ * reverted settlement and a BullMQ retry.
  */
 export const EVALUATOR_GAS_HEADROOM = 400_000n;
 

@@ -9,9 +9,9 @@
 | pending | `AgentPolicyModule` | | | | `script/Deploy.s.sol` (new `Action` struct pair) |
 | pending | `AgentExecutor` | | | | same broadcast; `FEE_BPS=30` |
 | pending | `AgentJobEscrow` | | | | `script/DeployEscrow.s.sol`; token USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e`; `platformFeeBP=30`, `evaluatorFeeBP=0` |
-| pending | `ReputationHook` | | | | bound to the escrow; `trustedEvaluator` = backend evaluator EOA; `minFeedbackBudget=1000000` |
+| pending | `ReputationHook` | | | | bound to the escrow; `trustedEvaluator` = backend evaluator EOA; `minFeedbackBudget=1000000`; `feedbackGasLimit=500000`, `identityCallGasLimit=50000` (R3c) |
 
-Constructor parameters actually used (fill in after the broadcast): `OPERATOR_ADDRESS`, `FEE_WALLET`, `TRUSTED_EVALUATOR`, `FEE_BPS`, `EVALUATOR_FEE_BPS`, `MIN_FEEDBACK_BUDGET`, `REPUTATION_REGISTRY_ADDRESS` (default `0x8004B663056A597Dffe9eCcC1965A193B7388713`), `IDENTITY_REGISTRY_ADDRESS` (default `0x8004A818BFB912233c491871b3d84c89A494BD9e`).
+Constructor parameters actually used (fill in after the broadcast): `OPERATOR_ADDRESS`, `FEE_WALLET`, `TRUSTED_EVALUATOR`, `FEE_BPS`, `EVALUATOR_FEE_BPS`, `MIN_FEEDBACK_BUDGET`, `FEEDBACK_GAS_LIMIT` (default `500000`), `IDENTITY_CALL_GAS_LIMIT` (default `50000`), `REPUTATION_REGISTRY_ADDRESS` (default `0x8004B663056A597Dffe9eCcC1965A193B7388713`), `IDENTITY_REGISTRY_ADDRESS` (default `0x8004A818BFB912233c491871b3d84c89A494BD9e`).
 
 ## 2. C4 runbook (owner runs it; the agent prepared it)
 
@@ -23,7 +23,7 @@ Prerequisites on the maintainer's machine (checked 2026-10-06): Foundry 1.7.1 at
    - `FEE_WALLET` = the address you want fees swept to (`OPERATOR_FEE_WALLET` in the backend `.env`).
    - `BASESCAN_API_KEY` for verification (optional but recommended).
 2. **Signer.** Preferred: `cast wallet import agentfi-deployer --interactive` (encrypted keystore, key never in the environment). `Deploy.s.sol` only reads `PRIVATE_KEY` from the environment, so for step 4 export it in the shell session (or put it in `packages/contracts/.env`, which is git-ignored) and unset it afterwards.
-3. **Tests.** In `packages/contracts`: `forge test` must show 291 passed.
+3. **Tests.** In `packages/contracts`: `forge test` must show 312 passed, 1 skipped (the skipped one is the R3c fork suite; optionally run it against the real registries with `BASE_SEPOLIA_FORK_URL=https://sepolia.base.org forge test --match-contract ReputationHookForkTest -vv`: 3 passed).
 4. **Policy module + executor (new ABI).**
 
    ```bash
@@ -40,6 +40,8 @@ Prerequisites on the maintainer's machine (checked 2026-10-06): Foundry 1.7.1 at
    export OPERATOR_ADDRESS=0x... FEE_WALLET=0x... TRUSTED_EVALUATOR=0x...
    forge script script/DeployEscrow.s.sol --rpc-url base_sepolia --account agentfi-deployer --broadcast --verify --etherscan-api-key $BASESCAN_API_KEY
    ```
+
+   Leave `FEEDBACK_GAS_LIMIT` (500000) and `IDENTITY_CALL_GAS_LIMIT` (50000) unset unless there is a reason to change them (R3c; the script refuses values outside 250000–2000000 / 20000–200000 before broadcasting). The script prints `Hook gas requirement: 667937` with the defaults.
 
 6. **Checks.** Run the `cast call` list from the deployment doc ("Post-deployment checks") and `scripts/verify-deployment.sh https://sepolia.base.org <policyModule> <executor> <operator> <feeWallet> 30`.
 7. **Record.** Fill section 1 of this file, update `STATE.md` §3 and the address registry in `docs/operations/contract-deployment.md`, and set in the backend `.env`: `POLICY_MODULE_ADDRESS_84532`, `EXECUTOR_ADDRESS_84532`, `AGENT_JOB_ESCROW_ADDRESS_84532`, `REPUTATION_HOOK_ADDRESS_84532`, `ESCROW_EVALUATOR_PRIVATE_KEY`, `ALCHEMY_API_KEY`.
@@ -96,7 +98,7 @@ Without `E2E_ANVIL_FORK_URL` the suite is reported as skipped and exits 0 (CI). 
 
 ### 5.2 What the rehearsal proved (2026-10-07, fork block 47 822 000)
 
-Deployment (deterministic for the pinned block): `AgentJobEscrow` `0x70449abF99B0b470F0280D5E3036265cB849d77C`, `ReputationHook` `0x47D053c18726916e47f07D444B2D645235647677`; post-deploy reads match the runbook (`token()` = USDC, `platformFeeBP()` = 30, `operator()`, hook `acp()` / `trustedEvaluator()` / registries / `minFeedbackBudget()` = 1 000 000). Result: **6/6 passed in 198 s** (suite total; the ERC-8004 agent ids below are the next free ids on the registry at that block).
+Deployment (deterministic for the pinned block): `AgentJobEscrow` `0x70449abF99B0b470F0280D5E3036265cB849d77C`, `ReputationHook` `0x47D053c18726916e47f07D444B2D645235647677`; post-deploy reads match the runbook (`token()` = USDC, `platformFeeBP()` = 30, `operator()`, hook `acp()` / `trustedEvaluator()` / registries / `minFeedbackBudget()` = 1 000 000). Result: **6/6 passed in 198 s** (suite total; the ERC-8004 agent ids below are the next free ids on the registry at that block). **R3c rerun (2026-10-07, same block, gas-capped hook):** 6/6 passed in 203 s; same deployment addresses; the post-deploy reads now also check `feedbackGasLimit()` = 500 000 and `identityCallGasLimit()` = 50 000; happy path `FeedbackWritten` and `getSummary(#9599, …)` = (1, 100, 0), contest `getSummary(#9603, …, "rejected")` = (1, 0, 0) as before.
 
 | Path | Backend env | What is asserted |
 |---|---|---|
@@ -111,7 +113,7 @@ Deployment (deterministic for the pinned block): `AgentJobEscrow` `0x70449abF99B
 1. **No settlement could ever be enqueued.** The escrow settlement queue used BullMQ `jobId = "<action>:<jobId>"`; BullMQ 5 rejects custom ids with `:` (unless they split into exactly three parts), so every `complete` / `reject` / `claimRefund` enqueue threw `Custom Id cannot contain :`: jobs stuck `PAYMENT_PENDING`/`SUBMITTED`, no cancellation/contest refund, no expiry sweep. Now `<action>-<jobId>` (regression test runs BullMQ's own validation).
 2. **ERC-8004 feedback silently lost on every settlement.** The evaluator sent viem's default gas = `eth_estimateGas`, the lowest limit at which `complete` succeeds — and at that limit the hook's `giveFeedback` runs out of gas inside its try/catch, so the hook emits `FeedbackFailed(jobId, "")` and payment settles without feedback. Measured on the fork: estimate 246 770 → `FeedbackFailed`; full path 340 231 (`giveFeedback` 179 416). The evaluator signer now sends estimate + 400 000 (`EVALUATOR_GAS_HEADROOM`; unused gas is not charged).
 
-**Recommendation before C4 (contract change, owner's call — not done here).** Bug 2 is fixed for AgentFi's own evaluator, but the hook still lets *any* caller that trusts gas estimation lose the feedback (another evaluator client, a manual `cast send`, future third-party evaluators). Since the contracts are not deployed yet, consider a guard in `ReputationHook._write` before the `try`: revert the whole settlement when `gasleft()` is below a reserve that covers `giveFeedback` (e.g. 250 000) — estimators then converge on the full path, and only a caller that deliberately under-funds gas is affected (the evaluator is trusted). Needs a Foundry test with a gas-limited call and the 291-test suite rerun.
+**Recommendation before C4 (contract change) — done in R3c.** Bug 2 was fixed for AgentFi's own evaluator, but the hook still let *any* caller that trusts gas estimation lose the feedback (another evaluator client, a manual `cast send`, future third-party evaluators). R3c fixed it in the contract before deployment: every registry call forwards a fixed gas cap (`feedbackGasLimit` 500 000 to `giveFeedback`, `identityCallGasLimit` 50 000 to each identity call) and, once the cheap gates pass, the hook reverts the whole settlement with `InsufficientGasForFeedback` when the caller's gas cannot cover those caps (`feedbackGasRequirement` = 667 937 inside the hook). Estimators now converge on the full path: on this fork the lowest gas at which `complete` succeeds (777 522 for the escrow call) writes the feedback and one unit less reverts (`test/ReputationHook.fork.t.sol`); a registry that burns gas still cannot block settlement (it costs at most its cap). Design and measurements: [erc-8004-integration.md §4](../architecture/erc-8004-integration.md#4-agentfi-design-feedback-written-by-the-escrow-hook) "Gas policy". The backend's 400 000 headroom stays as insurance.
 
 **Observation (not a bug).** On Base Sepolia CoinGecko has no prices, so a USDC reward resolves to $0: the requester's daily-volume reservation is skipped (`Escrow: USD value resolved to 0`) and the revenue snapshot stays NULL. Expected on testnet; on Base mainnet USDC is priced.
 

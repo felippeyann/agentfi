@@ -35,18 +35,35 @@ import {ReputationHook} from "../src/ReputationHook.sol";
  *   FEE_BPS                     — platform fee in basis points [30]
  *   EVALUATOR_FEE_BPS           — evaluator fee in basis points [0]
  *   MIN_FEEDBACK_BUDGET         — minimum job budget (token units) for feedback [1000000 = 1 USDC]
- *   USDC_ADDRESS                — escrow token [Base: 0x8335…2913, Base Sepolia: 0x036C…CF7e]
+ *   FEEDBACK_GAS_LIMIT          — gas forwarded by the hook to `giveFeedback` [500000; allowed
+ *                                 250000..2000000 — the v2.0.0 registry uses 179416]
+ *   IDENTITY_CALL_GAS_LIMIT     — gas forwarded to each Identity Registry `ownerOf` /
+ *                                 `getAgentWallet` call [50000; allowed 20000..200000 — v2.0.0 uses ~7800]
+ *   USDC_ADDRESS               — escrow token [Base: 0x8335…2913, Base Sepolia: 0x036C…CF7e]
  *   REPUTATION_REGISTRY_ADDRESS — ERC-8004 Reputation Registry [Base: 0x8004BAa1…9b63, Base Sepolia: 0x8004B663…8713]
  *   IDENTITY_REGISTRY_ADDRESS   — ERC-8004 Identity Registry [Base: 0x8004A169…a432, Base Sepolia: 0x8004A818…BD9e]
  *
  * On any other chain `USDC_ADDRESS`, `REPUTATION_REGISTRY_ADDRESS` and `IDENTITY_REGISTRY_ADDRESS`
- * are required. All three must have code on the target chain and `FEE_BPS + EVALUATOR_FEE_BPS`
- * must be below 10 000; everything is validated before the first transaction is broadcast.
+ * are required. All three must have code on the target chain, `FEE_BPS + EVALUATOR_FEE_BPS`
+ * must be below 10 000 and both gas limits must be within the hook's bounds; everything is
+ * validated before the first transaction is broadcast.
  */
 contract DeployEscrowScript is Script {
     uint256 internal constant CHAIN_BASE = 8453;
     uint256 internal constant CHAIN_BASE_SEPOLIA = 84532;
     uint256 internal constant BPS_DENOMINATOR = 10_000;
+    /// @notice Default `ReputationHook.feedbackGasLimit`: 2.8x the 179 416 gas `giveFeedback` uses on
+    ///         the ERC-8004 Reputation Registry v2.0.0 (first entry for an agent, C5a fork run).
+    uint256 public constant DEFAULT_FEEDBACK_GAS_LIMIT = 500_000;
+    /// @notice Default `ReputationHook.identityCallGasLimit`: 6x the ~7 800 gas of a cold
+    ///         `ownerOf` / `getAgentWallet` through the ERC-8004 Identity Registry v2.0.0 proxy.
+    uint256 public constant DEFAULT_IDENTITY_CALL_GAS_LIMIT = 50_000;
+    /// @notice Mirrors of the `ReputationHook` constructor bounds (constants of another contract are
+    ///         not reachable from here; `DeployEscrow.t.sol` pins them to the hook's getters).
+    uint256 public constant MIN_FEEDBACK_GAS_LIMIT = 250_000;
+    uint256 public constant MAX_FEEDBACK_GAS_LIMIT = 2_000_000;
+    uint256 public constant MIN_IDENTITY_CALL_GAS_LIMIT = 20_000;
+    uint256 public constant MAX_IDENTITY_CALL_GAS_LIMIT = 200_000;
 
     address internal constant USDC_BASE = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address internal constant USDC_BASE_SEPOLIA = 0x036CbD53842c5426634e7929541eC2318f3dCF7e;
@@ -64,6 +81,8 @@ contract DeployEscrowScript is Script {
         uint256 feeBps;
         uint256 evaluatorFeeBps;
         uint256 minFeedbackBudget;
+        uint256 feedbackGasLimit;
+        uint256 identityCallGasLimit;
         address usdc;
         address reputationRegistry;
         address identityRegistry;
@@ -72,6 +91,7 @@ contract DeployEscrowScript is Script {
     error MissingEnv(string name);
     error NotAContract(string name, address value);
     error InvalidFees(uint256 platformFeeBP, uint256 evaluatorFeeBP);
+    error InvalidGasLimit(string name, uint256 value, uint256 min, uint256 max);
 
     function run() external returns (AgentJobEscrow escrow, ReputationHook hook) {
         Config memory cfg = readConfig();
@@ -84,6 +104,8 @@ contract DeployEscrowScript is Script {
         console.log("Platform fee bps:     ", cfg.feeBps);
         console.log("Evaluator fee bps:    ", cfg.evaluatorFeeBps);
         console.log("Min feedback budget:  ", cfg.minFeedbackBudget);
+        console.log("Feedback gas limit:   ", cfg.feedbackGasLimit);
+        console.log("Identity call gas:    ", cfg.identityCallGasLimit);
         console.log("Reputation registry:  ", cfg.reputationRegistry);
         console.log("Identity registry:    ", cfg.identityRegistry);
 
@@ -96,9 +118,16 @@ contract DeployEscrowScript is Script {
 
         // 2. Hook — attached per job by the backend via createJob(..., hook).
         hook = new ReputationHook(
-            address(escrow), cfg.reputationRegistry, cfg.identityRegistry, cfg.trustedEvaluator, cfg.minFeedbackBudget
+            address(escrow),
+            cfg.reputationRegistry,
+            cfg.identityRegistry,
+            cfg.trustedEvaluator,
+            cfg.minFeedbackBudget,
+            cfg.feedbackGasLimit,
+            cfg.identityCallGasLimit
         );
         console.log("ReputationHook:", address(hook));
+        console.log("Hook gas requirement: ", hook.feedbackGasRequirement());
 
         vm.stopBroadcast();
 
@@ -110,7 +139,8 @@ contract DeployEscrowScript is Script {
         console.log("--------------------");
     }
 
-    /// @notice Reads the configuration from env and validates it (addresses must have code, fees must sum below 10 000).
+    /// @notice Reads the configuration from env and validates it (addresses must have code, fees must
+    ///         sum below 10 000, gas limits must be within the hook's bounds).
     function readConfig() public view returns (Config memory cfg) {
         cfg.deployerKey = vm.envOr("PRIVATE_KEY", uint256(0));
         cfg.operator = vm.envAddress("OPERATOR_ADDRESS");
@@ -119,6 +149,15 @@ contract DeployEscrowScript is Script {
         cfg.feeBps = vm.envOr("FEE_BPS", uint256(30));
         cfg.evaluatorFeeBps = vm.envOr("EVALUATOR_FEE_BPS", uint256(0));
         cfg.minFeedbackBudget = vm.envOr("MIN_FEEDBACK_BUDGET", uint256(1_000_000));
+        cfg.feedbackGasLimit = boundedGasLimit(
+            "FEEDBACK_GAS_LIMIT", DEFAULT_FEEDBACK_GAS_LIMIT, MIN_FEEDBACK_GAS_LIMIT, MAX_FEEDBACK_GAS_LIMIT
+        );
+        cfg.identityCallGasLimit = boundedGasLimit(
+            "IDENTITY_CALL_GAS_LIMIT",
+            DEFAULT_IDENTITY_CALL_GAS_LIMIT,
+            MIN_IDENTITY_CALL_GAS_LIMIT,
+            MAX_IDENTITY_CALL_GAS_LIMIT
+        );
         cfg.usdc = resolveContract("USDC_ADDRESS", defaultUsdc(block.chainid));
         cfg.reputationRegistry =
             resolveContract("REPUTATION_REGISTRY_ADDRESS", defaultReputationRegistry(block.chainid));
@@ -145,6 +184,18 @@ contract DeployEscrowScript is Script {
         if (chainId == CHAIN_BASE) return IDENTITY_REGISTRY_BASE;
         if (chainId == CHAIN_BASE_SEPOLIA) return IDENTITY_REGISTRY_BASE_SEPOLIA;
         return address(0);
+    }
+
+    /// @notice Reads an optional gas-limit env var, falling back to `fallbackValue`; reverts with
+    ///         `InvalidGasLimit` when the result is outside [`min`, `max`] (the hook's constructor
+    ///         bounds), so a typo is refused before anything is broadcast.
+    function boundedGasLimit(string memory name, uint256 fallbackValue, uint256 min, uint256 max)
+        public
+        view
+        returns (uint256 value)
+    {
+        value = vm.envOr(name, fallbackValue);
+        if (value < min || value > max) revert InvalidGasLimit(name, value, min, max);
     }
 
     /// @notice Reads an optional address env var, falling back to `fallbackValue`; reverts if the

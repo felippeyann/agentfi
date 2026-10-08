@@ -343,7 +343,17 @@ export function parseDeployOutput(stdout: string, chainId: number): { escrow: Ad
 /** Env of the `forge script` child: the runbook variables only, no inherited key or address overrides. */
 function deployEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const key of ['PRIVATE_KEY', 'USDC_ADDRESS', 'REPUTATION_REGISTRY_ADDRESS', 'IDENTITY_REGISTRY_ADDRESS', 'FEE_BPS', 'EVALUATOR_FEE_BPS', 'MIN_FEEDBACK_BUDGET']) {
+  for (const key of [
+    'PRIVATE_KEY',
+    'USDC_ADDRESS',
+    'REPUTATION_REGISTRY_ADDRESS',
+    'IDENTITY_REGISTRY_ADDRESS',
+    'FEE_BPS',
+    'EVALUATOR_FEE_BPS',
+    'MIN_FEEDBACK_BUDGET',
+    'FEEDBACK_GAS_LIMIT',
+    'IDENTITY_CALL_GAS_LIMIT',
+  ]) {
     delete env[key];
   }
   // C4 runbook step 5, verbatim variable names.
@@ -420,7 +430,18 @@ export async function startEscrowFork(config: EscrowForkConfig, log: (msg: strin
     const { escrow, hook } = parseDeployOutput(stdout, BASE_SEPOLIA_CHAIN_ID);
 
     // What C4's "Post-deployment checks" verify, on the fork.
-    const [token, feeBps, operator, acp, trustedEvaluator, identityRegistry, reputationRegistry, minFeedbackBudget] = await Promise.all([
+    const [
+      token,
+      feeBps,
+      operator,
+      acp,
+      trustedEvaluator,
+      identityRegistry,
+      reputationRegistry,
+      minFeedbackBudget,
+      feedbackGasLimit,
+      identityCallGasLimit,
+    ] = await Promise.all([
       client.readContract({ address: escrow, abi: AGENT_JOB_ESCROW_ABI, functionName: 'token' }),
       client.readContract({ address: escrow, abi: AGENT_JOB_ESCROW_ABI, functionName: 'platformFeeBP' }),
       client.readContract({ address: escrow, abi: AGENT_JOB_ESCROW_ABI, functionName: 'operator' }),
@@ -429,6 +450,8 @@ export async function startEscrowFork(config: EscrowForkConfig, log: (msg: strin
       client.readContract({ address: hook, abi: REPUTATION_HOOK_ABI, functionName: 'identityRegistry' }),
       client.readContract({ address: hook, abi: REPUTATION_HOOK_ABI, functionName: 'reputationRegistry' }),
       client.readContract({ address: hook, abi: REPUTATION_HOOK_ABI, functionName: 'minFeedbackBudget' }),
+      client.readContract({ address: hook, abi: REPUTATION_HOOK_ABI, functionName: 'feedbackGasLimit' }),
+      client.readContract({ address: hook, abi: REPUTATION_HOOK_ABI, functionName: 'identityCallGasLimit' }),
     ]);
     const mismatches = [
       getAddress(token as Address) !== USDC_BASE_SEPOLIA && `token ${token}`,
@@ -439,6 +462,9 @@ export async function startEscrowFork(config: EscrowForkConfig, log: (msg: strin
       getAddress(identityRegistry as Address) !== IDENTITY_REGISTRY_BASE_SEPOLIA && `hook.identityRegistry ${identityRegistry}`,
       getAddress(reputationRegistry as Address) !== REPUTATION_REGISTRY_BASE_SEPOLIA && `hook.reputationRegistry ${reputationRegistry}`,
       BigInt(minFeedbackBudget as bigint) !== 1_000_000n && `hook.minFeedbackBudget ${minFeedbackBudget}`,
+      // R3c deploy defaults (FEEDBACK_GAS_LIMIT / IDENTITY_CALL_GAS_LIMIT unset).
+      BigInt(feedbackGasLimit as bigint) !== 500_000n && `hook.feedbackGasLimit ${feedbackGasLimit}`,
+      BigInt(identityCallGasLimit as bigint) !== 50_000n && `hook.identityCallGasLimit ${identityCallGasLimit}`,
     ].filter(Boolean);
     if (mismatches.length > 0) throw new Error(`[e2e:escrow-fork] unexpected deployment: ${mismatches.join(', ')}`);
     log(`[e2e:escrow-fork] AgentJobEscrow ${escrow} · ReputationHook ${hook} (fork block ${forkBlockNumber})`);

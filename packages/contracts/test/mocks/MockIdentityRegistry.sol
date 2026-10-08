@@ -37,6 +37,60 @@ contract MockIdentityRegistry is IIdentityRegistry {
     }
 }
 
+/// @dev Identity registry whose `ownerOf` / `getAgentWallet` can each be told to answer normally, loop
+///      forever (burn the whole cap), burn the cap down to `LEAVE` and then answer, or answer with
+///      `HUGE_RETURN` bytes of return data whose first word is the answer (R3c gas-griefing cases).
+contract GasGriefingIdentityRegistry {
+    enum Mode {
+        Answer,
+        Loop,
+        BurnThenAnswer,
+        HugeReturn
+    }
+
+    uint256 internal constant LEAVE = 2_000;
+    uint256 public constant HUGE_RETURN = 64 * 1024;
+
+    Mode public ownerMode;
+    Mode public walletMode;
+    address public ownerAnswer;
+    address public walletAnswer;
+
+    function set(Mode ownerMode_, address ownerAnswer_, Mode walletMode_, address walletAnswer_) external {
+        ownerMode = ownerMode_;
+        ownerAnswer = ownerAnswer_;
+        walletMode = walletMode_;
+        walletAnswer = walletAnswer_;
+    }
+
+    function ownerOf(uint256) external view returns (address) {
+        return _respond(ownerMode, ownerAnswer);
+    }
+
+    function getAgentWallet(uint256) external view returns (address) {
+        return _respond(walletMode, walletAnswer);
+    }
+
+    function _respond(Mode mode, address answer) internal view returns (address) {
+        if (mode == Mode.Loop) {
+            assembly {
+                for {} 1 {} {}
+            }
+        }
+        if (mode == Mode.BurnThenAnswer) {
+            while (gasleft() > LEAVE) {}
+        }
+        if (mode == Mode.HugeReturn) {
+            uint256 n = HUGE_RETURN;
+            assembly {
+                mstore(0, answer)
+                return(0, n)
+            }
+        }
+        return answer;
+    }
+}
+
 /// @dev Identity registry that answers every call with a fixed raw byte string (malformed ERC-8004).
 contract RawIdentityRegistry {
     bytes internal _response;
