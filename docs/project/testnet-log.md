@@ -33,7 +33,7 @@ The two password prompts below (`cast wallet import --interactive` and `forge sc
 
 | What | How | Used as |
 |---|---|---|
-| Deployer | `cast wallet import agentfi-deployer --interactive` (paste the private key, choose a password; stored encrypted under `~/.foundry/keystores/agentfi-deployer`). `cast wallet address --account agentfi-deployer` shows its address. Fund it with ~0.05 Base Sepolia ETH (both scripts) | `--account agentfi-deployer` on both `forge script` commands |
+| Deployer | `cast wallet import agentfi-deployer --interactive` (paste the private key, choose a password; stored encrypted under `~/.foundry/keystores/agentfi-deployer`). `cast wallet address --account agentfi-deployer` shows its address. Fund it with ~0.01 Base Sepolia ETH: both scripts together need about 7.1 M gas (forge estimated 0.00007 ETH at the fork's gas price in the dry-run) | `--account agentfi-deployer` on both `forge script` commands |
 | Evaluator | `cast wallet new` prints a fresh address and private key. Fund the address with ~0.01 ETH: it pays the gas of every `complete` / `reject` / `claimRefund` (the backend alerts below 0.0005 ETH) | address → `TRUSTED_EVALUATOR` (hook, below); private key → `ESCROW_EVALUATOR_PRIVATE_KEY`, only in `packages/backend/.env` (§5.4, plan D5) |
 | Operator | the evaluator address is acceptable on testnet; use a separate key on mainnet | `OPERATOR_ADDRESS` |
 | Fee wallet | any address you control | `FEE_WALLET` (= backend `OPERATOR_FEE_WALLET`) |
@@ -59,7 +59,7 @@ cd packages/contracts
 forge test
 ```
 
-Last line: `341 tests passed, 0 failed, 2 skipped (343 total tests)`. The two skipped suites are the Base Sepolia fork suites; to run them against the real registries: `BASE_SEPOLIA_FORK_URL=https://sepolia.base.org forge test --match-path "test/*.fork.t.sol"` (the public RPC sometimes rate-limits: rerun).
+Last line: `341 tests passed, 0 failed, 2 skipped (343 total tests)`. The two skipped suites are the Base Sepolia fork suites; to run them against the real registries: `BASE_SEPOLIA_FORK_URL=https://sepolia.base.org forge test --match-path "test/*.fork.t.sol"` → `14 tests passed, 0 failed, 0 skipped` (the public RPC sometimes rate-limits: rerun).
 
 ### 2.4 Environment (same shell for both scripts)
 
@@ -122,7 +122,7 @@ HOOK=0x...        # REPUTATION_HOOK_ADDRESS_84532
 bash ../../scripts/verify-deployment.sh "$RPC" "$POLICY" "$EXECUTOR" "$OPERATOR_ADDRESS" "$FEE_WALLET" "$EXECUTOR_FEE_BPS"
 ```
 
-Expected: `=== Results: 4 passed, 0 failed ===`. Then paste the escrow and hook block from [contract-deployment.md, "Post-deployment checks"](../operations/contract-deployment.md#post-deployment-checks) into the same shell (it uses `ESCROW`, `HOOK`, `RPC` and `TRUSTED_EVALUATOR`); every line carries its expected value as a comment, including the hook's gas requirements, `canonicalAgentId` and `penalties` (both 0 on a fresh hook).
+Expected: `=== Results: 4 passed, 0 failed ===`. Then paste the escrow and hook block from [contract-deployment.md, "Post-deployment checks"](../operations/contract-deployment.md#post-deployment-checks) into the same shell (it uses `ESCROW`, `HOOK`, `RPC` and `TRUSTED_EVALUATOR`); every line carries its expected value as a comment, including the hook's gas requirements, `canonicalAgentId` and `penalties` (both 0 on a fresh hook). `cast` prints large numbers with their scientific form appended (`1000000 [1e6]`).
 
 ### 2.8 Record
 
@@ -212,10 +212,10 @@ The real-network version of the rehearsal: the backend on your machine, **Turnke
 ```bash
 docker compose -f docker-compose.dev.yml up -d postgres redis
 docker compose -f docker-compose.dev.yml stop api
-docker compose -f docker-compose.dev.yml exec postgres psql -U agentfi -d postgres -c "CREATE DATABASE agentfi_c5"
+docker compose -f docker-compose.dev.yml exec -T postgres psql -U agentfi -d postgres -c "CREATE DATABASE agentfi_c5"
 ```
 
-If you need the dev API to keep running, use another port instead (`API_PORT=3010` and `BACKEND_PUBLIC_URL=http://localhost:3010` in step 3; the on-chain URIs then carry that port, still localhost as D10 intends) and the dedicated Redis DB all the same. Start the dev API again after the run: `docker compose -f docker-compose.dev.yml start api`.
+`-T` keeps `exec` from asking for a TTY, which Git Bash (mintty) cannot provide. Compose names the stack after the folder of the checkout (`agentfi` for the usual clone); if the dev stack was started from a folder with another name, add `-p <that name>` (`docker ps` shows it as the prefix of `…-postgres-1`) or these commands address an empty project. If you need the dev API to keep running, use another port instead (`API_PORT=3010` and `BACKEND_PUBLIC_URL=http://localhost:3010` in step 3; the on-chain URIs then carry that port, still localhost as D10 intends) and the dedicated Redis DB all the same. Start the dev API again after the run: `docker compose -f docker-compose.dev.yml start api`.
 
 **3. `packages/backend/.env`.** The backend loads `.env` from the directory it is started in, and it is started from `packages/backend`, so the file is `packages/backend/.env` (git-ignored; not the repository-root `.env`). Create it with:
 
@@ -271,7 +271,7 @@ TRANSACTION_WORKER_ENABLED=false npx tsx src/index.ts
 TRANSACTION_WORKER_ENABLED=true npx tsx src/worker.ts
 ```
 
-The value on the command line wins over `.env` (dotenv never overrides a variable that is already set), so one `.env` serves both. Expected: the API logs `Transaction worker disabled for this process (TRANSACTION_WORKER_ENABLED=false)`, `ERC-8183 escrow enabled — evaluator signer configured` with `escrowEvaluatorAddress` = your `TRUSTED_EVALUATOR`, and `AgentFi API running on port 3000`; the worker logs `Transaction worker started`, `Payment recovery worker started`, `Escrow settlement worker started`, `Escrow expiry sweep scheduled` and `Transaction worker process is running`. `curl http://localhost:3000/health/ready` answers `"turnkey":true` once the Turnkey credentials work.
+The value on the command line wins over `.env` (dotenv never overrides a variable that is already set), so one `.env` serves both. Expected: the API logs `Transaction worker disabled for this process (TRANSACTION_WORKER_ENABLED=false)`, `ERC-8183 escrow enabled — evaluator signer configured` with `escrowEvaluatorAddress` = your `TRUSTED_EVALUATOR`, and `AgentFi API running on port 3000`; the worker logs `Transaction worker started`, `Payment recovery worker started`, `Escrow settlement worker started`, `Escrow expiry sweep scheduled` and `Transaction worker process is running`. `curl http://localhost:3000/health/ready` answers `"turnkey":true` once the Turnkey credentials work (its `rpc` check reads Ethereum mainnet through Alchemy, so it says `false` with a placeholder `ALCHEMY_API_KEY`; that does not affect Base Sepolia).
 
 **6. Happy path** (third terminal, repository root):
 
@@ -292,3 +292,24 @@ Ends with `✓ Escrow cancellation refunded end to end.` (requester refunded in 
 **8. Record** one row per run in section 3 (AgentFi job id, `onChainJobId`, settle tx and fee as printed; the fund tx is `proofOfPayment.txHash` in `GET /v1/jobs/<job id>/feedback.json` for the happy run, and the requester wallet's `fund` transaction on <https://sepolia.basescan.org> for both) and the provider's identity in section 4 (the ERC-8004 agent id printed in step 6; its `register` tx on the provider wallet's Basescan page; `agentURI` = `http://localhost:3000/v1/agents/<provider id>/erc8004.json`).
 
 **Local wallet provider: fork rehearsal only.** `WALLET_PROVIDER=local` (the fork harness of §5.1, and the dry-run of §5.5) keeps each agent's key in the memory of the process that created it. Every restart loses the keys, so agents registered before can no longer sign (register new ones), and an API and a worker in separate processes cannot share them: the worker fails with `[local-wallet] wallet … not found`. With the local provider run one process that does both (`TRANSACTION_WORKER_ENABLED=true npx tsx src/index.ts`, no `worker.ts`), as the harness does. `NODE_ENV=production` and `staging` refuse it.
+
+### 5.5 Dry-run of §2 and §5.4 on 2026-10-08 (H14) — local fork, no real funds
+
+The two runbooks above were executed as written on `main` 90bb831 + the H14 branch, against `anvil --fork-url https://sepolia.base.org --chain-id 84532 --port 8548` (fork of block 47 860 069). Substitutions, and nothing else: the RPC (`http://127.0.0.1:8548` for `base_sepolia` / `https://sepolia.base.org`); a throwaway keystore holding Anvil account 0 (`cast wallet import … --private-key … --unsafe-password …`, then `--account … --password …`, because a coding agent has no terminal for the prompts; deleted afterwards); fresh `cast wallet new` keys for the evaluator (= operator) and the fee wallet; faucets → `anvil_setBalance` and the example's `AGENTFI_FORK_FUNDING=true`; no `--verify` and no Etherscan key; **`WALLET_PROVIDER=local` instead of Turnkey** (no Turnkey credentials exist for the dry-run); the dev stack was left running, so the step-2 alternative was used (`API_PORT=3160`, `BACKEND_PUBLIC_URL=http://localhost:3160`), with database `agentfi_h14` and Redis DB 6.
+
+| Step | Result |
+|---|---|
+| §2.0–2.3 | submodule present; forge 1.7.1; `forge test` 341 passed, 2 skipped; fork suites with `BASE_SEPOLIA_FORK_URL` 14 passed; no `PRIVATE_KEY` anywhere |
+| §2.5 `Deploy.s.sol` | `Legacy EscrowModule: skip`, copy block with `POLICY_MODULE_ADDRESS_84532` / `EXECUTOR_ADDRESS_84532` / `OPERATOR_FEE_WALLET` only; no `ETHERSCAN_API_KEY` needed without `--verify` |
+| §2.6 `DeployEscrow.s.sol` | `Hook gas requirement: 597937`, `Hook bind requirement: 140794`, copy block as documented; deployer nonce +4 for both scripts (forge estimated 2.25 M + 4.87 M gas) |
+| §2.6 "Verify later" | `--resume` (without `--verify`) sent nothing: deployer nonce unchanged |
+| §2.2 negative checks | `PRIVATE_KEY` of another address in `packages/contracts/.env` + `--account … --broadcast` → `SignerConflict(0xf39F…2266, 0x7099…79C8)`, nonce unchanged; the same address → the `WARNING: PRIVATE_KEY is set` block and `Deployer (PRIVATE_KEY)` |
+| §2.7 | `verify-deployment.sh` from `packages/contracts`: 4 passed, 0 failed; all 23 `cast call` checks of contract-deployment.md returned the documented values |
+| §5.4 steps 3–4 | `.env` generated from the step-3 block (only the substitutions above); `npx prisma generate`; `npx prisma migrate deploy` printed `Environment variables loaded from .env` and applied 18 migrations to the empty database |
+| §5.4 step 5 (API + worker) | both processes booted with the documented log lines and `escrowEvaluatorAddress` = the evaluator; `/health/ready` `turnkey: true` (local provider), `rpc: false` (placeholder Alchemy key, as noted in step 5) |
+| §5.4 step 6 on API + worker **with the local provider** | failed as the local-provider note predicts: `create FAILED: [local-wallet] wallet … not found` (the wallet was created in the API process, the worker signs). Not a Turnkey problem; it is why the local provider runs as one process |
+| §5.4 steps 6–7, single process (`TRANSACTION_WORKER_ENABLED=true npx tsx src/index.ts`) | happy: on-chain job #1 Completed, provider +0.997 USDC, ERC-8004 agent #9604 bound, `feedback written`, `getSummary(9604, [hook], "agentfi.job", "")` = (1, 100, 0), `canonicalAgentId(provider)` = 9604, `pendingPlatformFees` = 3000; API keys printed in step 1; cancel with the reused keys: job #2 Rejected, 1.000000 USDC refunded, `feedback skipped:no-params` |
+
+Observation (not a runbook defect): in the cancel run the provider already had identity #9604, so its `setProviderAgentId` for job #2 was broadcast after the evaluator's `reject` and reverted on-chain (31 590 gas paid by the provider wallet; binding `FAILED`, payment unaffected). In the C5a rehearsal the same race ended `SKIPPED` because the identity was still being registered.
+
+Not verified here: anything Turnkey does (wallet creation, signing, the `turnkey` readiness check against the real API), the faucets, Etherscan verification (`--verify`, `--resume --verify`), the interactive password prompts, and the dev-stack `stop api` / `start api` commands (the dev stack served other work and stayed up).
