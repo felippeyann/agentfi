@@ -400,17 +400,24 @@ contract AgentJobEscrowTest is Test {
         assertEq(escrow.getJob(jobId).provider, provider);
     }
 
-    function test_SetProvider_ClearsProviderAgentId() public {
+    function test_SetProvider_NoAgentIdToClear_ThenProviderBinds() public {
+        // C2b: nobody can bind an id while the provider is unset, so setProvider emits only ProviderSet.
         uint256 jobId = _createNoProvider(address(0));
-        vm.startPrank(client);
+        vm.prank(client);
+        vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
         escrow.setProviderAgentId(jobId, 4242);
-        vm.expectEmit(true, true, true, true, address(escrow));
-        emit AgentJobEscrow.ProviderSet(jobId, provider);
-        vm.expectEmit(true, true, true, true, address(escrow));
-        emit AgentJobEscrow.ProviderAgentIdSet(jobId, 0);
+
+        vm.recordLogs();
+        vm.prank(client);
         escrow.setProvider(jobId, provider);
-        vm.stopPrank();
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1);
+        assertEq(logs[0].topics[0], AgentJobEscrow.ProviderSet.selector);
         assertEq(escrow.providerAgentId(jobId), 0);
+
+        vm.prank(provider);
+        escrow.setProviderAgentId(jobId, 4242);
+        assertEq(escrow.providerAgentId(jobId), 4242);
     }
 
     function test_SetProvider_NotClient_Reverts() public {
@@ -1210,7 +1217,7 @@ contract AgentJobEscrowTest is Test {
             vm.prank(stranger);
             escrow.claimRefund(jobId);
         } else {
-            vm.prank(client);
+            vm.prank(provider);
             escrow.setProviderAgentId(jobId, 7);
         }
     }
@@ -1523,7 +1530,7 @@ contract AgentJobEscrowTest is Test {
         escrow.reject(funded, REASON, "");
         vm.prank(client);
         escrow.setBudget(open, 1, "");
-        vm.prank(client);
+        vm.prank(provider);
         escrow.setProviderAgentId(open, 9);
         vm.prank(client);
         escrow.reject(open, REASON, "");
@@ -1560,7 +1567,7 @@ contract AgentJobEscrowTest is Test {
         uint256 n = hook.callCount();
         vm.expectEmit(true, true, true, true, address(escrow));
         emit AgentJobEscrow.ProviderAgentIdSet(jobId, 1234);
-        vm.prank(client);
+        vm.prank(provider);
         escrow.setProviderAgentId(jobId, 1234);
         assertEq(escrow.providerAgentId(jobId), 1234);
         assertEq(hook.callCount(), n); // extension, not hooked
@@ -1568,15 +1575,17 @@ contract AgentJobEscrowTest is Test {
 
     function test_SetProviderAgentId_WhileFunded_Succeeds() public {
         uint256 jobId = _funded(address(0));
-        vm.prank(client);
+        vm.prank(provider);
         escrow.setProviderAgentId(jobId, 55);
         assertEq(escrow.providerAgentId(jobId), 55);
     }
 
-    function test_SetProviderAgentId_CanBeCleared() public {
+    function test_SetProviderAgentId_ProviderCanClearItsOwn() public {
         uint256 jobId = _open(address(0));
-        vm.startPrank(client);
+        vm.startPrank(provider);
         escrow.setProviderAgentId(jobId, 55);
+        vm.expectEmit(true, true, true, true, address(escrow));
+        emit AgentJobEscrow.ProviderAgentIdSet(jobId, 0);
         escrow.setProviderAgentId(jobId, 0);
         vm.stopPrank();
         assertEq(escrow.providerAgentId(jobId), 0);
@@ -1584,9 +1593,31 @@ contract AgentJobEscrowTest is Test {
 
     function test_SetProviderAgentId_AfterSubmit_Reverts() public {
         uint256 jobId = _submitted(address(0));
-        vm.prank(client);
+        vm.prank(provider);
         vm.expectRevert(_invalidStatus(jobId, AgentJobEscrow.JobStatus.Submitted));
         escrow.setProviderAgentId(jobId, 1);
+    }
+
+    /// @dev C2b finding 3 (second adversarial review): the client used to be able to set 0 after the
+    ///      provider had bound its id and before `submit`, so `complete` skipped with "no-agent-id".
+    function test_SetProviderAgentId_ClientCannotWipeProviderBinding() public {
+        uint256 jobId = _funded(address(0));
+        vm.prank(provider);
+        escrow.setProviderAgentId(jobId, 4242);
+
+        vm.prank(client);
+        vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
+        escrow.setProviderAgentId(jobId, 0);
+        vm.prank(client);
+        vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
+        escrow.setProviderAgentId(jobId, 7);
+        assertEq(escrow.providerAgentId(jobId), 4242);
+
+        // ... and while Open as well.
+        uint256 open = _open(address(0));
+        vm.prank(client);
+        vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
+        escrow.setProviderAgentId(open, 1);
     }
 
     function test_SetProviderAgentId_ByProvider_Succeeds() public {
@@ -1608,19 +1639,21 @@ contract AgentJobEscrowTest is Test {
         escrow.setProviderAgentId(jobId, 1);
     }
 
-    function test_SetProviderAgentId_NoProviderYet_OnlyClient() public {
-        // With provider == address(0) nobody but the client may set it (no "anyone" hole).
+    function test_SetProviderAgentId_NoProviderYet_NobodyCanSet() public {
+        // With provider == address(0) nobody may set it (no "anyone" hole, and not the client either;
+        // `msg.sender` can never be the zero address).
         uint256 jobId = _createNoProvider(address(0));
-        vm.prank(stranger);
-        vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
-        escrow.setProviderAgentId(jobId, 1);
-        vm.prank(client);
-        escrow.setProviderAgentId(jobId, 1);
-        assertEq(escrow.providerAgentId(jobId), 1);
+        address[3] memory callers = [stranger, client, evaluator];
+        for (uint256 i = 0; i < callers.length; i++) {
+            vm.prank(callers[i]);
+            vm.expectRevert(AgentJobEscrow.Unauthorized.selector);
+            escrow.setProviderAgentId(jobId, 1);
+        }
+        assertEq(escrow.providerAgentId(jobId), 0);
     }
 
     function test_SetProviderAgentId_UnknownJob_Reverts() public {
-        vm.prank(client);
+        vm.prank(provider);
         vm.expectRevert(abi.encodeWithSelector(AgentJobEscrow.JobNotFound.selector, 7));
         escrow.setProviderAgentId(7, 1);
     }

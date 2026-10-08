@@ -3,11 +3,20 @@ pragma solidity 0.8.24;
 
 import {IReputationRegistry} from "../../src/IReputationRegistry.sol";
 
+/// @dev The ERC-8004 v2.0.0 Identity Registry check the Reputation Registry calls before recording.
+interface ISelfFeedbackCheck {
+    function isAuthorizedOrOwner(address spender, uint256 agentId) external view returns (bool);
+}
+
 /// @dev Records the last `giveFeedback` and `revokeFeedback` calls; can be told to revert.
 ///
 ///      `giveFeedback` is received through `fallback` and decoded into a single struct instead of a
 ///      declared 8-parameter function: four `calldata` strings make the generated ABI decoder
 ///      exceed the 16-slot stack limit when the optimizer is off (as in `forge coverage`).
+///
+///      With `setSelfFeedbackGuard(identity)` it reproduces the v2.0.0 anti-self-feedback gate:
+///      `giveFeedback` reverts with "Self-feedback not allowed" when the writer is the owner or an
+///      approved operator of the agent id (second adversarial review: a provider approves the hook).
 contract MockReputationRegistry {
     struct Feedback {
         uint256 agentId;
@@ -23,7 +32,10 @@ contract MockReputationRegistry {
     uint256 public callCount;
     address public lastCaller;
     bool public shouldRevert;
+    address public selfFeedbackGuard;
     Feedback internal _last;
+    /// @dev Entries recorded per (agentId, value), for assertions about which identity was rated.
+    mapping(uint256 => mapping(int128 => uint256)) public entries;
 
     uint256 public revokeCount;
     address public lastRevoker;
@@ -32,6 +44,10 @@ contract MockReputationRegistry {
 
     function setShouldRevert(bool v) external {
         shouldRevert = v;
+    }
+
+    function setSelfFeedbackGuard(address identity) external {
+        selfFeedbackGuard = identity;
     }
 
     function last() external view returns (Feedback memory) {
@@ -53,9 +69,16 @@ contract MockReputationRegistry {
         // Function arguments are encoded as a bare tuple; prefix the 0x20 offset word so the bytes
         // decode as a single dynamic struct with the same layout.
         Feedback memory f = abi.decode(abi.encodePacked(uint256(0x20), msg.data[4:]), (Feedback));
+        if (selfFeedbackGuard != address(0)) {
+            require(
+                !ISelfFeedbackCheck(selfFeedbackGuard).isAuthorizedOrOwner(msg.sender, f.agentId),
+                "Self-feedback not allowed"
+            );
+        }
         callCount++;
         lastCaller = msg.sender;
         _last = f;
+        entries[f.agentId][f.value]++;
     }
 }
 

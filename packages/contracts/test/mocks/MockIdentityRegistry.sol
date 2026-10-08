@@ -5,9 +5,13 @@ import {IIdentityRegistry} from "../../src/IIdentityRegistry.sol";
 
 /// @dev Minimal ERC-8004 Identity Registry: `ownerOf` / `getAgentWallet` per id, both reverting
 ///      for unknown ids like the ERC-721 reference implementation; can be told to revert on everything.
+///      Also models the ERC-721 approvals the v2.0.0 Reputation Registry consults through
+///      `isAuthorizedOrOwner` for its anti-self-feedback check (see `MockReputationRegistry.setSelfFeedbackGuard`).
 contract MockIdentityRegistry is IIdentityRegistry {
     mapping(uint256 => address) internal _owners;
     mapping(uint256 => address) internal _wallets;
+    mapping(uint256 => address) internal _approved;
+    mapping(address => mapping(address => bool)) internal _operators;
     bool public shouldRevert;
 
     error ERC721NonexistentToken(uint256 tokenId);
@@ -22,6 +26,32 @@ contract MockIdentityRegistry is IIdentityRegistry {
 
     function setShouldRevert(bool v) external {
         shouldRevert = v;
+    }
+
+    /// @dev ERC-721 `transferFrom` as the v2.0.0 registry implements it for this purpose: the owner
+    ///      changes, the single-token approval and the agent wallet are cleared.
+    function transfer(uint256 agentId, address to) external {
+        _owners[agentId] = to;
+        delete _approved[agentId];
+        delete _wallets[agentId];
+    }
+
+    /// @dev ERC-721 `approve`, callable by the owner (`msg.sender`).
+    function approve(address to, uint256 agentId) external {
+        require(msg.sender == _owners[agentId], "MockIdentityRegistry: not owner");
+        _approved[agentId] = to;
+    }
+
+    /// @dev ERC-721 `setApprovalForAll` for `msg.sender`'s tokens.
+    function setApprovalForAll(address operator, bool approved) external {
+        _operators[msg.sender][operator] = approved;
+    }
+
+    /// @dev ERC-8004 v2.0.0: owner, approved address or operator of the owner. Reverts for unknown ids.
+    function isAuthorizedOrOwner(address spender, uint256 agentId) external view returns (bool) {
+        address owner = _owners[agentId];
+        if (owner == address(0)) revert ERC721NonexistentToken(agentId);
+        return spender == owner || _approved[agentId] == spender || _operators[owner][spender];
     }
 
     function ownerOf(uint256 agentId) external view returns (address owner) {
@@ -87,6 +117,32 @@ contract GasGriefingIdentityRegistry {
                 return(0, n)
             }
         }
+        return answer;
+    }
+}
+
+/// @dev Worst case for the binding guard on `submit`: `ownerOf` burns the whole cap it is given, and
+///      `getAgentWallet` answers `answer` only when it still has at least `threshold` gas on entry
+///      (i.e. it received essentially the full `identityCallGasLimit`), otherwise the zero address.
+///      Immutables only, so the probe itself reads no storage before measuring.
+contract CapProbeIdentityRegistry {
+    address public immutable answer;
+    uint256 public immutable threshold;
+
+    constructor(address answer_, uint256 threshold_) {
+        answer = answer_;
+        threshold = threshold_;
+    }
+
+    function ownerOf(uint256) external pure returns (address) {
+        assembly {
+            for {} 1 {} {}
+        }
+        return address(0);
+    }
+
+    function getAgentWallet(uint256) external view returns (address) {
+        if (gasleft() < threshold) return address(0);
         return answer;
     }
 }
