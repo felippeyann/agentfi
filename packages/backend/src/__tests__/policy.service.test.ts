@@ -49,6 +49,10 @@ function makeMockDb(policy: AgentPolicy | null = basePolicy()): PrismaClient {
     dailyVolume: {
       findUnique: vi.fn().mockResolvedValue(null),
     },
+    // x402 spend (pay-resource, P6) counts from its ledger rows.
+    resourcePayment: {
+      findMany: vi.fn().mockResolvedValue([]),
+    },
     // Atomic volume check uses raw SQL
     $queryRaw: vi.fn().mockResolvedValue([{ volumeUsd: '0' }]),
     $executeRaw: vi.fn().mockResolvedValue(1),
@@ -328,6 +332,28 @@ describe('PolicyService.validateTransaction', () => {
       valueUsd: '200', // 0 + 200 < 500
     });
     expect(result.allowed).toBe(true);
+  });
+
+  it("counts today's x402 spend (pay-resource ledger rows) against the same daily limit (P6)", async () => {
+    const db = makeMockDb(basePolicy({ maxDailyVolumeUsd: '500' }));
+    // DailyVolume after the upsert: 200 (this tx). x402 today: 350 USDC.
+    (db as any).$queryRaw.mockResolvedValue([{ volumeUsd: '200' }]);
+    (db as any).resourcePayment.findMany.mockResolvedValue([{ amount: '300000000' }, { amount: '50000000' }]);
+    const svc = new PolicyService(db);
+    const result = await svc.validateTransaction({
+      agentId: 'agent-1',
+      targetContract: UNISWAP_ROUTER,
+      valueEth: '0.1',
+      valueUsd: '200', // 0 + 350 (x402) + 200 = 550 > 500
+    });
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toMatch(/Daily volume limit of 500 USD would be exceeded. Current: 350\.00, requested: 200\.00/);
+    // The rows queried are the agent's counted ones reserved since midnight UTC.
+    const where = (db as any).resourcePayment.findMany.mock.calls[0][0].where;
+    expect(where).toMatchObject({ agentId: 'agent-1', reservedAt: { gte: expect.any(Date) } });
+    expect(where.OR).toEqual(expect.arrayContaining([{ status: { in: ['reserved', 'pending', 'settled', 'unknown'] } }]));
+    // The DailyVolume reservation is rolled back.
+    expect((db as any).$executeRaw).toHaveBeenCalled();
   });
 
   // ── cooldown ───────────────────────────────────────────────────────────

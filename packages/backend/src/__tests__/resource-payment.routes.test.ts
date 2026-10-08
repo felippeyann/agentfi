@@ -54,6 +54,8 @@ interface LedgerRow {
   payTo: string;
   status: string;
   authorizationNonce: string | null;
+  authorizationValidBefore: Date | null;
+  reservedAt: Date;
   receipt: unknown;
   receiptVerified: boolean | null;
   settlementTxHash: string | null;
@@ -64,11 +66,44 @@ interface LedgerRow {
 }
 
 const { mockDb, ledger } = vi.hoisted(() => {
-  // In-memory ResourcePayment table with the (jobId, paymentId) unique index.
+  // In-memory ResourcePayment table with the (jobId, paymentId) unique index
+  // and a small evaluator for the Prisma `where` shapes the service uses
+  // (equality, in, gt/gte/lte, case-insensitive equals, null, OR / AND / NOT).
   const rows = new Map<string, LedgerRow>();
   let seq = 0;
   const byKey = (jobId: string, paymentId: string) =>
     [...rows.values()].find((r) => r.jobId === jobId && r.paymentId === paymentId);
+
+  const comparable = (value: unknown) => (value instanceof Date ? value.getTime() : value);
+  const fieldMatches = (actual: unknown, condition: any): boolean => {
+    if (condition === null) return actual === null || actual === undefined;
+    if (condition instanceof Date || typeof condition !== 'object') return comparable(actual) === comparable(condition);
+    if ('in' in condition && !condition.in.includes(actual)) return false;
+    if ('equals' in condition) {
+      const insensitive = condition.mode === 'insensitive';
+      const a = insensitive ? String(actual).toLowerCase() : actual;
+      const b = insensitive ? String(condition.equals).toLowerCase() : condition.equals;
+      if (a !== b) return false;
+    }
+    if (actual === null || actual === undefined) return !('gt' in condition || 'gte' in condition || 'lte' in condition);
+    if ('gt' in condition && !((comparable(actual) as number) > (comparable(condition.gt) as number))) return false;
+    if ('gte' in condition && !((comparable(actual) as number) >= (comparable(condition.gte) as number))) return false;
+    if ('lte' in condition && !((comparable(actual) as number) <= (comparable(condition.lte) as number))) return false;
+    return true;
+  };
+  const matches = (row: LedgerRow, where: any = {}): boolean =>
+    Object.entries(where).every(([key, condition]) => {
+      if (key === 'OR') return (condition as any[]).some((inner) => matches(row, inner));
+      if (key === 'AND') return (condition as any[]).every((inner) => matches(row, inner));
+      if (key === 'NOT') return !matches(row, condition);
+      if (key === 'jobId_paymentId') {
+        const c = condition as { jobId: string; paymentId: string };
+        return row.jobId === c.jobId && row.paymentId === c.paymentId;
+      }
+      return fieldMatches((row as unknown as Record<string, unknown>)[key], condition);
+    });
+  const select = (row: LedgerRow, fields?: Record<string, boolean>) =>
+    fields ? Object.fromEntries(Object.keys(fields).map((k) => [k, (row as any)[k]])) : { ...row };
 
   const create = async ({ data }: any): Promise<LedgerRow> => {
     if (byKey(data.jobId, data.paymentId)) {
@@ -81,6 +116,8 @@ const { mockDb, ledger } = vi.hoisted(() => {
     const row: LedgerRow = {
       id: `rp-${++seq}`,
       authorizationNonce: null,
+      authorizationValidBefore: null,
+      reservedAt: new Date(),
       receipt: null,
       receiptVerified: null,
       settlementTxHash: null,
@@ -95,25 +132,39 @@ const { mockDb, ledger } = vi.hoisted(() => {
   };
   const update = async ({ where, data }: any): Promise<LedgerRow> => {
     const row = rows.get(where.id);
-    if (!row) throw new Error(`row ${where.id} not found`);
+    if (!row || !matches(row, where)) {
+      const err = new Error(`row ${where.id} not found`) as Error & { code: string };
+      err.code = 'P2025';
+      throw err;
+    }
     Object.assign(row, data, { updatedAt: new Date() });
     return { ...row };
   };
 
   const resourcePayment = {
     findUnique: vi.fn(async ({ where }: any) => {
-      if (where.id) return rows.get(where.id) ? { ...rows.get(where.id)! } : null;
-      const key = where.jobId_paymentId;
-      const hit = byKey(key.jobId, key.paymentId);
+      const hit = [...rows.values()].find((r) => matches(r, where));
       return hit ? { ...hit } : null;
     }),
-    findMany: vi.fn(async ({ where }: any) =>
-      [...rows.values()]
-        .filter((r) => r.jobId === where.jobId && (!where.status || where.status.in.includes(r.status)))
-        .map((r) => ({ amount: r.amount })),
+    findUniqueOrThrow: vi.fn(async ({ where }: any) => {
+      const hit = [...rows.values()].find((r) => matches(r, where));
+      if (!hit) throw Object.assign(new Error('not found'), { code: 'P2025' });
+      return { ...hit };
+    }),
+    findFirst: vi.fn(async ({ where }: any) => {
+      const hit = [...rows.values()].find((r) => matches(r, where));
+      return hit ? { ...hit } : null;
+    }),
+    findMany: vi.fn(async ({ where, select: fields }: any) =>
+      [...rows.values()].filter((r) => matches(r, where)).map((r) => select(r, fields)),
     ),
     create: vi.fn(create),
     update: vi.fn(update),
+    updateMany: vi.fn(async ({ where, data }: any) => {
+      const hits = [...rows.values()].filter((r) => matches(r, where));
+      for (const row of hits) Object.assign(row, data, { updatedAt: new Date() });
+      return { count: hits.length };
+    }),
     upsert: vi.fn(async ({ where, create: createData, update: updateData }: any): Promise<LedgerRow> => {
       const key = where.jobId_paymentId;
       const existing = byKey(key.jobId, key.paymentId);
@@ -125,8 +176,11 @@ const { mockDb, ledger } = vi.hoisted(() => {
   const mockDb: any = {
     job: { findUnique: vi.fn() },
     agent: { findUnique: vi.fn() },
+    agentPolicy: { findUnique: vi.fn(async () => null) },
+    dailyVolume: { findUnique: vi.fn(async () => null) },
     resourcePayment,
-    $queryRaw: vi.fn(async () => []),
+    // Row locks: the Job lock reads the job status, the Agent lock is ignored.
+    $queryRaw: vi.fn(async () => [{ status: 'ACCEPTED' }]),
     $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(mockDb)),
   };
 
@@ -174,6 +228,7 @@ import {
   NONCE_32,
   USDC_BASE_SEPOLIA,
   fake402,
+  isPaidRequest,
   loopbackOnly,
   neverFetch,
   startResourceServer,
@@ -283,6 +338,9 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
     caller = PROVIDER;
     mockDb.job.findUnique.mockResolvedValue(jobRow());
     mockDb.agent.findUnique.mockResolvedValue(agentRow());
+    mockDb.agentPolicy.findUnique.mockResolvedValue(null);
+    mockDb.dailyVolume.findUnique.mockResolvedValue(null);
+    mockDb.$queryRaw.mockResolvedValue([{ status: 'ACCEPTED' }]);
   });
 
   afterEach(async () => {
@@ -404,7 +462,7 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
       expect(row?.error).toMatch(/above the cap/);
     });
 
-    it('counts settled and unknown rows against the budget, not refused ones', async () => {
+    it('counts settled rows against the budget', async () => {
       const f = await fixture({ price: '$0.40' });
       const app = await buildApp({ base: f.base });
 
@@ -590,7 +648,7 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
       expect(f.counts).toEqual({ verify: 1, settle: 1, deliver: 1 });
     });
 
-    it('a server that rejects the signed payment is refused (402 PAYMENT_REFUSED), does not count against the budget, and may be retried on the same row', async () => {
+    it('a server that rejects the signed payment is refused (402 PAYMENT_REFUSED) but stays counted until validBefore and blocks a second signature to the same payee', async () => {
       const f = await fixture({ price: '$0.40', facilitator: 'reject-verify' });
       const app = await buildApp({ base: f.base });
 
@@ -602,19 +660,224 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
       expect(body.reason).toContain('insufficient_funds');
       expect(body.payment).toMatchObject({ status: 'refused', responseStatus: 402 });
       expect(body.payment.authorizationNonce).toMatch(NONCE_32);
+      expect(body.authorization).toMatchObject({ method: 'eip3009', nonce: body.payment.authorizationNonce });
+      // The window the server can still settle in is stored and returned.
+      const validBefore = new Date(Number(body.authorization.validBefore) * 1000).toISOString();
+      expect(body.payment.authorizationValidBefore).toBe(validBefore);
+      expect(body.countedUntil).toBe(validBefore);
+      expect(body.error).toMatch(/still holds the signed authorization/);
       expect(wallet.signatures).toBe(1);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ paymentId: PAYMENT_ID, nonce: body.payment.authorizationNonce }),
+        expect.stringMatching(/refused a signed payment.*holds the authorization until validBefore/),
+      );
 
+      // Counted: the server may settle what it holds even though it said no.
+      const free = await pay(app, { url: `${f.base}/free` });
+      expect(free.json().remainingBudget).toMatchObject({ spent: '400000', remaining: '600000' });
+
+      // Same id: nothing fetched, nothing signed (409 OUTSTANDING_AUTHORIZATION).
+      const pathsBefore = f.paths.length;
       const retry = await pay(app, { url: f.url, paymentId: PAYMENT_ID });
-      expect(retry.statusCode).toBe(402);
-      expect(retry.json().payment.id).toBe(body.payment.id);
-      expect(retry.json().payment.status).toBe('refused');
-      expect(retry.json().payment.authorizationNonce).not.toBe(body.payment.authorizationNonce);
-      expect(wallet.signatures).toBe(2);
+      expect(retry.statusCode).toBe(409);
+      expect(retry.json()).toMatchObject({
+        code: 'OUTSTANDING_AUTHORIZATION',
+        paymentId: PAYMENT_ID,
+        outstandingPaymentId: PAYMENT_ID,
+        validBefore,
+      });
+      expect(retry.json().payment).toMatchObject({ id: body.payment.id, status: 'refused' });
+      expect(f.paths.length).toBe(pathsBefore);
+
+      // A new id to the same payee: the 402 is read, nothing is signed.
+      const other = await pay(app, { url: f.url, paymentId: 'other_0123456789abcdef' });
+      expect(other.statusCode).toBe(409);
+      expect(other.json()).toMatchObject({ code: 'OUTSTANDING_AUTHORIZATION', outstandingPaymentId: PAYMENT_ID, payment: null });
+      expect(other.json().payTo.toLowerCase()).toBe(f.seller.address.toLowerCase());
+      expect(wallet.signatures).toBe(1);
+      expect(f.counts.verify).toBe(1);
       expect(ledger.all()).toHaveLength(1);
-      expect(retry.json().remainingBudget).toBeUndefined();
+    });
+
+    it('once the refused authorization has expired the amount stops counting and the same id is retried on the same row', async () => {
+      const f = await fixture({ price: '$0.40', facilitator: 'reject-verify' });
+      const app = await buildApp({ base: f.base });
+
+      const first = await pay(app, { url: f.url, paymentId: PAYMENT_ID });
+      expect(first.statusCode).toBe(402);
+      const [row] = ledger.all();
+      // The window passes (validBefore one second ago).
+      row!.authorizationValidBefore = new Date(Date.now() - 1000);
 
       const free = await pay(app, { url: `${f.base}/free` });
       expect(free.json().remainingBudget.remaining).toBe('1000000');
+
+      const retry = await pay(app, { url: f.url, paymentId: PAYMENT_ID });
+      expect(retry.statusCode).toBe(402);
+      expect(retry.json().payment.id).toBe(first.json().payment.id);
+      expect(retry.json().payment.status).toBe('refused');
+      expect(retry.json().payment.authorizationNonce).not.toBe(first.json().payment.authorizationNonce);
+      expect(new Date(retry.json().payment.authorizationValidBefore).getTime()).toBeGreaterThan(Date.now());
+      expect(wallet.signatures).toBe(2);
+      expect(ledger.all()).toHaveLength(1);
+    });
+
+    it('a settlement reported as failed after signing is refused and counted the same way', async () => {
+      const f = await fixture({ price: '$0.40', facilitator: 'fail-settle' });
+      const app = await buildApp({ base: f.base });
+
+      const res = await pay(app, { url: f.url, paymentId: PAYMENT_ID });
+
+      expect(res.statusCode).toBe(402);
+      expect(res.json()).toMatchObject({ code: 'PAYMENT_REFUSED' });
+      expect(res.json().reason).toContain('settle_failed');
+      expect(res.json().payment).toMatchObject({ status: 'refused' });
+      expect(res.json().payment.authorizationValidBefore).not.toBeNull();
+      const free = await pay(app, { url: `${f.base}/free` });
+      expect(free.json().remainingBudget.spent).toBe('400000');
+    });
+
+    it('a 5xx answer to the signed payment (the server may settle anyway) is refused and counted', async () => {
+      const f = await fixture({ price: '$0.40' });
+      // The server settles (the fake facilitator counts it) but the answer is
+      // replaced by a 500 on the way back — what a malicious server does.
+      const answer500: typeof fetch = async (input, init) => {
+        const response = await loopbackOnly(f.base)(input, init);
+        if (!isPaidRequest(input)) return response;
+        await response.arrayBuffer();
+        return new Response('upstream exploded', { status: 500 });
+      };
+      const app = await buildApp({ fetch: answer500 });
+
+      const res = await pay(app, { url: f.url, paymentId: PAYMENT_ID });
+
+      expect(res.statusCode).toBe(402);
+      expect(res.json()).toMatchObject({ code: 'PAYMENT_REFUSED', responseStatus: 500 });
+      expect(res.json().payment).toMatchObject({ status: 'refused', responseStatus: 500 });
+      expect(f.counts.settle).toBe(1);
+      // The money moved; the ledger still counts it and refuses to sign again.
+      const again = await pay(app, { url: f.url, paymentId: 'again_0123456789abcdef' });
+      expect(again.statusCode).toBe(409);
+      expect(again.json().code).toBe('OUTSTANDING_AUTHORIZATION');
+      expect(wallet.signatures).toBe(1);
+      expect(f.counts.settle).toBe(1);
+    });
+  });
+
+  describe('agent policy (P6): refused before anything is signed', () => {
+    function policyRow(overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'policy-1',
+        agentId: PROVIDER,
+        active: true,
+        expiresAt: null,
+        maxValuePerTxEth: '1.0',
+        maxValueForAutoApprovalEth: '0.1',
+        maxDailyVolumeUsd: '10000',
+        allowedContracts: [],
+        allowedTokens: [],
+        cooldownSeconds: 60,
+        pausedByOperatorAt: null,
+        updatedAt: new Date(),
+        ...overrides,
+      };
+    }
+
+    it('per-transaction cap, read in USD for USDC: a price above it is 403 POLICY_VIOLATION, recorded failed_before_signing', async () => {
+      mockDb.agentPolicy.findUnique.mockResolvedValue(policyRow({ maxValuePerTxEth: '0.25' }));
+      const f = await fixture({ price: '$0.40' });
+      const app = await buildApp({ base: f.base });
+
+      const res = await pay(app, { url: f.url, paymentId: PAYMENT_ID });
+
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toMatchObject({
+        code: 'POLICY_VIOLATION',
+        rule: 'maxValuePerTx',
+        limit: '0.25',
+        price: '400000',
+        priceFormatted: '0.4',
+        paymentId: PAYMENT_ID,
+      });
+      expect(res.json().payment).toMatchObject({ status: 'failed_before_signing', amount: '400000' });
+      expect(wallet.signatures).toBe(0);
+      expect(f.counts).toEqual({ verify: 0, settle: 0, deliver: 0 });
+
+      // Within the cap it pays (the same row is retried).
+      mockDb.agentPolicy.findUnique.mockResolvedValue(policyRow({ maxValuePerTxEth: '0.40' }));
+      const paid = await pay(app, { url: f.url, paymentId: PAYMENT_ID });
+      expect(paid.statusCode).toBe(200);
+      expect(paid.json().payment).toMatchObject({ status: 'settled', id: res.json().payment.id });
+    });
+
+    it('daily volume counts DailyVolume plus today\'s counted x402 rows across jobs', async () => {
+      mockDb.agentPolicy.findUnique.mockResolvedValue(policyRow({ maxDailyVolumeUsd: '1' }));
+      mockDb.dailyVolume.findUnique.mockResolvedValue({ volumeUsd: '0.5' });
+      const f = await fixture({ price: '$0.40' });
+      const app = await buildApp({ base: f.base });
+
+      // 0.50 (transactions) + 0.40 = 0.90 ≤ 1.00
+      expect((await pay(app, { url: f.url })).statusCode).toBe(200);
+      // A different job of the same provider: 0.50 + 0.40 + 0.40 = 1.30 > 1.00
+      mockDb.job.findUnique.mockResolvedValue(jobRow({ id: 'job-2' }));
+      const res = await pay(app, { url: f.url }, 'job-2');
+
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toMatchObject({ code: 'POLICY_VIOLATION', rule: 'maxDailyVolume', limit: '1', spentToday: '0.9' });
+      expect(wallet.signatures).toBe(1);
+      expect(mockDb.dailyVolume.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { agentId_date: { agentId: PROVIDER, date: new Date().toISOString().slice(0, 10) } } }),
+      );
+    });
+
+    it('a token allowlist without USDC refuses before anything is fetched', async () => {
+      mockDb.agent.findUnique.mockResolvedValue(
+        agentRow({ policy: { active: true, expiresAt: null, allowedTokens: ['0x0000000000000000000000000000000000000abc'] } }),
+      );
+      const app = await buildApp({ fetch: neverFetch() });
+
+      const res = await pay(app, { url: 'http://127.0.0.1:1/paid' });
+
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toMatchObject({ code: 'POLICY_VIOLATION', rule: 'allowedTokens', payment: null });
+      expect(ledger.all()).toHaveLength(0);
+    });
+
+    it('allowedContracts is read as the payee allowlist: a payTo not listed is refused, a listed one pays', async () => {
+      const f = await fixture({ price: '$0.40' });
+      mockDb.agent.findUnique.mockResolvedValue(
+        agentRow({ policy: { active: true, expiresAt: null, allowedTokens: [USDC_BASE_SEPOLIA] } }),
+      );
+      mockDb.agentPolicy.findUnique.mockResolvedValue(
+        policyRow({ allowedTokens: [USDC_BASE_SEPOLIA], allowedContracts: ['0x00000000000000000000000000000000000000c1'] }),
+      );
+      const app = await buildApp({ base: f.base });
+
+      const refused = await pay(app, { url: f.url });
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json()).toMatchObject({ code: 'POLICY_VIOLATION', rule: 'allowedContracts' });
+      expect(refused.json().payTo.toLowerCase()).toBe(f.seller.address.toLowerCase());
+      expect(wallet.signatures).toBe(0);
+
+      mockDb.agentPolicy.findUnique.mockResolvedValue(
+        policyRow({ allowedTokens: [USDC_BASE_SEPOLIA], allowedContracts: [f.seller.address.toLowerCase()] }),
+      );
+      const paid = await pay(app, { url: f.url });
+      expect(paid.statusCode).toBe(200);
+      expect(wallet.signatures).toBe(1);
+    });
+
+    it('a job cancelled while the 402 was being read is refused under the lock (409 JOB_NOT_ACTIVE), nothing signed or recorded', async () => {
+      const f = await fixture({ price: '$0.40' });
+      const app = await buildApp({ base: f.base });
+      mockDb.$queryRaw.mockResolvedValue([{ status: 'CANCELLED' }]);
+
+      const res = await pay(app, { url: f.url });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ code: 'JOB_NOT_ACTIVE', status: 'CANCELLED' });
+      expect(wallet.signatures).toBe(0);
+      expect(ledger.all()).toHaveLength(0);
     });
   });
 
@@ -790,7 +1053,7 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
       expect(ledger.all()).toHaveLength(0);
     });
 
-    it('a redirect answering the signed payment is refused, recorded as refused and not counted against the budget', async () => {
+    it('a redirect answering the signed payment is refused, recorded as refused and counted until the authorization expires', async () => {
       const f = await fixture({ price: '$0.40', redirect: 'paid' });
       const app = await buildApp({ base: f.base });
 
@@ -815,9 +1078,12 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
         expect.objectContaining({ paymentId: PAYMENT_ID, status: 302 }),
         expect.stringMatching(/redirect.*not followed/),
       );
+      expect(body.payment.authorizationValidBefore).not.toBeNull();
+      expect(body.countedUntil).toBe(body.payment.authorizationValidBefore);
 
+      // The server holds a signed authorization whatever it answered.
       const free = await pay(app, { url: `${f.base}/free` });
-      expect(free.json().remainingBudget.remaining).toBe('1000000');
+      expect(free.json().remainingBudget).toMatchObject({ spent: '400000', remaining: '600000' });
     });
 
     it('a redirect after a reported settlement is refused but the row is settled and counted (the money moved)', async () => {
@@ -895,8 +1161,36 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
       expect(body.error).toContain('eth_chainId failed: https://base-sepolia.g.alchemy.com/v2/[redacted]');
       expect(body.payment).toMatchObject({ status: 'failed_before_signing', paymentId: PAYMENT_ID });
       expect(body.payment.error).toContain('[redacted]');
-      // The ledger itself keeps the full text for the operator.
-      expect(ledger.all()[0]?.error).toContain(ALCHEMY_KEY);
+      // P6: the ledger stores sanitized text too (sanitize before clipping);
+      // the full text goes to the operator log only.
+      expect(ledger.all()[0]?.error).not.toContain(ALCHEMY_KEY);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ paymentId: PAYMENT_ID, cause: expect.stringContaining(ALCHEMY_KEY) }),
+        expect.stringMatching(/Resource payment failed/),
+      );
+    });
+
+    it('a secret that straddles the clip boundary leaks no prefix (sanitized before clipping)', async () => {
+      const f = await fixture({ price: '$0.40' });
+      const app = await buildApp({ base: f.base });
+      // "Failed to create payment payload: " (34) + 111 filler + 43 chars of
+      // URL put the key at offset 188 of the clipped text: a 200-char clip
+      // taken BEFORE sanitizing would keep its first 12 characters, which no
+      // rule recognises afterwards.
+      const message = `${'a'.repeat(111)} rpc https://base-sepolia.g.alchemy.com/v2/${ALCHEMY_KEY} more`;
+      const signSpy = vi.spyOn(wallet, 'signTypedData').mockRejectedValueOnce(new Error(message));
+
+      const res = await pay(app, { url: f.url, paymentId: PAYMENT_ID });
+      signSpy.mockRestore();
+
+      expect(res.statusCode).toBe(502);
+      const stored = ledger.all()[0]?.error ?? '';
+      for (let i = 0; i + 8 <= ALCHEMY_KEY.length; i++) {
+        const piece = ALCHEMY_KEY.slice(i, i + 8);
+        expect(res.payload).not.toContain(piece);
+        expect(stored).not.toContain(piece);
+      }
+      expect(res.json().error).toContain('[redacted]');
     });
   });
 });

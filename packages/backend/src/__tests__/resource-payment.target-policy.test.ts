@@ -69,7 +69,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { logger } from '../api/middleware/logger.js';
 import { resourcePaymentRoutes } from '../api/routes/resource-payments.js';
 import { env } from '../config/env.js';
-import type { TargetLookup } from '../services/payments/outbound-target.js';
+import type { OutboundTargetPolicy, TargetLookup } from '../services/payments/outbound-target.js';
 import { ResourcePaymentService } from '../services/payments/resource-payment.service.js';
 import { X402ClientService } from '../services/payments/x402-client.service.js';
 import type { TypedDataSigner } from '../services/wallet/signer.js';
@@ -112,19 +112,20 @@ let caller = PROVIDER;
 let calls: TransportCall[] = [];
 const open: Array<() => Promise<void>> = [];
 
-async function buildApp(lookup?: TargetLookup): Promise<FastifyInstance> {
+async function buildApp(lookup?: TargetLookup, policy: OutboundTargetPolicy = {}): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   app.addHook('preHandler', async (request: any) => {
     request.agentId = caller;
     request.agentTier = 'FREE';
   });
   const client = new X402ClientService({ fetch: recordingTransport(calls) });
+  const targetPolicy = { ...policy, ...(lookup ? { lookup } : {}) };
   await app.register(resourcePaymentRoutes, {
     service: new ResourcePaymentService({
       db: mockDb,
       wallet,
       client,
-      ...(lookup ? { targetPolicy: { lookup } } : {}),
+      ...(Object.keys(targetPolicy).length > 0 ? { targetPolicy } : {}),
     }),
   });
   open.push(() => app.close());
@@ -204,6 +205,11 @@ describe('pay-resource outbound target policy — default configuration (S4)', (
       ['NAT64 with a private embedded IPv4', 'http://[64:ff9b::10.0.0.1]/', '64:ff9b::a00:1'],
       ['IPv6 unique-local', 'http://[fd00::1]/', 'fd00::1'],
       ['IPv6 link-local', 'http://[fe80::1]/', 'fe80::1'],
+      ['benchmarking 198.18/15', 'http://198.18.0.1/', '198.18.0.1'],
+      ['IETF protocol assignments 192.0.0/24', 'http://192.0.0.170/', '192.0.0.170'],
+      ['6to4 around RFC 1918', 'http://[2002:a00:1::]/', '2002:a00:1::'],
+      ['local-use NAT64', 'http://[64:ff9b:1::808:808]/', '64:ff9b:1::808:808'],
+      ['SIIT IPv4-translated loopback', 'http://[::ffff:0:7f00:1]/', '::ffff:0:7f00:1'],
     ])('%s: %s', async (_label, url, hostname) => {
       const lookup = lookupReturning([{ address: '93.184.216.34', family: 4 }]);
       const app = await buildApp(lookup);
@@ -242,17 +248,23 @@ describe('pay-resource outbound target policy — default configuration (S4)', (
       ['an AAAA record IPv4-mapped to loopback', [{ address: '::ffff:7f00:1', family: 6 }], '::ffff:7f00:1'],
       ['an AAAA record in fc00::/7', [{ address: 'fd12:3456::1', family: 6 }], 'fd12:3456::1'],
       ['an AAAA record NAT64 to RFC 1918', [{ address: '64:ff9b::c0a8:1', family: 6 }], '64:ff9b::c0a8:1'],
-    ])('refuses when %s (400 INVALID_URL, refusal private-address)', async (_label, addresses, address) => {
+      ['an A record in 198.18/15 (benchmarking)', [{ address: '198.19.0.1', family: 4 }], '198.19.0.1'],
+      ['an A record in 192.0.0/24', [{ address: '192.0.0.8', family: 4 }], '192.0.0.8'],
+      ['an AAAA record 6to4 around loopback', [{ address: '2002:7f00:1::1', family: 6 }], '2002:7f00:1::1'],
+      ['an AAAA record in local-use NAT64', [{ address: '64:ff9b:1::808:808', family: 6 }], '64:ff9b:1::808:808'],
+      ['an AAAA record in the SIIT form', [{ address: '::ffff:0:808:808', family: 6 }], '::ffff:0:808:808'],
+    ])('refuses when %s (400 INVALID_URL, refusal no-public-address)', async (_label, addresses, address) => {
       const lookup = lookupReturning(addresses);
       const app = await buildApp(lookup);
 
       const res = await pay(app, 'https://metadata.attacker.example/latest/meta-data/');
 
       expect(res.statusCode).toBe(400);
+      // P6: the same answer as a name that does not resolve at all.
       expect(res.json()).toEqual({
-        error: 'url hostname resolves to a private, loopback, link-local or reserved address (metadata.attacker.example)',
+        error: 'url hostname does not resolve to a public address (metadata.attacker.example)',
         code: 'INVALID_URL',
-        refusal: 'private-address',
+        refusal: 'no-public-address',
         hostname: 'metadata.attacker.example',
       });
       // S5: the private address the name resolved to is never sent back (it
@@ -267,15 +279,32 @@ describe('pay-resource outbound target policy — default configuration (S4)', (
       expectNothingHappened();
     });
 
-    it('a name that does not resolve is 400 INVALID_URL (refusal unresolvable)', async () => {
-      const app = await buildApp(lookupFailing('ENOTFOUND'));
+    it.each([
+      ['NXDOMAIN', lookupFailing('ENOTFOUND')],
+      ['no address at all', lookupReturning([])],
+      ['a private address', lookupReturning([{ address: '10.1.2.3', family: 4 }])],
+    ])(
+      'an internal name cannot be probed: %s gets the same body (refusal no-public-address)',
+      async (_label, lookup) => {
+        const app = await buildApp(lookup);
 
-      const res = await pay(app, 'https://nowhere.example/quote');
+        const res = await pay(app, 'https://db.corp.example/quote');
 
-      expect(res.statusCode).toBe(400);
-      expect(res.json()).toMatchObject({ code: 'INVALID_URL', refusal: 'unresolvable', hostname: 'nowhere.example' });
-      expectNothingHappened();
-    });
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toEqual({
+          error: 'url hostname does not resolve to a public address (db.corp.example)',
+          code: 'INVALID_URL',
+          refusal: 'no-public-address',
+          hostname: 'db.corp.example',
+        });
+        // The precise reason stays in the operator log.
+        expect(vi.mocked(logger.warn)).toHaveBeenCalledWith(
+          expect.objectContaining({ refusal: expect.stringMatching(/^(unresolvable|private-address)$/) }),
+          expect.stringContaining('refused by the outbound target policy'),
+        );
+        expectNothingHappened();
+      },
+    );
 
     it('a transient resolver failure is 502 PAYMENT_FAILED at stage "resolve", nothing signed or recorded', async () => {
       const app = await buildApp(lookupFailing('EAI_AGAIN'));
@@ -297,6 +326,46 @@ describe('pay-resource outbound target policy — default configuration (S4)', (
       expect(res.statusCode).toBe(403);
       expect(lookup).not.toHaveBeenCalled();
       expectNothingHappened();
+    });
+  });
+
+  describe('port policy (P6)', () => {
+    it('development / test is unrestricted by default (no RESOURCE_PAYMENT_ALLOWED_PORTS)', async () => {
+      expect(env.RESOURCE_PAYMENT_ALLOWED_PORTS).toBeUndefined();
+      const app = await buildApp(lookupReturning([{ address: '93.184.216.34', family: 4 }]));
+
+      const res = await pay(app, 'https://api.example.com:8443/quote');
+
+      expect(res.statusCode).toBe(200);
+      expect(calls).toHaveLength(1);
+    });
+
+    it.each([
+      ['an explicit non-standard port', 'https://api.example.com:6379/', 6379],
+      ['http on 8080', 'http://api.example.com:8080/quote', 8080],
+    ])('the production default (80, 443) refuses %s before any DNS lookup', async (_label, url, port) => {
+      const lookup = lookupReturning([{ address: '93.184.216.34', family: 4 }]);
+      const app = await buildApp(lookup, { allowedPorts: [80, 443] });
+
+      const res = await pay(app, url);
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ code: 'INVALID_URL', refusal: 'port-not-allowed', port, hostname: 'api.example.com' });
+      expect(res.json().error).toMatch(/port .* is not allowed/);
+      expect(lookup).not.toHaveBeenCalled();
+      expectNothingHappened();
+    });
+
+    it.each([
+      ['https without a port (443)', 'https://api.example.com/quote'],
+      ['http without a port (80)', 'http://api.example.com/quote'],
+      ['an explicit :443', 'https://api.example.com:443/quote'],
+    ])('the production default allows %s', async (_label, url) => {
+      const app = await buildApp(lookupReturning([{ address: '93.184.216.34', family: 4 }]), { allowedPorts: [80, 443] });
+
+      const res = await pay(app, url);
+
+      expect(res.statusCode).toBe(200);
     });
   });
 
