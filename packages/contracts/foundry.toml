@@ -23,10 +23,15 @@ polygon      = "${ALCHEMY_API_KEY_RPC_POLYGON}"
 base_sepolia = "https://sepolia.base.org"
 arb_sepolia  = "https://sepolia-rollup.arbitrum.io/rpc"
 
+# Etherscan API V2: ONE `ETHERSCAN_API_KEY` (an etherscan.io account key) for every chain, the
+# chain selected by id (forge 1.7.1 sends `https://api.etherscan.io/v2/api?chainid=<id>`). No
+# per-explorer `url`: the V1 endpoints (`api-sepolia.basescan.org/api`, …) answer "You are using a
+# deprecated V1 endpoint". The keys match [rpc_endpoints], so `--rpc-url base_sepolia --verify`
+# resolves the entry by alias.
 [etherscan]
-mainnet      = { key = "${ETHERSCAN_API_KEY}" }
-base         = { key = "${BASESCAN_API_KEY}",    url = "https://api.basescan.org/api" }
-arbitrum     = { key = "${ARBISCAN_API_KEY}",    url = "https://api.arbiscan.io/api" }
-polygon      = { key = "${POLYGONSCAN_API_KEY}", url = "https://api.polygonscan.com/api" }
-base_sepolia = { key = "${BASESCAN_API_KEY}",    url = "https://api-sepolia.basescan.org/api" }
-arb_sepolia  = { key = "${ARBISCAN_API_KEY}",    url = "https://api-sepolia.arbiscan.io/api" }
+mainnet      = { key = "${ETHERSCAN_API_KEY}", chain = 1 }
+base         = { key = "${ETHERSCAN_API_KEY}", chain = 8453 }
+arbitrum     = { key = "${ETHERSCAN_API_KEY}", chain = 42161 }
+polygon      = { key = "${ETHERSCAN_API_KEY}", chain = 137 }
+base_sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 84532 }
+arb_sepolia  = { key = "${ETHERSCAN_API_KEY}", chain = 421614 }
