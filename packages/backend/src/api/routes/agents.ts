@@ -548,22 +548,42 @@ export async function agentRoutes(fastify: FastifyInstance) {
 
   /**
    * GET /v1/agents/:id/trust-report — fetch the reputation and trust metrics of an agent.
+   *
+   * C3d: `erc8004` lists, per ERC-8004 identity on a chain with a
+   * ReputationHook, the hook's `canonicalAgentId` for the agent's wallet (the
+   * id its settlements are rated under) and `penalties(agentId)` (negative
+   * verdicts the registry did not record; while non-zero no positive entry is
+   * written). Read on-chain, cached for a minute; null fields = unreadable.
    */
   fastify.get<{ Params: { id: string } }>('/v1/agents/:id/trust-report', async (request, reply) => {
     const agent = await db.agent.findUnique({
       where: { id: request.params.id },
-      select: { 
-        id: true, 
-        name: true, 
-        reputationScore: true, 
-        a2aTxCount: true, 
+      select: {
+        id: true,
+        name: true,
+        reputationScore: true,
+        a2aTxCount: true,
         lastActiveAt: true,
-        createdAt: true 
+        createdAt: true,
+        safeAddress: true,
+        identities: IDENTITY_SELECT,
       },
     });
 
     if (!agent) return reply.code(404).send({ error: 'Agent not found' });
-    return agent;
+    const { safeAddress, identities, ...report } = agent;
+    let erc8004: unknown[] = [];
+    const minted = (identities ?? []).filter((identity) => identity.erc8004AgentId);
+    if (minted.length > 0) {
+      try {
+        // Lazy: the runtime binds RPC clients and queues the other agent routes never need.
+        const { hookReputation } = await import('../../services/job/escrow-erc8183.runtime.js');
+        erc8004 = await hookReputation({ identities: minted, walletAddress: safeAddress });
+      } catch (err) {
+        logger.warn({ agentId: agent.id, err: (err as Error)?.message ?? String(err) }, 'Trust report: ReputationHook state unavailable');
+      }
+    }
+    return { ...report, erc8004 };
   });
 
   /**

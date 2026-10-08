@@ -442,9 +442,26 @@ export async function adminRoutes(fastify: FastifyInstance) {
           requesterId: true,
           reservationStatus: true,
           reward: true,
+          escrowKind: true,
+          onChainStatus: true,
         },
       });
       if (!job) return reply.code(404).send({ error: 'Job not found' });
+
+      // C3d: an ERC-8183 job whose budget may still be on-chain is settled by
+      // the evaluator, not by a DB flip (a "force COMPLETED" job would still
+      // be refunded at expiry, a "force FAILED" one keeps the USDC locked).
+      if (
+        job.escrowKind === 'erc8183' &&
+        !['COMPLETED', 'REJECTED', 'EXPIRED', 'EXPIRED_UNFUNDED', 'FAILED'].includes(job.onChainStatus ?? '')
+      ) {
+        return reply.code(409).send({
+          error: 'USE_RESOLVE',
+          message:
+            `ERC-8183 job with onChainStatus ${job.onChainStatus}: decide it with POST /admin/jobs/${job.id}/resolve ` +
+            '(pay | refund | refund + quality-rejected | payout-blocked) so the evaluator settles it on-chain.',
+        });
+      }
 
       // Only allow reconcile on payment-state jobs to avoid accidental
       // overrides on healthy lifecycle states (PENDING/ACCEPTED/COMPLETED/etc).
@@ -526,6 +543,70 @@ export async function adminRoutes(fastify: FastifyInstance) {
       };
     },
   );
+
+  /**
+   * POST /admin/jobs/:id/resolve — operator decision on an ERC-8183 job held
+   * for review (C3d, decision D9): a contested job (`onChainStatus
+   * CONTESTED`), a CANCELLED/FAILED job whose deliverable is Submitted
+   * on-chain (C3c alert), or a PAYMENT_PENDING job whose settlement is stuck.
+   *
+   *   { decision: 'pay' }                                   complete + feedback (rating 100)
+   *   { decision: 'refund' }                                reject, "0x" (no rating)
+   *   { decision: 'refund', verdict: 'quality-rejected' }   reject REASON_QUALITY_REJECTED + feedback (rating 0)
+   *   { decision: 'payout-blocked' }                        reject REASON_PAYOUT_BLOCKED, "0x" (no rating)
+   *
+   * `note` (required) and `operator` (the admin UI sends its signed-in user;
+   * default "admin-api") are recorded on the job with the time
+   * (`resolution`, `resolvedBy`, `resolvedAt`, `resolutionNote`, `reviewLog`).
+   * The evaluator settles from the settlement queue; the response is 202.
+   */
+  const resolveSchema = z
+    .object({
+      decision: z.enum(['pay', 'refund', 'payout-blocked']),
+      verdict: z.literal('quality-rejected').optional(),
+      note: z.string().trim().min(3).max(1000),
+      operator: z.string().trim().min(1).max(120).optional(),
+    })
+    .refine((body) => body.verdict === undefined || body.decision === 'refund', {
+      message: 'verdict "quality-rejected" is only valid with decision "refund"',
+      path: ['verdict'],
+    });
+
+  fastify.post<{ Params: { id: string } }>('/admin/jobs/:id/resolve', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+
+    const parsed = resolveSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid request body', details: parsed.error.flatten().fieldErrors });
+    }
+    const { decision, verdict, note, operator } = parsed.data;
+    const resolution = decision === 'refund' && verdict === 'quality-rejected' ? 'quality-rejected' : decision;
+
+    // Imported lazily like the reconcile route's escrow service: the runtime
+    // binds BullMQ queues and RPC clients that the other admin routes never need.
+    const { resolveJob } = await import('../../services/job/escrow-erc8183.runtime.js');
+    const outcome = await resolveJob({ jobId: request.params.id, decision: resolution, note, operator: operator ?? 'admin-api' });
+
+    if (outcome.outcome === 'unverifiable') {
+      return reply.code(503).send({ error: 'CHAIN_UNREADABLE', message: outcome.message });
+    }
+    if (outcome.outcome === 'refused') {
+      const status = outcome.code === 'NOT_FOUND' ? 404 : 409;
+      return reply.code(status).send({
+        error: outcome.code,
+        message: outcome.message,
+        ...(outcome.status !== undefined ? { status: outcome.status } : {}),
+        ...(outcome.onChainStatus !== undefined ? { onChainStatus: outcome.onChainStatus } : {}),
+      });
+    }
+    return reply.code(202).send({
+      jobId: request.params.id,
+      resolution: outcome.resolution,
+      previousStatus: outcome.previousStatus,
+      previousOnChainStatus: outcome.previousOnChainStatus,
+      queued: outcome.queued,
+    });
+  });
 
   /**
    * GET /admin/transactions — global transaction log.
