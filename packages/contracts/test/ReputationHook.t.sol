@@ -40,6 +40,9 @@ contract ReputationHookTest is Test {
     bytes32 internal constant REASON = keccak256("reason");
     string internal constant FEEDBACK_URI = "https://backend.example/v1/jobs/1/feedback.json";
     bytes32 internal constant FEEDBACK_HASH = keccak256("feedback-file");
+    /// @dev Deploy-script defaults (`FEEDBACK_GAS_LIMIT`, `IDENTITY_CALL_GAS_LIMIT`).
+    uint256 internal constant FEEDBACK_GAS = 500_000;
+    uint256 internal constant IDENTITY_GAS = 50_000;
 
     // -------------------------------------------------------------------------
     // setUp
@@ -72,7 +75,7 @@ contract ReputationHookTest is Test {
         internal
         returns (ReputationHook)
     {
-        return new ReputationHook(address(escrow), registry_, identity_, trusted, minBudget);
+        return new ReputationHook(address(escrow), registry_, identity_, trusted, minBudget, FEEDBACK_GAS, IDENTITY_GAS);
     }
 
     function _params() internal pure returns (bytes memory) {
@@ -162,7 +165,7 @@ contract ReputationHookTest is Test {
 
     function test_Constructor_ZeroAcp_Reverts() public {
         vm.expectRevert(ReputationHook.ZeroAddress.selector);
-        new ReputationHook(address(0), address(registry), address(identity), evaluator, MIN_BUDGET);
+        new ReputationHook(address(0), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, IDENTITY_GAS);
     }
 
     function test_Constructor_ZeroRegistry_Reverts() public {
@@ -511,7 +514,9 @@ contract ReputationHookTest is Test {
     function test_Reject_PayoutBlocked_ProviderBlacklisted_EndToEnd() public {
         BlacklistERC20 bl = new BlacklistERC20();
         AgentJobEscrow e = new AgentJobEscrow(address(bl), feeWallet, operator, 0, 30);
-        ReputationHook h = new ReputationHook(address(e), address(registry), address(identity), evaluator, MIN_BUDGET);
+        ReputationHook h = new ReputationHook(
+            address(e), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, IDENTITY_GAS
+        );
         bl.mint(client, BUDGET);
         vm.startPrank(client);
         bl.approve(address(e), BUDGET);
