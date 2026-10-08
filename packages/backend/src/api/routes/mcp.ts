@@ -1,15 +1,19 @@
 /**
  * MCP SSE transport routes — embedded in the backend Fastify server.
  *
- * GET  /mcp/sse      → Opens an SSE stream (requires x-api-key header)
- * POST /mcp/messages  → Receives JSON-RPC messages for an active session
+ * GET  /mcp/sse      → Opens an SSE stream (x-api-key header; never ?apiKey=)
+ * POST /mcp/messages  → Receives JSON-RPC messages for an active session,
+ *                       with the same x-api-key that opened it
  *
  * Authentication: uses the same agent API key as the rest of the API,
  * but validated inline (not by the global auth middleware) so that
  * unauthenticated tools/list discovery works for Smithery scanning.
+ * S6: sessions are bound to the opening key, capped (global, per key) and
+ * evicted when idle; query-string keys are refused.
  */
 
 import type { FastifyInstance } from 'fastify';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import {
@@ -69,6 +73,12 @@ const MOVES_FUNDS = {
   idempotentHint: false,
   openWorldHint: true,
 } as const;
+
+/**
+ * An id interpolated into a backend path (same rule as the stdio MCP server's
+ * packages/mcp-server/src/path-ids.ts, introduced for `job_id` in X3a).
+ */
+export const PATH_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 export interface ToolDef {
   name: string;
@@ -292,7 +302,12 @@ export function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
       annotations: { title: 'Get transaction status', ...READ_OWN_RECORDS },
       description: 'Get the status of a previously submitted transaction',
       inputSchema: z.object({
-        transactionId: z.string().describe('Transaction ID returned by execute_*'),
+        // S6: interpolated into the path — the X3a id rule, so a crafted id
+        // cannot reach another route (`../agents/me/...`) or add a query.
+        transactionId: z
+          .string()
+          .regex(PATH_ID_PATTERN, 'must be a transaction id (letters, digits, "_" or "-")')
+          .describe('Transaction ID returned by execute_*'),
       }),
       handler: async (args: Record<string, unknown>) =>
         call('GET', `/v1/transactions/${args.transactionId}`),
@@ -351,10 +366,146 @@ function getRequiredFields(schema: z.ZodObject<z.ZodRawShape>): string[] {
 
 // ─── MCP Server + Fastify routes ───
 
-const sessions = new Map<
-  string,
-  { transport: SSEServerTransport; apiKey: string; server: Server }
->();
+export interface McpSessionLimits {
+  /** Open SSE sessions across all callers. */
+  maxSessions: number;
+  /** Open SSE sessions per API key (per client IP for keyless discovery sessions). */
+  maxPerKey: number;
+  /** A session with no POST /mcp/messages for this long is closed. */
+  idleTimeoutMs: number;
+}
+
+/** Limits from MCP_SSE_MAX_SESSIONS / _PER_KEY / MCP_SSE_IDLE_TIMEOUT_SECONDS (validated by config/env.ts). */
+export function mcpSessionLimitsFromEnv(source: Readonly<Record<string, string | undefined>> = process.env): McpSessionLimits {
+  const positiveInt = (name: string, fallback: number) => {
+    const value = Number(source[name]);
+    return Number.isInteger(value) && value > 0 ? value : fallback;
+  };
+  return {
+    maxSessions: positiveInt('MCP_SSE_MAX_SESSIONS', 200),
+    maxPerKey: positiveInt('MCP_SSE_MAX_SESSIONS_PER_KEY', 5),
+    idleTimeoutMs: positiveInt('MCP_SSE_IDLE_TIMEOUT_SECONDS', 900) * 1000,
+  };
+}
+
+interface McpSession {
+  transport: SSEServerTransport;
+  server: Server;
+  /** sha256 of the x-api-key that opened the session ('' hashed for keyless discovery). */
+  keyHash: string;
+  /** Per-key cap bucket: the key hash, or the client IP for a keyless session. */
+  owner: string;
+  lastActivity: number;
+}
+
+const sha256 = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
+
+/**
+ * Open `/mcp/sse` sessions (S6). Before, the map was unbounded and
+ * `POST /mcp/messages?sessionId=…` drove any session with no credential at
+ * all — whoever learned a session id could make tool calls with the API key
+ * that opened it. Now each session is bound to the hash of its opening key,
+ * capped globally and per key, and evicted when idle.
+ */
+export class McpSessionRegistry {
+  private readonly sessions = new Map<string, McpSession>();
+
+  constructor(
+    readonly limits: McpSessionLimits,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  get size(): number {
+    return this.sessions.size;
+  }
+
+  countFor(owner: string): number {
+    let count = 0;
+    for (const session of this.sessions.values()) if (session.owner === owner) count++;
+    return count;
+  }
+
+  /** Why a new session for `owner` is refused (null when it may open). */
+  refusal(owner: string): { status: 429 | 503; error: string; code: string } | null {
+    if (this.sessions.size >= this.limits.maxSessions) {
+      return { status: 503, code: 'MCP_SESSIONS_FULL', error: 'Too many open MCP sessions on this server. Retry later.' };
+    }
+    if (this.countFor(owner) >= this.limits.maxPerKey) {
+      return {
+        status: 429,
+        code: 'MCP_SESSION_LIMIT',
+        error: `This API key already has ${this.limits.maxPerKey} open MCP sessions. Close one (or wait for it to idle out) and retry.`,
+      };
+    }
+    return null;
+  }
+
+  add(id: string, session: Omit<McpSession, 'lastActivity'>): void {
+    this.sessions.set(id, { ...session, lastActivity: this.now() });
+  }
+
+  get(id: string): McpSession | undefined {
+    return this.sessions.get(id);
+  }
+
+  delete(id: string): void {
+    this.sessions.delete(id);
+  }
+
+  /** True when `presentedKey` is the key that opened the session (constant-time on the hashes). */
+  matchesKey(session: McpSession, presentedKey: string): boolean {
+    const a = Buffer.from(session.keyHash, 'hex');
+    const b = Buffer.from(sha256(presentedKey), 'hex');
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
+  touch(session: McpSession): void {
+    session.lastActivity = this.now();
+  }
+
+  /** Closes every session idle for longer than the timeout; returns how many. */
+  async evictIdle(): Promise<number> {
+    const cutoff = this.now() - this.limits.idleTimeoutMs;
+    const idle = [...this.sessions.entries()].filter(([, session]) => session.lastActivity < cutoff);
+    for (const [id, session] of idle) await this.close(id, session);
+    return idle.length;
+  }
+
+  async closeAll(): Promise<void> {
+    for (const [id, session] of [...this.sessions.entries()]) await this.close(id, session);
+  }
+
+  private async close(id: string, session: McpSession): Promise<void> {
+    this.sessions.delete(id);
+    try {
+      await session.server.close();
+    } catch {
+      // The stream may already be gone; the session is forgotten either way.
+    }
+  }
+}
+
+/** Query parameters that look like an API key — refused on the MCP routes (S6). */
+const API_KEY_QUERY_PARAM = /^(api[-_]?key|x-api-key|key|token)$/i;
+
+function queryCarriesApiKey(query: unknown): boolean {
+  if (!query || typeof query !== 'object') return false;
+  return Object.keys(query).some((name) => API_KEY_QUERY_PARAM.test(name));
+}
+
+const API_KEY_IN_QUERY = {
+  error:
+    'Pass the agent API key in the x-api-key header. API keys in the query string are refused: URLs end up in ' +
+    'access logs and proxies.',
+  code: 'API_KEY_IN_QUERY',
+} as const;
+
+/** The x-api-key header as a single string ('' when absent); null when it is malformed (repeated). */
+function headerApiKey(headers: Record<string, string | string[] | undefined>): string | null {
+  const value = headers['x-api-key'];
+  if (value === undefined) return '';
+  return typeof value === 'string' ? value : null;
+}
 
 export interface McpServerOptions {
   /** Where a failed tool call is logged in full (default: the backend logger). Tests inject one. */
@@ -471,16 +622,51 @@ export function proxyToolErrorResult(
   return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: true };
 }
 
-export async function mcpRoutes(fastify: FastifyInstance) {
+export interface McpRoutesOptions {
+  /** Session caps; default from the MCP_SSE_* environment variables. */
+  limits?: McpSessionLimits;
+  /** Tests inject a registry to observe or pre-fill it. */
+  registry?: McpSessionRegistry;
+}
+
+export async function mcpRoutes(fastify: FastifyInstance, opts: McpRoutesOptions = {}) {
+  const registry = opts.registry ?? new McpSessionRegistry(opts.limits ?? mcpSessionLimitsFromEnv());
+  const sweep = setInterval(
+    () => {
+      registry.evictIdle().catch(() => {});
+    },
+    Math.max(1_000, Math.min(60_000, Math.floor(registry.limits.idleTimeoutMs / 2))),
+  );
+  sweep.unref();
+  fastify.addHook('onClose', async () => {
+    clearInterval(sweep);
+    await registry.closeAll();
+  });
+
   // GET /mcp/sse — open SSE stream
   fastify.get('/mcp/sse', async (request, reply) => {
-    const apiKey =
-      (request.headers['x-api-key'] as string) ??
-      (request.query as Record<string, string>)['apiKey'] ??
-      '';
+    // S6: header only. `?apiKey=` put agent keys in access logs (Fastify logs
+    // req.url); it is refused rather than ignored so a client relying on it
+    // does not silently fall back to an unauthenticated session.
+    if (queryCarriesApiKey(request.query)) {
+      return reply.code(400).send(API_KEY_IN_QUERY);
+    }
+    const apiKey = headerApiKey(request.headers);
+    if (apiKey === null) {
+      return reply.code(400).send({ error: 'Send exactly one x-api-key header', code: 'INVALID_API_KEY_HEADER' });
+    }
 
     // Allow unauthenticated connections for tool discovery (Smithery scan),
-    // but tool calls will fail without a valid key.
+    // but tool calls will fail without a valid key. Keyless sessions are
+    // capped per client IP, keyed ones per key.
+    const keyHash = sha256(apiKey);
+    const owner = apiKey ? `key:${keyHash}` : `anon:${request.ip}`;
+    const refusal = registry.refusal(owner);
+    if (refusal) {
+      if (refusal.status === 503) reply.header('Retry-After', '30');
+      return reply.code(refusal.status).send({ error: refusal.error, code: refusal.code });
+    }
+
     const mcpServer = createMcpServer(apiKey, {
       logError: (traceId, tool, err) => request.log.error({ err, traceId, tool }, 'MCP /mcp/sse tool call failed'),
     });
@@ -489,26 +675,37 @@ export async function mcpRoutes(fastify: FastifyInstance) {
     reply.hijack();
 
     const transport = new SSEServerTransport('/mcp/messages', reply.raw);
-    sessions.set(transport.sessionId, {
-      transport,
-      apiKey,
-      server: mcpServer,
-    });
-    transport.onclose = () => sessions.delete(transport.sessionId);
+    registry.add(transport.sessionId, { transport, server: mcpServer, keyHash, owner });
+    transport.onclose = () => registry.delete(transport.sessionId);
 
     await mcpServer.connect(transport);
   });
 
   // POST /mcp/messages — receive JSON-RPC messages
   fastify.post('/mcp/messages', async (request, reply) => {
+    if (queryCarriesApiKey(request.query)) {
+      return reply.code(400).send(API_KEY_IN_QUERY);
+    }
     const sessionId =
       (request.query as Record<string, string>)['sessionId'] ?? '';
-    const session = sessions.get(sessionId);
+    const session = registry.get(sessionId);
 
     if (!session) {
       reply.code(404).send({ error: 'Session not found' });
       return;
     }
+
+    // S6: a session only answers the API key that opened it — knowing the
+    // session id is not enough to make tool calls with someone else's key.
+    const apiKey = headerApiKey(request.headers);
+    if (apiKey === null || !registry.matchesKey(session, apiKey)) {
+      reply.code(403).send({
+        error: 'This MCP session was opened with a different API key. Send the same x-api-key header on POST /mcp/messages.',
+        code: 'MCP_SESSION_KEY_MISMATCH',
+      });
+      return;
+    }
+    registry.touch(session);
 
     // Hijack and forward the raw request/response to the SSE transport.
     // Pass request.body as parsedBody so the SDK doesn't try to re-read
