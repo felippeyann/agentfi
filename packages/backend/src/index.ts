@@ -159,8 +159,9 @@ async function start() {
     } catch (err) {
       logger.error({ err }, 'Payment recovery worker failed to start');
     }
-    // C3c: confirmation monitors of a previous run died with it.
-    await repollSubmittedAtBoot();
+    // C3c: confirmation monitors of a previous run died with it. Not awaited:
+    // it never throws and must not delay `listen`.
+    void repollSubmittedAtBoot();
   }
 
   // ERC-8183 escrow (C3): the evaluator signer settles jobs from the

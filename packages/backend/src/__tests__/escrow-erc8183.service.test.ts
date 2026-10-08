@@ -36,6 +36,7 @@ import {
   type Log,
 } from 'viem';
 import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
+import { InMemoryLaneLock } from '../services/transaction/wallet-lane.js';
 import type { EvaluatorWriteParams } from '../services/escrow/evaluator-signer.js';
 import { REPUTATION_HOOK_ABI } from '../abi/ReputationHook.abi.js';
 import {
@@ -1007,6 +1008,17 @@ describe('C3c — funding lane (pumpFunding)', () => {
     expect(lastQueued(queue).name).toBe('erc8183-approve');
     // B's approve is pending now: the lane is busy until B's fund is terminal.
     expect(await pumpFunding(deps, REQUESTER.id, CHAIN_ID)).toBeNull();
+  });
+
+  it('a job that cannot be funded is unwound after the lane is released (no self-deadlock on a real lock)', async () => {
+    const { deps, jobs, releaseJobEscrow } = makeDeps(
+      [escrowJob({ id: 'job-a', onChainJobId: '1', onChainStatus: 'BUDGET_SET', status: 'PENDING', budgetToken: null })],
+      { chainStatus: CHAIN_JOB_STATUS.Open },
+    );
+    const locked = { ...deps, lanes: new InMemoryLaneLock() };
+    expect(await pumpFunding(locked, REQUESTER.id, CHAIN_ID)).toBeNull();
+    expect(jobs.get('job-a')).toMatchObject({ status: 'FAILED', onChainStatus: 'FAILED' });
+    expect(releaseJobEscrow).toHaveBeenCalledWith('job-a');
   });
 
   it('a cancelled holder that never sent its fund does not keep the lane', async () => {

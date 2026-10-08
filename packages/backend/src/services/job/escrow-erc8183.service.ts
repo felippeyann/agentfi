@@ -656,7 +656,10 @@ async function continueChain(deps: Erc8183Deps, jobId: string, step: 'setBudget'
  */
 export async function pumpFunding(deps: Erc8183Deps, requesterId: string, chainId: number): Promise<string | null> {
   const lanes = deps.lanes ?? NO_LANE;
-  return lanes.run(fundingLaneKey(chainId, requesterId), async () => {
+  // A job that cannot be funded is unwound AFTER the lane is released:
+  // handleStepFailure pumps the same lane again.
+  let broken: EscrowJobRow | null = null;
+  const sent = await lanes.run(fundingLaneKey(chainId, requesterId), async (): Promise<string | null> => {
     const scope = { requesterId, escrowChainId: chainId, escrowKind: ESCROW_KIND };
     const holder = await deps.db.job.findFirst({
       where: { ...scope, onChainStatus: 'APPROVED', status: { in: [...LIVE_JOB_STATUS_LIST] } },
@@ -682,7 +685,7 @@ export async function pumpFunding(deps: Erc8183Deps, requesterId: string, chainI
     });
     if (!next) return null;
     if (!next.onChainJobId || !next.budgetAmount || !next.budgetToken || !next.escrowContract) {
-      await handleStepFailure(deps, next, 'approve', 'cannot build approve: escrow columns incomplete', null);
+      broken = next;
       return null;
     }
     const data = encodeFunctionData({
@@ -701,6 +704,9 @@ export async function pumpFunding(deps: Erc8183Deps, requesterId: string, chainI
     });
     return next.id;
   });
+  const unfundable = broken as EscrowJobRow | null;
+  if (unfundable) await handleStepFailure(deps, unfundable, 'approve', 'cannot build approve: escrow columns incomplete', null);
+  return sent;
 }
 
 // ── Chain-driven advances (C3c) ────────────────────────────────────────────
