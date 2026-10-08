@@ -139,8 +139,8 @@ contract AgentJobEscrow {
     // AgentFi extension — events
     // =========================================================================
 
-    /// @notice Emitted when the client or provider attaches an ERC-8004 agent id to the job's provider
-    ///         (also with `agentId == 0` when `setProvider` clears a previously set id).
+    /// @notice Emitted when the provider attaches its ERC-8004 agent id to the job (also with
+    ///         `agentId == 0` when the provider clears it).
     event ProviderAgentIdSet(uint256 indexed jobId, uint256 indexed agentId);
     /// @notice Emitted when a non-zero platform fee is accrued to `pendingPlatformFees` on completion.
     event PlatformFeeAccrued(uint256 indexed jobId, uint256 amount);
@@ -232,8 +232,8 @@ contract AgentJobEscrow {
     uint256 private _jobCount;
     /// @dev Job records by id.
     mapping(uint256 jobId => Job) private _jobs;
-    /// @notice AgentFi extension: ERC-8004 agent id of the provider, set by the client or the
-    ///         provider (0 = none). `ReputationHook` verifies on-chain that the id belongs to the provider.
+    /// @notice AgentFi extension: ERC-8004 agent id of the provider, set by the provider only
+    ///         (0 = none). `ReputationHook` verifies on-chain that the id belongs to the provider.
     mapping(uint256 jobId => uint256 agentId) public providerAgentId;
     /// @notice AgentFi extension: timestamp of `submit` (0 = the job was never submitted).
     mapping(uint256 jobId => uint256 timestamp) public submittedAt;
@@ -344,9 +344,9 @@ contract AgentJobEscrow {
      * @notice Sets the provider of an `Open` job whose provider is still unset. Only the client may call.
      * @dev ERC-8183: "SHALL revert if job is not Open, current `job.provider != address(0)`, or
      *      `provider == address(0)`". A provider is therefore assigned exactly once (at `createJob`
-     *      or here) and can never be swapped. Any `providerAgentId` set before the provider was
-     *      known is cleared (it belonged to nobody). Hook data: `abi.encode(address provider, bytes optParams)`
-     *      with empty optParams.
+     *      or here) and can never be swapped. No `providerAgentId` can exist yet (only the provider
+     *      may set it), so there is nothing to clear. Hook data:
+     *      `abi.encode(address provider, bytes optParams)` with empty optParams.
      * @param jobId The job.
      * @param provider_ New provider (non-zero, not the client, not the evaluator).
      */
@@ -364,10 +364,6 @@ contract AgentJobEscrow {
 
         job.provider = provider_;
         emit ProviderSet(jobId, provider_);
-        if (providerAgentId[jobId] != 0) {
-            delete providerAgentId[jobId];
-            emit ProviderAgentIdSet(jobId, 0);
-        }
 
         _hookAfter(job.hook, jobId, this.setProvider.selector, data);
     }
@@ -496,7 +492,10 @@ contract AgentJobEscrow {
      * @dev Hook data: `abi.encode(bytes32 reason, bytes optParams)`. The refund is pushed to
      *      `job.client`: if the client cannot receive the token (e.g. USDC blacklist) this reverts
      *      and `complete` is the only exit. Allowed after `expiredAt` while the job is still
-     *      `Funded`/`Submitted` (races `claimRefund`, first tx wins).
+     *      `Funded`/`Submitted` (races `claimRefund`, first tx wins). AgentFi's `ReputationHook`
+     *      writes negative ERC-8004 feedback only when `reason` is its `REASON_QUALITY_REJECTED`
+     *      (the evaluator's explicit quality verdict, decision D9); every other reason refunds
+     *      without a rating.
      * @param jobId The job.
      * @param reason Hash of the human-readable reason.
      * @param optParams Opaque parameters forwarded to the hook (AgentFi: feedback URI and hash).
@@ -563,21 +562,24 @@ contract AgentJobEscrow {
 
     /**
      * @notice Attaches the provider's ERC-8004 agent id to a job so settlement outcomes can be
-     *         attributed to an on-chain identity (read by `ReputationHook`). The client or the
-     *         provider may call, while the job is `Open` or `Funded`. Not hooked.
-     * @dev The escrow does not validate the id: `ReputationHook` checks against the ERC-8004
+     *         attributed to an on-chain identity (read by `ReputationHook`). Only the provider may
+     *         call, while the job is `Open` or `Funded`. Not hooked.
+     * @dev Provider-only since the second adversarial review (2026-10-08): when the client could
+     *      also call it, a client could set `0` after the provider had bound its id and before
+     *      `submit`, so the hook skipped the feedback (`no-agent-id`). The identity belongs to the
+     *      provider, so only the provider decides which one it presents (AgentFi's backend binds it
+     *      through the provider's own wallet, R2). Because nobody can set it while
+     *      `provider == address(0)`, `setProvider` never has a stale id to clear.
+     *      The escrow does not validate the id: `ReputationHook` checks against the ERC-8004
      *      Identity Registry that the id is owned by (or has its agent wallet set to) `job.provider`
-     *      before writing feedback, so a wrong id only results in a skipped write. Cleared by
-     *      `setProvider`.
+     *      when the provider submits, so a wrong id only results in a skipped write.
      * @param jobId The job.
      * @param agentId ERC-8004 identity id (0 clears it).
      */
     function setProviderAgentId(uint256 jobId, uint256 agentId) external nonReentrant {
         Job storage job = _getJob(jobId);
         if (job.status != JobStatus.Open && job.status != JobStatus.Funded) revert InvalidStatus(jobId, job.status);
-        if (msg.sender != job.client && (msg.sender != job.provider || job.provider == address(0))) {
-            revert Unauthorized();
-        }
+        if (msg.sender != job.provider) revert Unauthorized();
 
         providerAgentId[jobId] = agentId;
         emit ProviderAgentIdSet(jobId, agentId);
