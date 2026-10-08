@@ -13,6 +13,8 @@
  *  - POST /v1/jobs/:id/contest guards
  *  - GET /v1/jobs/:id/feedback.json: 404 until generated, public (no API key),
  *    byte-stable: keccak256(body) == feedbackHashOf(stored file)
+ *  - X3a: a reward without chainId or token is 400 VALIDATION_FAILED (no
+ *    Ethereum-mainnet / ETH default)
  */
 import { vi } from 'vitest';
 
@@ -608,5 +610,95 @@ describe('S5: chain errors in job responses are sanitized', () => {
       code: 'VALIDATION_FAILED',
       details: [expect.objectContaining({ path: ['providerId'] })],
     });
+  });
+});
+
+// ── X3a: a paid job names its chain and token (no mainnet/ETH default) ─────
+
+describe('POST /v1/jobs: a reward must name chainId and token (X3a)', () => {
+  let REWARD_CHAIN_ID_REQUIRED: string;
+  let REWARD_TOKEN_REQUIRED: string;
+  beforeAll(async () => {
+    ({ REWARD_CHAIN_ID_REQUIRED, REWARD_TOKEN_REQUIRED } = await import('../api/routes/jobs.js'));
+  });
+
+  const post = (app: Awaited<ReturnType<typeof buildApp>>, payload: Record<string, unknown>) =>
+    app.inject({ method: 'POST', url: '/v1/jobs', payload: { providerId: PROVIDER.id, payload: { task: 'x' }, ...payload } });
+
+  /** Nothing was looked up, reserved, created or sent on-chain. */
+  function expectNothingHappened() {
+    expect(mockDb.agent.findUnique).not.toHaveBeenCalled();
+    expect(escrowMock.reserveJobEscrow).not.toHaveBeenCalled();
+    expect(mockDb.job.create).not.toHaveBeenCalled();
+    expect(runtimeMock.startEscrow).not.toHaveBeenCalled();
+    expect(escrowMock.queueOnChainEscrowLock).not.toHaveBeenCalled();
+  }
+
+  it('a reward without chainId is 400 VALIDATION_FAILED telling the caller to set it (it used to become an Ethereum-mainnet job)', async () => {
+    const app = await buildApp();
+
+    const res = await post(app, { reward: { amount: '12.5', token: 'USDC' } });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({
+      error: 'Validation failed',
+      code: 'VALIDATION_FAILED',
+      details: [expect.objectContaining({ path: ['reward', 'chainId'], message: REWARD_CHAIN_ID_REQUIRED })],
+    });
+    expect(REWARD_CHAIN_ID_REQUIRED).toContain('set it to the chain');
+    expectNothingHappened();
+  });
+
+  it('a reward without token is 400 VALIDATION_FAILED (it used to default to ETH)', async () => {
+    const app = await buildApp();
+
+    const res = await post(app, { reward: { amount: '12.5', chainId: CHAIN_ID } });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toEqual({
+      error: 'Validation failed',
+      code: 'VALIDATION_FAILED',
+      details: [expect.objectContaining({ path: ['reward', 'token'], message: REWARD_TOKEN_REQUIRED })],
+    });
+    expectNothingHappened();
+  });
+
+  it('a reward with neither reports both issues', async () => {
+    const app = await buildApp();
+
+    const res = await post(app, { reward: { amount: '0.01' } });
+
+    expect(res.statusCode).toBe(400);
+    const paths = (res.json().details as Array<{ path: string[] }>).map((d) => d.path.join('.')).sort();
+    expect(paths).toEqual(['reward.chainId', 'reward.token']);
+    expectNothingHappened();
+  });
+
+  it.each([
+    ['a string', '84532'],
+    ['zero', 0],
+    ['a fraction', 84532.5],
+  ])('a chainId that is %s is 400 VALIDATION_FAILED', async (_label, chainId) => {
+    const app = await buildApp();
+
+    const res = await post(app, { reward: { amount: '12.5', token: 'USDC', chainId } });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ code: 'VALIDATION_FAILED', details: [expect.objectContaining({ path: ['reward', 'chainId'] })] });
+    expectNothingHappened();
+  });
+
+  it('a free job (no reward) still needs neither', async () => {
+    mockDb.agent.findUnique.mockResolvedValueOnce(PROVIDER);
+    mockDb.job.create.mockResolvedValue({ id: 'job-3', status: 'PENDING', reward: {}, escrowKind: null });
+    const app = await buildApp();
+
+    const res = await post(app, {});
+
+    expect(res.statusCode).toBe(201);
+    expect(runtimeMock.isErc8183Enabled).not.toHaveBeenCalled();
+    expect(escrowMock.reserveJobEscrow).not.toHaveBeenCalled();
+    expect(mockDb.job.create).toHaveBeenCalledWith({ data: expect.objectContaining({ reward: {}, status: 'PENDING' }) });
+    expect(res.json().escrow).toBeNull();
   });
 });
