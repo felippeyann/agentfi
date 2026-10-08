@@ -41,8 +41,10 @@ It prints a Claude Desktop `mcpServers` config snippet, five demo prompts, and a
 REST command for the P&L checkpoint.
 
 By default, the helper points Claude Desktop at the local workspace MCP server
-(`npm run start -w packages/mcp-server`) so the demo can use unreleased source
-tools such as `get_my_pnl`. To force a published npm package instead, run:
+(`npm run start -w packages/mcp-server`) so the demo can use the source tools
+that npm 0.5.0 does not have yet (`get_job`, `check_outbox`, `contest_job`,
+`pay_for_resource`: 35 tools in source, 31 in 0.5.0). To force a published npm
+package instead, run:
 
 ```bash
 $env:AGENTFI_MCP_PACKAGE="@agent_fi/mcp-server"
@@ -60,8 +62,10 @@ Merge the printed `mcpServers` block into the file, then restart Claude
 Desktop. In Claude Desktop, use the `+` button near the chat box and open
 Connectors to confirm both AgentFi servers are connected.
 
-The generated config uses `stdio` and `npx`. On Windows, the helper prints a
-`cmd /c npx ...` command so native Windows launches the MCP server reliably.
+The generated config uses `stdio`: by default it starts the MCP server from
+this checkout (`npm run start -w packages/mcp-server`), or `npx -y <package>`
+when `AGENTFI_MCP_PACKAGE` is set. On Windows, the helper wraps either in
+`cmd /c ...` so native Windows launches the MCP server reliably.
 
 ## 4. Run the prompts
 

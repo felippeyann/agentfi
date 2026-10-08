@@ -30,8 +30,8 @@ First build takes ~2 minutes (npm install + tsc). Subsequent starts: ~10 seconds
 When you see:
 
 ```
-api-1  | [info] AgentFi API listening on :3000
-api-1  | [warn] [local-wallet] LocalWalletService active — keys in process memory, NOT for production
+api-1  | [..] WARN (1): [local-wallet] LocalWalletService active — keys in process memory, NOT for production
+api-1  | [..] INFO (1): AgentFi API running on port 3000
 ```
 
 …the stack is ready.
@@ -140,7 +140,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 }
 ```
 
-Restart Claude Desktop. You should see 26 AgentFi tools available.
+Restart Claude Desktop. You should see 31 AgentFi tools: `npx` runs the published `@agent_fi/mcp-server@0.5.0`. The source on `main` has 35 (the escrow job tools `get_job`, `check_outbox`, `contest_job` and `pay_for_resource` ship with 0.6.0); to get them now, point Claude Desktop at a checkout instead, as [`npm run demo:claude-mcp`](demos/claude-desktop-mcp.md) does.
 
 > Transactions themselves won't execute in dev without a real `ALCHEMY_API_KEY` (RPC calls will fail), but `/v1/agents/me`, `/v1/agents/search`, `/v1/jobs`, P&L, and all data-layer tools work end-to-end.
 
