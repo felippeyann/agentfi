@@ -18,7 +18,7 @@ Every variable below must be configured on the **backend service** of your host.
 
 | Variable | Value | Where to get it |
 |---|---|---|
-| `NODE_ENV` | `production` | — |
+| `NODE_ENV` | `production` (or `staging`) | Always set it explicitly (see "Boot guards" below) |
 | `API_SECRET` | 64-char random string | `openssl rand -hex 32` |
 | `ADMIN_SECRET` | 64-char random string | `openssl rand -hex 32` |
 | `ADMIN_USERNAME` | Admin login username | Operator-defined |
@@ -45,6 +45,21 @@ Every variable below must be configured on the **backend service** of your host.
 | `TENDERLY_ACCESS_KEY` | Your key | `dashboard.tenderly.co` → API Access |
 | `TENDERLY_ACCOUNT` | Your slug | visible in Tenderly dashboard URL |
 | `TENDERLY_PROJECT` | Your project slug | visible in Tenderly dashboard URL |
+| `TRUST_PROXY` | `1` behind Railway / Fly / Render (one proxy hop); default `false` | Fastify `trustProxy`: `false`, a hop count (1-10), the proxies' IPs / CIDRs, or `true` (trusts a client-chosen `X-Forwarded-For`; warned at boot). Lets per-IP limits (public registration, `/health/ready`) see the client. The admin loopback gate never uses it. |
+| `MCP_SSE_MAX_SESSIONS` / `MCP_SSE_MAX_SESSIONS_PER_KEY` / `MCP_SSE_IDLE_TIMEOUT_SECONDS` | `200` / `5` / `900` | Caps for the backend's hosted MCP (`GET /mcp/sse`): sessions are bound to the opening API key, capped globally and per key, and closed when idle. |
+
+### Boot guards (S6)
+
+`config/env.ts` refuses to start (`FATAL`, exit 1) on these combinations; the rules live in `packages/backend/src/config/env-guards.ts`:
+
+| Combination | `production` / `staging` | `development` / `test` |
+|---|---|---|
+| A placeholder from `.env.example` (`your-…-here`, incl. `sk_test_your-…`, `whsec_your-…`) or `docker-compose.dev.yml` in `API_SECRET`, `ADMIN_SECRET`, `STRIPE_*`, `ALCHEMY_API_KEY`, `TURNKEY_*` | FATAL | allowed |
+| `WALLET_PROVIDER=local` | FATAL | allowed |
+| `RPC_URL_<chainId>` over plain `http://` | FATAL (https only) | allowed only to a loopback / private host (`localhost`, `127.x`, `::1`, RFC 1918, link-local, ULA, a single-label compose name, `*.local` / `*.internal` / `*.lan` / `*.home.arpa`) |
+| `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS=true`, a legacy executor, an escrow address without `ESCROW_EVALUATOR_PRIVATE_KEY` | FATAL | allowed / WARN |
+
+**`NODE_ENV` unset.** The schema then means `development`, with every guard above off. The backend always prints a loud warning, and refuses to boot when both hold: (1) it runs in a container or on a hosting platform — `/.dockerenv`, `/run/.containerenv`, or one of `KUBERNETES_SERVICE_HOST`, `container`, `FLY_APP_NAME`, `RAILWAY_ENVIRONMENT`, `RAILWAY_ENVIRONMENT_NAME`, `RENDER`, `DYNO`, `ECS_CONTAINER_METADATA_URI_V4`, `ECS_CONTAINER_METADATA_URI`, `K_SERVICE` is set; and (2) the configuration looks like production — `WALLET_PROVIDER=turnkey` (the default), a contract address on a mainnet chain (1, 8453, 42161, 137), a live Stripe key (`sk_live_` / `rk_live_`), `ADMIN_ALLOW_REMOTE=true`, or a public `BACKEND_PUBLIC_URL`. `Dockerfile.backend` sets `NODE_ENV=production`; a development container sets `NODE_ENV=development` explicitly (as `docker-compose.dev.yml` does).
 
 ### Optional — RPC endpoints
 
@@ -53,7 +68,7 @@ By default every chain's RPC is built from `ALCHEMY_API_KEY`, with Infura (`INFU
 | Variable | Value | Notes |
 |---|---|---|
 | `INFURA_API_KEY` | Your Infura key | Second candidate after Alchemy |
-| `RPC_URL_<chainId>` (`RPC_URL_8453`, `RPC_URL_84532`, `RPC_URL_1`, `RPC_URL_42161`, `RPC_URL_137`) | `https://…` (http/https only) | Becomes the **primary** RPC of that chain — your own node, another provider, or a local Anvil fork (the C5a escrow rehearsal sets `RPC_URL_84532` to its fork). Alchemy, Infura and the public RPC stay behind it as fallbacks. Blank = unset; a malformed value refuses boot. Used everywhere the backend talks to the chain: transaction submitter and monitor, the ERC-8183 evaluator signer, escrow and registry reads. |
+| `RPC_URL_<chainId>` (`RPC_URL_8453`, `RPC_URL_84532`, `RPC_URL_1`, `RPC_URL_42161`, `RPC_URL_137`) | `https://…` (https only in production / staging; plain http only to a loopback / private host in development) | Becomes the **primary** RPC of that chain — your own node, another provider, or a local Anvil fork (the C5a escrow rehearsal sets `RPC_URL_84532` to its fork). Alchemy, Infura and the public RPC stay behind it as fallbacks. Blank = unset; a malformed value or a forbidden `http://` refuses boot. Used everywhere the backend talks to the chain: transaction submitter and monitor, the ERC-8183 evaluator signer, escrow and registry reads. |
 
 ### Stripe (needed only if running paid subscriptions)
 

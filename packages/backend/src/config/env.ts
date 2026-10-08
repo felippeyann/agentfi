@@ -3,6 +3,13 @@ import 'dotenv/config';
 import { privateKeyToAccount } from 'viem/accounts';
 import type { Address, Hex } from 'viem';
 import { describeLegacyContract, findLegacyContractConfig } from './contracts.js';
+import {
+  PRODUCTION_LIKE,
+  nodeEnvUnsetVerdict,
+  placeholderKeys,
+  rpcUrlProblem,
+} from './env-guards.js';
+import { parseTrustProxy, type TrustProxySetting } from './trust-proxy.js';
 
 /** Chains the ERC-8183 escrow can be configured on (one address pair per chain). */
 export const ESCROW_CHAIN_IDS = [1, 8453, 42161, 137, 84532] as const;
@@ -45,7 +52,9 @@ const identityRegistryFields = Object.fromEntries(
 // another provider, a local Anvil fork); Alchemy / Infura / the public RPC
 // stay behind it as fallbacks (config/chains.ts `getRpcCandidates`). Blank or
 // unset → the existing Alchemy-first order. Only http(s) URLs: every client
-// is a viem `http` transport. Same chain list as `CHAIN_IDS` in
+// is a viem `http` transport; https only in production / staging, and plain
+// http only to a loopback / private host elsewhere (S6, `rpcUrlProblem` in
+// env-guards.ts, checked after parsing). Same chain list as `CHAIN_IDS` in
 // config/chains.ts (not imported: tests mock that module partially).
 export const RPC_OVERRIDE_CHAIN_IDS = [1, 8453, 42161, 137, 84532] as const;
 const rpcUrlFields = Object.fromEntries(
@@ -76,7 +85,22 @@ const envSchema = z.object({
   // Railway injects PORT, fallback to API_PORT, then 3000
   API_PORT: z.coerce.number().default(parseInt(process.env['PORT'] ?? process.env['API_PORT'] ?? '3000')),
   API_SECRET: z.string().min(32),
+  // Unset → development, with a loud WARN; refused in a container with a
+  // production-looking config (S6, `nodeEnvUnsetVerdict` in env-guards.ts).
   NODE_ENV: z.enum(['development', 'staging', 'production', 'test']).default('development'),
+
+  // Fastify `trustProxy` (S6): false (default) | true | hop count | IPs/CIDRs.
+  // See config/trust-proxy.ts. The admin loopback gate never trusts it.
+  TRUST_PROXY: z.preprocess(blankToUndefined, z.string().default('false')).superRefine((value, ctx) => {
+    const parsedTrustProxy = parseTrustProxy(value);
+    if ('error' in parsedTrustProxy) ctx.addIssue({ code: z.ZodIssueCode.custom, message: parsedTrustProxy.error });
+  }),
+
+  // Hosted MCP over SSE (`GET /mcp/sse`, S6): sessions are bound to the API
+  // key that opened them and capped. Defaults live in api/routes/mcp.ts too.
+  MCP_SSE_MAX_SESSIONS: z.coerce.number().int().positive().default(200),
+  MCP_SSE_MAX_SESSIONS_PER_KEY: z.coerce.number().int().positive().default(5),
+  MCP_SSE_IDLE_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(900),
 
   // RPC
   ALCHEMY_API_KEY: z.string().min(1),
@@ -208,6 +232,20 @@ const envSchema = z.object({
   PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR: z.coerce.number().int().min(0).default(5),
 });
 
+// NODE_ENV unset (S6): the schema falls back to development and every guard
+// below is off. Always say so loudly; refuse when the process runs in a
+// container / on a hosting platform with a production-looking configuration.
+const nodeEnvUnset = nodeEnvUnsetVerdict(process.env);
+if (nodeEnvUnset) {
+  console.warn(
+    `\n${'!'.repeat(78)}\n${nodeEnvUnset.warning}\n${'!'.repeat(78)}\n`,
+  );
+  if (nodeEnvUnset.fatal) {
+    console.error(nodeEnvUnset.fatal);
+    process.exit(1);
+  }
+}
+
 const parsed = envSchema.safeParse(process.env);
 
 if (!parsed.success) {
@@ -215,26 +253,52 @@ if (!parsed.success) {
   process.exit(1);
 }
 
-// Reject known placeholder values in production to prevent accidental deploys
-// with default .env.example credentials.
-if (parsed.data.NODE_ENV === 'production') {
-  const ADMIN_SECRET_PLACEHOLDER = 'your-admin-secret-min-32-chars-here';
-  if (parsed.data.ADMIN_SECRET === ADMIN_SECRET_PLACEHOLDER) {
+// RPC_URL_<chainId> transport (S6): https only in production / staging;
+// plain http only to a loopback / private host in development / test.
+for (const key of Object.keys(parsed.data).filter((k) => k.startsWith('RPC_URL_'))) {
+  const url = parsed.data[key as keyof typeof parsed.data];
+  if (typeof url !== 'string') continue;
+  const problem = rpcUrlProblem(url, parsed.data.NODE_ENV);
+  if (problem) {
+    console.error(`FATAL: ${key} ${problem}.`);
+    process.exit(1);
+  }
+}
+
+// Production AND staging (S6: staging is as strict as production for
+// wallets and secrets — it holds real keys and is reachable).
+if (PRODUCTION_LIKE.has(parsed.data.NODE_ENV)) {
+  // Reject the placeholder values shipped in .env.example and
+  // docker-compose.dev.yml: a known API_SECRET registers agents and loosens
+  // policies, a known ADMIN_SECRET opens /admin, a known
+  // STRIPE_WEBHOOK_SECRET forges billing events.
+  const placeholders = placeholderKeys(process.env);
+  if (placeholders.length > 0) {
     console.error(
-      'FATAL: ADMIN_SECRET is set to the .env.example placeholder value. ' +
-      'Set a strong random secret before deploying to production.',
+      `FATAL: ${placeholders.join(', ')} ${placeholders.length === 1 ? 'is' : 'are'} set to a placeholder value from ` +
+        `.env.example / docker-compose.dev.yml, which cannot run with NODE_ENV=${parsed.data.NODE_ENV}. ` +
+        'Generate real values (openssl rand -hex 32 for secrets) before deploying.',
     );
     process.exit(1);
   }
 
-  // Refuse to boot production with the local (in-memory) wallet provider —
-  // it's development-only and would silently lose keys on every restart.
+  // Refuse to boot with the local (in-memory) wallet provider — it's
+  // development-only and would silently lose keys on every restart.
   if (parsed.data.WALLET_PROVIDER === 'local') {
     console.error(
-      'FATAL: WALLET_PROVIDER=local is development-only and cannot run with NODE_ENV=production. ' +
+      `FATAL: WALLET_PROVIDER=local is development-only and cannot run with NODE_ENV=${parsed.data.NODE_ENV}. ` +
       'Set WALLET_PROVIDER=turnkey and provide TURNKEY_API_PUBLIC_KEY, TURNKEY_API_PRIVATE_KEY, TURNKEY_ORGANIZATION_ID.',
     );
     process.exit(1);
+  }
+
+  // TRUST_PROXY=true makes the client-chosen left-most X-Forwarded-For entry
+  // the request IP (per-IP rate limits become per-header). Allowed, but say so.
+  if (parsed.data.TRUST_PROXY.trim() === 'true') {
+    console.warn(
+      'WARN: TRUST_PROXY=true trusts every X-Forwarded-For hop, so a client can choose its own request IP and ' +
+        'evade per-IP rate limits. Prefer the proxy hop count (e.g. TRUST_PROXY=1) or the proxy addresses.',
+    );
   }
 
   // Tenderly is optional, but without it production simulates every tx via a
@@ -327,6 +391,12 @@ if (
 }
 
 export const env = parsed.data;
+
+/** Fastify `trustProxy` derived from TRUST_PROXY (validated above). */
+export const trustProxySetting: TrustProxySetting = (() => {
+  const result = parseTrustProxy(parsed.data.TRUST_PROXY);
+  return 'value' in result ? result.value : false;
+})();
 
 /** Address of the ERC-8183 evaluator signer, or null when no key is configured. */
 export const escrowEvaluatorAddress: Address | null = derivedEvaluatorAddress;

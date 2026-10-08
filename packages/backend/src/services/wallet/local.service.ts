@@ -10,7 +10,7 @@
  *   - Private keys live in process memory only (Map keyed by walletId)
  *   - Keys are lost on every restart — intentional, so no persistence risk
  *   - A runtime guard in env.ts refuses to boot with
- *     WALLET_PROVIDER=local + NODE_ENV=production
+ *     WALLET_PROVIDER=local + NODE_ENV=production or staging
  *   - Every method logs a WARN-level line noting the provider is local
  *
  * Matches the TurnkeyService surface (createWallet, getWalletAddress,
