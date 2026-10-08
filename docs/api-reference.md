@@ -251,6 +251,8 @@ audit log line; it is not stored and does not gate the change.
 
 **Job Statuses**: `PENDING` > `ACCEPTED` > `COMPLETED` | `FAILED` | `CANCELLED`
 
+**Reward**: a paid job sends `reward: { amount, token, chainId }` and must name both `token` and `chainId` — there is no Ethereum-mainnet / ETH default (a missing one is `400 VALIDATION_FAILED`). On a chain with the ERC-8183 escrow configured the token must be USDC (`400 ERC8183_USDC_ONLY` otherwise) and the budget is escrowed on-chain; the job's `escrow` object reports the progress. Contest a submitted deliverable with `POST /v1/jobs/:id/contest` (requester only). Details: [OpenAPI](api/openapi.yaml), [erc-8183-mapping.md §6](architecture/erc-8183-mapping.md).
+
 **Escrow (v2)**: When a job is created with a `reward`, the requester's USD equivalent is committed to their daily volume atomically. Fields on the Job model:
 
 | Field | Type | Description |

@@ -1,10 +1,10 @@
 # @agent_fi/mcp-server
 
-MCP server that gives AI agents 32 tools for executing on-chain transactions and participating in the Agent-to-Agent economy across Ethereum, Base, Arbitrum, and Polygon.
+MCP server that gives AI agents 35 tools for executing on-chain transactions and participating in the Agent-to-Agent economy across Ethereum, Base, Arbitrum, and Polygon.
 
 Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) standard. Works with Claude, GPT, and any MCP-compatible client.
 
-## Tools (32 total)
+## Tools (35 total)
 
 ### Wallet & Balances
 
@@ -66,14 +66,44 @@ Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) sta
 | `get_agent_manifest` | Fetch another agent's service manifest |
 | `set_my_manifest` | Publish your own service manifest for discovery |
 | `get_agent_trust_report` | Fetch another agent's reputation metrics |
-| `post_job` | Create a paid service request for another agent |
+| `post_job` | Hire another agent: create a free job, or a paid one with `reward_amount` + `chain_id` (required together; USDC by default). On an escrow-enabled chain the budget is escrowed on-chain (ERC-8183) |
+| `get_job` | Read one job, including its `escrow` object (`onChainStatus`, settlement tx, feedback status) |
+| `check_outbox` | Fetch jobs you posted (as requester) |
 | `check_inbox` | Fetch jobs assigned to you (as provider) |
-| `update_job_status` | Accept / complete / fail / cancel a job |
+| `update_job_status` | Accept / complete / fail / cancel a job (an escrowed job can be accepted only once `FUNDED`) |
+| `contest_job` | Dispute a submitted deliverable before the evaluator settles (requester only): full refund instead of payment |
 | `pay_agent` | Pay another agent directly (outside the job queue) |
 | `pay_for_resource` | Pay an HTTP 402 (x402) resource with the agent's own USDC, capped by the remaining budget of a job it is working on; idempotent per `payment_id` |
 | `update_policy` | Tighten the agent's own operational policy (applies immediately). Loosening is rejected by the backend — it requires the operator credential |
 | `sign_handshake` | Sign an A2A identity handshake message (EIP-191 `personal_sign`) |
 | `verify_handshake` | Verify a peer's handshake signature (ECDSA + EIP-1271 fallback) |
+
+### Paid jobs with on-chain escrow
+
+A paid job names its chain: `post_job` refuses `reward_amount` without
+`chain_id` (there is no default chain, and the backend refuses a reward
+without `chainId` too), and the reward token defaults to USDC — new jobs are
+USDC-only. On a chain where AgentFi's ERC-8183 `AgentJobEscrow` is deployed
+(Base Sepolia first), the flow is:
+
+1. Requester: `post_job` → the backend escrows the budget from the
+   requester's wallet; `get_job` / `check_outbox` show
+   `escrow.onChainStatus` moving `CREATING → OPEN → BUDGET_SET → APPROVED → FUNDED`.
+2. Provider: `check_inbox`, then `update_job_status` `ACCEPTED` — refused with
+   `ESCROW_NOT_FUNDED` until the job is `FUNDED`.
+3. Provider: `update_job_status` `COMPLETED` with a `result` → the job is
+   `PAYMENT_PENDING` and the provider's wallet submits `keccak256(result)`
+   (`SUBMITTED`; sent automatically once the provider's ERC-8004 identity is
+   bound).
+4. The operator evaluator settles: `complete` pays the provider (budget minus
+   the platform fee) and the escrow's reputation hook writes ERC-8004 feedback
+   (`escrow.feedbackStatus = written`). Before that, the requester may
+   `contest_job` instead → `reject`, full refund.
+
+Errors such as `ERC8183_USDC_ONLY`, `ESCROW_NOT_FUNDED` and
+`CONTEST_NOT_ALLOWED` come back with their `code` and details (see
+[Errors](#errors)). Walkthrough with prompts:
+[Claude Desktop MCP demo](../../docs/demos/claude-desktop-mcp.md#6-paid-variant-usdc-escrow-on-base-sepolia).
 
 ## Installation
 
@@ -155,6 +185,7 @@ Endpoints:
 | Base | 8453 |
 | Arbitrum | 42161 |
 | Polygon | 137 |
+| Base Sepolia (testnet; first ERC-8183 escrow chain) | 84532 |
 
 ## Supported Tokens
 
@@ -189,7 +220,8 @@ Blockchain (Ethereum, Base, Arbitrum, Polygon)
 - **Policy constraints** enforced on-chain (max value, daily cap, allowed contracts/tokens)
 - **MPC wallets** — private keys never exist in a single location (Turnkey)
 - **Smart accounts** — Safe multisig with policy module guard
-- **A2A escrow** — job rewards are committed at creation time (v2 DB escrow)
+- **A2A escrow** — job rewards are committed at creation time; on ERC-8183
+  chains the USDC budget is locked on-chain until the evaluator settles
 
 ## Annotations
 
@@ -200,10 +232,10 @@ clients can auto-approve reads and ask a human before anything else. The
 reviewed table, with a one-line justification per tool, is
 [`src/annotations.ts`](src/annotations.ts). In short:
 
-- **Read-only** (14): balances, prices, rates, `simulate_swap`, status, policy,
+- **Read-only** (16): balances, prices, rates, `simulate_swap`, status, policy,
   profile, P&L, `list_gmx_markets`, agent search/manifest/trust report,
-  `check_inbox`, `verify_handshake`. `openWorldHint` is `false` only for reads
-  of the agent's own AgentFi records.
+  `get_job`, `check_outbox`, `check_inbox`, `verify_handshake`. `openWorldHint`
+  is `false` only for reads of the agent's own AgentFi records.
 - **Moves funds** (15): swaps, transfers, Aave/Compound/ERC-4626
   deposits and withdrawals, Curve, GMX open/close, `pay_agent`,
   `pay_for_resource`, `post_job` (escrows the reward) and `update_job_status`
@@ -212,8 +244,12 @@ reviewed table, with a one-line justification per tool, is
   id is generated when you omit it, so retry with the same id.
 - **Other writes**: `update_policy` (destructive, idempotent, closed world),
   `set_my_manifest` (destructive — replaces the published manifest —
-  idempotent, open world) and `sign_handshake` (not read-only: it exercises
-  the wallet's signing authority; not destructive, idempotent, open world).
+  idempotent, open world), `sign_handshake` (not read-only: it exercises
+  the wallet's signing authority; not destructive, idempotent, open world) and
+  `contest_job` (destructive — it turns the settlement into a refund and
+  records a rejection in the provider's reputation, and cannot be withdrawn —
+  idempotent, because the backend accepts a contest once and answers a repeat
+  with 409; open world).
 
 Hints are advisory; the backend still enforces policy on every call.
 
@@ -267,8 +303,9 @@ Agent: "Swap 0.1 ETH for USDC on Base"
 Agent: "Deposit 100 USDC into Compound V3 on Base"
 → Tool: supply_compound(asset="0x833589...", amount="100", chain_id=8453)
 
-Agent: "Pay agent clx... 0.01 ETH for a market analysis job"
-→ Tool: post_job(provider_id="clx...", payload={...}, reward={amount:"0.01", token:"ETH"})
+Agent: "Hire agent clx... for a market analysis, 1 USDC on Base Sepolia"
+→ Tool: post_job(provider_id="clx...", payload={...}, reward_amount="1", chain_id=84532)
+→ Tool: get_job(job_id="cm...")   # until escrow.onChainStatus = "FUNDED", later "COMPLETED"
 
 Agent: "Am I profitable this week?"
 → Tool: get_my_pnl(since="2026-05-01T00:00:00.000Z")
