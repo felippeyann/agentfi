@@ -1,14 +1,22 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {IERC165} from "forge-std/interfaces/IERC165.sol";
 import {AgentJobEscrow} from "../src/AgentJobEscrow.sol";
 import {ReputationHook} from "../src/ReputationHook.sol";
 import {IACPHook} from "../src/IACPHook.sol";
 import {MockERC20, BlacklistERC20} from "./mocks/MockERC20.sol";
-import {MockReputationRegistry, EmptyRevertRegistry, InvalidOpcodeRegistry} from "./mocks/MockReputationRegistry.sol";
-import {MockIdentityRegistry, RawIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
+import {
+    MockReputationRegistry,
+    EmptyRevertRegistry,
+    InvalidOpcodeRegistry,
+    GasBurningRegistry,
+    GasHungryRegistry,
+    CountingRegistry,
+    LongRevertRegistry
+} from "./mocks/MockReputationRegistry.sol";
+import {MockIdentityRegistry, RawIdentityRegistry, GasGriefingIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 
 contract ReputationHookTest is Test {
     // -------------------------------------------------------------------------
@@ -638,8 +646,8 @@ contract ReputationHookTest is Test {
     }
 
     function test_Complete_RegistryOutOfGas_SettlementSucceeds() public {
-        // INVALID burns every unit of gas forwarded to the registry; the 1/64 kept by the hook
-        // (EIP-150) is enough to emit the failure and let the escrow finish.
+        // INVALID burns every unit of gas forwarded to the registry, i.e. exactly `feedbackGasLimit`;
+        // the rest of the transaction's gas is untouched, so the hook emits the failure and the escrow finishes.
         InvalidOpcodeRegistry oog = new InvalidOpcodeRegistry();
         ReputationHook h = _newHook(address(oog), address(identity), evaluator, MIN_BUDGET);
         uint256 jobId = _submitted(address(h), AGENT_ID);
@@ -737,5 +745,443 @@ contract ReputationHookTest is Test {
         vm.prank(evaluator);
         escrow.complete(jobId, REASON, _params());
         assertEq(registry.callCount(), 0);
+    }
+
+    // =========================================================================
+    // R3c — gas policy: capped registry calls, InsufficientGasForFeedback guard
+    // =========================================================================
+    //
+    // Every settlement below is sent the way an RPC client would after `eth_estimateGas`: a low-level
+    // call with an explicit gas limit, all touched accounts cold (`vm.cool`), state restored between
+    // probes. `_minimalGas` binary-searches the lowest limit at which the settlement succeeds — what
+    // an estimator returns — and the tests assert what happens AT that limit.
+
+    /// @dev Gas limit for settlements whose cheap gates skip the write: far below `feedbackGasRequirement`.
+    uint256 internal constant SKIP_PATH_GAS = 200_000;
+    /// @dev Upper bound of the binary search (every settlement in this file succeeds with it).
+    uint256 internal constant SEARCH_CEILING = 5_000_000;
+
+    bytes32 internal constant WRITTEN = keccak256("FeedbackWritten(uint256,uint256,int128)");
+    bytes32 internal constant SKIPPED = keccak256("FeedbackSkipped(uint256,bytes32)");
+    bytes32 internal constant FAILED = keccak256("FeedbackFailed(uint256,bytes)");
+
+    function _coolAll(ReputationHook h) internal {
+        address rep = h.reputationRegistry();
+        address id = h.identityRegistry();
+        vm.cool(address(escrow));
+        vm.cool(address(token));
+        vm.cool(address(h));
+        vm.cool(rep);
+        vm.cool(id);
+    }
+
+    function _settleCall(uint256 jobId, bool completed, bytes32 reason, bytes memory params)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return completed
+            ? abi.encodeCall(AgentJobEscrow.complete, (jobId, reason, params))
+            : abi.encodeCall(AgentJobEscrow.reject, (jobId, reason, params));
+    }
+
+    /// @dev `caller` sends `callData` to the escrow with exactly `gasLimit` gas, every account cold.
+    function _sendWithGas(ReputationHook h, address caller, bytes memory callData, uint256 gasLimit)
+        internal
+        returns (bool ok, bytes memory ret)
+    {
+        _coolAll(h);
+        vm.prank(caller);
+        (ok, ret) = address(escrow).call{gas: gasLimit}(callData);
+    }
+
+    function _minimalGasFor(ReputationHook h, address caller, bytes memory callData) internal returns (uint256) {
+        uint256 lo = 0;
+        uint256 hi = SEARCH_CEILING;
+        while (hi - lo > 1) {
+            uint256 mid = (lo + hi) / 2;
+            uint256 snap = vm.snapshotState();
+            (bool ok,) = _sendWithGas(h, caller, callData, mid);
+            vm.revertToStateAndDelete(snap);
+            if (ok) hi = mid;
+            else lo = mid;
+        }
+        return hi;
+    }
+
+    /// @dev What `eth_estimateGas` returns for the evaluator's `complete` / `reject` of `jobId`.
+    function _minimalGas(ReputationHook h, uint256 jobId, bool completed, bytes memory params)
+        internal
+        returns (uint256)
+    {
+        return _minimalGasFor(h, evaluator, _settleCall(jobId, completed, REASON, params));
+    }
+
+    /// @dev Settles at `gasLimit` (must succeed) and returns the single event the hook emitted.
+    function _settleAt(ReputationHook h, address caller, bytes memory callData, uint256 gasLimit)
+        internal
+        returns (bytes32 topic, bytes memory data)
+    {
+        vm.recordLogs();
+        (bool ok,) = _sendWithGas(h, caller, callData, gasLimit);
+        assertTrue(ok, "settlement reverted");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 found;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter != address(h)) continue;
+            (topic, data) = (logs[i].topics[0], logs[i].data);
+            found++;
+        }
+        assertEq(found, 1, "hook must emit exactly one event");
+    }
+
+    function _settleEvaluatorAt(ReputationHook h, uint256 jobId, bool completed, bytes memory params, uint256 gasLimit)
+        internal
+        returns (bytes32 topic, bytes memory data)
+    {
+        return _settleAt(h, evaluator, _settleCall(jobId, completed, REASON, params), gasLimit);
+    }
+
+    /// @dev Settles at `gasLimit`, expects `InsufficientGasForFeedback` bubbled through the escrow.
+    function _expectGuardRevert(ReputationHook h, uint256 jobId, bool completed, bytes memory params, uint256 gasLimit)
+        internal
+        returns (uint256 available, uint256 required)
+    {
+        (bool ok, bytes memory ret) = _sendWithGas(h, evaluator, _settleCall(jobId, completed, REASON, params), gasLimit);
+        assertFalse(ok, "settlement should revert");
+        assertEq(ret.length, 68, "revert data must be InsufficientGasForFeedback(uint256,uint256)");
+        assertEq(bytes4(ret), ReputationHook.InsufficientGasForFeedback.selector);
+        assembly {
+            available := mload(add(ret, 0x24))
+            required := mload(add(ret, 0x44))
+        }
+        assertLt(available, required);
+    }
+
+    function _feedbackCallRequirement(ReputationHook h) internal view returns (uint256) {
+        uint256 cap = h.feedbackGasLimit();
+        return cap + cap / 63 + 1 + h.FEEDBACK_CALL_RESERVE();
+    }
+
+    /// @dev Minimal gas of a plain feedback write through the default `hook` (reference for the
+    ///      "registry behaviour does not change the gas a settlement needs" assertions).
+    function _baselineMinimalGas() internal returns (uint256) {
+        uint256 jobId = _submitted(address(hook), AGENT_ID);
+        return _minimalGas(hook, jobId, true, _params());
+    }
+
+    function _uriOfLength(uint256 n) internal pure returns (string memory) {
+        bytes memory b = new bytes(n);
+        for (uint256 i = 0; i < n; i++) {
+            b[i] = "a";
+        }
+        return string(b);
+    }
+
+    // ----- constructor parameters -------------------------------------------
+
+    function test_GasPolicy_ImmutablesAndRequirement() public view {
+        assertEq(hook.feedbackGasLimit(), FEEDBACK_GAS);
+        assertEq(hook.identityCallGasLimit(), IDENTITY_GAS);
+        assertEq(hook.MIN_FEEDBACK_GAS_LIMIT(), 250_000);
+        assertEq(hook.MAX_FEEDBACK_GAS_LIMIT(), 2_000_000);
+        assertEq(hook.MIN_IDENTITY_CALL_GAS_LIMIT(), 20_000);
+        assertEq(hook.MAX_IDENTITY_CALL_GAS_LIMIT(), 200_000);
+        assertEq(hook.MAX_REASON_LENGTH(), 256);
+        // 2 * 50_000 + (500_000 + 7_936 + 1 + 10_000) + 50_000
+        assertEq(
+            hook.feedbackGasRequirement(),
+            2 * IDENTITY_GAS + FEEDBACK_GAS + FEEDBACK_GAS / 63 + 1 + hook.FEEDBACK_CALL_RESERVE() + hook.GAS_RESERVE()
+        );
+        assertEq(hook.feedbackGasRequirement(), 667_937);
+    }
+
+    function test_Constructor_FeedbackGasLimitBounds() public {
+        uint256 min = hook.MIN_FEEDBACK_GAS_LIMIT();
+        uint256 max = hook.MAX_FEEDBACK_GAS_LIMIT();
+        vm.expectRevert(abi.encodeWithSelector(ReputationHook.InvalidFeedbackGasLimit.selector, min - 1));
+        new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, min - 1, IDENTITY_GAS);
+        vm.expectRevert(abi.encodeWithSelector(ReputationHook.InvalidFeedbackGasLimit.selector, max + 1));
+        new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, max + 1, IDENTITY_GAS);
+        vm.expectRevert(abi.encodeWithSelector(ReputationHook.InvalidFeedbackGasLimit.selector, 0));
+        new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, 0, IDENTITY_GAS);
+
+        ReputationHook atMin =
+            new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, min, IDENTITY_GAS);
+        ReputationHook atMax =
+            new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, max, IDENTITY_GAS);
+        assertEq(atMin.feedbackGasLimit(), min);
+        assertEq(atMax.feedbackGasLimit(), max);
+    }
+
+    function test_Constructor_IdentityCallGasLimitBounds() public {
+        uint256 min = hook.MIN_IDENTITY_CALL_GAS_LIMIT();
+        uint256 max = hook.MAX_IDENTITY_CALL_GAS_LIMIT();
+        vm.expectRevert(abi.encodeWithSelector(ReputationHook.InvalidIdentityCallGasLimit.selector, min - 1));
+        new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, min - 1);
+        vm.expectRevert(abi.encodeWithSelector(ReputationHook.InvalidIdentityCallGasLimit.selector, max + 1));
+        new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, max + 1);
+
+        ReputationHook atMin =
+            new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, min);
+        ReputationHook atMax =
+            new ReputationHook(address(escrow), address(registry), address(identity), evaluator, MIN_BUDGET, FEEDBACK_GAS, max);
+        assertEq(atMin.identityCallGasLimit(), min);
+        assertEq(atMax.identityCallGasLimit(), max);
+        assertEq(atMax.feedbackGasRequirement(), 2 * max + _feedbackCallRequirement(atMax) + atMax.GAS_RESERVE());
+    }
+
+    // ----- the guard ---------------------------------------------------------
+
+    function test_GasGuard_JustTooLittleGas_RevertsAndWritesNothing() public {
+        uint256 jobId = _submitted(address(hook), AGENT_ID);
+        uint256 minimal = _minimalGas(hook, jobId, true, _params());
+
+        // One unit below what an estimator would return: the hook's up-front check is what fails.
+        (uint256 available, uint256 required) = _expectGuardRevert(hook, jobId, true, _params(), minimal - 1);
+        assertEq(required, hook.feedbackGasRequirement());
+        assertEq(available, required - 1, "the guard is the binding constraint, to the unit");
+
+        // Nothing happened: no feedback, no payment, the job is still Submitted.
+        assertEq(registry.callCount(), 0);
+        assertEq(token.balanceOf(provider), 0);
+        assertEq(uint8(escrow.getJob(jobId).status), uint8(AgentJobEscrow.JobStatus.Submitted));
+    }
+
+    function test_GasGuard_EnoughGas_WritesFeedback() public {
+        uint256 jobId = _submitted(address(hook), AGENT_ID);
+        (bytes32 topic, bytes memory data) = _settleEvaluatorAt(hook, jobId, true, _params(), 1_000_000);
+        assertEq(topic, WRITTEN);
+        assertEq(abi.decode(data, (int128)), 100);
+        assertEq(registry.callCount(), 1);
+        _assertFeedback(AGENT_ID, 100, "completed");
+    }
+
+    /// @notice THE property: the lowest gas at which `complete` succeeds also writes the feedback.
+    function test_MinimalGas_Complete_WritesFeedback() public {
+        uint256 jobId = _submitted(address(hook), AGENT_ID);
+        uint256 minimal = _minimalGas(hook, jobId, true, _params());
+
+        (bytes32 topic,) = _settleEvaluatorAt(hook, jobId, true, _params(), minimal);
+        assertEq(topic, WRITTEN, "feedback lost at the estimated gas");
+        assertEq(registry.callCount(), 1);
+        _assertFeedback(AGENT_ID, 100, "completed");
+        assertEq(token.balanceOf(provider), BUDGET - (BUDGET * 30) / 10_000);
+        emit log_named_uint("minimal gas, complete + feedback (mock registry)", minimal);
+    }
+
+    function test_MinimalGas_Reject_WritesNegativeFeedback() public {
+        uint256 jobId = _submitted(address(hook), AGENT_ID);
+        uint256 minimal = _minimalGas(hook, jobId, false, _params());
+
+        (bytes32 topic,) = _settleEvaluatorAt(hook, jobId, false, _params(), minimal);
+        assertEq(topic, WRITTEN, "feedback lost at the estimated gas");
+        _assertFeedback(AGENT_ID, 0, "rejected");
+        assertEq(token.balanceOf(client), 1_000_000e6);
+
+        uint256 other = _submitted(address(hook), AGENT_ID);
+        (, uint256 required) = _expectGuardRevert(hook, other, false, _params(), minimal - 1);
+        assertEq(required, hook.feedbackGasRequirement());
+    }
+
+    /// @dev Any feedback URI length, complete or reject: at the estimated gas the write happens, one
+    ///      unit below the guard reverts. `CountingRegistry` keeps the registry's own cost flat.
+    function testFuzz_MinimalGas_AlwaysWrites(uint256 uriLength, bool completed) public {
+        uriLength = bound(uriLength, 0, 4_096);
+        CountingRegistry counting = new CountingRegistry();
+        ReputationHook h = _newHook(address(counting), address(identity), evaluator, MIN_BUDGET);
+        uint256 jobId = _submitted(address(h), AGENT_ID);
+        bytes memory params = abi.encode(_uriOfLength(uriLength), FEEDBACK_HASH);
+
+        uint256 minimal = _minimalGas(h, jobId, completed, params);
+        _expectGuardRevert(h, jobId, completed, params, minimal - 1);
+        (bytes32 topic,) = _settleEvaluatorAt(h, jobId, completed, params, minimal);
+        assertEq(topic, WRITTEN);
+        assertEq(counting.callCount(), 1);
+    }
+
+    // ----- gates that skip the write are not subject to the guard -----------
+
+    function test_SkipGates_SettleBelowTheGuard() public {
+        assertLt(SKIP_PATH_GAS, hook.feedbackGasRequirement());
+        bytes32 topic;
+        bytes memory data;
+
+        // untrusted-evaluator
+        uint256 jobId = _submittedWith(address(hook), AGENT_ID, BUDGET, stranger);
+        (topic, data) = _settleAt(hook, stranger, _settleCall(jobId, true, REASON, _params()), SKIP_PATH_GAS);
+        assertEq(topic, SKIPPED);
+        assertEq(abi.decode(data, (bytes32)), "untrusted-evaluator");
+
+        // no-params
+        jobId = _submitted(address(hook), AGENT_ID);
+        (topic, data) = _settleAt(hook, evaluator, _settleCall(jobId, true, REASON, ""), SKIP_PATH_GAS);
+        assertEq(abi.decode(data, (bytes32)), "no-params");
+
+        // no-agent-id
+        jobId = _submitted(address(hook), 0);
+        (topic, data) = _settleAt(hook, evaluator, _settleCall(jobId, true, REASON, _params()), SKIP_PATH_GAS);
+        assertEq(abi.decode(data, (bytes32)), "no-agent-id");
+
+        // budget-too-small
+        jobId = _submittedWith(address(hook), AGENT_ID, MIN_BUDGET - 1, evaluator);
+        (topic, data) = _settleAt(hook, evaluator, _settleCall(jobId, true, REASON, _params()), SKIP_PATH_GAS);
+        assertEq(abi.decode(data, (bytes32)), "budget-too-small");
+
+        // not-submitted (evaluator rejects a Funded job: cancellation)
+        jobId = _funded(address(hook), AGENT_ID);
+        (topic, data) = _settleAt(hook, evaluator, _settleCall(jobId, false, REASON, _params()), SKIP_PATH_GAS);
+        assertEq(abi.decode(data, (bytes32)), "not-submitted");
+
+        // payout-blocked
+        jobId = _submitted(address(hook), AGENT_ID);
+        (topic, data) = _settleAt(
+            hook, evaluator, _settleCall(jobId, false, hook.REASON_PAYOUT_BLOCKED(), _params()), SKIP_PATH_GAS
+        );
+        assertEq(abi.decode(data, (bytes32)), "payout-blocked");
+
+        assertEq(registry.callCount(), 0);
+    }
+
+    function test_ClaimRefund_NeverNeedsHookGas() public {
+        uint256 jobId = _submitted(address(hook), AGENT_ID);
+        vm.warp(escrow.getJob(jobId).expiredAt);
+        uint256 minimal = _minimalGasFor(hook, stranger, abi.encodeCall(AgentJobEscrow.claimRefund, (jobId)));
+        assertLt(minimal, SKIP_PATH_GAS);
+        (bool ok,) = _sendWithGas(hook, stranger, abi.encodeCall(AgentJobEscrow.claimRefund, (jobId)), minimal);
+        assertTrue(ok);
+        assertEq(uint8(escrow.getJob(jobId).status), uint8(AgentJobEscrow.JobStatus.Expired));
+        assertEq(token.balanceOf(client), 1_000_000e6);
+    }
+
+    // ----- registries that burn gas cannot block or starve settlement -------
+
+    function test_GasBurningRegistry_FeedbackFailed_SettlementSucceeds() public {
+        uint256 baseline = _baselineMinimalGas();
+        GasBurningRegistry burner = new GasBurningRegistry();
+        ReputationHook h = _newHook(address(burner), address(identity), evaluator, MIN_BUDGET);
+        uint256 jobId = _submitted(address(h), AGENT_ID);
+
+        uint256 minimal = _minimalGas(h, jobId, true, _params());
+        assertEq(minimal, baseline, "a gas-burning registry must not change the gas settlement needs");
+
+        (bytes32 topic, bytes memory data) = _settleEvaluatorAt(h, jobId, true, _params(), minimal);
+        assertEq(topic, FAILED);
+        assertEq(abi.decode(data, (bytes)).length, 0);
+        assertEq(uint8(escrow.getJob(jobId).status), uint8(AgentJobEscrow.JobStatus.Completed));
+        assertEq(token.balanceOf(provider), BUDGET - (BUDGET * 30) / 10_000);
+    }
+
+    function test_GasBurningRegistry_Reject_RefundSucceeds() public {
+        GasBurningRegistry burner = new GasBurningRegistry();
+        ReputationHook h = _newHook(address(burner), address(identity), evaluator, MIN_BUDGET);
+        uint256 jobId = _submitted(address(h), AGENT_ID);
+        uint256 minimal = _minimalGas(h, jobId, false, _params());
+        (bytes32 topic,) = _settleEvaluatorAt(h, jobId, false, _params(), minimal);
+        assertEq(topic, FAILED);
+        assertEq(uint8(escrow.getJob(jobId).status), uint8(AgentJobEscrow.JobStatus.Rejected));
+        assertEq(token.balanceOf(client), 1_000_000e6);
+    }
+
+    function test_GasHungryRegistry_WrittenAtMinimalGas() public {
+        // The registry uses almost its whole cap and still succeeds: the gas the hook keeps after
+        // the call (1/64 + FEEDBACK_CALL_RESERVE) is enough for the event and the escrow's tail.
+        GasHungryRegistry hungry = new GasHungryRegistry();
+        ReputationHook h = _newHook(address(hungry), address(identity), evaluator, MIN_BUDGET);
+        uint256 jobId = _submitted(address(h), AGENT_ID);
+        uint256 minimal = _minimalGas(h, jobId, true, _params());
+        (bytes32 topic,) = _settleEvaluatorAt(h, jobId, true, _params(), minimal);
+        assertEq(topic, WRITTEN);
+        assertEq(hungry.callCount(), 1);
+    }
+
+    function test_RegistryRevertData_TruncatedAndBounded() public {
+        uint256 baseline = _baselineMinimalGas();
+        LongRevertRegistry bomb = new LongRevertRegistry(10_000);
+        ReputationHook h = _newHook(address(bomb), address(identity), evaluator, MIN_BUDGET);
+        uint256 jobId = _submitted(address(h), AGENT_ID);
+
+        uint256 minimal = _minimalGas(h, jobId, true, _params());
+        assertEq(minimal, baseline, "revert data must not raise the gas settlement needs");
+
+        (bytes32 topic, bytes memory data) = _settleEvaluatorAt(h, jobId, true, _params(), minimal);
+        assertEq(topic, FAILED);
+        bytes memory full = bomb.revertData();
+        bytes memory expected = new bytes(h.MAX_REASON_LENGTH());
+        for (uint256 i = 0; i < expected.length; i++) {
+            expected[i] = full[i];
+        }
+        assertEq(abi.decode(data, (bytes)), expected);
+        assertEq(uint8(escrow.getJob(jobId).status), uint8(AgentJobEscrow.JobStatus.Completed));
+    }
+
+    function test_GasBurningIdentityRegistry_AgentNotProvider_SettlementSucceeds() public {
+        uint256 baseline = _baselineMinimalGas();
+        GasGriefingIdentityRegistry griefer = new GasGriefingIdentityRegistry();
+        griefer.set(GasGriefingIdentityRegistry.Mode.Loop, provider, GasGriefingIdentityRegistry.Mode.Loop, provider);
+        ReputationHook h = _newHook(address(registry), address(griefer), evaluator, MIN_BUDGET);
+        uint256 jobId = _submitted(address(h), AGENT_ID);
+
+        uint256 minimal = _minimalGas(h, jobId, true, _params());
+        assertEq(minimal, baseline, "a gas-burning identity registry must not change the gas settlement needs");
+
+        (bytes32 topic, bytes memory data) = _settleEvaluatorAt(h, jobId, true, _params(), minimal);
+        assertEq(topic, SKIPPED);
+        assertEq(abi.decode(data, (bytes32)), "agent-not-provider");
+        assertEq(registry.callCount(), 0);
+        assertEq(token.balanceOf(provider), BUDGET - (BUDGET * 30) / 10_000);
+    }
+
+    function test_OwnerOfBurnsGas_AgentWalletStillVerified_Written() public {
+        // A burning `ownerOf` costs exactly its cap and cannot starve the `getAgentWallet` check.
+        GasGriefingIdentityRegistry griefer = new GasGriefingIdentityRegistry();
+        griefer.set(GasGriefingIdentityRegistry.Mode.Loop, address(0), GasGriefingIdentityRegistry.Mode.Answer, provider);
+        ReputationHook h = _newHook(address(registry), address(griefer), evaluator, MIN_BUDGET);
+        uint256 jobId = _submitted(address(h), AGENT_ID);
+        uint256 minimal = _minimalGas(h, jobId, true, _params());
+        (bytes32 topic,) = _settleEvaluatorAt(h, jobId, true, _params(), minimal);
+        assertEq(topic, WRITTEN);
+        assertEq(registry.callCount(), 1);
+    }
+
+    function test_IdentityHugeReturnData_RejectedAndBounded() public {
+        uint256 baseline = _baselineMinimalGas();
+        GasGriefingIdentityRegistry griefer = new GasGriefingIdentityRegistry();
+        // First word is the provider, but 64 KiB of return data is not "exactly one word".
+        griefer.set(
+            GasGriefingIdentityRegistry.Mode.HugeReturn, provider, GasGriefingIdentityRegistry.Mode.HugeReturn, provider
+        );
+        ReputationHook h = _newHook(address(registry), address(griefer), evaluator, MIN_BUDGET);
+        uint256 jobId = _submitted(address(h), AGENT_ID);
+
+        uint256 minimal = _minimalGas(h, jobId, true, _params());
+        assertEq(minimal, baseline, "return data must not raise the gas settlement needs");
+        (bytes32 topic, bytes memory data) = _settleEvaluatorAt(h, jobId, true, _params(), minimal);
+        assertEq(topic, SKIPPED);
+        assertEq(abi.decode(data, (bytes32)), "agent-not-provider");
+    }
+
+    /// @dev Worst case for the up-front estimate: both identity calls consume (almost) their whole cap
+    ///      and the trusted evaluator sends a very large feedback URI, so the hook's own work exceeds
+    ///      `GAS_RESERVE`. The second check right before `giveFeedback` then becomes the binding one:
+    ///      one unit below the estimated gas it reverts, and at the estimated gas the registry still
+    ///      receives its full cap and the feedback is written.
+    function test_WorstCase_FeedbackCallCheckIsBinding_StillWrites() public {
+        GasGriefingIdentityRegistry griefer = new GasGriefingIdentityRegistry();
+        griefer.set(
+            GasGriefingIdentityRegistry.Mode.Loop, address(0), GasGriefingIdentityRegistry.Mode.BurnThenAnswer, provider
+        );
+        GasHungryRegistry hungry = new GasHungryRegistry();
+        ReputationHook h = _newHook(address(hungry), address(griefer), evaluator, MIN_BUDGET);
+        uint256 jobId = _submitted(address(h), AGENT_ID);
+        bytes memory params = abi.encode(_uriOfLength(40_000), FEEDBACK_HASH);
+
+        uint256 minimal = _minimalGas(h, jobId, true, params);
+        (, uint256 required) = _expectGuardRevert(h, jobId, true, params, minimal - 1);
+        assertEq(required, _feedbackCallRequirement(h), "the pre-call check binds in the worst case");
+
+        (bytes32 topic,) = _settleEvaluatorAt(h, jobId, true, params, minimal);
+        assertEq(topic, WRITTEN);
+        assertEq(hungry.callCount(), 1);
     }
 }
