@@ -1780,6 +1780,14 @@ export async function reconcileEscrowJob(deps: Erc8183Deps, jobId: string): Prom
     return 'advanced';
   }
 
+  if (!live && job.onChainStatus === 'FAILED') {
+    // Funding was unwound. Only a `fund` that was broadcast and then
+    // declared dropped (FAILED with a hash) can still lock the budget; a
+    // reverted one has a receipt, one that never left has no hash.
+    const fundTx = await latestStepTx(deps, 'fund', job.id);
+    if (!fundTx || fundTx.status !== 'FAILED' || !fundTx.txHash) return 'unchanged';
+  }
+
   const chain = await tryReadChainJob(deps, job);
   if (!chain) return 'chainUnreadable';
 
@@ -1893,7 +1901,17 @@ export async function reconcileEscrowJobs(deps: Erc8183Deps, opts: { staleBefore
 
   const [stalledFunding, lostRejects, unsubmitted, stalledBindings] = await Promise.all([
     pick({ status: { in: [...LIVE_JOB_STATUS_LIST] }, onChainStatus: { in: ['CREATING', 'OPEN', 'BUDGET_SET', 'APPROVED'] } }),
-    pick({ status: { in: ['CANCELLED', 'FAILED'] }, onChainJobId: { not: null }, onChainStatus: { in: ['APPROVED', 'FUNDED'] } }),
+    pick({
+      status: { in: ['CANCELLED', 'FAILED'] },
+      onChainJobId: { not: null },
+      OR: [
+        { onChainStatus: { in: ['APPROVED', 'FUNDED'] } },
+        // Funding unwound after a `fund` was declared dropped: it can still
+        // mine until expiresAt (reconcileEscrowJob only reads the chain when
+        // the latest fund attempt is such a dropped broadcast).
+        { onChainStatus: 'FAILED', expiresAt: { gt: nowOf(deps) } },
+      ],
+    }),
     pick({ status: 'ACCEPTED', onChainStatus: 'FUNDED', deliverableHash: { not: null } }),
     pick({ status: { in: ['PENDING', 'ACCEPTED', 'PAYMENT_PENDING'] }, providerAgentIdStatus: 'BINDING' }),
   ]);
