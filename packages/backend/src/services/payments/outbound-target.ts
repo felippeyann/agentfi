@@ -12,10 +12,13 @@
  * Three controls. The development override (`allowPrivateHosts`) only lifts
  * the range refusal; resolution and pinning always run.
  *
- *   1. Resolve before you connect — `assertPublicTarget`: refuse a literal
- *      private / loopback / link-local / unique-local / unspecified /
- *      IPv4-mapped host, then resolve the hostname (every address, verbatim
- *      order) and refuse when ANY address falls in those ranges.
+ *   1. Resolve before you connect — `assertPublicTarget`: refuse a port the
+ *      port policy does not allow (P6: production / staging default 80 and
+ *      443 only, `RESOURCE_PAYMENT_ALLOWED_PORTS` overrides; development and
+ *      test unrestricted), refuse a literal private / loopback / link-local /
+ *      unique-local / unspecified / IPv4-mapped host, then resolve the
+ *      hostname (every address, verbatim order) and refuse when ANY address
+ *      falls in those ranges.
  *   2. Pin what you validated — `createPinnedDispatcher`: an undici `Agent`
  *      whose connect-time `lookup` answers only the validated addresses, so a
  *      rebind between check and connect cannot move the socket. The URL is
@@ -26,13 +29,21 @@
  *      and re-send the signed payment header there.
  *
  * Ranges refused (`isPrivateAddress`):
- *   IPv4  0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12, 192.168/16,
+ *   IPv4  0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12, 192.0.0/24
+ *         (IETF protocol assignments), 192.168/16, 198.18/15 (benchmarking),
  *         and everything from 224/4 up (multicast, reserved, broadcast).
  *   IPv6  ::/96 (unspecified, loopback ::1, deprecated IPv4-compatible),
- *         fc00::/7 unique-local, fe80::/10 link-local, fec0::/10 site-local,
- *         ff00::/8 multicast; ::ffff:0:0/96 (IPv4-mapped) and 64:ff9b::/96
- *         (NAT64) are judged by their embedded IPv4.
+ *         ::ffff:0:0:0/96 (SIIT IPv4-translated), 64:ff9b:1::/48 (local-use
+ *         NAT64), fc00::/7 unique-local, fe80::/10 link-local, fec0::/10
+ *         site-local, ff00::/8 multicast; ::ffff:0:0/96 (IPv4-mapped),
+ *         64:ff9b::/96 (NAT64) and 2002::/16 (6to4) are judged by their
+ *         embedded IPv4.
  * Anything that does not parse as an address is refused too.
+ *
+ * What the agent learns (P6): a DNS name that does not resolve and one that
+ * resolves to a refused address get the SAME public refusal
+ * (`no-public-address`, `publicRefusal`), so pay-resource cannot be used to
+ * probe which internal names exist; the precise reason stays in the log.
  */
 
 import { lookup as dnsLookup } from 'node:dns/promises';
@@ -56,6 +67,11 @@ export interface OutboundTargetPolicy {
    * connection still pinned to what was resolved.
    */
   allowPrivateHosts?: boolean;
+  /**
+   * Ports a URL may name (the scheme default when it names none). `'any'` or
+   * omitted = unrestricted. See `resolveAllowedPorts` for the env defaults.
+   */
+  allowedPorts?: readonly number[] | 'any';
   lookup?: TargetLookup;
 }
 
@@ -67,6 +83,8 @@ export interface ValidatedTarget {
 }
 
 export type OutboundTargetRefusal =
+  /** The URL names a port the port policy does not allow. */
+  | 'port-not-allowed'
   /** The hostname itself is a loopback name or a private / reserved address literal. */
   | 'private-host'
   /** At least one address the hostname resolves to is private / reserved. */
@@ -76,19 +94,81 @@ export type OutboundTargetRefusal =
   /** The resolver failed for another reason (transient DNS error). */
   | 'resolver-failed';
 
+/**
+ * What a caller is told. `private-address` and `unresolvable` collapse into
+ * `no-public-address` (P6): telling them apart would let an agent learn which
+ * internal names exist. `private-host` and `port-not-allowed` only restate
+ * the agent's own input. `resolver-failed` is not a refusal (transient).
+ */
+export type PublicTargetRefusal = 'port-not-allowed' | 'private-host' | 'no-public-address';
+
 export class OutboundTargetError extends Error {
   readonly refusal: OutboundTargetRefusal;
   readonly hostname: string;
   /** The offending address, for `private-address`. Logged only — never sent to the caller (S5). */
   readonly address: string | undefined;
+  /** The port that was refused, for `port-not-allowed`. */
+  readonly port: number | undefined;
 
-  constructor(refusal: OutboundTargetRefusal, hostname: string, message: string, address?: string) {
+  constructor(
+    refusal: OutboundTargetRefusal,
+    hostname: string,
+    message: string,
+    extra: { address?: string; port?: number } = {},
+  ) {
     super(message);
     this.name = 'OutboundTargetError';
     this.refusal = refusal;
     this.hostname = hostname;
-    this.address = address;
+    this.address = extra.address;
+    this.port = extra.port;
   }
+}
+
+/** The refusal and message a caller may see for `error` (see `PublicTargetRefusal`). */
+export function publicRefusal(error: OutboundTargetError): { refusal: PublicTargetRefusal; message: string } {
+  if (error.refusal === 'port-not-allowed' || error.refusal === 'private-host') {
+    return { refusal: error.refusal, message: error.message };
+  }
+  return {
+    refusal: 'no-public-address',
+    message: `url hostname does not resolve to a public address (${error.hostname})`,
+  };
+}
+
+// ── Port policy ─────────────────────────────────────────────────────────────
+
+/** Ports a production-like deployment allows when `RESOURCE_PAYMENT_ALLOWED_PORTS` is unset. */
+export const PRODUCTION_DEFAULT_PORTS: readonly number[] = [80, 443];
+
+/** `"80, 443,8443"` → `[80, 443, 8443]`; throws on anything that is not a list of ports 1-65535. */
+export function parsePortList(raw: string): number[] {
+  const ports = raw.split(',').map((part) => part.trim());
+  if (ports.length === 0 || ports.some((part) => !/^\d{1,5}$/.test(part))) {
+    throw new Error(`port list must be comma-separated port numbers, e.g. "80,443"; got ${JSON.stringify(raw)}`);
+  }
+  const numbers = ports.map(Number);
+  if (numbers.some((port) => port < 1 || port > 65535)) {
+    throw new Error(`ports must be between 1 and 65535; got ${JSON.stringify(raw)}`);
+  }
+  return [...new Set(numbers)];
+}
+
+/**
+ * Port policy from the environment: an explicit `RESOURCE_PAYMENT_ALLOWED_PORTS`
+ * list applies everywhere; without one, production and staging allow 80 and
+ * 443 only and development / test are unrestricted (local resource servers
+ * listen on arbitrary ports).
+ */
+export function resolveAllowedPorts(nodeEnv: string, raw: string | undefined): readonly number[] | 'any' {
+  if (raw !== undefined && raw.trim() !== '') return parsePortList(raw);
+  return nodeEnv === 'production' || nodeEnv === 'staging' ? PRODUCTION_DEFAULT_PORTS : 'any';
+}
+
+/** The port a request to `url` connects to: the explicit one, or the scheme default. */
+export function effectivePort(url: URL): number {
+  if (url.port !== '') return Number(url.port);
+  return url.protocol === 'https:' ? 443 : 80;
 }
 
 // ── Address classification ──────────────────────────────────────────────────
@@ -104,14 +184,16 @@ function parseIpv4(ip: string): [number, number, number, number] | undefined {
 function isPrivateIpv4(ip: string): boolean {
   const octets = parseIpv4(ip);
   if (!octets) return true;
-  const [a, b] = octets;
+  const [a, b, c] = octets;
   return (
     a === 0 ||
     a === 10 ||
     a === 127 ||
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 0 && c === 0) || // 192.0.0/24 IETF protocol assignments
     (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19)) || // 198.18/15 benchmarking
     (a === 100 && b >= 64 && b <= 127) ||
     a >= 224
   );
@@ -146,25 +228,40 @@ function parseIpv6(ip: string): number[] | undefined {
   return groups;
 }
 
+/** Dotted IPv4 from two 16-bit groups. */
+function ipv4FromGroups(hi: number, lo: number): string {
+  return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+}
+
+/** The IPv4 in the low 32 bits (mapped, translated, NAT64 forms). */
 function embeddedIpv4(groups: number[]): string {
   const [hi = 0, lo = 0] = groups.slice(6);
-  return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+  return ipv4FromGroups(hi, lo);
 }
 
 function isPrivateIpv6(ip: string): boolean {
   const groups = parseIpv6(ip);
   if (!groups) return true;
   const [g0 = 0, g1 = 0, g2 = 0, g3 = 0, g4 = 0, g5 = 0] = groups;
-  const leadingZero = g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0;
+  const zeroTo3 = g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0;
+  const leadingZero = zeroTo3 && g4 === 0;
   // ::/96 — :: (unspecified), ::1 (loopback) and the deprecated
   // IPv4-compatible form; none of them is a public destination.
   if (leadingZero && g5 === 0) return true;
   // ::ffff:0:0/96 — IPv4-mapped: judge the embedded IPv4.
   if (leadingZero && g5 === 0xffff) return isPrivateIpv4(embeddedIpv4(groups));
-  // 64:ff9b::/96 — NAT64 well-known prefix: same.
+  // ::ffff:0:0:0/96 — SIIT IPv4-translated (RFC 2765): only meaningful
+  // behind a stateless translator, never a public destination.
+  if (zeroTo3 && g4 === 0xffff && g5 === 0) return true;
+  // 64:ff9b::/96 — NAT64 well-known prefix: judge the embedded IPv4.
   if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
     return isPrivateIpv4(embeddedIpv4(groups));
   }
+  // 64:ff9b:1::/48 — local-use NAT64 (RFC 8215): translates into whatever
+  // IPv4 the local network chooses, internal ranges included.
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 0x0001) return true;
+  // 2002::/16 — 6to4: the relay delivers to the IPv4 in bits 16-47.
+  if (g0 === 0x2002) return isPrivateIpv4(ipv4FromGroups(g1, g2));
   if ((g0 & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
   if ((g0 & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
   if ((g0 & 0xffc0) === 0xfec0) return true; // fec0::/10 site-local (deprecated)
@@ -217,6 +314,19 @@ export async function assertPublicTarget(url: URL, policy: OutboundTargetPolicy 
   const hostname = normalizeHostname(url.hostname);
   const allowPrivate = policy.allowPrivateHosts === true;
 
+  const allowedPorts = policy.allowedPorts ?? 'any';
+  if (allowedPorts !== 'any') {
+    const port = effectivePort(url);
+    if (!allowedPorts.includes(port)) {
+      throw new OutboundTargetError(
+        'port-not-allowed',
+        hostname,
+        `url port ${port} is not allowed for paid resources (allowed: ${allowedPorts.join(', ')})`,
+        { port },
+      );
+    }
+  }
+
   if (!allowPrivate && isPrivateHost(hostname)) {
     throw new OutboundTargetError(
       'private-host',
@@ -256,7 +366,7 @@ export async function assertPublicTarget(url: URL, policy: OutboundTargetPolicy 
           'private-address',
           hostname,
           `url hostname resolves to a private, loopback, link-local or reserved address (${hostname})`,
-          address,
+          { address },
         );
       }
     }

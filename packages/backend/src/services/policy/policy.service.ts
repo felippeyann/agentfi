@@ -2,6 +2,7 @@ import type { PrismaClient, AgentPolicy } from '@prisma/client';
 import { getAddress, type Address } from 'viem';
 import { OnChainPolicyService } from './onchain-policy.service.js';
 import { parsePolicyDecimal } from './policy-numbers.js';
+import { resourcePaymentSpentToday } from '../payments/resource-payment-ledger.js';
 
 export interface PolicyValidationResult {
   allowed: boolean;
@@ -102,8 +103,13 @@ export class PolicyService {
     // Check max daily volume in USD (0 or unparsable = no daily limit, same as the classifier)
     const dailyLimitUsd = parsePolicyDecimal(policy.maxDailyVolumeUsd) ?? 0;
     if (dailyLimitUsd > 0) {
-      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+      const now = new Date();
+      const today = now.toISOString().slice(0, 10); // YYYY-MM-DD
       const incomingVolumeUsd = parseFloat(params.valueUsd ?? '0');
+      // x402 payments (pay-resource, P6) are not in DailyVolume: they count
+      // from their ledger rows (counted states, reserved today), so one daily
+      // limit covers both paths.
+      const x402TodayUsd = Number(await resourcePaymentSpentToday(this.db, params.agentId, now)) / 1e6;
 
       // Atomic reserve: upsert adds the incoming volume first, then we check.
       // This prevents TOCTOU race conditions where concurrent requests both
@@ -117,7 +123,7 @@ export class PolicyService {
           "updatedAt" = NOW()
         RETURNING "volumeUsd"
       `;
-      const projectedVolumeUsd = parseFloat(reserved[0]?.volumeUsd ?? '0');
+      const projectedVolumeUsd = parseFloat(reserved[0]?.volumeUsd ?? '0') + x402TodayUsd;
 
       if (projectedVolumeUsd > dailyLimitUsd) {
         // Rollback the reservation � subtract back

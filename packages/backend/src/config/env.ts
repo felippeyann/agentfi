@@ -220,6 +220,22 @@ const envSchema = z.object({
   // apply). Refused at boot in production and staging.
   RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS: z.preprocess(blankToUndefined, z.enum(['true', 'false']).default('false')),
 
+  // pay-resource port policy (P6): comma-separated ports a paid resource URL
+  // may use, e.g. "80,443,8443". Unset: production and staging allow 80 and
+  // 443 only; development and test are unrestricted. When set it applies in
+  // every environment (services/payments/outbound-target.ts).
+  RESOURCE_PAYMENT_ALLOWED_PORTS: z.preprocess(
+    blankToUndefined,
+    z
+      .string()
+      .regex(/^\s*\d{1,5}\s*(,\s*\d{1,5}\s*)*$/, 'must be comma-separated port numbers, e.g. "80,443"')
+      .refine(
+        (raw) => raw.split(',').every((part) => Number(part) >= 1 && Number(part) <= 65535),
+        'ports must be between 1 and 65535',
+      )
+      .optional(),
+  ),
+
   // Rate-limit overrides (requests/minute per tier)
   RATE_LIMIT_FREE: z.coerce.number().int().positive().default(30),
   RATE_LIMIT_PRO: z.coerce.number().int().positive().default(300),

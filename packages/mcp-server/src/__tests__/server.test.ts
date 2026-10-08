@@ -266,4 +266,18 @@ describe('pay_for_resource typed refusals (unchanged)', () => {
     expect(result.isError).toBeUndefined();
     expect(payloadOf(result)).toEqual({ paid: false, httpStatus: 502, ...body });
   });
+
+  it.each([
+    [409, { error: 'payee holds a live authorization', code: 'OUTSTANDING_AUTHORIZATION', validBefore: '2026-10-08T12:10:00.000Z' }],
+    [403, { error: 'Daily volume limit exceeded', code: 'POLICY_VIOLATION', rule: 'maxDailyVolume', limit: '100' }],
+  ])('returns the P6 refusal %s %j as structured output', async (status, body) => {
+    fetchMock.mockImplementation(async () => jsonResponse(status, body));
+    const result = await callTool(
+      'pay_for_resource',
+      { job_id: 'job_1', url: 'https://api.example.com/data' },
+      { log },
+    );
+    expect(result.isError).toBeUndefined();
+    expect(payloadOf(result)).toEqual({ paid: false, httpStatus: status, ...body });
+  });
 });

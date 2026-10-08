@@ -40,6 +40,8 @@ const PAY_RESOURCE_STRUCTURED_CODES = new Set([
   'UNSUPPORTED_ASSET',
   'UNSUPPORTED_BUDGET_TOKEN',
   'PAYMENT_IN_PROGRESS',
+  'OUTSTANDING_AUTHORIZATION',
+  'POLICY_VIOLATION',
 ]);
 
 export const agentTools = [
@@ -448,11 +450,17 @@ export const agentTools = [
       'ACCEPTED as provider, and returns the resource response. This SPENDS YOUR OWN USDC: the backend signs a ' +
       "USDC authorization with your wallet, capped by the job's remaining reward budget (reward minus everything " +
       'already paid or pending on that job) and by `max_amount` when you pass one. A price above the cap is refused ' +
-      'BEFORE anything is signed (BUDGET_EXCEEDED, with `price` and `remaining`). Only USDC on the job\'s chain is ' +
-      'accepted (UNSUPPORTED_ASSET otherwise). Idempotent per `payment_id`: calling again with the same id returns ' +
-      'the recorded payment instead of paying twice — always reuse the id when retrying. A PAYMENT_OUTCOME_UNKNOWN ' +
-      'result means a signed authorization reached the server but no settlement was confirmed: do NOT retry with a ' +
-      'new id; the amount stays reserved against the job until an operator reconciles it.',
+      'BEFORE anything is signed (BUDGET_EXCEEDED, with `price` and `remaining`). Your operator policy applies too, ' +
+      'also before signing (POLICY_VIOLATION with `rule`): the per-transaction limit read in USD for USDC, the daily ' +
+      'volume, the token allowlist and, when set, the contract allowlist as the list of payees. Only USDC on the ' +
+      "job's chain is accepted (UNSUPPORTED_ASSET otherwise). Idempotent per `payment_id`: calling again with the " +
+      'same id returns the recorded payment instead of paying twice — always reuse the id when retrying; a ' +
+      'concurrent call with the same id gets PAYMENT_IN_PROGRESS. A PAYMENT_OUTCOME_UNKNOWN result means a signed ' +
+      'authorization reached the server but no settlement was confirmed: do NOT retry with a new id; the amount ' +
+      'stays reserved against the job until an operator reconciles it. A PAYMENT_REFUSED result means the server ' +
+      'refused the signed authorization but still holds it until it expires (at most 10 minutes, `countedUntil`): ' +
+      'the amount stays counted until then and any new payment to that payee on the job is refused ' +
+      '(OUTSTANDING_AUTHORIZATION) — retry after `countedUntil`.',
     inputSchema: z.object({
       job_id: jobIdSchema('The ID of the ACCEPTED job whose budget pays for the resource (you must be its provider).'),
       url: z.string().url().describe('Absolute http(s) URL of the 402 resource.'),

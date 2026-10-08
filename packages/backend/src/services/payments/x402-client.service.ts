@@ -37,6 +37,13 @@
  * (`undiciTransport`), never Node's built-in one, so a dispatcher built from
  * that package is always driven by the same undici copy whatever the Node
  * version bundles.
+ *
+ * Bounded reads (P6): no response body is ever read whole. The final
+ * response body is read up to `maxBodyBytes` (default 64 KiB) and the
+ * transfer is aborted beyond it (`bodyTruncated: true`); the body of a plain
+ * 402 is read up to `maxPaymentRequiredBytes` (default 16 KiB) and a larger
+ * one is refused before anything is signed. A provider can therefore not
+ * make the backend buffer an unbounded answer.
  */
 
 import { x402Client, x402HTTPClient } from '@x402/core/client';
@@ -73,6 +80,7 @@ import {
 import { wrapFetchWithPayment } from '@x402/fetch';
 import { fetch as undiciFetch, type Dispatcher } from 'undici';
 import { formatUnits } from 'viem';
+import { sanitizeContextFromEnv, sanitizeText } from '../../api/errors/sanitize.js';
 import type { ClientSigner } from '../wallet/signer.js';
 
 // ── Errors ──────────────────────────────────────────────────────────────────
@@ -156,6 +164,8 @@ export interface PayResourceParams {
   paymentId?: string;
   /** Per-phase transport timeout in milliseconds. Overrides the service default (30 000). */
   requestTimeoutMs?: number;
+  /** Longest final response body read, in bytes; the transfer is aborted beyond it. Overrides the service default. */
+  maxBodyBytes?: number;
   /**
    * Longest authorization validity window (seconds from signing) this call
    * accepts. Options whose `maxTimeoutSeconds` exceeds it are not acceptable.
@@ -247,7 +257,10 @@ export interface ResourcePaymentInfo {
 
 export interface PayResourceResult {
   status: number;
+  /** At most `maxBodyBytes` of the body, decoded as UTF-8 (an incomplete trailing character of a cut body is dropped). */
   body: string;
+  /** True when the body was longer than `maxBodyBytes`: the read stopped there and the transfer was aborted. */
+  bodyTruncated: boolean;
   headers: Record<string, string>;
   /** True when the server reported a successful settlement in `PAYMENT-RESPONSE`. */
   paid: boolean;
@@ -278,6 +291,10 @@ export interface X402ClientServiceOptions {
   requestTimeoutMs?: number;
   /** Default longest authorization window in seconds. Default `MAX_AUTHORIZATION_WINDOW_SECONDS`. */
   maxAuthorizationWindowSeconds?: number;
+  /** Default longest final response body read, in bytes. Default `DEFAULT_MAX_BODY_BYTES`. */
+  maxBodyBytes?: number;
+  /** Longest body of a plain 402 read before refusing it, in bytes. Default `MAX_PAYMENT_REQUIRED_BYTES`. */
+  maxPaymentRequiredBytes?: number;
   /** TEST ONLY — see {@link TestOnlyGates}. */
   __testOnlyGates?: TestOnlyGates;
 }
@@ -296,6 +313,16 @@ export const MAX_AUTHORIZATION_WINDOW_SECONDS = 600;
 
 /** Default timeout applied to each request phase (plain request, paid request, body read). */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+/** Default cap on the final response body (P6): read this much, abort the transfer beyond it. */
+export const DEFAULT_MAX_BODY_BYTES = 64 * 1024;
+
+/**
+ * Cap on the body of a plain 402 (P6). v2 carries the requirements in the
+ * `PAYMENT-REQUIRED` header; the body is only a v1 fallback and never needs
+ * to be large. A larger one is refused before anything is signed.
+ */
+export const MAX_PAYMENT_REQUIRED_BYTES = 16 * 1024;
 
 /** Server-supplied reasons are clipped to this length in error messages and `details.reason`. */
 const MAX_REASON_LENGTH = 200;
@@ -389,10 +416,69 @@ function redactUrl(url: string): string {
   }
 }
 
-/** Bounds server-controlled text before it reaches an error message. */
+/**
+ * Bounds server-controlled or upstream text before it reaches an error
+ * message. Sanitized FIRST (P6): clipping first could cut a secret (an RPC
+ * key, a token in a URL) at the boundary and leave a prefix the API's
+ * sanitizer no longer recognises.
+ */
 function clip(text: string, max = MAX_REASON_LENGTH): string {
-  const flat = text.replace(/\s+/g, ' ');
+  const flat = sanitizeText(text, sanitizeContextFromEnv()).replace(/\s+/g, ' ');
   return flat.length <= max ? flat : `${flat.slice(0, max)}…`;
+}
+
+/**
+ * Reads at most `maxBytes` of `response`'s body. When more arrives the read
+ * stops there and the body is cancelled, which aborts the transfer — the rest
+ * is never received or buffered.
+ */
+export async function readBodyLimited(
+  response: Response,
+  maxBytes: number,
+): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+  const stream = response.body;
+  if (!stream) return { bytes: new Uint8Array(0), truncated: false };
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let truncated = false;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const room = maxBytes - size;
+    if (value.byteLength > room) {
+      if (room > 0) {
+        chunks.push(value.subarray(0, room));
+        size += room;
+      }
+      truncated = true;
+      await reader.cancel().catch(() => undefined);
+      break;
+    }
+    chunks.push(value);
+    size += value.byteLength;
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { bytes, truncated };
+}
+
+/** UTF-8 text of a body read by `readBodyLimited`; a cut body drops an incomplete trailing character. */
+function decodeBody(bytes: Uint8Array, truncated: boolean): string {
+  return new TextDecoder('utf-8').decode(bytes, truncated ? { stream: true } : undefined);
+}
+
+/** Cancels an unread body so its connection is released; never throws. */
+async function discardBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // already consumed or errored
+  }
 }
 
 function isTimeout(error: unknown): boolean {
@@ -533,6 +619,8 @@ export class X402ClientService {
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly requestTimeoutMs: number;
   private readonly maxAuthorizationWindowSeconds: number;
+  private readonly maxBodyBytes: number;
+  private readonly maxPaymentRequiredBytes: number;
   private readonly testGates: TestOnlyGates;
 
   constructor(options: X402ClientServiceOptions = {}) {
@@ -542,6 +630,12 @@ export class X402ClientService {
       'maxAuthorizationWindowSeconds',
       options.maxAuthorizationWindowSeconds,
       MAX_AUTHORIZATION_WINDOW_SECONDS,
+    );
+    this.maxBodyBytes = positiveNumber('maxBodyBytes', options.maxBodyBytes, DEFAULT_MAX_BODY_BYTES);
+    this.maxPaymentRequiredBytes = positiveNumber(
+      'maxPaymentRequiredBytes',
+      options.maxPaymentRequiredBytes,
+      MAX_PAYMENT_REQUIRED_BYTES,
     );
     const gates = options.__testOnlyGates ?? {};
     if ((gates.skipPreflight || gates.skipSpendControls) && process.env['NODE_ENV'] === 'production') {
@@ -566,6 +660,7 @@ export class X402ClientService {
       this.maxAuthorizationWindowSeconds,
     );
     const timeoutMs = positiveNumber('requestTimeoutMs', params.requestTimeoutMs, this.requestTimeoutMs);
+    const maxBodyBytes = positiveNumber('maxBodyBytes', params.maxBodyBytes, this.maxBodyBytes);
     const paymentId = params.paymentId ?? generatePaymentId(PAYMENT_ID_PREFIX);
     if (!isValidPaymentId(paymentId)) {
       throw new Error(
@@ -660,10 +755,19 @@ export class X402ClientService {
       if (state.abort && hasPaymentHeader(request)) throw state.abort;
       const response = await this.fetchImpl(request, transportInit);
       if (response.status === 402 && !hasPaymentHeader(request)) {
-        const paymentRequired = await this.decodePaymentRequired(httpClient, response.clone(), ctx);
+        // Bounded read of the 402 body (P6). `@x402/fetch` would read the
+        // body it is handed in full, so it gets a replay of the bytes read
+        // here instead of the live stream.
+        const text = await this.readPaymentRequiredBody(response, ctx);
+        const paymentRequired = this.decodePaymentRequired(httpClient, response.headers, text, ctx);
         state.paymentRequired = paymentRequired;
         state.offers = this.decodeOffers(paymentRequired);
         if (!this.testGates.skipPreflight) this.preflight(paymentRequired, ctx);
+        return new Response(text, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
       }
       return response;
     };
@@ -672,10 +776,14 @@ export class X402ClientService {
 
     let response: Response;
     let body: string;
+    let bodyTruncated: boolean;
     try {
       response = await fetchWithPayment(url, init);
-      // The body read is covered by the same deadline as the request itself.
-      body = await response.text();
+      // The body read is covered by the same deadline as the request itself,
+      // and bounded (P6): beyond `maxBodyBytes` the transfer is aborted.
+      const read = await readBodyLimited(response, maxBodyBytes);
+      body = decodeBody(read.bytes, read.truncated);
+      bodyTruncated = read.truncated;
     } catch (error) {
       if (error instanceof X402PaymentError) throw error;
       if (state.abort) throw state.abort;
@@ -686,14 +794,14 @@ export class X402ClientService {
 
     if (!state.paymentRequired) {
       // Never saw a 402: free resource, or a non-payment error. Return as-is.
-      return { status: response.status, body, headers, paid: false };
+      return { status: response.status, body, bodyTruncated, headers, paid: false };
     }
 
     const selected = state.selected;
     if (!selected || !state.paymentPayload) {
       // The wrapper returned without creating a payment (a hook supplied
       // headers that satisfied the server). Not something we configure.
-      return { status: response.status, body, headers, paid: false };
+      return { status: response.status, body, bodyTruncated, headers, paid: false };
     }
 
     const sent = this.sentDetails(state, paymentId);
@@ -746,6 +854,7 @@ export class X402ClientService {
     return {
       status: response.status,
       body,
+      bodyTruncated,
       headers,
       // No PAYMENT-RESPONSE on a 2xx means the server accepted the request
       // without reporting a settlement: treat as unpaid-until-reconciled.
@@ -793,20 +902,50 @@ export class X402ClientService {
 
   // ── 402 inspection ────────────────────────────────────────────────────────
 
-  private async decodePaymentRequired(
+  /**
+   * The body of a plain 402, read up to `maxPaymentRequiredBytes`. A declared
+   * or actual body above that is refused before anything is signed (P6) and
+   * the transfer aborted.
+   */
+  private async readPaymentRequiredBody(response: Response, ctx: PreflightContext): Promise<string> {
+    const limit = this.maxPaymentRequiredBytes;
+    const refuse = (): PaymentFailedError =>
+      new PaymentFailedError(
+        `402 from ${ctx.safeUrl} has a body larger than ${limit} bytes; refusing it before anything is signed`,
+        {
+          url: ctx.url,
+          status: 402,
+          stage: 'request',
+          timedOut: false,
+          authorizationSent: false,
+          paymentIdSent: false,
+          maxPaymentRequiredBytes: limit,
+        },
+      );
+    const declared = Number(response.headers.get('content-length') ?? '');
+    if (Number.isFinite(declared) && declared > limit) {
+      await discardBody(response);
+      throw refuse();
+    }
+    const read = await readBodyLimited(response, limit);
+    if (read.truncated) throw refuse();
+    return decodeBody(read.bytes, false);
+  }
+
+  private decodePaymentRequired(
     httpClient: x402HTTPClient,
-    response: Response,
+    headers: Headers,
+    text: string,
     ctx: PreflightContext,
-  ): Promise<PaymentRequired> {
+  ): PaymentRequired {
     let body: unknown;
     try {
-      const text = await response.text();
       if (text) body = JSON.parse(text);
     } catch {
       // v2 carries requirements in the header; a non-JSON body is fine.
     }
     try {
-      return httpClient.getPaymentRequiredResponse((name) => response.headers.get(name), body);
+      return httpClient.getPaymentRequiredResponse((name) => headers.get(name), body);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new PaymentFailedError(

@@ -373,7 +373,10 @@ enum AgentIdentityStatus {
 /// State machine (terminal states never change, except `unknown → settled`
 /// through a future reconciliation task):
 ///   reserved → pending → settled | unknown | refused
-///   failed_before_signing (402 parse / budget / scheme errors before any signature)
+///   failed_before_signing (402 parse / budget / scheme / policy errors before any signature)
+/// Counted against the job budget and the payer's daily volume: reserved,
+/// pending, settled, unknown, and refused until `authorizationValidBefore`
+/// (services/payments/resource-payment-ledger.ts).
 model ResourcePayment {
   id                 String                @id @default(cuid())
   jobId              String
@@ -395,6 +398,14 @@ model ResourcePayment {
   paymentId          String
   /// EIP-3009 / Permit2 nonce of the signed authorization (set once signed).
   authorizationNonce String?
+  /// EIP-3009 `validBefore` / Permit2 `deadline` of the signed authorization
+  /// (set once signed): until then the resource server can settle it, so a
+  /// `refused` row keeps counting against the budget until this has passed
+  /// (P6). Null before signing and on rows written before migration 0018.
+  authorizationValidBefore DateTime?
+  /// When the row was last reserved (first attempt, or a retry on the same
+  /// row): the day it counts in for the payer's daily volume (P6, migration 0018).
+  reservedAt         DateTime              @default(now())
   status             ResourcePaymentStatus
   /// Raw `offer-receipt` receipt from the resource server, when provided.
   receipt            Json?
@@ -411,6 +422,7 @@ model ResourcePayment {
   @@unique([jobId, paymentId])
   @@index([jobId])
   @@index([status])
+  @@index([agentId, reservedAt])
 }
 
 enum ResourcePaymentStatus {
@@ -418,6 +430,6 @@ enum ResourcePaymentStatus {
   pending               // authorization signed and sent to the resource server
   settled               // 2xx with a settlement report (receipt verified or marked unverified)
   unknown               // timeout / transport error after signing: money may have moved; no automatic retry
-  refused               // server answered 4xx/5xx after signing, no settlement
-  failed_before_signing // 402 parse / budget / scheme error before any signature
+  refused               // server answered 4xx/5xx/3xx after signing without reporting a settlement; counted until authorizationValidBefore
+  failed_before_signing // 402 parse / budget / scheme / policy error before any signature
 }

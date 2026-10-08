@@ -15,11 +15,15 @@ import { fetch as undiciFetch } from 'undici';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   OutboundTargetError,
+  PRODUCTION_DEFAULT_PORTS,
   assertPublicTarget,
   createPinnedDispatcher,
   isPrivateAddress,
   isPrivateHost,
+  parsePortList,
   pinnedLookup,
+  publicRefusal,
+  resolveAllowedPorts,
   type TargetLookup,
   type ValidatedTarget,
 } from '../services/payments/outbound-target.js';
@@ -104,6 +108,34 @@ describe('isPrivateAddress', () => {
     ['ff02::1', true],
     ['2001:4860:4860::8888', false],
     ['2606:4700:4700::1111', false],
+    // P6 — 198.18/15 (benchmarking) and 192.0.0/24 (IETF protocol assignments)
+    ['198.17.255.255', false],
+    ['198.18.0.0', true],
+    ['198.19.255.255', true],
+    ['198.20.0.0', false],
+    ['191.255.255.255', false],
+    ['192.0.0.0', true],
+    ['192.0.0.255', true],
+    ['192.0.1.0', false],
+    ['::ffff:198.18.0.1', true],
+    // P6 — 6to4 2002::/16 judged by the IPv4 in bits 16-47
+    ['2002:7f00:1::', true],
+    ['2002:7f00:0001:0:0:0:0:1', true],
+    ['2002:a9fe:a9fe::1', true],
+    ['2002:c0a8:101::', true],
+    ['2002:c612:1::', true],
+    ['2002:808:808::1', false],
+    ['2001:ffff::1', false],
+    ['2003::1', false],
+    // P6 — local-use NAT64 64:ff9b:1::/48 refused whatever it embeds
+    ['64:ff9b:1::808:808', true],
+    ['64:ff9b:1:ffff::1', true],
+    ['64:ff9b:2::808:808', false],
+    // P6 — SIIT IPv4-translated ::ffff:0:0:0/96 refused
+    ['::ffff:0:7f00:1', true],
+    ['::ffff:0:808:808', true],
+    ['::ffff:0:0', true],
+    ['0:0:0:0:ffff:0:808:808', true],
   ])('%s → %s', (address, expected) => {
     expect(isPrivateAddress(address)).toBe(expected);
   });
@@ -207,6 +239,82 @@ describe('assertPublicTarget', () => {
     expect(target.hostname).toBe('localhost');
     expect(target.addresses.length).toBeGreaterThan(0);
     for (const { address } of target.addresses) expect(isPrivateAddress(address)).toBe(true);
+  });
+
+  describe('port policy (P6)', () => {
+    it('refuses a port outside the list before resolving, naming the port', async () => {
+      const lookup = resolvesTo(['93.184.216.34', 4]);
+      const error = await refusal(
+        assertPublicTarget(new URL('https://api.example.com:5432/'), { allowedPorts: [80, 443], lookup }),
+      );
+      expect(error).toMatchObject({ refusal: 'port-not-allowed', hostname: 'api.example.com', port: 5432 });
+      expect(error.message).toBe('url port 5432 is not allowed for paid resources (allowed: 80, 443)');
+      expect(lookup).not.toHaveBeenCalled();
+    });
+
+    it('judges the scheme default when the URL names no port', async () => {
+      const lookup = resolvesTo(['93.184.216.34', 4]);
+      await expect(assertPublicTarget(new URL('https://api.example.com/'), { allowedPorts: [443], lookup })).resolves.toBeDefined();
+      const error = await refusal(assertPublicTarget(new URL('http://api.example.com/'), { allowedPorts: [443], lookup }));
+      expect(error).toMatchObject({ refusal: 'port-not-allowed', port: 80 });
+    });
+
+    it("'any' (or no list) is unrestricted, and the port check also applies with the private-host override", async () => {
+      const lookup = resolvesTo(['127.0.0.1', 4]);
+      await expect(
+        assertPublicTarget(new URL('http://127.0.0.1:6379/'), { allowPrivateHosts: true, allowedPorts: 'any', lookup }),
+      ).resolves.toBeDefined();
+      const error = await refusal(
+        assertPublicTarget(new URL('http://127.0.0.1:6379/'), { allowPrivateHosts: true, allowedPorts: [80, 443], lookup }),
+      );
+      expect(error.refusal).toBe('port-not-allowed');
+    });
+
+    it('resolveAllowedPorts: production and staging default to 80/443, development and test to any; an explicit list wins everywhere', () => {
+      expect(resolveAllowedPorts('production', undefined)).toEqual(PRODUCTION_DEFAULT_PORTS);
+      expect(resolveAllowedPorts('staging', '')).toEqual([80, 443]);
+      expect(resolveAllowedPorts('development', undefined)).toBe('any');
+      expect(resolveAllowedPorts('test', undefined)).toBe('any');
+      expect(resolveAllowedPorts('production', '443, 8443')).toEqual([443, 8443]);
+      expect(resolveAllowedPorts('development', '8080')).toEqual([8080]);
+    });
+
+    it.each(['80;443', '0', '65536', 'http', '80,', ' '])('parsePortList refuses %j', (raw) => {
+      expect(() => parsePortList(raw)).toThrow();
+    });
+
+    it('parsePortList trims and de-duplicates', () => {
+      expect(parsePortList(' 80 ,443,80 ')).toEqual([80, 443]);
+    });
+  });
+
+  describe('publicRefusal (P6): what the agent is told', () => {
+    it('collapses private-address and unresolvable into one refusal and one message', async () => {
+      const privateName = await refusal(
+        assertPublicTarget(new URL('https://db.internal.example/'), { lookup: resolvesTo(['10.0.0.5', 4]) }),
+      );
+      const missingName = await refusal(
+        assertPublicTarget(new URL('https://db.internal.example/'), {
+          lookup: async () => {
+            throw Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' });
+          },
+        }),
+      );
+      expect(privateName.refusal).toBe('private-address');
+      expect(missingName.refusal).toBe('unresolvable');
+      expect(publicRefusal(privateName)).toEqual(publicRefusal(missingName));
+      expect(publicRefusal(privateName)).toEqual({
+        refusal: 'no-public-address',
+        message: 'url hostname does not resolve to a public address (db.internal.example)',
+      });
+    });
+
+    it('keeps private-host and port-not-allowed (they only restate the agent\'s input)', async () => {
+      const literal = await refusal(assertPublicTarget(new URL('http://10.0.0.1/'), {}));
+      expect(publicRefusal(literal)).toEqual({ refusal: 'private-host', message: literal.message });
+      const port = await refusal(assertPublicTarget(new URL('http://8.8.8.8:25/'), { allowedPorts: [80] }));
+      expect(publicRefusal(port)).toEqual({ refusal: 'port-not-allowed', message: port.message });
+    });
   });
 });
 

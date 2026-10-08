@@ -157,6 +157,35 @@ describe('RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS (S4 development override)', () =>
   });
 });
 
+describe('RESOURCE_PAYMENT_ALLOWED_PORTS (P6 port policy)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    restoreEnv();
+  });
+
+  function example(): Record<string, string> {
+    return parse(readFileSync(EXAMPLE_FILE, 'utf8'));
+  }
+
+  it('ships commented out (unset), and a blank value is unset too', async () => {
+    expect(example()['RESOURCE_PAYMENT_ALLOWED_PORTS']).toBeUndefined();
+    expect(readFileSync(EXAMPLE_FILE, 'utf8')).toMatch(/^# RESOURCE_PAYMENT_ALLOWED_PORTS=80,443$/m);
+    const blank = await bootWith({ ...example(), RESOURCE_PAYMENT_ALLOWED_PORTS: '' });
+    expect(blank.exit).not.toHaveBeenCalled();
+    expect(blank.env.RESOURCE_PAYMENT_ALLOWED_PORTS).toBeUndefined();
+  });
+
+  it('accepts a comma-separated port list', async () => {
+    const { env, exit } = await bootWith({ ...example(), RESOURCE_PAYMENT_ALLOWED_PORTS: '80, 443,8443' });
+    expect(exit).not.toHaveBeenCalled();
+    expect(env.RESOURCE_PAYMENT_ALLOWED_PORTS).toBe('80, 443,8443');
+  });
+
+  it.each(['80;443', 'https', '0', '70000', '80,'])('refuses to boot with %j', async (value) => {
+    await expect(bootWith({ ...example(), RESOURCE_PAYMENT_ALLOWED_PORTS: value })).rejects.toThrow(/process\.exit\(1\)/);
+  });
+});
+
 describe('RPC_URL_<chainId> (per-chain RPC override, C5a)', () => {
   afterEach(() => {
     vi.restoreAllMocks();

@@ -2083,7 +2083,9 @@ export interface paths {
          * Pay an x402 (HTTP 402) resource from the job's remaining budget
          * @description The job's **provider** pays a third-party `402` resource with its own
          *     USDC, within the job's remaining reward budget
-         *     (`reward − Σ reserved/pending/settled/unknown payments on the job`).
+         *     (`reward − Σ counted payments on the job`: `reserved`, `pending`,
+         *     `settled`, `unknown`, and `refused` until its authorization's
+         *     `validBefore`).
          *     The requester cannot call this (`403 NOT_PROVIDER`); the job must be
          *     `ACCEPTED` (`409 JOB_NOT_ACTIVE`); the job reward must be denominated
          *     in USDC on a supported chain (`400 UNSUPPORTED_BUDGET_TOKEN`).
@@ -2091,31 +2093,52 @@ export interface paths {
          *     The backend fetches `url`. On a `402` it checks the offered price
          *     against the cap — the lower of the remaining budget and `maxAmount` —
          *     **before anything is signed**, reserves the amount in a durable
-         *     `ResourcePayment` row (under a row lock on the job, so concurrent
-         *     payments cannot overspend), signs an EIP-3009 USDC authorization with
-         *     the provider's wallet and resends the request with
-         *     `PAYMENT-SIGNATURE`. Only USDC on the job's chain is accepted
-         *     (`400 UNSUPPORTED_ASSET`). A non-402 response (free resource, or an
-         *     error) is returned untouched with `payment: null`.
+         *     `ResourcePayment` row (under row locks on the job and the paying
+         *     agent, so concurrent payments cannot overspend the budget or the
+         *     daily volume), signs an EIP-3009 USDC authorization with the
+         *     provider's wallet and resends the request with `PAYMENT-SIGNATURE`.
+         *     Only USDC on the job's chain is accepted (`400 UNSUPPORTED_ASSET`). A
+         *     non-402 response (free resource, or an error) is returned with
+         *     `payment: null`; response bodies are read up to 64 KiB and the
+         *     transfer is aborted beyond that (`resource.truncated`).
          *
-         *     **Outbound target policy.** Before anything is fetched, the hostname
-         *     is resolved and the request is refused (`400 INVALID_URL`, with
-         *     `refusal` and `hostname`; the address a name resolved to is never
-         *     returned) when the host is — or any address
-         *     it resolves to is — loopback, private, link-local, unique-local,
-         *     unspecified or otherwise reserved (IPv4-mapped and NAT64 addresses are
-         *     judged by their IPv4). The connection is pinned to the validated
-         *     addresses, so a DNS rebind cannot redirect it. Redirects are never
-         *     followed: any `3xx` is `400 REDIRECT_REFUSED`, before or after signing.
+         *     **Agent policy.** Under the same locks and before signing, the
+         *     payment must pass the provider's policy (`403 POLICY_VIOLATION` with
+         *     `rule`): `maxValuePerTx` — the `maxValuePerTxEth` number read in USD
+         *     for USDC; `maxDailyVolume` — USD committed today through
+         *     transactions (`DailyVolume`) plus today's counted pay-resource rows
+         *     on all the agent's jobs, plus this price; `allowedTokens` — when
+         *     non-empty it must list the job chain's USDC (checked before anything
+         *     is fetched); `allowedContracts` — when non-empty it must list the
+         *     402's `payTo` (the payee).
+         *
+         *     **Outbound target policy.** Before anything is fetched, the URL's
+         *     port must be allowed (production / staging: 80 and 443 unless
+         *     `RESOURCE_PAYMENT_ALLOWED_PORTS` says otherwise; development / test:
+         *     any), and the hostname is resolved and the request is refused
+         *     (`400 INVALID_URL`, with `refusal` and `hostname`) when the host is —
+         *     or any address it resolves to is — loopback, private, link-local,
+         *     unique-local, unspecified or otherwise reserved (IPv4-mapped, NAT64
+         *     and 6to4 addresses are judged by their IPv4). A name that does not
+         *     resolve and one that resolves to a refused address get the same
+         *     answer (`no-public-address`), so internal names cannot be probed;
+         *     the resolved address is never returned. The connection is pinned to
+         *     the validated addresses, so a DNS rebind cannot redirect it.
+         *     Redirects are never followed: any `3xx` is `400 REDIRECT_REFUSED`,
+         *     before or after signing.
          *
          *     **Idempotency.** `paymentId` is unique per job (a server UUID when
          *     omitted). A retry with the same id returns the existing row *without a
          *     second payment* when it is `pending`, `settled` or `unknown`
-         *     (`replayed: true`, `resource: null`); a `reserved` row is an attempt
-         *     in flight (`409 PAYMENT_IN_PROGRESS`); only `refused` /
-         *     `failed_before_signing` rows are retried, on the same row. The id is
-         *     also sent to the server inside the x402 `payment-identifier`
-         *     extension so a cache-enabled server deduplicates on its side.
+         *     (`replayed: true`, `resource: null`); a `reserved` row — or a
+         *     concurrent retry of the same id — is `409 PAYMENT_IN_PROGRESS` (the
+         *     retry takes the row with a conditional update under the lock, so
+         *     concurrent retries pay at most once); a `refused` row whose
+         *     authorization is still live is `409 OUTSTANDING_AUTHORIZATION`; only
+         *     `failed_before_signing` rows and `refused` rows whose authorization
+         *     expired are retried, on the same row. The id is also sent to the
+         *     server inside the x402 `payment-identifier` extension so a
+         *     cache-enabled server deduplicates on its side.
          *
          *     **State machine** (`ResourcePayment.status`):
          *     `reserved → pending → settled | unknown | refused`, plus
@@ -2123,6 +2146,11 @@ export interface paths {
          *     (timeout or transport error after signing; `502
          *     PAYMENT_OUTCOME_UNKNOWN`) is never retried automatically and stays
          *     reserved against the budget until an operator reconciles it.
+         *     `refused` (the server answered the signed payment without reporting a
+         *     settlement) stays counted until `authorizationValidBefore`: the
+         *     server still holds a valid authorization and its answer is not proof
+         *     that nothing settled. Until then no new authorization to the same
+         *     `payTo` is signed on the job (`409 OUTSTANDING_AUTHORIZATION`).
          *
          *     When the server provides an `offer-receipt`, it is verified against
          *     the accepted offer; a mismatch still settles but is stored with
@@ -2160,9 +2188,12 @@ export interface paths {
                 };
                 /**
                  * @description `VALIDATION_FAILED`, `INVALID_URL` (not an absolute http(s) URL, or
-                 *     refused by the outbound target policy: `refusal` is `private-host`,
-                 *     `private-address` or `unresolvable`, with `hostname`; the
-                 *     offending resolved address is only logged), `INVALID_BUDGET`, `UNSUPPORTED_BUDGET_TOKEN`
+                 *     refused by the outbound target policy: `refusal` is `private-host`
+                 *     (loopback name or private/reserved literal), `no-public-address`
+                 *     (the name does not resolve, or resolves to a private/reserved
+                 *     address — deliberately indistinguishable) or `port-not-allowed`
+                 *     (with `port`), with `hostname`; the offending resolved address is
+                 *     only logged), `INVALID_BUDGET`, `UNSUPPORTED_BUDGET_TOKEN`
                  *     (the job reward is not USDC) or `UNSUPPORTED_ASSET` (the 402 does
                  *     not offer USDC on the job's chain within the allowed authorization
                  *     window) — nothing was signed — or `REDIRECT_REFUSED`: the resource
@@ -2184,8 +2215,11 @@ export interface paths {
                  * @description `BUDGET_EXCEEDED` — refused before signing; `price`, `remaining` and
                  *     `cap` are base units — or `PAYMENT_REFUSED` — the server answered
                  *     the signed payment (verification rejected, settlement failed, or a
-                 *     4xx/5xx) without settling it; `payment.status` is `refused` and the
-                 *     same `paymentId` may be retried.
+                 *     4xx/5xx) without reporting a settlement; `payment.status` is
+                 *     `refused`. The server still holds the authorization until
+                 *     `countedUntil` (= `payment.authorizationValidBefore`), so the amount
+                 *     stays counted and no new payment to the same `payTo` is signed on
+                 *     the job before then; the same `paymentId` may be retried after it.
                  */
                 402: {
                     headers: {
@@ -2195,7 +2229,15 @@ export interface paths {
                         "application/json": components["schemas"]["ResourcePaymentError"];
                     };
                 };
-                /** @description `NOT_PROVIDER` (only the provider pays), `AGENT_INACTIVE` or `POLICY_PAUSED`. */
+                /**
+                 * @description `NOT_PROVIDER` (only the provider pays), `AGENT_INACTIVE`,
+                 *     `POLICY_PAUSED`, or `POLICY_VIOLATION` — the provider's policy
+                 *     refused the payment before anything was signed: `rule` is
+                 *     `maxValuePerTx`, `maxDailyVolume` (with `spentToday`),
+                 *     `allowedTokens` or `allowedContracts` (the `payTo` is not listed);
+                 *     `limit` is the policy value, `price` the offered price in base
+                 *     units.
+                 */
                 403: {
                     headers: {
                         [name: string]: unknown;
@@ -2214,9 +2256,13 @@ export interface paths {
                     };
                 };
                 /**
-                 * @description `JOB_NOT_ACTIVE` (job is not `ACCEPTED`), `PAYMENT_IN_PROGRESS`
-                 *     (same `paymentId` currently reserved) or `PAYMENT_ID_CONFLICT`
-                 *     (same `paymentId`, different URL or method).
+                 * @description `JOB_NOT_ACTIVE` (job is not `ACCEPTED`, also re-checked under the
+                 *     lock), `PAYMENT_IN_PROGRESS` (same `paymentId` currently reserved,
+                 *     or taken by a concurrent retry), `PAYMENT_ID_CONFLICT` (same
+                 *     `paymentId`, different URL or method) or
+                 *     `OUTSTANDING_AUTHORIZATION` (a payment to the same `payTo` on this
+                 *     job was refused after signing and its authorization is live until
+                 *     `validBefore`; nothing was signed — retry after that).
                  */
                 409: {
                     headers: {
@@ -2228,8 +2274,9 @@ export interface paths {
                 };
                 /**
                  * @description `PAYMENT_FAILED` — the hostname could not be resolved because of a
-                 *     transient resolver failure (`stage: resolve`), the 402 was unusable,
-                 *     or the request failed / timed out before anything was signed — or
+                 *     transient resolver failure (`stage: resolve`), the 402 was unusable
+                 *     (including a 402 body above 16 KiB, refused unread), or the request
+                 *     failed / timed out before anything was signed — or
                  *     `PAYMENT_OUTCOME_UNKNOWN` — a
                  *     signed authorization left the process and no answer came back.
                  *     `payment.status` is `unknown`; `authorization` carries the nonce
@@ -3646,10 +3693,11 @@ export interface components {
         };
         /**
          * @description Ledger state of a job-scoped x402 payment:
-         *     `reserved` (budget checked, nothing signed) → `pending` (authorization
-         *     signed and sent) → `settled` | `unknown` (no answer after signing;
-         *     money may have moved, never retried automatically) | `refused`
-         *     (server answered 4xx/5xx after signing, no settlement);
+         *     `reserved` (budget and policy checked, nothing signed) → `pending`
+         *     (authorization signed and sent) → `settled` | `unknown` (no answer
+         *     after signing; money may have moved, never retried automatically) |
+         *     `refused` (server answered 4xx/5xx/3xx after signing without reporting
+         *     a settlement; counted until `authorizationValidBefore`);
          *     `failed_before_signing` for refusals before any signature.
          * @enum {string}
          */
@@ -3675,6 +3723,16 @@ export interface components {
             paymentId?: string;
             /** @description EIP-3009 / Permit2 nonce of the signed authorization; set once signed. */
             authorizationNonce?: string | null;
+            /**
+             * Format: date-time
+             * @description EIP-3009 `validBefore` / Permit2 `deadline` of the signed authorization; set once signed. Until then the resource server can settle it, so a `refused` row counts against the budget until this time.
+             */
+            authorizationValidBefore?: string | null;
+            /**
+             * Format: date-time
+             * @description When the row was last reserved (a retry reuses the row); the day it counts in for the daily volume.
+             */
+            reservedAt?: string;
             status?: components["schemas"]["ResourcePaymentStatus"];
             /** @description Raw `offer-receipt` receipt from the resource server, when provided. */
             receipt?: {
@@ -3716,7 +3774,7 @@ export interface components {
             network?: string;
             /** @description Job reward in base units. */
             total?: string;
-            /** @description Base units reserved, pending, settled or unknown. */
+            /** @description Base units reserved, pending, settled, unknown, or refused with a live authorization. */
             spent?: string;
             /** @description Base units. */
             remaining?: string;
@@ -3732,7 +3790,7 @@ export interface components {
             };
             /** @description Parsed JSON when the response is JSON and fits the cap; otherwise text. */
             body?: unknown;
-            /** @description True when the body was cut at 64 KiB. */
+            /** @description True when the body was longer than 64 KiB; reading stopped there and the transfer was aborted. */
             truncated?: boolean;
         };
         PayResourceResponse: {
@@ -3746,9 +3804,9 @@ export interface components {
         };
         ResourcePaymentError: components["schemas"]["Error"] & {
             /** @enum {string} */
-            code: "VALIDATION_FAILED" | "INVALID_URL" | "REDIRECT_REFUSED" | "INVALID_BUDGET" | "UNSUPPORTED_BUDGET_TOKEN" | "UNSUPPORTED_ASSET" | "BUDGET_EXCEEDED" | "NOT_PROVIDER" | "AGENT_INACTIVE" | "POLICY_PAUSED" | "JOB_NOT_FOUND" | "JOB_NOT_ACTIVE" | "PAYMENT_IN_PROGRESS" | "PAYMENT_ID_CONFLICT" | "PAYMENT_REFUSED" | "PAYMENT_FAILED" | "PAYMENT_OUTCOME_UNKNOWN" | "LEDGER_ERROR";
+            code: "VALIDATION_FAILED" | "INVALID_URL" | "REDIRECT_REFUSED" | "INVALID_BUDGET" | "UNSUPPORTED_BUDGET_TOKEN" | "UNSUPPORTED_ASSET" | "BUDGET_EXCEEDED" | "NOT_PROVIDER" | "AGENT_INACTIVE" | "POLICY_PAUSED" | "POLICY_VIOLATION" | "JOB_NOT_FOUND" | "JOB_NOT_ACTIVE" | "PAYMENT_IN_PROGRESS" | "PAYMENT_ID_CONFLICT" | "OUTSTANDING_AUTHORIZATION" | "PAYMENT_REFUSED" | "PAYMENT_FAILED" | "PAYMENT_OUTCOME_UNKNOWN" | "LEDGER_ERROR";
             paymentId?: string;
-            /** @description Offered price in base units (`BUDGET_EXCEEDED`); `null` when the budget was exhausted before fetching. */
+            /** @description Offered price in base units (`BUDGET_EXCEEDED`, `POLICY_VIOLATION`); `null` when the budget was exhausted before fetching. */
             price?: string | null;
             /** @example 0.4 */
             priceFormatted?: string;
@@ -3758,16 +3816,41 @@ export interface components {
             /** @description Effective per-payment cap in base units (min of remaining budget and `maxAmount`). */
             cap?: string;
             capFormatted?: string;
-            /** @description Server-supplied reason (`PAYMENT_REFUSED`), clipped at 200 characters. */
+            /** @description Server-supplied reason (`PAYMENT_REFUSED`), sanitized then clipped at 200 characters. */
             reason?: string;
             responseStatus?: number;
             /**
-             * @description Why the outbound target policy refused the URL (`INVALID_URL`): the host is a loopback name or a private/reserved literal, one of its resolved addresses is private/reserved, or it does not resolve.
+             * @description Why the outbound target policy refused the URL (`INVALID_URL`): the host is a loopback name or a private/reserved literal; the name does not resolve or one of its addresses is private/reserved (the two are deliberately reported alike so internal names cannot be probed); or the port is not allowed.
              * @enum {string}
              */
-            refusal?: "private-host" | "private-address" | "unresolvable";
+            refusal?: "private-host" | "no-public-address" | "port-not-allowed";
             /** @description Hostname the outbound target policy judged (`INVALID_URL`). The private address it resolved to is never returned. */
             hostname?: string;
+            /** @description The refused port (`INVALID_URL`, `refusal: port-not-allowed`). */
+            port?: number;
+            /**
+             * @description Policy rule that refused the payment (`POLICY_VIOLATION`).
+             * @enum {string}
+             */
+            rule?: "maxValuePerTx" | "maxDailyVolume" | "allowedTokens" | "allowedContracts";
+            /** @description The policy value that refused it, as stored (`maxValuePerTx`: `maxValuePerTxEth` read in USD; `maxDailyVolume`: USD). */
+            limit?: string;
+            /** @description USD already committed today, without this payment (`POLICY_VIOLATION`, `rule: maxDailyVolume`). */
+            spentToday?: string;
+            /** @description The payee (`POLICY_VIOLATION`, `OUTSTANDING_AUTHORIZATION`). */
+            payTo?: string;
+            /** @description The refused payment whose authorization is still live (`OUTSTANDING_AUTHORIZATION`). */
+            outstandingPaymentId?: string;
+            /**
+             * Format: date-time
+             * @description When the outstanding authorization expires; retry after it (`OUTSTANDING_AUTHORIZATION`).
+             */
+            validBefore?: string | null;
+            /**
+             * Format: date-time
+             * @description Until when the refused payment counts against the budget and blocks its payee (`PAYMENT_REFUSED`, `REDIRECT_REFUSED` after signing).
+             */
+            countedUntil?: string | null;
             /** @description Redirect target, resolved and stripped of query string and userinfo (`REDIRECT_REFUSED`); never requested. */
             location?: string | null;
             /**
@@ -3776,7 +3859,7 @@ export interface components {
              */
             stage?: "resolve" | "request" | "payment-creation" | "paid-request";
             timedOut?: boolean;
-            /** @description Nonce and window of the signed authorization (`PAYMENT_OUTCOME_UNKNOWN`), for reconciliation. Never the signature. */
+            /** @description Nonce and window of the signed authorization (`PAYMENT_OUTCOME_UNKNOWN`, `PAYMENT_REFUSED`), for reconciliation. Never the signature. */
             authorization?: {
                 /** @enum {string} */
                 method?: "eip3009" | "permit2";
