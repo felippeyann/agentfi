@@ -45,10 +45,17 @@ forge --version
 
 ### Install contract dependencies
 
+`forge-std` is a pinned git submodule (`packages/contracts/lib/forge-std`). From the repository root:
+
 ```bash
-cd packages/contracts
-forge install foundry-rs/forge-std --no-commit
+git submodule update --init --recursive
 ```
+
+Without it `forge build` fails on `forge-std/Script.sol`. Do not use `forge install`: the dependency is the pinned submodule (and forge 1.7.1 rejects the old `forge install … --no-commit` with "unexpected argument").
+
+### Interactive prompts
+
+`cast wallet import <name> --interactive` and every `forge script --account <name>` ask for the keystore password on the terminal. Run them yourself in a terminal window (Git Bash, Windows Terminal, PowerShell); a coding agent's shell or CI has no terminal attached and cannot answer the prompt.
 
 ### Get a block explorer API key (Etherscan API V2)
 
@@ -94,7 +101,7 @@ $env:EXECUTOR_FEE_BPS = "30"
 $env:ETHERSCAN_API_KEY = "..."
 ```
 
-**Signer:** import the deployer key once into Foundry's encrypted keystore (`cast wallet import agentfi-deployer --interactive`) and pass `--account agentfi-deployer`; do not export `PRIVATE_KEY`. Forge auto-loads `packages/contracts/.env`: a `PRIVATE_KEY` there used to override `--account` silently. Both scripts now print a warning whenever `PRIVATE_KEY` is set and refuse to run when it belongs to a different address than the CLI signer (`SignerConflict`).
+**Signer: the keystore *or* `PRIVATE_KEY`, never both.** Import the deployer key once into Foundry's encrypted keystore (`cast wallet import agentfi-deployer --interactive`) and pass `--account agentfi-deployer`; then make sure no `PRIVATE_KEY` is left anywhere forge looks: `unset PRIVATE_KEY`, and no `PRIVATE_KEY=` line in `packages/contracts/.env` (forge auto-loads that file; a key there used to override `--account` silently). Both scripts print a warning whenever `PRIVATE_KEY` is set and stop before broadcasting with `SignerConflict(cliSigner, privateKeySigner)` when it belongs to a different address than the CLI signer: remove the key and rerun, nothing was sent.
 
 ### Step 2 — Run tests
 
@@ -116,6 +123,8 @@ forge script script/Deploy.s.sol \
   --broadcast \
   --verify
 ```
+
+Without an `ETHERSCAN_API_KEY`, leave out `--verify` (the contracts work unverified). To verify later, export the key and rerun the same command with `--resume --verify` instead of `--broadcast --verify`: `--resume` reads `broadcast/<script>/<chainId>/run-latest.json` and sends no new transaction for a deployment that went through.
 
 Replace `<chain_alias>` with one of the configured RPC aliases:
 
@@ -249,7 +258,13 @@ REPUTATION_HOOK_ADDRESS_84532=0x...
 
 ### Post-deployment checks
 
+Set the three variables first (the Base Sepolia public RPC shown; any RPC of the chain works). `TRUSTED_EVALUATOR` is still exported from the deployment step.
+
 ```bash
+RPC=https://sepolia.base.org   # the chain you deployed to
+ESCROW=0x...                   # AGENT_JOB_ESCROW_ADDRESS_<chainId> from the output above
+HOOK=0x...                     # REPUTATION_HOOK_ADDRESS_<chainId> from the output above
+
 cast call $ESCROW "token()(address)"            --rpc-url $RPC   # == USDC_ADDRESS
 cast call $ESCROW "feeWallet()(address)"        --rpc-url $RPC   # == FEE_WALLET
 cast call $ESCROW "operator()(address)"         --rpc-url $RPC   # == OPERATOR_ADDRESS
@@ -257,6 +272,7 @@ cast call $ESCROW "platformFeeBP()(uint256)"    --rpc-url $RPC   # == FEE_BPS
 cast call $ESCROW "evaluatorFeeBP()(uint256)"   --rpc-url $RPC   # == EVALUATOR_FEE_BPS
 cast call $ESCROW "paused()(bool)"              --rpc-url $RPC   # false
 cast call $ESCROW "pendingPlatformFees()(uint256)" --rpc-url $RPC # 0
+cast call $ESCROW "jobCount()(uint256)"         --rpc-url $RPC   # 0
 cast call $HOOK   "acp()(address)"              --rpc-url $RPC   # == ESCROW
 cast call $HOOK   "reputationRegistry()(address)" --rpc-url $RPC # == REPUTATION_REGISTRY_ADDRESS
 cast call $HOOK   "identityRegistry()(address)" --rpc-url $RPC   # == IDENTITY_REGISTRY_ADDRESS
@@ -266,9 +282,18 @@ cast call $HOOK   "feedbackGasLimit()(uint256)" --rpc-url $RPC   # == FEEDBACK_G
 cast call $HOOK   "identityCallGasLimit()(uint256)" --rpc-url $RPC  # == IDENTITY_CALL_GAS_LIMIT (50000)
 cast call $HOOK   "feedbackGasRequirement()(uint256)" --rpc-url $RPC # 597937 with the defaults (also printed by the script)
 cast call $HOOK   "canonicalBindGasRequirement()(uint256)" --rpc-url $RPC # 140794 with the defaults (also printed)
-cast call $HOOK   "REASON_QUALITY_REJECTED()(bytes32)" --rpc-url $RPC # 0x0ec25635…dbc64e281 = keccak256("agentfi.quality-rejected")
+cast call $HOOK   "REASON_QUALITY_REJECTED()(bytes32)" --rpc-url $RPC # 0x0ec256357691b70fc22a1ea701b9b2c298924a0f2ba5275b8d2d638dbc64e281 = keccak256("agentfi.quality-rejected")
+cast call $HOOK   "REASON_PAYOUT_BLOCKED()(bytes32)" --rpc-url $RPC   # 0x4fc5fb5c2aafa31a8c658ecf1014e38fba39a32768deef76a1c42bef80fb56cb = keccak256("agentfi.payout-blocked")
+cast call $HOOK   "canonicalAgentId(address)(uint256)" $TRUSTED_EVALUATOR --rpc-url $RPC  # 0 (no provider bound yet; any address answers 0 on a fresh hook)
+cast call $HOOK   "penalties(uint256)(uint256)" 1 --rpc-url $RPC  # 0 (no verdict recorded yet)
 cast call $HOOK   "supportsInterface(bytes4)(bool)" 0x7ff6bc9e --rpc-url $RPC  # true (IACPHook id)
 cast call $HOOK   "supportsInterface(bytes4)(bool)" 0xffffffff --rpc-url $RPC  # false (the escrow probes this too)
+```
+
+Then the policy module and executor of `Deploy.s.sol` (from `packages/contracts`; arguments: RPC, policy module, executor, operator, fee wallet, executor fee bps; prints `=== Results: 4 passed, 0 failed ===`):
+
+```bash
+bash ../../scripts/verify-deployment.sh "$RPC" <POLICY_MODULE_ADDRESS> <EXECUTOR_ADDRESS> "$OPERATOR_ADDRESS" "$FEE_WALLET" "$EXECUTOR_FEE_BPS"
 ```
 
 Note: `0x7ff6bc9e` is the `IACPHook` ERC-165 id (`beforeAction.selector 0xdc08fb1d ^ afterAction.selector 0xa3fe4783`; `IACPHook is IERC165` does not change it). The escrow checks it (and that `0xffffffff` answers `false`) at `createJob`, so a successful `createJob(..., hook)` on testnet is the simplest end-to-end check.
@@ -367,56 +392,13 @@ For each deployed chain, open the contract on the block explorer:
 
 ### Automated verification script
 
-Create a cast-based verification from the repo root:
+[`scripts/verify-deployment.sh`](../../scripts/verify-deployment.sh) checks the policy module and the executor with `cast call` (operator, fee wallet, fee bps, executor → policy module; addresses compared case-insensitively) and, with a seventh argument, the legacy `EscrowModule` operator. It prints one OK/FAIL line per check and exits 1 if any check failed. From the repository root:
 
 ```bash
-#!/usr/bin/env bash
-# scripts/verify-deployment.sh
-# Usage: ./scripts/verify-deployment.sh <rpc_url> <policy_module_addr> <executor_addr> <expected_operator> <expected_fee_wallet> <expected_fee_bps>
-
-set -euo pipefail
-
-RPC_URL="$1"
-POLICY_MODULE="$2"
-EXECUTOR="$3"
-EXPECTED_OPERATOR="$4"
-EXPECTED_FEE_WALLET="$5"
-EXPECTED_FEE_BPS="$6"
-
-echo "=== Verifying deployment on $RPC_URL ==="
-
-# AgentPolicyModule checks
-ACTUAL_OPERATOR=$(cast call "$POLICY_MODULE" "operator()(address)" --rpc-url "$RPC_URL")
-if [ "$ACTUAL_OPERATOR" != "$EXPECTED_OPERATOR" ]; then
-  echo "FAIL: operator() = $ACTUAL_OPERATOR, expected $EXPECTED_OPERATOR"
-  exit 1
-fi
-echo "OK: operator() = $ACTUAL_OPERATOR"
-
-# AgentExecutor checks
-ACTUAL_FEE_WALLET=$(cast call "$EXECUTOR" "feeWallet()(address)" --rpc-url "$RPC_URL")
-if [ "$ACTUAL_FEE_WALLET" != "$EXPECTED_FEE_WALLET" ]; then
-  echo "FAIL: feeWallet() = $ACTUAL_FEE_WALLET, expected $EXPECTED_FEE_WALLET"
-  exit 1
-fi
-echo "OK: feeWallet() = $ACTUAL_FEE_WALLET"
-
-ACTUAL_FEE_BPS=$(cast call "$EXECUTOR" "feeBps()(uint256)" --rpc-url "$RPC_URL")
-if [ "$ACTUAL_FEE_BPS" != "$EXPECTED_FEE_BPS" ]; then
-  echo "FAIL: feeBps() = $ACTUAL_FEE_BPS, expected $EXPECTED_FEE_BPS"
-  exit 1
-fi
-echo "OK: feeBps() = $ACTUAL_FEE_BPS"
-
-ACTUAL_POLICY_MODULE=$(cast call "$EXECUTOR" "policyModule()(address)" --rpc-url "$RPC_URL")
-if [ "$ACTUAL_POLICY_MODULE" != "$POLICY_MODULE" ]; then
-  echo "FAIL: policyModule() = $ACTUAL_POLICY_MODULE, expected $POLICY_MODULE"
-  exit 1
-fi
-echo "OK: policyModule() = $ACTUAL_POLICY_MODULE"
-
-echo "=== All checks passed ==="
+bash scripts/verify-deployment.sh <rpc_url> <policy_module> <executor> <operator> <fee_wallet> <executor_fee_bps> [escrow_module]
 ```
+
+From `packages/contracts` the path is `../../scripts/verify-deployment.sh`. The escrow and hook have no script: use the `cast call` block in "Post-deployment checks" above.
 
 ---
 
@@ -448,8 +430,9 @@ The backend encodes the **current** struct (as of October 2026). A contract comp
 from the old struct does not dispatch the new selectors, so every transaction routed
 through it reverts. `AgentPolicyModule`'s own ABI is unchanged (`validateTransaction`
 already took a token — the old executor passed `address(0)`), but `Deploy.s.sol`
-always ships a fresh policy module + executor + escrow set, and the backend treats the
-old policy module as part of the legacy pair.
+always ships a fresh policy module + executor pair (plus the legacy `EscrowModule` only
+with `DEPLOY_LEGACY_ESCROW_MODULE=true`), and the backend treats the old policy module as
+part of the legacy pair.
 
 ### Backend ABI — single source of truth
 
@@ -490,8 +473,10 @@ Guards in place:
 - `npm run preflight` **fails** if `EXECUTOR_ADDRESS_<chainId>` is a legacy address or if
   the on-chain bytecode does not contain the current selectors, and warns on a legacy
   policy module.
-- Base Sepolia no longer has hard-coded defaults — set `POLICY_MODULE_ADDRESS_84532`,
-  `EXECUTOR_ADDRESS_84532`, `ESCROW_MODULE_ADDRESS_84532` after redeploying.
+- Base Sepolia no longer has hard-coded defaults — set `POLICY_MODULE_ADDRESS_84532` and
+  `EXECUTOR_ADDRESS_84532` after redeploying (and `ESCROW_MODULE_ADDRESS_84532` only if
+  the legacy module was deployed with `DEPLOY_LEGACY_ESCROW_MODULE=true`; the script
+  prints that line only then).
 
 Redeploy order: **Base Sepolia first, then Base mainnet** (standard flow above). Until
 the new addresses land, leave `*_ADDRESS_8453` / `*_ADDRESS_84532` unset: the backend
@@ -524,7 +509,10 @@ Do not point `EXECUTOR_ADDRESS_8453` at this pair with the current backend; see
 
 These were the hard-coded defaults in `packages/backend/src/config/contracts.ts` until
 October 2026. The testnet now reads `POLICY_MODULE_ADDRESS_84532` /
-`EXECUTOR_ADDRESS_84532` / `ESCROW_MODULE_ADDRESS_84532` from env like every other chain.
+`EXECUTOR_ADDRESS_84532` (and, only for an opt-in legacy deployment,
+`ESCROW_MODULE_ADDRESS_84532`) from env like every other chain. The redeploy with the
+current ABI, together with `AgentJobEscrow` and `ReputationHook`, is task C4: runbook and
+evidence in [testnet-log.md](../project/testnet-log.md).
 
 ### Arbitrum One (Chain 42161) — NOT DEPLOYED
 

@@ -113,7 +113,12 @@ Prerequisites:
   requester's wallet needs at least the reward in USDC plus a little ETH for
   gas; the provider's wallet needs ETH for `submit` and its first-job ERC-8004
   `register` / `setProviderAgentId`. `node examples/escrow-erc8183/index.mjs`
-  registers and funds such a pair and prints both API keys.
+  registers such a pair and prints both API keys right after registering them
+  (the backend shows a key only once). On Base Sepolia it then waits for you
+  to fund the two wallets from faucets; against the fork stack
+  `AGENTFI_FORK_FUNDING=true` funds them with Anvil cheat codes. A happy run
+  pays the requester's USDC to the provider, so top the requester up again
+  before the MCP demo.
 - A reward of at least 1 USDC: the hook skips feedback below its
   `minFeedbackBudget`.
 
