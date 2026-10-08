@@ -54,6 +54,24 @@ export function resolveIdentityRegistry(chainId: number, source: ContractEnvSour
   return DEFAULT_IDENTITY_REGISTRIES[chainId];
 }
 
+/**
+ * Official ERC-8004 Reputation Registry deployments — the defaults
+ * `script/DeployEscrow.s.sol` wires into `ReputationHook`
+ * (docs/architecture/erc-8004-integration.md §1). The backend never writes to
+ * it (the hook does); C3d's boot check compares it with `hook.reputationRegistry()`.
+ */
+export const DEFAULT_REPUTATION_REGISTRIES: Readonly<Record<number, Address>> = {
+  8453: '0x8004BAa17C55a88189AE136b182e5fdA19dE9b63',
+  84532: '0x8004B663056A597Dffe9eCcC1965A193B7388713',
+};
+
+/** `REPUTATION_REGISTRY_ADDRESS_<chainId>` when set (blank counts as unset), else the official default, else undefined. */
+export function resolveReputationRegistry(chainId: number, source: ContractEnvSource = process.env): Address | undefined {
+  const override = source[`REPUTATION_REGISTRY_ADDRESS_${chainId}`];
+  if (override) return override as Address;
+  return DEFAULT_REPUTATION_REGISTRIES[chainId];
+}
+
 /** `process.env`-shaped lookup; injectable so the helpers below are unit-testable. */
 export type ContractEnvSource = Readonly<Record<string, string | undefined>>;
 

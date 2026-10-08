@@ -36,6 +36,11 @@
  *      chain: stalled funding steps resumed, lost cancellation refunds
  *      re-enqueued, deliverables Submitted on-chain settled, stuck ERC-8004
  *      bindings resumed.
+ *   3. C3d `alertExpiringReviews` — jobs held for operator review (contested,
+ *      or CANCELLED/FAILED while Submitted on-chain) within
+ *      ESCROW_REVIEW_ALERT_BEFORE_EXPIRY_SECONDS of `expiresAt` are alerted
+ *      once (after expiry `claimRefund` is permissionless: full refund, no
+ *      feedback).
  * Every pass is independent: one failing never skips the others.
  *
  * Topology: this worker runs in `worker.ts` (the documented API + worker
@@ -50,7 +55,7 @@ import { db } from '../db/client.js';
 import { env } from '../config/env.js';
 import { logger } from '../api/middleware/logger.js';
 import { finalizeA2APaymentJob } from '../services/job/payment-finalizer.service.js';
-import { reconcileEscrowJobs, recoverErc8183Job } from '../services/job/escrow-erc8183.runtime.js';
+import { alertExpiringReviews, reconcileEscrowJobs, recoverErc8183Job } from '../services/job/escrow-erc8183.runtime.js';
 import { repollSubmittedTransactionsNow } from './transaction.queue.js';
 
 /** ERC-8183 jobs whose state has not moved for this long are reconciled from the chain (C3c). */
@@ -131,6 +136,8 @@ interface RecoverySummary {
   repoll?: Awaited<ReturnType<typeof repollSubmittedTransactionsNow>> | null;
   /** C3c: ERC-8183 reconciliation pass (null when the pass failed). */
   escrowReconcile?: Awaited<ReturnType<typeof reconcileEscrowJobs>> | null;
+  /** C3d: "held for review, expires soon" alerts sent this tick (null when the pass failed). */
+  reviewAlerts?: number | null;
 }
 
 /** One recovery tick: re-poll SUBMITTED rows, the PAYMENT_PENDING scan, then the escrow reconciliation. */
@@ -156,6 +163,13 @@ export async function runPaymentRecoveryTick(): Promise<RecoverySummary> {
   } catch (err) {
     summary.escrowReconcile = null;
     logger.error({ err: (err as Error)?.message ?? String(err) }, 'Payment recovery: ERC-8183 reconciliation failed');
+  }
+
+  try {
+    summary.reviewAlerts = await alertExpiringReviews({ limit: PER_TICK_LIMIT });
+  } catch (err) {
+    summary.reviewAlerts = null;
+    logger.error({ err: (err as Error)?.message ?? String(err) }, 'Payment recovery: review expiry alerts failed');
   }
   return summary;
 }

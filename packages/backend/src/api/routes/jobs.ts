@@ -8,12 +8,14 @@ import { ReputationService } from '../../services/policy/reputation.service.js';
 import { executeA2APayment } from './transactions.js';
 import {
   reserveJobEscrow,
+  reserveEscrowJobSpend,
   releaseJobEscrow,
   markEscrowReleased,
   queueOnChainEscrowLock,
 } from '../../services/policy/escrow.service.js';
 import { finalizeA2APaymentJob } from '../../services/job/payment-finalizer.service.js';
 import {
+  contestJob,
   enqueueSubmit,
   erc8183Config,
   getEscrowToken,
@@ -23,7 +25,9 @@ import {
 } from '../../services/job/escrow-erc8183.runtime.js';
 import {
   ESCROW_KIND,
+  expiryMarginMs,
   isEscrowTokenReward,
+  isFeedbackFileCommitted,
   serializeFeedbackFile,
   toJobResponse,
 } from '../../services/job/escrow-erc8183.service.js';
@@ -112,6 +116,7 @@ export async function jobRoutes(fastify: FastifyInstance) {
     const useErc8183 = Boolean(body.reward?.amount) && isErc8183Enabled(rewardChainId);
 
     let requester: { id: string; walletId: string; safeAddress: string } | null = null;
+    let escrowToken: string | null = null;
     if (useErc8183) {
       // ERC-8183: the contract rejects provider == client and provider == evaluator.
       if (provider.id === request.agentId) {
@@ -131,7 +136,6 @@ export async function jobRoutes(fastify: FastifyInstance) {
       }
 
       // Decision D8: USDC only on escrow chains.
-      let escrowToken: string;
       try {
         escrowToken = await getEscrowToken(rewardChainId);
       } catch (err) {
@@ -157,7 +161,37 @@ export async function jobRoutes(fastify: FastifyInstance) {
     // v2 Escrow: if reward is specified, reserve funds before creating the job.
     // This prevents requesters from creating paid jobs they can't honor.
     let reservedAt: Date | null = null;
-    if (body.reward?.amount) {
+    let reservedValueUsd: string | null = null;
+    if (body.reward?.amount && useErc8183 && escrowToken) {
+      // C3d: the requester's policy applies to an escrow job like to any
+      // spend — allowlists (payee = provider wallet), per-tx cap and daily
+      // volume with USDC at 1.00 USD (no oracle), cooldown.
+      const at = new Date();
+      const spend = await reserveEscrowJobSpend({
+        requesterId: request.agentId,
+        chainId: rewardChainId,
+        amount: body.reward.amount,
+        token: escrowToken,
+        payee: provider.safeAddress,
+        now: at,
+      });
+      if (!spend.success) {
+        if (spend.code === 'RESERVATION_FAILED') {
+          return reply.code(400).send({ error: 'Escrow reservation failed', reason: spend.reason });
+        }
+        return reply.code(spend.httpStatus).send({
+          error: spend.reason,
+          code: spend.code,
+          ...(spend.rule ? { rule: spend.rule } : {}),
+          ...(spend.limit !== undefined ? { limit: spend.limit } : {}),
+          ...(spend.spentToday !== undefined ? { spentToday: spend.spentToday } : {}),
+          amount: body.reward.amount,
+          payee: provider.safeAddress,
+        });
+      }
+      reservedAt = at;
+      reservedValueUsd = spend.reservedValueUsd;
+    } else if (body.reward?.amount) {
       const reservation = await reserveJobEscrow({
         requesterId: request.agentId,
         reward: {
@@ -173,6 +207,7 @@ export async function jobRoutes(fastify: FastifyInstance) {
         });
       }
       reservedAt = new Date();
+      reservedValueUsd = reservation.reservedValueUsd ?? null;
     }
 
     const job = await db.job.create({
@@ -190,6 +225,7 @@ export async function jobRoutes(fastify: FastifyInstance) {
               reservedChainId: rewardChainId,
               reservedAt,
               reservationStatus: 'PENDING',
+              reservedValueUsd,
             }
           : {}),
       },
@@ -316,6 +352,23 @@ export async function jobRoutes(fastify: FastifyInstance) {
         message: `Job is not funded on-chain yet (onChainStatus=${job.onChainStatus ?? 'unknown'})`,
         onChainStatus: job.onChainStatus,
         escrowError: sanitizeStoredError(job.escrowError),
+      });
+    }
+
+    // C3d: too close to (or past) `expiresAt`, an accept or a delivery would
+    // race the permissionless `claimRefund`: the requester would get the
+    // deliverable AND the refund. Refused; the provider keeps its result.
+    if (
+      isErc8183 &&
+      (body.status === 'ACCEPTED' || body.status === 'COMPLETED') &&
+      job.expiresAt &&
+      job.expiresAt.getTime() - Date.now() < expiryMarginMs(erc8183Config)
+    ) {
+      return reply.code(409).send({
+        error: 'ESCROW_EXPIRING',
+        message: `The escrow expires at ${job.expiresAt.toISOString()}: too late to ${body.status === 'ACCEPTED' ? 'accept' : 'deliver'} (it could not be settled before the requester can claim the refund)`,
+        expiresAt: job.expiresAt,
+        onChainStatus: job.onChainStatus,
       });
     }
 
@@ -487,10 +540,14 @@ export async function jobRoutes(fastify: FastifyInstance) {
 
   /**
    * POST /v1/jobs/:id/contest — requester disputes a submitted deliverable
-   * before the evaluator settles (C3). Allowed while the job is
-   * PAYMENT_PENDING, the deliverable is SUBMITTED on-chain and no settlement
-   * has been claimed (`onChainStatus` still SUBMITTED). The evaluator then
-   * sends `reject` (full refund) instead of `complete`.
+   * before the evaluator settles (C3; C3d / decision D9). Allowed while the
+   * job is PAYMENT_PENDING, the deliverable is SUBMITTED on-chain, no
+   * settlement has been claimed and no evaluator settlement of it can still
+   * mine. A contest does NOT refund by itself: the job is held for operator
+   * review (`escrow.onChainStatus = CONTESTED`) and the operator decides —
+   * pay the provider, refund the requester, or refund with a quality verdict
+   * (the only case that writes a negative ERC-8004 rating). Unresolved at
+   * `expiresAt`, anyone can claim the refund: full refund, no rating.
    */
   fastify.post<{ Params: { id: string } }>('/v1/jobs/:id/contest', async (request, reply) => {
     const body = contestJobSchema.parse(request.body ?? {});
@@ -506,23 +563,25 @@ export async function jobRoutes(fastify: FastifyInstance) {
       return reply.code(409).send({ error: 'NOT_ESCROW_JOB', message: 'Only ERC-8183 escrowed jobs can be contested' });
     }
 
-    // Conditional write: the settlement worker claims the job by flipping
-    // SUBMITTED → SETTLING, so exactly one of (contest, settle) wins.
-    const claimed = await db.job.updateMany({
-      where: { id: job.id, status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', contestedAt: null },
-      data: { contestedAt: new Date(), contestReason: body.reason ?? null },
-    });
-    if (claimed.count === 0) {
-      return reply.code(409).send({
-        error: 'CONTEST_NOT_ALLOWED',
-        message: 'A job can only be contested while PAYMENT_PENDING, SUBMITTED on-chain and not yet settled',
-        status: job.status,
-        onChainStatus: job.onChainStatus,
-        contestedAt: job.contestedAt,
+    // C3d race rule (escrow-erc8183.service.ts `contestEscrowJob`): the hold
+    // is a conditional write from the same SUBMITTED row the settlement
+    // claims, and is refused once a settlement transaction may still mine.
+    const outcome = await contestJob({ jobId: job.id, reason: body.reason ?? null });
+    if (outcome.outcome !== 'held') {
+      const current = await db.job.findUnique({
+        where: { id: job.id },
+        select: { status: true, onChainStatus: true, contestedAt: true },
+      });
+      return reply.code(outcome.outcome === 'unverifiable' ? 503 : 409).send({
+        error: outcome.outcome === 'unverifiable' ? 'CONTEST_UNVERIFIABLE' : 'CONTEST_NOT_ALLOWED',
+        message: outcome.reason,
+        status: current?.status ?? job.status,
+        onChainStatus: current?.onChainStatus ?? job.onChainStatus,
+        contestedAt: current?.contestedAt ?? job.contestedAt,
       });
     }
 
-    logger.warn({ jobId: job.id, requesterId: request.agentId, reason: body.reason }, 'ERC-8183 job contested by requester');
+    logger.warn({ jobId: job.id, requesterId: request.agentId, reason: body.reason }, 'ERC-8183 job contested by requester — held for operator review');
     const fresh = await db.job.findUnique({ where: { id: job.id } });
     return toJobResponse(fresh!);
   });
@@ -531,12 +590,14 @@ export async function jobRoutes(fastify: FastifyInstance) {
    * GET /v1/jobs/:id/feedback.json — public ERC-8004 feedback file (C3/R3).
    * Served byte-for-byte as it was hashed into the `complete`/`reject`
    * `optParams` (`keccak256(body) == feedbackHash` emitted by the hook).
-   * 404 until the settlement worker has generated it.
+   * 404 until the settlement worker has generated it. C3d: `immutable` only
+   * once the settlement that committed its hash is mined; before that the
+   * file can still be rebuilt (another operator decision) and is `no-store`.
    */
   fastify.get<{ Params: { id: string } }>('/v1/jobs/:id/feedback.json', async (request, reply) => {
     const job = await db.job.findUnique({
       where: { id: request.params.id },
-      select: { feedbackFile: true },
+      select: { feedbackFile: true, onChainStatus: true },
     });
     if (!job || !job.feedbackFile) {
       return reply.code(404).send({ error: 'Feedback file not available for this job' });
@@ -544,7 +605,7 @@ export async function jobRoutes(fastify: FastifyInstance) {
     return reply
       .code(200)
       .header('content-type', 'application/json; charset=utf-8')
-      .header('cache-control', 'public, max-age=31536000, immutable')
+      .header('cache-control', isFeedbackFileCommitted(job) ? 'public, max-age=31536000, immutable' : 'no-store')
       .send(serializeFeedbackFile(job.feedbackFile as Record<string, unknown>));
   });
 
