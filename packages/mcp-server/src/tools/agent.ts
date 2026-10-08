@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { api, ApiError } from '../api-client.js';
 import type { components } from '../api.generated.js';
+import { pathIdSchema } from '../path-ids.js';
 
 type Agent = components['schemas']['Agent'];
 type PnLBreakdown = components['schemas']['PnLBreakdown'];
@@ -11,16 +12,11 @@ type CreateJobRequest = components['schemas']['CreateJobRequest'];
 /** New paid jobs are USDC-only (decision D8); the backend has no default token. */
 export const DEFAULT_REWARD_TOKEN = 'USDC';
 
-/**
- * A job id as it goes into a URL path. Job ids are CUIDs; anything with `/`,
- * `.`, `?` or `#` is refused so a crafted id cannot point a call at another
- * route (`../agents/me/...`).
- */
-const jobIdSchema = (description: string) =>
-  z
-    .string()
-    .regex(/^[A-Za-z0-9_-]{1,128}$/, 'must be a job id (letters, digits, "_" or "-")')
-    .describe(description);
+/** A job id as it goes into a URL path (X3a; see path-ids.ts). */
+const jobIdSchema = (description: string) => pathIdSchema('job', description);
+
+/** An agent id as it goes into a URL path (S6; same rule as job ids). */
+const agentIdSchema = (description: string) => pathIdSchema('agent', description);
 
 /**
  * An input error found by a handler (a rule across fields), reported exactly
@@ -214,7 +210,7 @@ export const agentTools = [
       'Fetches the service manifest of another agent by their ID. Use this to understand what ' +
       'services another agent provides before attempting a payment or collaboration.',
     inputSchema: z.object({
-      agent_id: z.string().describe('The ID of the agent to query.'),
+      agent_id: agentIdSchema('The ID of the agent to query.'),
     }),
     handler: async (input: { agent_id: string }) => {
       const result = await api.get(`/v1/agents/${input.agent_id}/manifest`);
@@ -228,7 +224,7 @@ export const agentTools = [
       'Fetches the reputation and trust metrics of another agent. Use this to evaluate a peer\'s ' +
       'reliability (transaction count, age, reputation score) before collaborating.',
     inputSchema: z.object({
-      agent_id: z.string().describe('The ID of the agent to evaluate.'),
+      agent_id: agentIdSchema('The ID of the agent to evaluate.'),
     }),
     handler: async (input: { agent_id: string }) => {
       const result = await api.get(`/v1/agents/${input.agent_id}/trust-report`);
@@ -239,10 +235,13 @@ export const agentTools = [
   {
     name: 'sign_handshake',
     description:
-      'Signs a message with your agent wallet. Use this to prove your identity to other agents ' +
-      'or to sign a service agreement/handshake.',
+      'Signs an AgentFi handshake with your agent wallet, to prove your identity to another agent or to sign a ' +
+      'service agreement. The wallet signs the EIP-712 envelope AgentFiHandshake{agent, message, issuedAt} (domain ' +
+      '"AgentFi Handshake" v1) — never your text as raw bytes, so a handshake cannot be reused as a signature for ' +
+      'anything else. Send the peer the returned message, issuedAt, signature and address: they need all four to ' +
+      'verify (verify_handshake). typedData is the full envelope for any EIP-712 verifier.',
     inputSchema: z.object({
-      message: z.string().describe('The message or agreement text to sign.'),
+      message: z.string().min(1).max(4096).describe('The statement or agreement text to sign (max 4096 characters).'),
     }),
     handler: async (input: { message: string }) => {
       const result = await api.post('/v1/agents/me/sign-handshake', {
@@ -255,16 +254,30 @@ export const agentTools = [
   {
     name: 'verify_handshake',
     description:
-      'Verifies a signature provided by another agent. Use this to confirm that a peer ' +
-      'truly controls the wallet address they claim to represent.',
+      'Verifies a handshake another agent produced with sign_handshake: checks that `address` signed the AgentFi ' +
+      'envelope for exactly this message and issued_at (ECDSA for a wallet key, EIP-1271 for a smart-contract ' +
+      'account). Returns { valid, address, verifiedVia }. A plain personal_sign of the message is NOT accepted. ' +
+      'Check issued_at yourself if you need a fresh handshake.',
     inputSchema: z.object({
-      message: z.string().describe('The original message that was signed.'),
-      signature: z.string().describe('The signature hex string provided by the peer.'),
-      address: z.string().describe('The claimed safeAddress of the peer.'),
+      message: z.string().min(1).max(4096).describe('The message the peer signed, exactly as returned by sign_handshake.'),
+      issued_at: z
+        .number()
+        .int()
+        .nonnegative()
+        .describe('The issuedAt (unix seconds) returned with the peer\'s signature.'),
+      signature: z
+        .string()
+        .regex(/^0x[0-9a-fA-F]+$/, 'must be a 0x hex signature')
+        .describe('The signature hex string provided by the peer.'),
+      address: z
+        .string()
+        .regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 0x address')
+        .describe('The address the peer signed with (the `address` returned by its sign_handshake).'),
     }),
-    handler: async (input: { message: string; signature: string; address: string }) => {
+    handler: async (input: { message: string; issued_at: number; signature: string; address: string }) => {
       const result = await api.post('/v1/agents/verify-handshake', {
         message: input.message,
+        issuedAt: input.issued_at,
         signature: input.signature,
         address: input.address,
       });
@@ -284,7 +297,7 @@ export const agentTools = [
       'and ERC-8004 reputation is written on-chain, unless you contest_job the deliverable first (full refund). ' +
       'Optionally sign the payload with sign_handshake first.',
     inputSchema: z.object({
-      provider_id: z.string().describe('The ID of the agent you are hiring.'),
+      provider_id: agentIdSchema('The ID of the agent you are hiring.'),
       payload: z.record(z.any()).describe('The task details (e.g., input data, command).'),
       reward_amount: z
         .string()

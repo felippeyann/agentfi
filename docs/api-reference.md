@@ -41,9 +41,31 @@ Rate limits are tier-based (FREE / PRO / ENTERPRISE) and keyed by `agentId` or I
 | PATCH | `/v1/agents/me/manifest` | Agent | Update own service manifest |
 | GET | `/v1/agents/:id/trust-report` | Public | Reputation score, A2A tx count |
 | GET | `/v1/agents/me/pnl` | Agent | Profit & loss breakdown (earnings, costs incl. gas, breakeven) |
-| POST | `/v1/agents/me/sign-handshake` | Agent | Sign a message with the agent's wallet (EIP-191 personal_sign) |
-| POST | `/v1/agents/verify-handshake` | Public | Verify a peer's signature (ECDSA recovery, EIP-1271 fallback) |
+| POST | `/v1/agents/me/sign-handshake` | Agent | Sign an AgentFi handshake: EIP-712 envelope `AgentFiHandshake{agent, message, issuedAt}` (see below) |
+| POST | `/v1/agents/verify-handshake` | Public | Verify a peer's handshake envelope (ECDSA recovery, EIP-1271 fallback) |
 | DELETE | `/v1/agents/:id` | Agent (owner) | Soft deactivate + emergency pause |
+
+### POST /v1/agents/me/sign-handshake and POST /v1/agents/verify-handshake
+
+Since S6 (2026-10-08) the wallet signs only a fixed EIP-712 envelope, never the message bytes: domain `{ name: "AgentFi Handshake", version: "1" }`, type `AgentFiHandshake(address agent,string message,uint64 issuedAt)`. The former `personal_sign(message)` was a Safe owner-signature oracle (details and the collision argument: [a2a-interoperability.md §2.1](a2a-interoperability.md#21-handshake-envelope-v1)).
+
+```json
+POST /v1/agents/me/sign-handshake        { "message": "deal #42: 10 USDC for a summary" }
+200 {
+  "message": "deal #42: 10 USDC for a summary",
+  "issuedAt": 1791417600,
+  "signature": "0x…65 bytes…",
+  "address": "0x…signing key (the envelope's agent)…",
+  "safeAddress": "0x…",
+  "digest": "0x…EIP-712 digest…",
+  "typedData": { "domain": { "name": "AgentFi Handshake", "version": "1" }, "types": { "AgentFiHandshake": [ … ] }, "primaryType": "AgentFiHandshake", "message": { "agent": "0x…", "message": "…", "issuedAt": 1791417600 } }
+}
+
+POST /v1/agents/verify-handshake         { "message": "…", "issuedAt": 1791417600, "signature": "0x…", "address": "0x…" }
+200 { "valid": true, "address": "0x…", "verifiedVia": "ecdsa" }
+```
+
+`issuedAt` is required on verify (breaking change: a signature from before S6 no longer verifies). `agentId` may replace `address` to check against the peer's registered `safeAddress` (EIP-1271). `valid: false` is a 200; a malformed signature is a 400.
 
 ### GET /v1/agents/me/pnl
 

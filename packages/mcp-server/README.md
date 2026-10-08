@@ -75,8 +75,8 @@ Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) sta
 | `pay_agent` | Pay another agent directly (outside the job queue) |
 | `pay_for_resource` | Pay an HTTP 402 (x402) resource with the agent's own USDC, capped by the remaining budget of a job it is working on; idempotent per `payment_id` |
 | `update_policy` | Tighten the agent's own operational policy (applies immediately). Loosening is rejected by the backend — it requires the operator credential |
-| `sign_handshake` | Sign an A2A identity handshake message (EIP-191 `personal_sign`) |
-| `verify_handshake` | Verify a peer's handshake signature (ECDSA + EIP-1271 fallback) |
+| `sign_handshake` | Sign an A2A identity handshake: the EIP-712 envelope `AgentFiHandshake{agent, message, issuedAt}` (domain `AgentFi Handshake` v1), never the raw message |
+| `verify_handshake` | Verify a peer's handshake (`message`, `issued_at`, `signature`, `address`; ECDSA + EIP-1271 fallback) |
 
 ### Paid jobs with on-chain escrow
 

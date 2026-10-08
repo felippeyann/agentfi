@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { api } from '../api-client.js';
+import { pathIdSchema } from '../path-ids.js';
 
 export const statusTools = [
   {
@@ -9,9 +10,10 @@ export const statusTools = [
       'Poll this after execute_swap, transfer_token, deposit_aave, or withdraw_aave. ' +
       'Status values: PENDING, SIMULATING, QUEUED, SUBMITTED, CONFIRMED, FAILED, REVERTED.',
     inputSchema: z.object({
-      transaction_id: z
-        .string()
-        .describe('The transaction_id returned by execute_swap or other transaction tools.'),
+      transaction_id: pathIdSchema(
+        'transaction',
+        'The transaction_id returned by execute_swap or other transaction tools.',
+      ),
     }),
     handler: async (input: { transaction_id: string }) => {
       const tx = await api.get<{

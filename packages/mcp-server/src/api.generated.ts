@@ -387,12 +387,21 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Sign a message with the agent's wallet (EIP-191 personal_sign)
-         * @description Signs an arbitrary string message with the agent's wallet
-         *     (LocalWalletService via viem, or TurnkeyService via
-         *     `signRawPayload`). Used by peer agents to prove identity or
-         *     sign service agreements. Returns a 65-byte r||s||v signature
-         *     that any EIP-191-compatible verifier can check.
+         * Sign an AgentFi handshake (EIP-712 envelope) with the agent's wallet
+         * @description Signs the fixed, versioned EIP-712 envelope
+         *     `AgentFiHandshake(address agent,string message,uint64 issuedAt)` under
+         *     the domain `{ name: "AgentFi Handshake", version: "1" }` with the
+         *     agent's wallet (LocalWalletService via viem, or TurnkeyService via
+         *     `signRawPayload` of the EIP-712 digest). `agent` is the signing
+         *     address and `issuedAt` (unix seconds) is set by the server; the caller
+         *     chooses only `message`, which is hashed inside the struct.
+         *
+         *     The wallet never signs the message bytes themselves. Before S6 this
+         *     route signed `personal_sign(message)`, and for a 32-byte message that
+         *     is Safe's `eth_sign` owner signature over that digest (a Safe-mode
+         *     agent key is its Safe's 1/1 owner). Peers verify with
+         *     `verify-handshake` (send them `message`, `issuedAt`, `signature` and
+         *     `address`) or with any EIP-712 library from `typedData`.
          */
         post: {
             parameters: {
@@ -409,18 +418,13 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Signed handshake payload. */
+                /** @description Signed handshake. */
                 200: {
                     headers: {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": {
-                            message?: string;
-                            signature?: string;
-                            address?: string;
-                            safeAddress?: string;
-                        };
+                        "application/json": components["schemas"]["SignedHandshake"];
                     };
                 };
                 400: components["responses"]["BadRequest"];
@@ -452,12 +456,18 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Verify a peer's signature (ECDSA + EIP-1271 fallback)
-         * @description Accepts either `{ message, signature, address }` or `{ message,
-         *     signature, agentId }`. Tries ECDSA recovery first; if the
-         *     recovered address matches, returns `verifiedVia: 'ecdsa'`.
-         *     Otherwise, if the target is a contract (e.g., a Safe smart
-         *     wallet), falls back to EIP-1271 via the chain's public client.
+         * Verify a peer's handshake (ECDSA + EIP-1271 fallback)
+         * @description Accepts either `{ message, issuedAt, signature, address }` or
+         *     `{ message, issuedAt, signature, agentId }` (the peer's registered
+         *     `safeAddress`). Rebuilds the EIP-712 envelope
+         *     `AgentFiHandshake{agent: <target address>, message, issuedAt}`
+         *     (domain `AgentFi Handshake` v1) and checks the signature over its
+         *     digest: ECDSA recovery first (`verifiedVia: 'ecdsa'`); otherwise, if
+         *     the target is a contract (e.g. a Safe whose owners signed the
+         *     envelope), EIP-1271 `isValidSignature(digest, signature)` via the
+         *     chain's public client. A personal_sign of the bare message is not a
+         *     handshake and answers `valid: false`. Freshness is the verifier's
+         *     call: compare `issuedAt` with your own clock.
          */
         post: {
             parameters: {
@@ -470,7 +480,10 @@ export interface paths {
                 content: {
                     "application/json": {
                         message: string;
+                        /** @description Unix seconds returned by `sign-handshake` together with the signature. */
+                        issuedAt: number;
                         signature: string;
+                        /** @description The address the handshake was signed for (the `address` returned by `sign-handshake`). */
                         address?: string;
                         agentId?: string;
                         /** @default 1 */
@@ -3111,6 +3124,44 @@ export interface components {
             lastActiveAt?: string;
             /** Format: date-time */
             createdAt?: string;
+        };
+        /**
+         * @description An AgentFi handshake (S6): `signature` is over the EIP-712 digest of
+         *     `typedData` — domain `{ name: "AgentFi Handshake", version: "1" }`,
+         *     primary type `AgentFiHandshake(address agent,string message,uint64 issuedAt)`.
+         */
+        SignedHandshake: {
+            message: string;
+            /** @description Unix seconds at signing (set by the server). */
+            issuedAt: number;
+            /** @description 65-byte r||s||v ECDSA signature. */
+            signature: string;
+            /** @description The signing address (the envelope's `agent`). For a Safe-mode agent this is the Safe's owner key, not the Safe. */
+            address: string;
+            safeAddress: string;
+            /** @description EIP-712 digest that was signed. */
+            digest: string;
+            typedData: {
+                domain: {
+                    /** @enum {string} */
+                    name?: "AgentFi Handshake";
+                    /** @enum {string} */
+                    version?: "1";
+                };
+                types: {
+                    [key: string]: {
+                        name?: string;
+                        type?: string;
+                    }[];
+                };
+                /** @enum {string} */
+                primaryType: "AgentFiHandshake";
+                message: {
+                    agent?: string;
+                    message?: string;
+                    issuedAt?: number;
+                };
+            };
         };
         PnLBreakdown: {
             agentId?: string;

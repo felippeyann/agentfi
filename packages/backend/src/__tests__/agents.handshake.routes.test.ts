@@ -42,7 +42,7 @@ const { ALCHEMY_KEY, TURNKEY_PRIVATE_KEY } = vi.hoisted(() => {
 
 const { mockDb, walletMock, rpcUrls, loggerMock } = vi.hoisted(() => ({
   mockDb: { agent: { findUnique: vi.fn() } } as any,
-  walletMock: { signMessage: vi.fn() },
+  walletMock: { getWalletAddress: vi.fn(), signTypedData: vi.fn() },
   rpcUrls: [] as string[],
   loggerMock: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
@@ -68,7 +68,7 @@ vi.mock('viem', async (importOriginal) => {
       const url = config.transport({}).value?.url ?? 'unknown';
       rpcUrls.push(url);
       return {
-        verifyMessage: async () => {
+        verifyHash: async () => {
           throw new actual.HttpRequestError({
             url,
             status: 429,
@@ -85,11 +85,13 @@ import Fastify from 'fastify';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { privateKeyToAccount } from 'viem/accounts';
 import { registerErrorHandler } from '../api/errors/handler.js';
+import { buildHandshakeTypedData } from '../services/identity/handshake.js';
 
 type AgentsModule = typeof import('../api/routes/agents.js');
 
 const AGENT_ID = 'cl00000000000000000agent01';
 const SAFE = '0x2222222222222222222222222222222222222222';
+const ISSUED_AT = 1_791_417_600;
 const SIGNER = privateKeyToAccount('0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d');
 
 let agentRoutes: AgentsModule['agentRoutes'];
@@ -108,7 +110,8 @@ afterAll(() => {
 
 beforeEach(() => {
   mockDb.agent.findUnique.mockReset();
-  walletMock.signMessage.mockReset();
+  walletMock.getWalletAddress.mockReset();
+  walletMock.signTypedData.mockReset();
   for (const fn of Object.values(loggerMock)) fn.mockClear();
   rpcUrls.length = 0;
 });
@@ -127,13 +130,14 @@ async function buildApp() {
 describe('POST /v1/agents/verify-handshake (S5)', () => {
   it('an RPC failure in the EIP-1271 fallback answers 400 with sanitized details — the keyed Alchemy URL never leaves', async () => {
     const message = 'hello from agent B';
-    const signature = await SIGNER.signMessage({ message }); // signed by an EOA that is NOT the target → EIP-1271 path
+    // The S6 envelope, signed by an EOA that is NOT the target → EIP-1271 path.
+    const signature = await SIGNER.signTypedData(buildHandshakeTypedData({ agent: SAFE, message, issuedAt: ISSUED_AT }));
     const app = await buildApp();
 
     const res = await app.inject({
       method: 'POST',
       url: '/v1/agents/verify-handshake',
-      payload: { message, signature, address: SAFE, chainId: 84532 },
+      payload: { message, issuedAt: ISSUED_AT, signature, address: SAFE, chainId: 84532 },
     });
 
     // The route really used the operator's keyed URL…
@@ -155,13 +159,13 @@ describe('POST /v1/agents/verify-handshake (S5)', () => {
 
   it('a valid EOA handshake is unaffected', async () => {
     const message = 'hello from agent A';
-    const signature = await SIGNER.signMessage({ message });
+    const signature = await SIGNER.signTypedData(buildHandshakeTypedData({ agent: SIGNER.address, message, issuedAt: ISSUED_AT }));
     const app = await buildApp();
 
     const res = await app.inject({
       method: 'POST',
       url: '/v1/agents/verify-handshake',
-      payload: { message, signature, address: SIGNER.address },
+      payload: { message, issuedAt: ISSUED_AT, signature, address: SIGNER.address },
     });
 
     expect(res.statusCode).toBe(200);
@@ -174,7 +178,8 @@ describe('POST /v1/agents/verify-handshake (S5)', () => {
 describe('POST /v1/agents/me/sign-handshake (S5)', () => {
   it("the wallet provider's error is sanitized: no API private key, no provider URL query", async () => {
     mockDb.agent.findUnique.mockResolvedValue({ walletId: 'wallet-1', safeAddress: SAFE });
-    walletMock.signMessage.mockRejectedValue(
+    walletMock.getWalletAddress.mockResolvedValue(SIGNER.address);
+    walletMock.signTypedData.mockRejectedValue(
       new Error(
         `Turnkey error 401: POST https://api.turnkey.com/public/v1/submit/sign_raw_payload?organizationId=org-123 rejected the stamp of api key ${TURNKEY_PRIVATE_KEY}`,
       ),
