@@ -30,17 +30,27 @@
  * the wallet's next nonce, so the node rejects the duplicate once the first
  * broadcast is pending/mined — the same protection any retrying submitter
  * relies on.
+ *
+ * Confirmation (C3c): the monitor is a detached promise, so a worker restart
+ * or a slow chain can lose it. The receipt is recorded with a conditional
+ * write (`status = SUBMITTED`), and only the observer that made the write runs
+ * `runPostConfirmation` (fees, daily volume, A2A finalizer, escrow outcome).
+ * `repollSubmittedTransactions` is the second observer: the payment-recovery
+ * tick runs it for SUBMITTED rows older than a threshold and both entry
+ * points (`worker.ts`, `index.ts` with the worker) run it at boot for every
+ * SUBMITTED row, so a monitor killed by a shutdown or out of attempts never
+ * leaves a row — and the job behind it — stuck.
  */
 
 import type { Job, Queue } from 'bullmq';
 import type { PrismaClient } from '@prisma/client';
-import type { Address, Hex } from 'viem';
+import type { Address, Hex, TransactionReceipt } from 'viem';
 import { preSubmitGuard } from '../services/transaction/pre-submit-guard.js';
 import { finalizeA2APaymentJob } from '../services/job/payment-finalizer.service.js';
 import { onEscrowTxOutcome } from '../services/job/escrow-erc8183.runtime.js';
 import { weiToUsd } from '../services/transaction/price.service.js';
 import type { SubmitterService } from '../services/transaction/submitter.service.js';
-import type { MonitorService } from '../services/transaction/monitor.service.js';
+import { recordReceiptOnce, type ConfirmationOutcome } from '../services/transaction/monitor.service.js';
 import type { FeeService } from '../services/policy/fee.service.js';
 
 export interface TransactionJobData {
@@ -74,10 +84,27 @@ export interface ProcessorLogger {
 export interface TransactionProcessorDeps {
   db: PrismaClient;
   submitter: Pick<SubmitterService, 'submit'>;
-  monitor: Pick<MonitorService, 'waitForConfirmation'>;
+  monitor: {
+    waitForConfirmation(params: { txHash: Hex; chainId: number; transactionId: string }): Promise<ConfirmationOutcome | void>;
+  };
   feeService: Pick<FeeService, 'incrementTxUsage' | 'recordFeeEvent'>;
   logger: ProcessorLogger;
+  /** Receives the detached confirmation promise (shutdown bookkeeping; tests await it). */
+  trackMonitor?: (monitoring: Promise<void>) => void;
 }
+
+/** What the post-confirmation accounting needs — from the queue payload, or from `metadata.queuePayload` on a replay. */
+export interface PostConfirmationInput {
+  transactionId: string;
+  chainId: number;
+  agentId: string;
+  feeAmountWei: string;
+  value: string;
+  feeBps: number;
+  routedViaExecutor?: boolean;
+}
+
+export type PostConfirmationDeps = Pick<TransactionProcessorDeps, 'db' | 'feeService' | 'logger'>;
 
 export interface TransactionFailureDeps {
   db: PrismaClient;
@@ -169,82 +196,213 @@ export async function processTransactionJob(
 
   logger.info({ transactionId: data.transactionId, txHash }, 'Transaction submitted');
 
-  // Monitor confirmation async — resolves feeUsd via price oracle once confirmed
-  monitor
+  // Monitor confirmation async — resolves feeUsd via price oracle once confirmed.
+  // Only the observer that records the receipt runs the outcome (C3c): a
+  // timeout leaves the row SUBMITTED for `repollSubmittedTransactions`, and a
+  // receipt the re-poll recorded first is not handled twice.
+  const monitoring = monitor
     .waitForConfirmation({
       txHash,
       chainId: data.chainId,
       transactionId: data.transactionId,
     })
-    .then(async () => {
-      const tx = await db.transaction.findUnique({
-        where: { id: data.transactionId },
-        select: { status: true, amountIn: true, error: true, metadata: true },
-      });
-      if (tx?.status === 'CONFIRMED') {
-        await feeService.incrementTxUsage(data.agentId);
-
-        // Resolve USD value at time of confirmation
-        const feeUsd =
-          BigInt(data.feeAmountWei) > 0n ? await weiToUsd(BigInt(data.feeAmountWei), data.chainId) : '0';
-
-        // FeeEvent means collected revenue. Only log when fee was collected
-        // atomically on-chain through AgentExecutor.
-        if (data.routedViaExecutor && BigInt(data.feeAmountWei) > 0n) {
-          await feeService.recordFeeEvent({
-            agentId: data.agentId,
-            transactionId: data.transactionId,
-            feeAmountWei: BigInt(data.feeAmountWei),
-            feeUsd,
-            feeBps: data.feeBps,
-          });
-        }
-
-        // Update daily volume — atomic upsert avoids race condition under concurrency: 5
-        const valueUsd = await weiToUsd(BigInt(data.value), data.chainId);
-        if (parseFloat(valueUsd) > 0) {
-          const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-          await addDailyVolumeAtomic(db, data.agentId, today, valueUsd);
-        }
-      }
-
-      // Issue #81: A2A payment Job lifecycle is driven by the on-chain
-      // outcome here, not by executeA2APayment's resolution. The Transaction
-      // worker is the sole source of truth for finalizing paid jobs.
-      const meta = (tx?.metadata ?? null) as
-        | { jobId?: string; a2aPayment?: boolean; erc8183?: boolean }
-        | null;
-      if (meta?.a2aPayment === true && typeof meta.jobId === 'string') {
-        if (tx?.status === 'CONFIRMED') {
-          await finalizeA2APaymentJob({
-            jobId: meta.jobId,
-            transactionId: data.transactionId,
-            outcome: 'CONFIRMED',
-          });
-        } else {
-          // REVERTED, FAILED (timeout), or anything not-CONFIRMED → refund.
-          await finalizeA2APaymentJob({
-            jobId: meta.jobId,
-            transactionId: data.transactionId,
-            outcome: 'FAILED',
-            reason: tx?.error ?? `Transaction ${tx?.status ?? 'unknown'} on-chain`,
-          });
-        }
-      } else if (meta?.erc8183 === true) {
-        // C3: an ERC-8183 escrow step (create/setBudget/approve/fund/submit).
-        // The orchestrator advances or unwinds the Job from the chain outcome.
-        await onEscrowTxOutcome({
-          transactionId: data.transactionId,
-          status: tx?.status === 'CONFIRMED' ? 'CONFIRMED' : tx?.status === 'REVERTED' ? 'REVERTED' : 'FAILED',
-          error: tx?.error ?? (tx?.status === 'CONFIRMED' ? null : `Transaction ${tx?.status ?? 'unknown'} on-chain`),
-        });
-      }
+    .then(async (outcome) => {
+      if (outcome && (outcome.status === 'TIMEOUT' || !outcome.recorded)) return;
+      await runPostConfirmation({ db, feeService, logger }, data);
     })
     .catch((err) => {
       logger.error({ err, transactionId: data.transactionId }, 'Post-confirmation accounting failed');
     });
+  deps.trackMonitor?.(monitoring);
 
   return { txHash };
+}
+
+/**
+ * Everything that follows a recorded outcome (CONFIRMED / REVERTED / dropped
+ * FAILED): fee usage, FeeEvent and daily volume for a confirmed transaction,
+ * then the job lifecycle — the A2A finalizer or the ERC-8183 orchestrator.
+ * Callers guarantee it runs once per transaction (conditional status write).
+ */
+export async function runPostConfirmation(deps: PostConfirmationDeps, data: PostConfirmationInput): Promise<void> {
+  const { db, feeService } = deps;
+  const tx = await db.transaction.findUnique({
+    where: { id: data.transactionId },
+    select: { status: true, amountIn: true, error: true, metadata: true },
+  });
+  if (tx?.status === 'CONFIRMED') {
+    await feeService.incrementTxUsage(data.agentId);
+
+    // Resolve USD value at time of confirmation
+    const feeUsd =
+      BigInt(data.feeAmountWei) > 0n ? await weiToUsd(BigInt(data.feeAmountWei), data.chainId) : '0';
+
+    // FeeEvent means collected revenue. Only log when fee was collected
+    // atomically on-chain through AgentExecutor.
+    if (data.routedViaExecutor && BigInt(data.feeAmountWei) > 0n) {
+      await feeService.recordFeeEvent({
+        agentId: data.agentId,
+        transactionId: data.transactionId,
+        feeAmountWei: BigInt(data.feeAmountWei),
+        feeUsd,
+        feeBps: data.feeBps,
+      });
+    }
+
+    // Update daily volume — atomic upsert avoids race condition under concurrency: 5
+    const valueUsd = BigInt(data.value) > 0n ? await weiToUsd(BigInt(data.value), data.chainId) : '0';
+    if (parseFloat(valueUsd) > 0) {
+      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+      await addDailyVolumeAtomic(db, data.agentId, today, valueUsd);
+    }
+  }
+
+  // Issue #81: A2A payment Job lifecycle is driven by the on-chain
+  // outcome here, not by executeA2APayment's resolution. The Transaction
+  // worker is the sole source of truth for finalizing paid jobs.
+  const meta = (tx?.metadata ?? null) as
+    | { jobId?: string; a2aPayment?: boolean; erc8183?: boolean }
+    | null;
+  if (meta?.a2aPayment === true && typeof meta.jobId === 'string') {
+    if (tx?.status === 'CONFIRMED') {
+      await finalizeA2APaymentJob({
+        jobId: meta.jobId,
+        transactionId: data.transactionId,
+        outcome: 'CONFIRMED',
+      });
+    } else {
+      // REVERTED, FAILED (dropped), or anything not-CONFIRMED → refund.
+      await finalizeA2APaymentJob({
+        jobId: meta.jobId,
+        transactionId: data.transactionId,
+        outcome: 'FAILED',
+        reason: tx?.error ?? `Transaction ${tx?.status ?? 'unknown'} on-chain`,
+      });
+    }
+  } else if (meta?.erc8183 === true) {
+    // C3: an ERC-8183 escrow step (create/setBudget/approve/fund/submit).
+    // The orchestrator advances or unwinds the Job from the chain outcome.
+    await onEscrowTxOutcome({
+      transactionId: data.transactionId,
+      status: tx?.status === 'CONFIRMED' ? 'CONFIRMED' : tx?.status === 'REVERTED' ? 'REVERTED' : 'FAILED',
+      error: tx?.error ?? (tx?.status === 'CONFIRMED' ? null : `Transaction ${tx?.status ?? 'unknown'} on-chain`),
+    });
+  }
+}
+
+// ── Re-poll of SUBMITTED rows (C3c) ────────────────────────────────────────
+
+export interface RepollDeps extends PostConfirmationDeps {
+  /** The receipt, or null while the transaction is not mined. Throws on RPC errors. */
+  getReceipt(chainId: number, txHash: Hex): Promise<Pick<TransactionReceipt, 'status' | 'gasUsed' | 'effectiveGasPrice'> | null>;
+  /** Whether any RPC node still knows the transaction (pending or mined). Throws on RPC errors. */
+  isKnownTransaction(chainId: number, txHash: Hex): Promise<boolean>;
+  now?: () => Date;
+}
+
+export interface RepollOptions {
+  /** Only rows that have been SUBMITTED for longer than this (0 at boot: every row). */
+  olderThanMs: number;
+  /**
+   * A row with no receipt that no RPC node knows any more is declared dropped
+   * (FAILED) only after this long — a node behind a load balancer may simply
+   * not have seen it, and a dropped row unwinds its job.
+   */
+  dropAfterMs: number;
+  limit: number;
+}
+
+export interface RepollSummary {
+  scanned: number;
+  confirmed: number;
+  reverted: number;
+  dropped: number;
+  pending: number;
+  errors: number;
+}
+
+interface QueuePayloadMeta {
+  value?: string;
+  feeAmountWei?: string;
+  feeBps?: number;
+  routedViaExecutor?: boolean;
+}
+
+function postConfirmationInputOf(row: { id: string; chainId: number; agentId: string; metadata: unknown }): PostConfirmationInput {
+  const payload = ((row.metadata as { queuePayload?: QueuePayloadMeta } | null)?.queuePayload ?? {}) as QueuePayloadMeta;
+  return {
+    transactionId: row.id,
+    chainId: row.chainId,
+    agentId: row.agentId,
+    feeAmountWei: payload.feeAmountWei ?? '0',
+    value: payload.value ?? '0',
+    feeBps: payload.feeBps ?? 0,
+    routedViaExecutor: payload.routedViaExecutor ?? false,
+  };
+}
+
+/**
+ * Re-reads the receipt of SUBMITTED transactions whose monitor is gone
+ * (worker restart, shutdown, out of polling attempts) and replays the outcome
+ * through `runPostConfirmation` — exactly once, the receipt write is
+ * conditional. Without a receipt, a transaction is left alone while any node
+ * knows it; after `dropAfterMs` with no node knowing it, it is marked FAILED
+ * (dropped), which for an escrow step means a chain read before anything is
+ * unwound (`onEscrowTxOutcome`).
+ */
+export async function repollSubmittedTransactions(deps: RepollDeps, opts: RepollOptions): Promise<RepollSummary> {
+  const { db, logger } = deps;
+  const now = (deps.now?.() ?? new Date()).getTime();
+  const rows = await db.transaction.findMany({
+    where: { status: 'SUBMITTED', txHash: { not: null }, updatedAt: { lte: new Date(now - opts.olderThanMs) } },
+    orderBy: { updatedAt: 'asc' },
+    take: opts.limit,
+    select: { id: true, chainId: true, agentId: true, txHash: true, metadata: true, updatedAt: true },
+  });
+  const summary: RepollSummary = { scanned: rows.length, confirmed: 0, reverted: 0, dropped: 0, pending: 0, errors: 0 };
+
+  for (const row of rows) {
+    const txHash = row.txHash as Hex;
+    try {
+      const receipt = await deps.getReceipt(row.chainId, txHash);
+      if (receipt) {
+        const recorded = await recordReceiptOnce(db, row.id, receipt);
+        if (recorded.recorded) {
+          await runPostConfirmation(deps, postConfirmationInputOf(row));
+          if (recorded.status === 'CONFIRMED') summary.confirmed++;
+          else summary.reverted++;
+          logger.warn(
+            { transactionId: row.id, txHash, status: recorded.status },
+            'Re-poll: SUBMITTED transaction had a receipt nobody recorded — outcome replayed',
+          );
+        }
+        continue;
+      }
+
+      const ageMs = now - row.updatedAt.getTime();
+      if (ageMs < opts.dropAfterMs || (await deps.isKnownTransaction(row.chainId, txHash))) {
+        summary.pending++;
+        continue;
+      }
+      const error = `Dropped: no receipt and unknown to the RPC ${Math.round(ageMs / 60_000)} min after broadcast`;
+      const dropped = await db.transaction.updateMany({
+        where: { id: row.id, status: 'SUBMITTED' },
+        data: { status: 'FAILED', error },
+      });
+      if (dropped.count > 0) {
+        summary.dropped++;
+        logger.error({ transactionId: row.id, txHash, ageMs }, 'Re-poll: transaction dropped — marked FAILED');
+        await runPostConfirmation(deps, postConfirmationInputOf(row));
+      }
+    } catch (err) {
+      summary.errors++;
+      logger.warn(
+        { transactionId: row.id, txHash, err: (err as Error)?.message ?? String(err) },
+        'Re-poll: could not resolve a SUBMITTED transaction — will retry next tick',
+      );
+    }
+  }
+  return summary;
 }
 
 /** True on the attempt after which BullMQ will not retry the job again. */

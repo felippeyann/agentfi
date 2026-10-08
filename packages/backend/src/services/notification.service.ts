@@ -1,7 +1,8 @@
 import { logger } from '../api/middleware/logger.js';
 
 export interface NotificationPayload {
-  type: 'PENDING_APPROVAL' | 'TRANSACTION_CONFIRMED' | 'TRANSACTION_FAILED' | 'POLICY_VIOLATION';
+  /** ESCROW_ALERT (C3c): an ERC-8183 decision left to the operator, or the evaluator low on gas. */
+  type: 'PENDING_APPROVAL' | 'TRANSACTION_CONFIRMED' | 'TRANSACTION_FAILED' | 'POLICY_VIOLATION' | 'ESCROW_ALERT';
   agentId: string;
   agentName: string;
   transactionId?: string;
@@ -16,6 +17,7 @@ const TYPE_EMOJI: Record<NotificationPayload['type'], string> = {
   TRANSACTION_CONFIRMED: '✅',
   TRANSACTION_FAILED:    '❌',
   POLICY_VIOLATION:      '⛔',
+  ESCROW_ALERT:          '⚠️',
 };
 
 /**

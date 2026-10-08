@@ -26,6 +26,15 @@ export const IN_FLIGHT_TX = new Set(['QUEUED', 'SUBMITTED', 'PENDING_APPROVAL', 
 export const PENDING_TX_STATUSES = ['QUEUED', 'SUBMITTED', 'PENDING_APPROVAL'] as const;
 export const PENDING_TX = new Set<string>(PENDING_TX_STATUSES);
 
+/**
+ * Prisma filter for every attempt of a step: the deterministic `intentId`
+ * itself and its retries (`<intentId>#<epoch ms>`). Exact + `#` prefix, so the
+ * steps of job `abc` never match the steps of job `abcd`.
+ */
+export function intentAttemptsFilter(intentId: string) {
+  return { OR: [{ intentId }, { intentId: { startsWith: `${intentId}#` } }] };
+}
+
 export interface SigningAgent {
   id: string;
   walletId: string;
@@ -103,20 +112,35 @@ export async function enqueueAgentStep(deps: StepDeps, params: AgentStepParams):
     select: { id: true },
   });
 
-  await deps.queue.add(`erc8183-${params.step}`, {
-    transactionId: tx.id,
-    chainId: params.chainId,
-    walletId: params.signer.walletId,
-    from: getAddress(params.signer.safeAddress),
-    to: params.to,
-    data: params.data,
-    value: '0',
-    agentId: params.signer.id,
-    tier: 'FREE',
-    feeAmountWei: '0',
-    feeUsd: '0',
-    feeBps: 0,
-  });
+  try {
+    await deps.queue.add(`erc8183-${params.step}`, {
+      transactionId: tx.id,
+      chainId: params.chainId,
+      walletId: params.signer.walletId,
+      from: getAddress(params.signer.safeAddress),
+      to: params.to,
+      data: params.data,
+      value: '0',
+      agentId: params.signer.id,
+      tier: 'FREE',
+      feeAmountWei: '0',
+      feeUsd: '0',
+      feeBps: 0,
+    });
+  } catch (err) {
+    // C3c: a QUEUED row without a BullMQ job is never processed, yet it looks
+    // in flight to every idempotency and lane check. Mark it FAILED (it never
+    // left the process) so a retry gets a fresh intent and nothing waits on it.
+    try {
+      await deps.db.transaction.update({
+        where: { id: tx.id },
+        data: { status: 'FAILED', error: `enqueue failed: ${(err as Error)?.message ?? String(err)}`.slice(0, 500) },
+      });
+    } catch {
+      // best effort — the original error is what the caller needs
+    }
+    throw err;
+  }
 
   deps.logger.info(
     { jobId: params.jobId, step: params.step, transactionId: tx.id, intentId, from: params.signer.safeAddress },

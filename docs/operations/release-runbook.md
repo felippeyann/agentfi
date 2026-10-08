@@ -140,6 +140,7 @@ Recommended production topology for metered Redis:
 2. Worker service:
    - Start command: `cd packages/backend && npm run worker`
    - `TRANSACTION_WORKER_ENABLED=true`
+   - It also runs payment recovery (stale payments, re-poll of lost confirmations, ERC-8183 reconciliation) and, with an escrow chain configured, the settlement worker and expiry sweep — see `production-deploy.md` "What the worker service runs (C3c)".
    - Tune as needed:
      - `TRANSACTION_WORKER_CONCURRENCY`
      - `TRANSACTION_WORKER_DRAIN_DELAY_SEC`

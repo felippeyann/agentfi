@@ -221,6 +221,14 @@ If you use Upstash or any metered Redis plan, run a dedicated worker service:
 
 This avoids N API replicas polling BullMQ marker keys and helps prevent Redis request quota exhaustion.
 
+**What the worker service runs (C3c).** `npm run worker` starts the transaction worker, the **payment-recovery** worker (and its repeatable schedule), and — when an `AGENT_JOB_ESCROW_ADDRESS_<chainId>` and `ESCROW_EVALUATOR_PRIVATE_KEY` are set — the ERC-8183 settlement worker and expiry sweep. Before C3c payment recovery only started inside the API process with `TRANSACTION_WORKER_ENABLED=true`, so this recommended topology never ran it. An API process with `TRANSACTION_WORKER_ENABLED=true` still runs it too; the BullMQ repeat id (`payment-recovery-scan`) keeps one schedule per Redis and each tick runs once, so any number of processes may register it. Every tick (`PAYMENT_RECOVERY_INTERVAL_SEC`, default 120 s):
+
+- re-polls `SUBMITTED` transactions older than `TX_REPOLL_STALE_SEC` (default 600) whose confirmation monitor is gone (restart, shutdown, out of attempts) and replays their outcome exactly once; one that no RPC node knows any more is marked `FAILED` only after `TX_DROP_AFTER_SEC` (default 1800);
+- handles stale `PAYMENT_PENDING` jobs (unchanged);
+- reconciles ERC-8183 jobs whose state has not moved for `ESCROW_RECONCILE_STALE_SEC` (default 600) **from the chain** (`getJob`): stalled funding steps resume, a lost cancellation refund is re-enqueued, a deliverable already Submitted on-chain is settled, a stuck ERC-8004 binding resumes. See [erc-8183-mapping.md §6.7](../architecture/erc-8183-mapping.md).
+
+Both processes re-poll every `SUBMITTED` transaction once at boot, and a shutdown waits up to 10 s for running confirmation monitors. Per-wallet broadcast lanes and ERC-8183 funding lanes are Redis locks (`agentfi:lane:*`) on the same `REDIS_URL`, so they hold across the API and every worker replica. The evaluator's native balance is checked before each settlement: below `ESCROW_EVALUATOR_MIN_BALANCE_WEI` (default `500000000000000`, 0.0005 ETH; `0` disables) an `ESCROW_ALERT` notification goes to the configured operator channels (at most once per 15 minutes per chain).
+
 ### Admin auth audit logs
 
 Admin login events are written to application logs with the prefix `[admin-auth-audit]`:
