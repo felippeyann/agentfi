@@ -146,6 +146,7 @@ contract ReputationHookForkTest is Test {
         vm.recordLogs();
         (ok,) = _send(callData, minimal);
         assertTrue(ok);
+        emit log_named_uint("gas used by that call (escrow + hook + registries)", vm.lastCallGas().gasTotalUsed);
         Vm.Log[] memory logs = vm.getRecordedLogs();
         bool written;
         for (uint256 i = 0; i < logs.length; i++) {
