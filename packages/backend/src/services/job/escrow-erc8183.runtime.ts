@@ -18,9 +18,37 @@ import { transactionQueue } from '../../queues/transaction.queue.js';
 import { addSettlementJob } from '../../queues/escrow-settlement.queue.js';
 import { getEvaluatorSigner } from '../escrow/evaluator-signer.js';
 import { releaseJobEscrow } from '../policy/escrow.service.js';
+import { notificationService } from '../notification.service.js';
+import { walletLaneLock } from '../transaction/wallet-lane.runtime.js';
 import { finalizeA2APaymentJob } from './payment-finalizer.service.js';
 import * as svc from './escrow-erc8183.service.js';
-import type { Erc8183ChainConfig, Erc8183Config, Erc8183Deps } from './escrow-erc8183.service.js';
+import type { Erc8183ChainConfig, Erc8183Config, Erc8183Deps, EscrowAlert } from './escrow-erc8183.service.js';
+
+/**
+ * C3c: the evaluator's native balance below which every settlement send
+ * alerts the operator (`ESCROW_EVALUATOR_MIN_BALANCE_WEI`, default 0.0005 ETH
+ * ≈ a few dozen settlements on Base; `0` disables the check).
+ */
+function evaluatorMinBalanceWei(): bigint | null {
+  const raw = process.env['ESCROW_EVALUATOR_MIN_BALANCE_WEI'];
+  try {
+    const value = BigInt(raw && raw.trim() !== '' ? raw.trim() : '500000000000000');
+    return value > 0n ? value : null;
+  } catch {
+    return 500_000_000_000_000n;
+  }
+}
+
+/** Operator alerts from the orchestrator (cancellation refused, chain conflict, evaluator low on gas). */
+async function sendEscrowAlert(alert: EscrowAlert): Promise<void> {
+  await notificationService.notify({
+    type: 'ESCROW_ALERT',
+    agentId: alert.jobId ?? 'escrow',
+    agentName: 'ERC-8183 escrow',
+    message: alert.message,
+    metadata: { kind: alert.kind, jobId: alert.jobId, chainId: alert.chainId, ...alert.details },
+  });
+}
 
 export const erc8183Config: Erc8183Config = {
   evaluatorAddress: escrowEvaluatorAddress,
@@ -46,6 +74,7 @@ export const erc8183Config: Erc8183Config = {
     }
   },
   mcpPublicUrl: env.MCP_PUBLIC_URL ?? null,
+  evaluatorMinBalanceWei: evaluatorMinBalanceWei(),
 };
 
 const publicClients = new Map<number, ReturnType<typeof createChainPublicClient>>();
@@ -73,6 +102,8 @@ export function erc8183Deps(): Erc8183Deps {
     releaseJobEscrow,
     finalize: finalizeA2APaymentJob,
     logger,
+    lanes: walletLaneLock,
+    alert: sendEscrowAlert,
   };
 }
 
@@ -87,3 +118,5 @@ export const requestCancellationReject = (params: { jobId: string; reason: svc.C
   svc.requestCancellationReject(erc8183Deps(), params);
 export const recoverErc8183Job = (job: { id: string; onChainStatus: string | null }) =>
   svc.recoverErc8183Job(erc8183Deps(), job);
+export const reconcileEscrowJobs = (opts: { staleBefore: Date; limit: number }) =>
+  svc.reconcileEscrowJobs(erc8183Deps(), opts);

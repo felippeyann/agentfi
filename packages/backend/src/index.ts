@@ -18,7 +18,8 @@ import { adminRoutes } from './api/routes/admin.js';
 import { mcpRoutes } from './api/routes/mcp.js';
 import { jobRoutes } from './api/routes/jobs.js';
 import { resourcePaymentRoutes } from './api/routes/resource-payments.js';
-import { startTransactionWorker } from './queues/transaction.queue.js';
+import { drainTransactionMonitors, startTransactionWorker } from './queues/transaction.queue.js';
+import { repollSubmittedAtBoot, SHUTDOWN_MONITOR_GRACE_MS } from './worker-process.js';
 import { startReputationWorker, scheduleReputationUpdate } from './queues/reputation.queue.js';
 import {
   startPaymentRecoveryWorker,
@@ -146,6 +147,8 @@ async function start() {
   // process transactions — both feed off the same Job/Transaction tables and
   // the recovery logic is harmless to run on multiple replicas (idempotent),
   // but pointless on replicas where the transaction worker is disabled.
+  // C3c: `worker.ts` runs it too (the documented API + worker topology
+  // disables the worker here); the repeatable job id dedupes the schedule.
   let paymentRecoveryWorker:
     | ReturnType<typeof startPaymentRecoveryWorker>
     | undefined;
@@ -156,6 +159,8 @@ async function start() {
     } catch (err) {
       logger.error({ err }, 'Payment recovery worker failed to start');
     }
+    // C3c: confirmation monitors of a previous run died with it.
+    await repollSubmittedAtBoot();
   }
 
   // ERC-8183 escrow (C3): the evaluator signer settles jobs from the
@@ -193,6 +198,7 @@ async function start() {
     if (reputationWorker) await reputationWorker.close();
     if (paymentRecoveryWorker) await paymentRecoveryWorker.close();
     if (escrowSettlementWorker) await escrowSettlementWorker.close();
+    if (worker) await drainTransactionMonitors(SHUTDOWN_MONITOR_GRACE_MS);
     await fastify.close();
     process.exit(0);
   };

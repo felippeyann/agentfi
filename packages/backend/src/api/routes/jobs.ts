@@ -330,23 +330,45 @@ export async function jobRoutes(fastify: FastifyInstance) {
 
     const persistedStatus: JobStatus = isPaidCompletion ? 'PAYMENT_PENDING' : body.status;
 
-    const updatedJob = await db.job.update({
-      where: { id: request.params.id },
+    // C3c: the transition is conditional on the status this request validated
+    // (and, for an escrow ACCEPT, on the budget still being FUNDED). Two
+    // concurrent requests — e.g. two PATCH COMPLETED — can no longer both
+    // pass the check above: exactly one moves the row, the other gets 409
+    // and none of its side effects (a second submit, a reservation release,
+    // a refund) run.
+    const transitioned = await db.job.updateMany({
+      where: {
+        id: job.id,
+        status: job.status,
+        ...(body.status === 'ACCEPTED' && isErc8183 ? { onChainStatus: 'FUNDED' } : {}),
+      },
       data: {
         status: persistedStatus,
         ...(body.result !== undefined ? { result: body.result } : {}),
       },
     });
+    if (transitioned.count === 0) {
+      const current = await db.job.findUnique({ where: { id: job.id }, select: { status: true, onChainStatus: true } });
+      return reply.code(409).send({
+        error: 'JOB_STATUS_CONFLICT',
+        message: `Job changed while this request was processed (now ${current?.status ?? 'unknown'}); re-read it and retry if still valid`,
+        status: current?.status ?? null,
+        onChainStatus: current?.onChainStatus ?? null,
+      });
+    }
+    const updatedJob =
+      (await db.job.findUnique({ where: { id: job.id } })) ??
+      { ...job, status: persistedStatus, ...(body.result !== undefined ? { result: body.result } : {}) };
 
     if (isPaidCompletion && isErc8183) {
       // C3: the provider's wallet calls `submit(jobId, keccak256(result))`;
       // the evaluator settles from the settlement queue once it confirms.
-      // A synchronous failure here leaves the Job ACCEPTED (retryable).
+      // A synchronous failure here leaves the Job ACCEPTED (retryable):
+      // enqueueSubmit hands it back itself, and only when no submit of the
+      // job is live (C3c).
       try {
         await enqueueSubmit({ jobId: job.id, result: body.result });
       } catch (err) {
-        const reason = `submit could not be enqueued: ${errorMessage(err)}`;
-        await db.job.update({ where: { id: job.id }, data: { status: 'ACCEPTED', escrowError: reason } });
         logger.error({ jobId: job.id, err: errorMessage(err) }, 'ERC-8183 submit enqueue failed — job returned to ACCEPTED');
         return reply.code(503).send({ error: 'ESCROW_SUBMIT_FAILED', reason: publicErrorMessage(err) });
       }
