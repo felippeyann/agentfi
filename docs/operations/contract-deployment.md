@@ -258,13 +258,17 @@ REPUTATION_HOOK_ADDRESS_84532=0x...
 
 ### Post-deployment checks
 
-Set the three variables first (the Base Sepolia public RPC shown; any RPC of the chain works). `TRUSTED_EVALUATOR` is still exported from the deployment step.
+Set three variables first (the Base Sepolia public RPC shown; any RPC of the chain works; the C4 runbook already sets them). `TRUSTED_EVALUATOR` is still exported from the deployment step.
 
 ```bash
 RPC=https://sepolia.base.org   # the chain you deployed to
 ESCROW=0x...                   # AGENT_JOB_ESCROW_ADDRESS_<chainId> from the output above
 HOOK=0x...                     # REPUTATION_HOOK_ADDRESS_<chainId> from the output above
+```
 
+Then run the reads (each comment is the expected value):
+
+```bash
 cast call $ESCROW "token()(address)"            --rpc-url $RPC   # == USDC_ADDRESS
 cast call $ESCROW "feeWallet()(address)"        --rpc-url $RPC   # == FEE_WALLET
 cast call $ESCROW "operator()(address)"         --rpc-url $RPC   # == OPERATOR_ADDRESS
