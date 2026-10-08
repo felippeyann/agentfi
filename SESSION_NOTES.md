@@ -1,4 +1,4 @@
-# Session Notes — 2026-10-07
+# Session Notes — 2026-10-07 (end of day)
 
 > Single-point handoff doc. Update on every substantive session, prune stale
 > sections aggressively. If this file is older than a few days when you read
@@ -17,11 +17,11 @@ sessions did and what the next one should pick up.
 
 | Surface | Status |
 |---|---|
-| `main` | `52e8d5a` — on top of yesterday's work: #145 (docs close of 2026-10-06), #146 (S4 SSRF hardening of `pay-resource`), #147 (S2 MCP annotations + error sanitizer), #148 (H13 testnet smoke workflow made valid), #149 (R2 ERC-8004 identity minted on the first funded job and bound with `setProviderAgentId`) |
-| Gates | **G1 (safety) complete**: A1, A2, A3, S1, S2 merged and hardened by review. **G2** is code-complete (C2 contracts, C3 backend escrow flow, R2 identity, R3 hook) and waits for C4 + C5 on testnet. G3–G5 not started |
-| Tests on `main` | backend 705 unit tests, mcp-server 59 (new suite, CI job `MCP Tests`), admin 8, Foundry 291; E2E 3 pass / 4 skipped by design |
-| Dev stack | validated on b051077 (5 services healthy, `smoke:dev` and the three examples green); re-validate after the next code merges |
-| In flight | **S5** (`fix/s5-backend-error-hygiene`): backend error hygiene for direct REST callers (raw upstream errors, RPC URL with the Alchemy key in viem errors, `/mcp/sse` messages, `INVALID_URL` echoing private addresses). **C5a** (`test/c5a-escrow-fork-e2e`): full escrow + identity + reputation rehearsal on an Anvil fork of Base Sepolia, plus `RPC_URL_<chainId>` overrides and `examples/escrow-erc8183/`. Both are coding agents in worktrees with their own DBs (`agentfi_s5`, `agentfi_c5a`); review line by line before merging |
+| `main` | `5b317c5` — today: #145 (docs close of 2026-10-06), #146 S4, #147 S2, #148 H13, #149 R2, #150 (notes), #151 S5, #152 C5a, #153 X3a, #154 R3c |
+| Gates | **G1 (safety) complete.** **G2 is code-complete and rehearsed**: the full escrow + ERC-8004 identity + reputation flow passed 6/6 on an Anvil fork of Base Sepolia against the real USDC and registries (C5a, re-run after R3c); what remains is C4 + C5 on the real testnet, blocked on the owner. G3 (demo) has its MCP tools and prompts (X3a); G4/G5 not started |
+| Tests on `main` | backend 790 unit tests, mcp-server 84, admin 8, Foundry 312 (+1 fork test skipped without `BASE_SEPOLIA_FORK_URL`), E2E 3 pass / 4 skipped by design, escrow fork suite 6/6 (needs `E2E_ANVIL_FORK_URL`). Local full CI reproduction on 5b317c5 green (see quirks: run E2E with `E2E_REDIS_URL` while the dev stack is up) |
+| Dev stack | validated on f19a474 (5 services healthy, `smoke:dev` and the three examples green, no error logs); re-validate after the next backend merge |
+| In flight | nothing: no open PRs of ours; only Dependabot PRs remain |
 | Contracts | Base mainnet + Base Sepolia deployments are **legacy ABI**; redeploy (C4) is **blocked on the owner**: there is no `.env` and no Foundry keystore on this machine. Runbook: [docs/project/testnet-log.md](docs/project/testnet-log.md) |
 | npm `@agent_fi/mcp-server` | 0.5.0 published (31 tools); the repo now has 32 tools with annotations; 0.6.0 is task X3 |
 | Local toolchain | Node 24.14.1, Docker 29.8.1 (Postgres + Redis + the dev stack running), Foundry 1.7.1 (`~/.foundry/bin`), graphify (`%APPDATA%\Python\Python314\Scripts`) |
@@ -61,7 +61,13 @@ sessions did and what the next one should pick up.
      identity transaction per provider wallet at a time; `submit` deferred
      while binding and released when the binding ends; payment never blocked
      by identity; public `GET /v1/agents/:id/erc8004.json`.
-4. New plan rows: H13, S5 (backend error hygiene), N1 (same-wallet nonce
+5. Afternoon and evening, reviewed line by line and merged:
+   - **#151 S5**: one backend sanitizer (rules kept byte-identical to the MCP one by a sync test), Fastify error handler with opaque 500s + `traceId`, ~15 leak sites fixed (viem errors carried the RPC URL with the Alchemy key, including on the public transaction lookup), malformed JSON 400 and rate limit 429 instead of 500, `INVALID_URL` no longer echoes resolved private addresses.
+   - **#152 C5a**: the fork rehearsal (6/6) found two blocking bugs that unit tests could not: settlement queue ids with `:` were rejected by BullMQ (no job could ever be paid, refunded or expired) and the evaluator's bare gas estimate starved the reputation hook (feedback silently lost on every settlement). Both fixed. Also `RPC_URL_<chainId>` overrides and `examples/escrow-erc8183/`.
+   - **#153 X3a**: a paid job must name `reward.chainId` and `reward.token` (the MCP `post_job` used to create Ethereum-mainnet ETH jobs by default); `post_job` defaults to USDC and requires `chain_id`; new tools `get_job`, `check_outbox`, `contest_job` (35 tools); job ids validated so a crafted id cannot hop to another route. Breaking for the published MCP 0.5.0 paid `post_job` (now a 400 instead of a mainnet job); 0.6.0 (X3) ships the fix.
+   - **#154 R3c**: `ReputationHook` gas policy before deployment: every registry call has a fixed gas cap (`feedbackGasLimit` 500 000, `identityCallGasLimit` 50 000, constructor immutables with bounds, deploy env `FEEDBACK_GAS_LIMIT` / `IDENTITY_CALL_GAS_LIMIT`), and the hook reverts only when the caller supplied too little gas for a write (`InsufficientGasForFeedback`). A gas-burning or upgraded registry still cannot block settlement; estimators converge on the full path. Foundry 312, fork suite 6/6 again.
+6. Dev stack re-validated on f19a474; full local CI on 5b317c5 green; graphify rebuilt on 5b317c5.
+7. New plan rows: H13, S5 (backend error hygiene), N1 (same-wallet nonce
    concurrency), R2b (pin the Identity Registry implementation; provider gas
    note for C5).
 
@@ -77,23 +83,19 @@ sessions did and what the next one should pick up.
 
 ## Next session (do this first)
 
-1. Review and merge S5 and C5a when their PRs arrive. C5a's fork run is the
-   best evidence available before C4; read its on-chain assertions.
-2. After the merges: `graphify update .`, re-validate the dev stack
-   (`docker compose -f docker-compose.dev.yml up --build -d --wait`, then
-   `npm run smoke:dev` and the three examples).
-3. **Owner:** C4. Add the Base Sepolia deployer key (keystore or
-   `packages/contracts/.env`), generate and fund the evaluator key
-   (`TRUSTED_EVALUATOR` = `ESCROW_EVALUATOR_PRIVATE_KEY`), give provider test
-   wallets a little gas, and follow
-   [docs/project/testnet-log.md](docs/project/testnet-log.md). Then C5 runs the
-   rehearsed flow for real and logs the tx hashes (gate G2).
-4. Next code items without owner input: X3a (MCP tools for the escrow flow:
-   `post_job` still defaults the reward to ETH and has no chain parameter, no
-   `contest_job` tool, job views should show the `escrow` object), C3b (fee
-   sweep), N1, R2b, A6, S3, T1, R4, then X1–X4 for the G3 demo.
-5. **Owner:** interviews (WS7, Day-30 checkpoint 2026-11-05), the open
-   questions in plan §5 (mainnet addresses, Brazil assumption, fee tiers,
-   revenue model per job vs bps), Dependabot #109/#123/#124.
+1. **Owner: C4** is the only blocker for gate G2. Put the Base Sepolia deployer key in a Foundry keystore (or
+   `packages/contracts/.env`), generate and fund the evaluator key (`TRUSTED_EVALUATOR` =
+   `ESCROW_EVALUATOR_PRIVATE_KEY`), fund the provider test wallets with a little gas, and follow
+   [docs/project/testnet-log.md](docs/project/testnet-log.md) §2 (now with the optional `FEEDBACK_GAS_LIMIT` /
+   `IDENTITY_CALL_GAS_LIMIT`, defaults 500 000 / 50 000). Then C5 = run `examples/escrow-erc8183` twice
+   (happy, then `AGENTFI_FLOW=cancel`) and log the tx hashes (§5.4). The same flow already passed 6/6 on a fork.
+2. Next code items without owner input: C3b (platform fee sweep), N1 (per-wallet nonce lane), R2b (pin the
+   Identity Registry implementation), A6 (DailyVolume release), S3 (delete the legacy x402 v0.1 middleware), T1
+   (env load order in tests), R4 (trust report reads `getSummary` from the hook), bullmq 6 scheduler migration
+   (#111), then X3 (publish `@agent_fi/mcp-server` 0.6.0 — needs the owner's npm access) and X1/X2 for the demo.
+3. Before running the local E2E while the dev stack is up, export `E2E_REDIS_URL=redis://localhost:6379/12`
+   (the dev stack's transaction worker shares Redis DB 0 and steals the E2E's jobs).
+4. **Owner:** interviews (WS7, Day-30 checkpoint 2026-11-05), the open questions in plan §5 (mainnet addresses,
+   Brazil assumption, fee tiers, revenue model per job vs bps), Dependabot #109/#123/#124.
 
-_Last touch: 2026-10-07 ~20:30 (S5 and C5a agents running)._
+_Last touch: 2026-10-07 ~22:30 (all of today's PRs merged; nothing in flight)._
