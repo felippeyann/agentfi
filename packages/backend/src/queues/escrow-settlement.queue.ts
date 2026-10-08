@@ -10,7 +10,7 @@
  * module owns the queue, the dedupe keys, the evaluation delay and the worker
  * lifecycle.
  *
- * Dedupe: one BullMQ job per `<action>:<jobId>`. A completed job is removed
+ * Dedupe: one BullMQ job per `<action>-<jobId>`. A completed job is removed
  * immediately and a failed one is removed before re-adding, so a recovery
  * re-enqueue is never silently ignored. Every settlement reads the on-chain
  * status first, which is what makes re-running safe.
@@ -49,12 +49,22 @@ export const escrowSettlementQueue = new Queue<EscrowSettlementJobData>(ESCROW_S
   },
 });
 
+/**
+ * BullMQ job id of a settlement action: `<action>-<jobId>`.
+ *
+ * Not `<action>:<jobId>`: BullMQ 5 rejects a custom id containing `:` unless
+ * it splits into exactly three parts (a compatibility rule for old repeatable
+ * jobs that its next major turns into "no `:` at all"), so every `queue.add`
+ * with the colon form threw "Custom Id cannot contain :". Found by the C5a
+ * fork rehearsal: no evaluator settlement, cancellation refund or expiry
+ * claim could ever be enqueued (unit tests mocked the queue).
+ */
 export function settlementJobId(data: EscrowSettlementJobData): string {
-  return `${data.action}:${data.jobId}`;
+  return `${data.action}-${data.jobId}`;
 }
 
 /**
- * Enqueues one settlement action per job (dedupe key `<action>:<jobId>`).
+ * Enqueues one settlement action per job (dedupe key `<action>-<jobId>`).
  * `delayMs` applies the evaluation grace period to `settle`.
  */
 export async function addSettlementJob(data: EscrowSettlementJobData, opts?: { delayMs?: number }): Promise<void> {

@@ -23,6 +23,8 @@
     "test:e2e": "vitest run --config vitest.config.e2e.ts",
     "test:e2e:fork": "vitest run --config vitest.config.e2e.fork.ts",
     "test:e2e:testnet": "vitest run --config vitest.config.e2e.testnet.ts",
+    "test:e2e:escrow-fork": "vitest run --config vitest.config.e2e.escrow-fork.ts",
+    "e2e:escrow-fork:stack": "tsx src/__tests__/e2e/escrow-fork.stack.ts",
     "db:generate": "dotenv -e ../../.env prisma generate",
     "db:migrate": "dotenv -e ../../.env prisma migrate dev",
     "db:push": "dotenv -e ../../.env prisma db push"

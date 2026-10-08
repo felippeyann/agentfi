@@ -61,11 +61,42 @@ function isUsableRpcUrl(url: string | undefined): url is string {
   return Boolean(url && !url.includes('undefined') && !url.includes('null'));
 }
 
-/** Returns ordered RPC candidates for a chain: primary -> fallback -> public. */
-export function getRpcCandidates(chainId: number): string[] {
+/** `process.env`-shaped lookup; injectable so the RPC helpers are unit-testable. */
+export type RpcEnvSource = Readonly<Record<string, string | undefined>>;
+
+/** Name of the per-chain RPC override variable (`RPC_URL_84532`, …). */
+export function rpcOverrideEnvVar(chainId: number): string {
+  return `RPC_URL_${chainId}`;
+}
+
+/**
+ * `RPC_URL_<chainId>` when set (blank or whitespace counts as unset): a
+ * self-hosted node, a paid provider other than Alchemy/Infura, or a local
+ * Anvil fork. Read on every call (not at module load) so a process that sets
+ * it after import, and the unit tests, see the current value. The format is
+ * validated at boot by `config/env.ts`.
+ */
+export function getRpcOverride(chainId: number, source: RpcEnvSource = process.env): string | undefined {
+  const raw = source[rpcOverrideEnvVar(chainId)]?.trim();
+  return raw ? raw : undefined;
+}
+
+/**
+ * Returns ordered RPC candidates for a chain:
+ * `RPC_URL_<chainId>` override (when set) -> Alchemy -> Infura -> public.
+ *
+ * The override becomes the primary (`getPrimaryRpcUrl`, the evaluator signer,
+ * the submitter's first broadcast) and the existing providers stay behind it
+ * as fallbacks. Note for local forks: the fallbacks still point at the real
+ * network, so a harness that must stay hermetic passes dummy Alchemy/Infura
+ * keys (the fork E2E does) — a read that falls through to the public RPC only
+ * happens when the override is unreachable.
+ */
+export function getRpcCandidates(chainId: number, source: RpcEnvSource = process.env): string[] {
   const unique = new Set<string>();
 
   const candidates = [
+    getRpcOverride(chainId, source),
     RPC_URLS[chainId],
     FALLBACK_RPC_URLS[chainId],
     PUBLIC_RPC_URLS[chainId],

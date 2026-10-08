@@ -31,7 +31,7 @@
  *
  * Idempotency: each agent-signed step has a deterministic Transaction
  * `intentId = "erc8183:<step>:<jobId>"`; the settlement queue dedupes on
- * `"<action>:<jobId>"` and every settlement reads the on-chain job status
+ * `"<action>-<jobId>"` and every settlement reads the on-chain job status
  * first, so a redelivered or recovered job never settles twice.
  */
 

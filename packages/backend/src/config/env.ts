@@ -40,6 +40,29 @@ const identityRegistryFields = Object.fromEntries(
 ) as Record<`IDENTITY_REGISTRY_ADDRESS_${(typeof ESCROW_CHAIN_IDS)[number]}`, ReturnType<typeof optionalAddress>>;
 // ── end ERC-8004 identity ─────────────────────────────────────────────────
 
+// ── Per-chain RPC override (C5a) ──────────────────────────────────────────
+// `RPC_URL_<chainId>` becomes the primary RPC of that chain (self-hosted node,
+// another provider, a local Anvil fork); Alchemy / Infura / the public RPC
+// stay behind it as fallbacks (config/chains.ts `getRpcCandidates`). Blank or
+// unset → the existing Alchemy-first order. Only http(s) URLs: every client
+// is a viem `http` transport. Same chain list as `CHAIN_IDS` in
+// config/chains.ts (not imported: tests mock that module partially).
+export const RPC_OVERRIDE_CHAIN_IDS = [1, 8453, 42161, 137, 84532] as const;
+const rpcUrlFields = Object.fromEntries(
+  RPC_OVERRIDE_CHAIN_IDS.map((chainId) => [
+    `RPC_URL_${chainId}`,
+    z.preprocess(
+      (v) => (typeof v === 'string' ? (v.trim() === '' ? undefined : v.trim()) : v),
+      z
+        .string()
+        .url(`RPC_URL_${chainId} must be a URL`)
+        .regex(/^https?:\/\//i, `RPC_URL_${chainId} must be an http(s) URL`)
+        .optional(),
+    ),
+  ]),
+) as Record<`RPC_URL_${(typeof RPC_OVERRIDE_CHAIN_IDS)[number]}`, z.ZodEffects<z.ZodOptional<z.ZodString>>>;
+// ── end RPC override ──────────────────────────────────────────────────────
+
 const transactionWorkerEnabledDefault: 'true' | 'false' =
   process.env['TRANSACTION_WORKER_ENABLED'] === 'true' ||
   process.env['TRANSACTION_WORKER_ENABLED'] === 'false'
@@ -58,6 +81,7 @@ const envSchema = z.object({
   // RPC
   ALCHEMY_API_KEY: z.string().min(1),
   INFURA_API_KEY: z.string().optional(),
+  ...rpcUrlFields,
 
   // Wallet Infrastructure
   // WALLET_PROVIDER=local uses in-memory viem keys — development only.

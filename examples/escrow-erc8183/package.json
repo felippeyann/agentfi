@@ -1,0 +1,14 @@
+{
+  "name": "@agent_fi/example-escrow-erc8183",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Two-agent USDC job escrowed on the ERC-8183 AgentJobEscrow, with ERC-8004 feedback, against any AgentFi backend",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

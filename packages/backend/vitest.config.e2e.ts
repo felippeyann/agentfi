@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 import { config as loadDotenv } from 'dotenv';
 import { resolve } from 'path';
 
@@ -20,6 +20,9 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['src/__tests__/e2e/**/*.e2e.ts'],
+    // The ERC-8183 Base Sepolia fork rehearsal has its own Anvil, deploy and
+    // backend processes: `npm run test:e2e:escrow-fork` (vitest.config.e2e.escrow-fork.ts).
+    exclude: [...configDefaults.exclude, 'src/__tests__/e2e/escrow-erc8183.fork.e2e.ts'],
     globalSetup: ['src/__tests__/e2e/global-setup.ts'],
     testTimeout: 90_000,
     hookTimeout: 120_000,
@@ -37,7 +40,9 @@ export default defineConfig({
       // Never use the production Upstash/Neon URLs from .env — those have
       // request limits and would pollute production data.
       DATABASE_URL: process.env['E2E_DATABASE_URL'] ?? 'postgresql://agentfi:agentfi@localhost:5432/agentfi',
-      REDIS_URL:    'redis://localhost:6379',
+      // E2E_REDIS_URL (e.g. redis://localhost:6379/12) keeps the run off the
+      // dev stack's queues when docker-compose's API worker shares this Redis.
+      REDIS_URL:    process.env['E2E_REDIS_URL'] ?? 'redis://localhost:6379',
 
       // Secrets — dummy values are fine; E2E mocks bypass Turnkey and Alchemy
       API_SECRET:               process.env['API_SECRET']               ?? 'e2e-test-secret-min-32-chars-long!!',
