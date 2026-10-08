@@ -53,6 +53,7 @@ import {
   isEscrowTokenReward,
   onEscrowTxOutcome,
   processSettlementJob,
+  pumpFunding,
   recoverErc8183Job,
   requestCancellationReject,
   serializeFeedbackFile,
@@ -914,6 +915,150 @@ describe('recoverErc8183Job (payment-recovery branch)', () => {
     const inFlight = makeDeps([escrowJob({ onChainStatus: 'FUNDED', status: 'PAYMENT_PENDING' })], { txs: [stepTx('submit', 'job-1', { status: 'SUBMITTED' })] });
     expect(await recoverErc8183Job(inFlight.deps, { id: 'job-1', onChainStatus: 'FUNDED' })).toBe('inFlight');
     expect(inFlight.jobs.get('job-1')!['status']).toBe('PAYMENT_PENDING');
+  });
+});
+
+// ── C3c: chain as the source of truth ──────────────────────────────────────
+
+describe('C3c — the chain decides before anything is unwound', () => {
+  it('a fund REVERTED while getJob says Funded → FUNDED, job stays PENDING, reservation kept', async () => {
+    const { deps, jobs, releaseJobEscrow } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'APPROVED', status: 'PENDING' })], {
+      txs: [stepTx('fund', 'job-1', { status: 'REVERTED' })],
+      chainStatus: CHAIN_JOB_STATUS.Funded,
+    });
+    await onEscrowTxOutcome(deps, { transactionId: 'tx-fund', status: 'REVERTED', error: 'InvalidStatus' });
+    expect(jobs.get('job-1')).toMatchObject({ status: 'PENDING', onChainStatus: 'FUNDED', escrowError: null });
+    expect(releaseJobEscrow).not.toHaveBeenCalled();
+  });
+
+  it('an unreadable chain unwinds nothing: escrowError records it for the reconciliation', async () => {
+    const { deps, jobs, readContract, releaseJobEscrow } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'APPROVED', status: 'PENDING' })], {
+      txs: [stepTx('fund', 'job-1', { status: 'FAILED' })],
+    });
+    readContract.mockRejectedValue(new Error('rpc down'));
+    await onEscrowTxOutcome(deps, { transactionId: 'tx-fund', status: 'FAILED', error: 'Dropped' });
+    expect(jobs.get('job-1')).toMatchObject({ status: 'PENDING', onChainStatus: 'APPROVED' });
+    expect(jobs.get('job-1')!['escrowError']).toMatch(/left for reconciliation/);
+    expect(releaseJobEscrow).not.toHaveBeenCalled();
+  });
+
+  it('setBudget reported failed but the budget is set on-chain → BUDGET_SET and the approve goes out', async () => {
+    const { deps, jobs, queue } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'OPEN', status: 'PENDING' })], {
+      txs: [stepTx('setBudget', 'job-1', { status: 'FAILED' })],
+      chainStatus: CHAIN_JOB_STATUS.Open,
+    });
+    await onEscrowTxOutcome(deps, { transactionId: 'tx-setBudget', status: 'FAILED', error: 'Dropped' });
+    expect(jobs.get('job-1')!['onChainStatus']).toBe('BUDGET_SET');
+    expect(lastQueued(queue).name).toBe('erc8183-approve');
+  });
+
+  it('approve reported failed but the allowance is granted → APPROVED and the fund goes out', async () => {
+    const { deps, jobs, queue } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'BUDGET_SET', status: 'PENDING' })], {
+      txs: [stepTx('approve', 'job-1', { status: 'FAILED' })],
+      chainStatus: CHAIN_JOB_STATUS.Open,
+      allowance: BUDGET,
+    });
+    await onEscrowTxOutcome(deps, { transactionId: 'tx-approve', status: 'FAILED', error: 'Dropped' });
+    expect(jobs.get('job-1')!['onChainStatus']).toBe('APPROVED');
+    expect(lastQueued(queue).name).toBe('erc8183-fund');
+  });
+
+  it('a submit reported failed while the chain says Submitted → SUBMITTED + settlement, never back to ACCEPTED', async () => {
+    const { deps, jobs, settlement } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'FUNDED', status: 'PAYMENT_PENDING' })], {
+      txs: [stepTx('submit', 'job-1', { status: 'REVERTED' })],
+      chainStatus: CHAIN_JOB_STATUS.Submitted,
+    });
+    await onEscrowTxOutcome(deps, { transactionId: 'tx-submit', status: 'REVERTED', error: 'InvalidStatus' });
+    expect(jobs.get('job-1')).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED' });
+    expect(settlement.add).toHaveBeenCalledWith({ jobId: 'job-1', action: 'settle' }, undefined);
+  });
+
+  it('a duplicate fund confirmation runs its effects once (conditional advance)', async () => {
+    const { deps, settlement } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'APPROVED', status: 'CANCELLED' })], {
+      txs: [stepTx('fund', 'job-1')],
+    });
+    await onEscrowTxOutcome(deps, { transactionId: 'tx-fund', status: 'CONFIRMED' });
+    await onEscrowTxOutcome(deps, { transactionId: 'tx-fund', status: 'CONFIRMED' });
+    expect(settlement.add).toHaveBeenCalledTimes(1);
+  });
+
+  it('enqueueSubmit failing while another submit of the job is live keeps PAYMENT_PENDING (no hand-back)', async () => {
+    const { deps, jobs, queue } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'FUNDED', status: 'PAYMENT_PENDING' })], {
+      txs: [stepTx('submit', 'job-1', { status: 'FAILED' }), { ...stepTx('submit', 'job-1', { status: 'SUBMITTED' }), id: 'tx-live', intentId: 'erc8183:submit:job-1#1' }],
+    });
+    queue.add.mockRejectedValueOnce(new Error('redis gone'));
+    expect(await enqueueSubmit(deps, { jobId: 'job-1', result: {} })).toEqual({ deferred: false });
+    expect(jobs.get('job-1')!['status']).toBe('PAYMENT_PENDING');
+  });
+});
+
+describe('C3c — funding lane (pumpFunding)', () => {
+  it('admits one job at a time between approve and the end of its fund, oldest first', async () => {
+    const jobA = escrowJob({ id: 'job-a', onChainJobId: '1', onChainStatus: 'APPROVED', status: 'PENDING' });
+    const jobB = escrowJob({ id: 'job-b', onChainJobId: '2', onChainStatus: 'BUDGET_SET', status: 'PENDING' });
+    const jobC = escrowJob({ id: 'job-c', onChainJobId: '3', onChainStatus: 'BUDGET_SET', status: 'PENDING' });
+    const { deps, jobs, queue } = makeDeps([jobA, jobB, jobC]);
+
+    expect(await pumpFunding(deps, REQUESTER.id, CHAIN_ID)).toBeNull(); // A holds the lane
+    expect(queue.add).not.toHaveBeenCalled();
+
+    jobs.get('job-a')!['onChainStatus'] = 'FUNDED';
+    expect(await pumpFunding(deps, REQUESTER.id, CHAIN_ID)).toBe('job-b');
+    expect(lastQueued(queue).name).toBe('erc8183-approve');
+    // B's approve is pending now: the lane is busy until B's fund is terminal.
+    expect(await pumpFunding(deps, REQUESTER.id, CHAIN_ID)).toBeNull();
+  });
+
+  it('a cancelled holder that never sent its fund does not keep the lane', async () => {
+    const { deps } = makeDeps([
+      escrowJob({ id: 'job-a', onChainJobId: '1', onChainStatus: 'APPROVED', status: 'CANCELLED' }),
+      escrowJob({ id: 'job-b', onChainJobId: '2', onChainStatus: 'BUDGET_SET', status: 'PENDING' }),
+    ]);
+    expect(await pumpFunding(deps, REQUESTER.id, CHAIN_ID)).toBe('job-b');
+  });
+});
+
+describe('C3c — expiry, refusal and evaluator gas', () => {
+  it('claimRefund on a job still Open past expiresAt closes it EXPIRED_UNFUNDED, fails a live job, releases the reservation', async () => {
+    const { deps, jobs, signer, releaseJobEscrow } = makeDeps(
+      [escrowJob({ onChainJobId: '7', onChainStatus: 'BUDGET_SET', status: 'PENDING', expiresAt: new Date(NOW.getTime() - 1000) })],
+      { chainStatus: CHAIN_JOB_STATUS.Open },
+    );
+    const result = await processSettlementJob(deps, { data: { jobId: 'job-1', action: 'claimRefund' } });
+    expect(result).toEqual({ outcome: 'reconciled', onChainStatus: 'EXPIRED_UNFUNDED' });
+    expect(jobs.get('job-1')).toMatchObject({ status: 'FAILED', onChainStatus: 'EXPIRED_UNFUNDED' });
+    expect(releaseJobEscrow).toHaveBeenCalledWith('job-1');
+    expect(signer.writeContract).not.toHaveBeenCalled();
+  });
+
+  it('a reject for a cancellation refuses a job Submitted on-chain: alert, mirror SUBMITTED, nothing sent', async () => {
+    const { deps, jobs, signer, alert } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'FUNDED', status: 'CANCELLED' })], {
+      chainStatus: CHAIN_JOB_STATUS.Submitted,
+    });
+    const result = await processSettlementJob(deps, { data: { jobId: 'job-1', action: 'reject', reason: 'cancelled' } });
+    expect(result).toMatchObject({ outcome: 'noop' });
+    expect(signer.writeContract).not.toHaveBeenCalled();
+    expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'SUBMITTED', escrowError: expect.stringMatching(/Cancellation refused/) });
+    expect(alert).toHaveBeenCalledWith(expect.objectContaining({ kind: 'cancellation-refused', jobId: 'job-1' }));
+  });
+
+  it('a stale reject for a live job is dropped', async () => {
+    const { deps, signer } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'FUNDED', status: 'ACCEPTED' })], { chainStatus: CHAIN_JOB_STATUS.Funded });
+    expect(await processSettlementJob(deps, { data: { jobId: 'job-1', action: 'reject', reason: 'cancelled' } })).toMatchObject({ outcome: 'noop' });
+    expect(signer.writeContract).not.toHaveBeenCalled();
+  });
+
+  it('alerts once per interval when the evaluator gas is below the threshold, and still sends', async () => {
+    const low = { ...config, evaluatorMinBalanceWei: 10n ** 15n };
+    const { deps, signer, alert, getBalance } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'FUNDED', status: 'CANCELLED' })], {
+      chainStatus: CHAIN_JOB_STATUS.Funded,
+    });
+    getBalance.mockResolvedValue(10n ** 12n);
+    const d = { ...deps, config: low };
+    await processSettlementJob(d, { data: { jobId: 'job-1', action: 'reject', reason: 'cancelled' } });
+    await processSettlementJob(d, { data: { jobId: 'job-1', action: 'reject', reason: 'cancelled' } });
+    expect(signer.writeContract).toHaveBeenCalled();
+    expect(alert.mock.calls.filter(([a]) => (a as { kind: string }).kind === 'evaluator-balance-low')).toHaveLength(1);
   });
 });
 
