@@ -30,8 +30,8 @@ const FUND_MOVING = [
 ];
 
 describe('tool annotation coverage', () => {
-  it('registers 32 tools with unique names', () => {
-    expect(registeredNames).toHaveLength(32);
+  it('registers 35 tools with unique names', () => {
+    expect(registeredNames).toHaveLength(35);
     expect(new Set(registeredNames).size).toBe(registeredNames.length);
   });
 
@@ -82,6 +82,17 @@ describe('tool annotation classification', () => {
     }
   });
 
+  it('marks contest_job as a destructive, idempotent, open-world write (X3a)', () => {
+    // Destructive: it turns the settlement into a refund and cannot be undone.
+    // Idempotent: the backend's conditional update wins once; a repeat is a 409.
+    expect(annotationsFor('contest_job')).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    });
+  });
+
   it('lists exactly the expected read-only tools', () => {
     const readOnly = Object.entries(TOOL_ANNOTATIONS)
       .filter(([, a]) => a.readOnlyHint)
@@ -90,6 +101,8 @@ describe('tool annotation classification', () => {
     expect(readOnly).toEqual(
       [
         'check_inbox',
+        'check_outbox',
+        'get_job',
         'get_agent_manifest',
         'get_agent_trust_report',
         'get_defi_rates',
@@ -120,7 +133,7 @@ describe('tools/list over MCP', () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(32);
+    expect(tools).toHaveLength(35);
     for (const tool of tools) {
       const expected = TOOL_ANNOTATIONS[tool.name as keyof typeof TOOL_ANNOTATIONS];
       expect(expected, tool.name).toBeDefined();
