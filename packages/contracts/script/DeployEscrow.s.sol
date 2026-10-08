@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-import {Script, console} from "forge-std/Script.sol";
+import {console} from "forge-std/Script.sol";
+import {DeployGuards} from "./DeployGuards.sol";
 import {AgentJobEscrow} from "../src/AgentJobEscrow.sol";
 import {ReputationHook} from "../src/ReputationHook.sol";
 
@@ -11,28 +12,33 @@ import {ReputationHook} from "../src/ReputationHook.sol";
  *
  * Usage (keystore signer, preferred — the key never touches the environment):
  *   cast wallet import agentfi-deployer --interactive
- *   forge script script/DeployEscrow.s.sol \
+ *   EXPECTED_CHAIN_ID=84532 forge script script/DeployEscrow.s.sol \
  *     --rpc-url base_sepolia \
  *     --account agentfi-deployer \
  *     --broadcast \
- *     --verify \
- *     --etherscan-api-key $BASESCAN_API_KEY
+ *     --verify
  *
+ * `--verify` uses Etherscan API V2 (one `ETHERSCAN_API_KEY` for every chain, see `foundry.toml`).
  * `--ledger`, `--trezor` and `--private-key` work the same way (the script calls
  * `vm.startBroadcast()` without a key and Foundry uses the CLI signer). Setting `PRIVATE_KEY`
- * in the environment is still supported for backwards compatibility but discouraged.
+ * is still supported for backwards compatibility but discouraged: the script warns, and refuses
+ * a `PRIVATE_KEY` that differs from the CLI signer (`SignerConflict`) — forge auto-loads
+ * `packages/contracts/.env`, so a key left there used to override `--account` silently.
  *
  * Required env vars:
+ *   EXPECTED_CHAIN_ID           — chain id the deployment is meant for (84532 Base Sepolia, 8453 Base);
+ *                                 must equal the RPC's chain id or nothing is broadcast (`WrongChain`)
  *   OPERATOR_ADDRESS            — may pause/unpause job creation and funding, rotate the fee wallet
  *                                 and sweep accrued platform fees (never moves escrowed budgets)
  *   FEE_WALLET                  — initial receiver of accrued platform fees (`withdrawPlatformFees`)
  *   TRUSTED_EVALUATOR           — backend signer that settles jobs (decision D5): the only evaluator
  *                                 whose settlements write ERC-8004 feedback and the only
- *                                 `revokeFeedback` caller
+ *                                 `revokeFeedback` / `clearPenalties` caller
  *
  * Optional env vars (defaults in brackets):
  *   PRIVATE_KEY                 — deployer EOA private key [unset or 0: use the CLI signer above]
- *   FEE_BPS                     — platform fee in basis points [30]
+ *   FEE_BPS                     — escrow platform fee in basis points [30] (the executor's fee is
+ *                                 `EXECUTOR_FEE_BPS` in `Deploy.s.sol`)
  *   EVALUATOR_FEE_BPS           — evaluator fee in basis points [0]
  *   MIN_FEEDBACK_BUDGET         — minimum job budget (token units) for feedback [1000000 = 1 USDC]
  *   FEEDBACK_GAS_LIMIT          — gas forwarded by the hook to `giveFeedback` [500000; allowed
@@ -44,11 +50,11 @@ import {ReputationHook} from "../src/ReputationHook.sol";
  *   IDENTITY_REGISTRY_ADDRESS   — ERC-8004 Identity Registry [Base: 0x8004A169…a432, Base Sepolia: 0x8004A818…BD9e]
  *
  * On any other chain `USDC_ADDRESS`, `REPUTATION_REGISTRY_ADDRESS` and `IDENTITY_REGISTRY_ADDRESS`
- * are required. All three must have code on the target chain, `FEE_BPS + EVALUATOR_FEE_BPS`
- * must be below 10 000 and both gas limits must be within the hook's bounds; everything is
- * validated before the first transaction is broadcast.
+ * are required. The chain must be `EXPECTED_CHAIN_ID`, all three addresses must have code on it,
+ * `FEE_BPS + EVALUATOR_FEE_BPS` must be below 10 000 and both gas limits must be within the hook's
+ * bounds; everything is validated before the first transaction is broadcast.
  */
-contract DeployEscrowScript is Script {
+contract DeployEscrowScript is DeployGuards {
     uint256 internal constant CHAIN_BASE = 8453;
     uint256 internal constant CHAIN_BASE_SEPOLIA = 84532;
     uint256 internal constant BPS_DENOMINATOR = 10_000;
@@ -74,6 +80,7 @@ contract DeployEscrowScript is Script {
 
     /// @notice Everything the deployment needs, read from env and validated before broadcasting.
     struct Config {
+        uint256 expectedChainId;
         uint256 deployerKey;
         address operator;
         address feeWallet;
@@ -88,7 +95,6 @@ contract DeployEscrowScript is Script {
         address identityRegistry;
     }
 
-    error MissingEnv(string name);
     error NotAContract(string name, address value);
     error InvalidFees(uint256 platformFeeBP, uint256 evaluatorFeeBP);
     error InvalidGasLimit(string name, uint256 value, uint256 min, uint256 max);
@@ -96,7 +102,7 @@ contract DeployEscrowScript is Script {
     function run() external returns (AgentJobEscrow escrow, ReputationHook hook) {
         Config memory cfg = readConfig();
 
-        console.log("Deploying to chain:   ", block.chainid);
+        _logChainAndSigner(cfg.expectedChainId, cfg.deployerKey);
         console.log("Token (USDC):         ", cfg.usdc);
         console.log("Fee wallet:           ", cfg.feeWallet);
         console.log("Operator:             ", cfg.operator);
@@ -109,8 +115,7 @@ contract DeployEscrowScript is Script {
         console.log("Reputation registry:  ", cfg.reputationRegistry);
         console.log("Identity registry:    ", cfg.identityRegistry);
 
-        if (cfg.deployerKey != 0) vm.startBroadcast(cfg.deployerKey);
-        else vm.startBroadcast();
+        _startBroadcast(cfg.deployerKey);
 
         // 1. Escrow — the hook needs its address, so it goes first.
         escrow = new AgentJobEscrow(cfg.usdc, cfg.feeWallet, cfg.operator, cfg.evaluatorFeeBps, cfg.feeBps);
@@ -128,6 +133,7 @@ contract DeployEscrowScript is Script {
         );
         console.log("ReputationHook:", address(hook));
         console.log("Hook gas requirement: ", hook.feedbackGasRequirement());
+        console.log("Hook bind requirement:", hook.canonicalBindGasRequirement());
 
         vm.stopBroadcast();
 
@@ -139,10 +145,12 @@ contract DeployEscrowScript is Script {
         console.log("--------------------");
     }
 
-    /// @notice Reads the configuration from env and validates it (addresses must have code, fees must
+    /// @notice Reads the configuration from env and validates it (the chain must be `EXPECTED_CHAIN_ID`,
+    ///         `PRIVATE_KEY` must not contradict the CLI signer, addresses must have code, fees must
     ///         sum below 10 000, gas limits must be within the hook's bounds).
     function readConfig() public view returns (Config memory cfg) {
-        cfg.deployerKey = vm.envOr("PRIVATE_KEY", uint256(0));
+        cfg.expectedChainId = requireExpectedChain();
+        cfg.deployerKey = resolveDeployerKey();
         cfg.operator = vm.envAddress("OPERATOR_ADDRESS");
         cfg.feeWallet = vm.envAddress("FEE_WALLET");
         cfg.trustedEvaluator = vm.envAddress("TRUSTED_EVALUATOR");
