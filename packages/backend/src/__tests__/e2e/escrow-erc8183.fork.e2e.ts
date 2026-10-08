@@ -496,7 +496,11 @@ describe.skipIf(!ctx)('ERC-8183 escrow + ERC-8004 reputation on a Base Sepolia f
       await backend?.stop();
     });
 
-    it('contest while SUBMITTED: evaluator reject, full refund, feedback 0 tagged "rejected"', async () => {
+    // C2b / D9 (second adversarial review, 2026-10-08): a requester's contest is not an evaluator
+    // verdict. The backend still rejects with `keccak256("agentfi.contested")` (until C3d moves the
+    // contest to operator review), and the hook now refunds WITHOUT writing negative feedback
+    // (`FeedbackSkipped("not-verdict")`). Before C2b this scenario asserted a value-0 entry.
+    it('contest while SUBMITTED: evaluator reject, full refund, no feedback ("not-verdict", D9)', async () => {
       const { requester, provider } = await fundedPair(backend, fork, 'contest');
       const feesBefore = await pendingPlatformFees(fork);
 
@@ -543,12 +547,11 @@ describe.skipIf(!ctx)('ERC-8183 escrow + ERC-8004 reputation on a Base Sepolia f
 
       const events = await settlementEvents(fork, rejected.escrow!.settleTxHash!);
       expect(events.escrow.map((e) => e.eventName)).toEqual(expect.arrayContaining(['JobRejected', 'Refunded']));
-      const written = events.hook.find((e) => e.eventName === 'FeedbackWritten');
-      expect(written).toBeDefined();
-      expect(written!.args['value']).toBe(0n);
-      expect(events.feedback).toHaveLength(1);
-      expect(events.feedback[0]).toMatchObject({ agentId, clientAddress: fork.hook, value: 0n, tag1: 'agentfi.job', tag2: 'rejected' });
-      expect(rejected.escrow!.feedbackStatus).toBe('written');
+      expect(events.hook.find((e) => e.eventName === 'FeedbackWritten')).toBeUndefined();
+      const skipped = events.hook.find((e) => e.eventName === 'FeedbackSkipped');
+      expect(skipped).toBeDefined();
+      expect(events.feedback).toHaveLength(0);
+      expect(rejected.escrow!.feedbackStatus).toBe('skipped:not-verdict');
 
       const [count, value, decimals] = await forkClient(fork.anvilRpc).readContract({
         address: fork.reputationRegistry,
@@ -556,13 +559,14 @@ describe.skipIf(!ctx)('ERC-8183 escrow + ERC-8004 reputation on a Base Sepolia f
         functionName: 'getSummary',
         args: [agentId, [fork.hook], 'agentfi.job', 'rejected'],
       });
-      expect(count).toBe(1n);
+      expect(count).toBe(0n);
       expect(value).toBe(0n);
       log(`contest: getSummary(#${agentId}, [hook], "agentfi.job", "rejected") = count ${count}, value ${value}, decimals ${decimals}`);
 
+      // The backend still builds and serves the feedback file it committed in optParams; the hook
+      // just did not record it (C3d decides what the contest flow sends once it is an operator review).
       const file = await fetchFeedbackFile(backend, created.id);
       expect(file.status).toBe(200);
-      expect(keccak256(file.bytes)).toBe(events.feedback[0]!.feedbackHash);
       expect(file.json).toMatchObject({ outcome: 'rejected', jobId: created.id });
     });
   });

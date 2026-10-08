@@ -16,7 +16,8 @@
  *  - Who signs: the provider's own wallet signs both `register` (so the
  *    minted NFT's `ownerOf` — and its initial agentWallet — is `job.provider`,
  *    which is what the hook's `agent-not-provider` gate checks) and
- *    `setProviderAgentId` (the escrow lets client or provider call it).
+ *    `setProviderAgentId` (provider-only since C2b; the hook verifies the id
+ *    on the provider's first `submit` and keeps it as its canonical id).
  *  - One mint per (agent, chain): the unique `AgentIdentity(agentId, chainId)`
  *    row is claimed as REGISTERING before `register` is enqueued with the
  *    deterministic intentId `erc8004:register:<agentId>:<chainId>`; concurrent
