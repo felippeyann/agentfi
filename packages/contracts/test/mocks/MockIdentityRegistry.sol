@@ -123,9 +123,12 @@ contract GasGriefingIdentityRegistry {
 
 /// @dev Worst case for the binding guard on `submit`: `ownerOf` burns the whole cap it is given, and
 ///      `getAgentWallet` answers `answer` only when it still has at least `threshold` gas on entry
-///      (i.e. it received essentially the full `identityCallGasLimit`), otherwise the zero address.
-///      Immutables only, so the probe itself reads no storage before measuring.
+///      (i.e. it received essentially the full `identityCallGasLimit`), otherwise the zero address;
+///      when it answers it first burns its gas down to `LEAVE`, so the hook must pay for recording
+///      the canonical id out of its own reserve. Immutables only: the probe reads no storage
+///      before measuring.
 contract CapProbeIdentityRegistry {
+    uint256 internal constant LEAVE = 1_000;
     address public immutable answer;
     uint256 public immutable threshold;
 
@@ -143,6 +146,7 @@ contract CapProbeIdentityRegistry {
 
     function getAgentWallet(uint256) external view returns (address) {
         if (gasleft() < threshold) return address(0);
+        while (gasleft() > LEAVE) {}
         return answer;
     }
 }

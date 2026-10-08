@@ -1599,6 +1599,28 @@ contract ReputationHookTest is Test {
         assertEq(hungry.callCount(), 1);
     }
 
+    /// @dev Worst case for the penalty record: a very large URI uses up `GAS_RESERVE` (the pre-call
+    ///      check binds) and the registry burns its whole cap on a verdict. What the hook keeps after
+    ///      the call (1/64 + `FEEDBACK_CALL_RESERVE`) must still pay for `FeedbackFailed`, the cold
+    ///      `penalties` SSTORE and `AgentPenalized`: at the estimated gas the penalty is recorded and
+    ///      one unit below the guard reverts (not an out-of-gas in the penalty path).
+    function test_WorstCase_Verdict_BurntCap_PenaltyStillRecorded() public {
+        GasBurningRegistry burner = new GasBurningRegistry();
+        ReputationHook h = _newHook(address(burner), address(identity), evaluator, MIN_BUDGET);
+        uint256 jobId = _submitted(address(h), AGENT_ID);
+        bytes memory params = abi.encode(_uriOfLength(40_000), FEEDBACK_HASH);
+
+        uint256 minimal = _minimalGas(h, jobId, false, params);
+        (, uint256 required) = _expectGuardRevert(h, jobId, false, params, minimal - 1);
+        assertEq(required, _feedbackCallRequirement(h), "the pre-call check binds in the worst case");
+
+        Vm.Log[] memory logs = _hookLogsAt(h, evaluator, _settleCall(jobId, false, VERDICT, params), minimal);
+        assertEq(logs.length, 2);
+        assertEq(logs[0].topics[0], FAILED);
+        assertEq(logs[1].topics[0], PENALIZED);
+        assertEq(h.penalties(AGENT_ID), 1);
+    }
+
     // ----- the binding guard on submit ---------------------------------------
 
     /// @notice Same property on `submit`: the lowest gas at which a provider's first `submit`
@@ -1618,9 +1640,12 @@ contract ReputationHookTest is Test {
     }
 
     /// @dev `ownerOf` burns its whole cap and `getAgentWallet` answers only if it received
-    ///      (essentially) its full cap: at the estimated gas the binding is still recorded.
+    ///      (essentially) its full cap: at the estimated gas the binding is still recorded. The 2 000
+    ///      gas of slack covers the probe's own dispatch without the optimizer (`forge coverage`); a
+    ///      `BIND_RESERVE` too small to cover the first call's overhead would leave the second call
+    ///      ~3 000+ gas short and fail this test.
     function test_WorstCase_FirstSubmit_SecondIdentityCallGetsFullCap() public {
-        CapProbeIdentityRegistry probe = new CapProbeIdentityRegistry(provider, IDENTITY_GAS - 300);
+        CapProbeIdentityRegistry probe = new CapProbeIdentityRegistry(provider, IDENTITY_GAS - 2_000);
         ReputationHook h = _newHook(address(registry), address(probe), evaluator, MIN_BUDGET);
         uint256 jobId = _funded(address(h), AGENT_ID);
         uint256 minimal = _minimalSubmitGas(h, jobId);
