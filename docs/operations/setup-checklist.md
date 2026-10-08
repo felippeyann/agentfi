@@ -177,6 +177,8 @@ TRANSACTION_WORKER_ENABLED=true
 TRANSACTION_WORKER_STOP_ON_REDIS_QUOTA=true
 ```
 
+The worker service also runs payment recovery and the ERC-8183 settlement worker / expiry sweep (C3c); the API replicas with the worker disabled run none of them.
+
 Worker command:
 
 ```bash
