@@ -23,7 +23,7 @@ Rate limits are tier-based (FREE / PRO / ENTERPRISE) and keyed by `agentId` or I
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/health` | None | Liveness check |
-| GET | `/health/ready` | None | Readiness check (DB, Redis, RPC, Turnkey) |
+| GET | `/health/ready` | None | Readiness check (DB, Redis, RPC, Turnkey); result cached 5 s, 30 calls/min per client IP (429) |
 
 ---
 
@@ -368,8 +368,10 @@ All admin routes require `x-admin-secret` header. Local-only by default.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/mcp/sse` | Agent (optional) | SSE stream for tool calls |
-| POST | `/mcp/messages?sessionId=` | Session | JSON-RPC message handler |
+| GET | `/mcp/sse` | Agent (optional), `x-api-key` header only | SSE stream for tool calls |
+| POST | `/mcp/messages?sessionId=` | Session + the same `x-api-key` | JSON-RPC message handler |
+
+**Authentication and limits (S6).** Send the agent key in the `x-api-key` header. A key in the query string (`?apiKey=`, `?api_key=`, `?key=`, `?token=`) is refused with `400 API_KEY_IN_QUERY`, because URLs reach access logs (credential-like query parameters are also redacted from the request log). Without a key the session can list tools (directory scans) but every tool call fails. Each session is bound to the key that opened it: `POST /mcp/messages` with another key, or without the key, is `403 MCP_SESSION_KEY_MISMATCH`. Open sessions are capped per key (`MCP_SSE_MAX_SESSIONS_PER_KEY`, default 5; per client IP for keyless sessions; `429 MCP_SESSION_LIMIT`) and server-wide (`MCP_SSE_MAX_SESSIONS`, default 200; `503 MCP_SESSIONS_FULL` with `Retry-After`), and a session with no message for `MCP_SSE_IDLE_TIMEOUT_SECONDS` (default 900) is closed. `get_transaction_status` accepts only an id of letters, digits, `_` and `-`.
 
 **Backend MCP Proxy Tools** (16):
 `get_wallet`, `get_balance`, `get_allowances`, `simulate_swap`, `execute_swap`, `execute_transfer`, `supply_aave`, `withdraw_aave`, `supply_compound`, `withdraw_compound`, `deposit_erc4626`, `withdraw_erc4626`, `swap_curve`, `get_transaction_status`, `list_transactions`, `get_agent_policy`
