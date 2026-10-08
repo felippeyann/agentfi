@@ -1889,6 +1889,13 @@ export interface paths {
          *     (`escrow.providerAgentIdStatus = BINDING`) answers 200 with
          *     `escrow.deferredSubmitAt` set: the `submit` is sent automatically once
          *     the binding is BOUND / FAILED / SKIPPED.
+         *
+         *     The transition is conditional on the status the request read (C3c):
+         *     when another request changed the job first (e.g. two concurrent
+         *     `COMPLETED`), this one answers 409 `JOB_STATUS_CONFLICT` and none of
+         *     its effects run. A cancellation of an ERC-8183 job whose deliverable
+         *     is already Submitted on-chain is accepted in the database but its
+         *     refund is refused (`escrow.escrowError`, operator alert).
          */
         patch: {
             parameters: {
@@ -1924,8 +1931,11 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
                 /**
                  * @description `ESCROW_NOT_FUNDED` — ERC-8183 job accepted before the budget was
-                 *     locked on-chain (body carries `onChainStatus`); or the provider
-                 *     record is missing (legacy payment aborted).
+                 *     locked on-chain (body carries `onChainStatus`); `JOB_STATUS_CONFLICT`
+                 *     — the job changed while this request was processed (body carries the
+                 *     current `status` and `onChainStatus`; re-read the job and retry if
+                 *     still valid); or the provider record is missing (legacy payment
+                 *     aborted).
                  */
                 409: {
                     headers: {
@@ -1938,7 +1948,8 @@ export interface paths {
                 /**
                  * @description ERC-8183 chain only. `ESCROW_SUBMIT_FAILED` — the provider's `submit`
                  *     could not be queued (`reason`, sanitized); the job is returned to
-                 *     `ACCEPTED` so the completion can be retried.
+                 *     `ACCEPTED` so the completion can be retried (unless a `submit` of
+                 *     the job is already in flight).
                  */
                 503: {
                     headers: {
@@ -3568,7 +3579,10 @@ export interface components {
          *     `onChainStatus` is the last confirmed step: `CREATING → OPEN → BUDGET_SET
          *     → APPROVED → FUNDED → SUBMITTED → SETTLING → COMPLETED | REJECTED`;
          *     `FUNDED`/`SUBMITTED → EXPIRED` after `expiresAt` (claimRefund); `FAILED`
-         *     when a step before `FUNDED` failed (nothing locked; job `FAILED`).
+         *     when a step before `FUNDED` failed (nothing locked; job `FAILED`);
+         *     `EXPIRED_UNFUNDED` when the job expired while still Open on-chain
+         *     (nothing was ever locked). The backend reconciles this value from
+         *     `getJob` (C3c), so it can move forward without a new request.
          */
         JobEscrow: {
             /** @enum {string} */
@@ -3579,7 +3593,7 @@ export interface components {
             /** @description uint256 job id as a decimal string. */
             onChainJobId?: string | null;
             /** @enum {string|null} */
-            onChainStatus?: "CREATING" | "OPEN" | "BUDGET_SET" | "APPROVED" | "FUNDED" | "SUBMITTED" | "SETTLING" | "COMPLETED" | "REJECTED" | "EXPIRED" | "FAILED" | null;
+            onChainStatus?: "CREATING" | "OPEN" | "BUDGET_SET" | "APPROVED" | "FUNDED" | "SUBMITTED" | "SETTLING" | "COMPLETED" | "REJECTED" | "EXPIRED" | "EXPIRED_UNFUNDED" | "FAILED" | null;
             /** @description Operator evaluator signer (decision D5). */
             evaluator?: string | null;
             /** @description Budget in token base units (USDC, 6 decimals). */
