@@ -10,8 +10,9 @@ Claude Desktop using two AgentFi MCP connections against the local dev stack:
 5. The requester checks trust, and the operator shows P&L.
 
 The demo is intentionally no-reward so it works on the zero-credential dev
-stack. Paid jobs use the same flow, but require real-chain credentials and a
-funded requester wallet.
+stack. The paid variant (section 6) runs the same story with a USDC budget
+escrowed on-chain (ERC-8183) and ERC-8004 reputation written at settlement; it
+needs a backend with the escrow deployed and funded agent wallets.
 
 ## 1. Start AgentFi locally
 
@@ -91,6 +92,84 @@ curl http://localhost:3000/v1/agents/me/pnl \
 For this no-reward demo, P&L should remain near zero while still proving the
 accounting surface works. In a paid A2A demo, the same MCP tool shows requester
 costs and provider earnings once payment confirms.
+
+## 6. Paid variant: USDC escrow on Base Sepolia
+
+This is the G3 story: Claude hires an agent through AgentFi MCP, the budget is
+locked in AgentFi's ERC-8183 `AgentJobEscrow`, the provider delivers, the
+operator evaluator settles and the escrow's reputation hook writes ERC-8004
+feedback for the provider.
+
+Prerequisites:
+
+- A backend with the escrow on chain 84532: `AGENT_JOB_ESCROW_ADDRESS_84532`,
+  `REPUTATION_HOOK_ADDRESS_84532`, `ESCROW_EVALUATOR_PRIVATE_KEY`, an RPC for
+  84532 and both workers running (C4 runbook in
+  [testnet-log.md](../project/testnet-log.md)). Until C4 is deployed, the
+  local fork stack from [examples/escrow-erc8183](../../examples/escrow-erc8183/README.md)
+  (`npm run e2e:escrow-fork:stack`) is a full stand-in.
+- Two agents on 84532 whose API keys go into the `agentfi-requester` and
+  `agentfi-provider` connections (`AGENTFI_API_URL` = that backend). The
+  requester's wallet needs at least the reward in USDC plus a little ETH for
+  gas; the provider's wallet needs ETH for `submit` and its first-job ERC-8004
+  `register` / `setProviderAgentId`. `node examples/escrow-erc8183/index.mjs`
+  registers and funds such a pair and prints both API keys.
+- A reward of at least 1 USDC: the hook skips feedback below its
+  `minFeedbackBudget`.
+
+Prompts (replace `<provider-id>` and `<job-id>`):
+
+1. Requester — hire with escrow:
+
+   > Using only the agentfi-requester MCP server, fetch provider
+   > `<provider-id>`'s trust report, then hire it with post_job: payload
+   > `{"task":"risk-summary","question":"Risk of holding idle ETH versus USDC on Base for the next 24 hours?"}`,
+   > reward_amount "1", chain_id 84532 (the reward is in USDC). Show the job
+   > id and `escrow.onChainStatus`.
+
+2. Requester — watch the funding:
+
+   > Using get_job on the agentfi-requester server, check job `<job-id>`
+   > every 15 seconds until `escrow.onChainStatus` is FUNDED (stop and show
+   > `escrow.escrowError` if it is FAILED). List each status you saw.
+
+   Expected: `CREATING → OPEN → BUDGET_SET → APPROVED → FUNDED`. An accept
+   before `FUNDED` is refused with `ESCROW_NOT_FUNDED`.
+
+3. Provider — accept and deliver:
+
+   > Using only the agentfi-provider MCP server, check the inbox, confirm job
+   > `<job-id>` is FUNDED, accept it, then complete it with a structured result
+   > containing summary, riskLevel and nextAction.
+
+   Completing moves the job to `PAYMENT_PENDING`; the provider's wallet
+   submits `keccak256(result)` on-chain (`SUBMITTED`; sent automatically once
+   its ERC-8004 identity is bound, `escrow.providerAgentIdStatus`).
+
+4. Requester — settlement:
+
+   > Using get_job on the agentfi-requester server, check job `<job-id>` until
+   > its status is COMPLETED, then report `escrow.settleTxHash`,
+   > `escrow.platformFeeAmount` and `escrow.feedbackStatus`.
+
+   Expected: `escrow.onChainStatus = COMPLETED`, the provider paid the budget
+   minus the platform fee (30 bps by default), `feedbackStatus = written`. The feedback file
+   is public at `GET /v1/jobs/<job-id>/feedback.json`.
+
+5. Requester — trust and P&L:
+
+   > Fetch provider `<provider-id>`'s trust report again with
+   > get_agent_trust_report and compare it with step 1, then call get_my_pnl.
+
+   The trust report is AgentFi's own score today; reading the on-chain
+   ERC-8004 summary into it is task R4.
+
+Contest instead of paying: with `ESCROW_EVALUATION_DELAY_SECONDS` above 0 on
+the backend (default 0 settles as soon as `submit` confirms), replace step 4
+with "read job `<job-id>` with get_job; while it is PAYMENT_PENDING and
+SUBMITTED, contest_job it with a reason". The evaluator then sends `reject`:
+`escrow.onChainStatus = REJECTED`, the requester is refunded in full and the
+job ends `PAYMENT_FAILED`.
 
 ## Demo talk track
 

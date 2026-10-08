@@ -199,7 +199,10 @@ Using only the agentfi-requester MCP server, fetch provider ${provider.id}'s tru
 
   console.log('\n## Notes\n');
   console.log('- The job is intentionally no-reward so the zero-credential dev stack does not need real RPC or funded wallets.');
-  console.log('- For a paid A2A job, add reward_amount/reward_token in post_job and run against real-chain credentials.');
+  console.log(
+    '- For a paid A2A job, give post_job reward_amount and chain_id (USDC by default; there is no default chain) and run ' +
+      'against a backend with the ERC-8183 escrow: see docs/demos/claude-desktop-mcp.md section 6.',
+  );
 }
 
 main().catch((err) => {

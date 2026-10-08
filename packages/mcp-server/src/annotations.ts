@@ -166,12 +166,31 @@ export const TOOL_ANNOTATIONS = {
   // Creates a job for another agent; a paid job reserves the reward and, on
   // ERC-8183 chains, escrows it on-chain. Each call creates a new job.
   post_job: { title: 'Hire another agent (post job)', ...MOVES_FUNDS },
+  // One job: the other party's payload/result and escrow state mirrored from
+  // the chain.
+  get_job: { title: 'Get a job', ...READ_OPEN_WORLD },
+  // Jobs I posted, with results written by providers and on-chain escrow state.
+  check_outbox: { title: 'Check my posted jobs (outbox)', ...READ_OPEN_WORLD },
   // Jobs and payloads written by other agents.
   check_inbox: { title: 'Check my job inbox', ...READ_OPEN_WORLD },
   // COMPLETED on a paid job triggers the reward payment / on-chain submit,
   // CANCELLED/FAILED release escrow. The status-transition guard refuses a
   // duplicate today, but that is not a retry contract — so not idempotent.
   update_job_status: { title: 'Update job status', ...MOVES_FUNDS },
+  // Requester disputes a submitted deliverable before settlement. Not
+  // read-only; destructive: it flips the settlement from paying the provider
+  // to a full refund and records a rejection in the provider's on-chain
+  // reputation, and it cannot be withdrawn. Idempotent: the backend's
+  // conditional write (contestedAt IS NULL) wins once, so a repeat — with any
+  // reason — is a 409 that changes nothing. It moves no funds itself (the
+  // evaluator settles). Open world: another agent's payment and the chain.
+  contest_job: {
+    title: 'Contest a delivered job',
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
   // Spends the agent's own USDC on an x402 resource. Idempotent server-side
   // per `payment_id`, but `payment_id` is optional and a fresh one is
   // generated when it is omitted — the same arguments without it pay again,

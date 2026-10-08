@@ -29,13 +29,32 @@ import {
 } from '../../services/job/escrow-erc8183.service.js';
 const reputationService = new ReputationService();
 
+/**
+ * A paid job names its chain and its token (X3a). The schema used to default
+ * a reward to `chainId: 1, token: 'ETH'`, so a client that left them out —
+ * MCP `post_job` did — silently created an Ethereum-mainnet ETH job on the
+ * legacy direct-payment path instead of an escrowed USDC job (D8). Both are
+ * now required: a missing one is a 400 VALIDATION_FAILED whose `details`
+ * say what to set.
+ */
+export const REWARD_CHAIN_ID_REQUIRED =
+  'reward.chainId is required for a paid job: set it to the chain the reward is paid on (e.g. 84532 for Base Sepolia, 8453 for Base). There is no default chain.';
+export const REWARD_TOKEN_REQUIRED =
+  'reward.token is required for a paid job: name the reward token ("USDC"; escrow-enabled chains accept only USDC, decision D8). There is no default token.';
+
 const createJobSchema = z.object({
   providerId: z.string().cuid(),
   payload: z.record(z.any()),
   reward: z.object({
     amount: z.string(),
-    token: z.string().default('ETH'),
-    chainId: z.number().default(1),
+    token: z.string({ required_error: REWARD_TOKEN_REQUIRED }).min(1, REWARD_TOKEN_REQUIRED),
+    chainId: z
+      .number({
+        required_error: REWARD_CHAIN_ID_REQUIRED,
+        invalid_type_error: 'reward.chainId must be a number (an EVM chain id such as 84532)',
+      })
+      .int()
+      .positive(),
   }).optional(),
   signature: z.string().optional(),
 });
@@ -69,12 +88,13 @@ export async function jobRoutes(fastify: FastifyInstance) {
   /**
    * POST /v1/jobs — create a new service request (job) for another agent.
    *
-   * On a chain where the ERC-8183 escrow is configured (C3), a paid job is
-   * USDC-only (decision D8) and its budget is escrowed on-chain through
-   * `AgentJobEscrow`: the requester's wallet runs createJob → setBudget →
-   * approve → fund from the transaction queue, and the Job reports progress
-   * in `escrow.onChainStatus`. Everywhere else the legacy (DB reservation +
-   * optional EscrowModule lock) path is unchanged.
+   * A paid job (`reward`) must name `reward.chainId` and `reward.token`
+   * (X3a: no mainnet/ETH default). On a chain where the ERC-8183 escrow is
+   * configured (C3), a paid job is USDC-only (decision D8) and its budget is
+   * escrowed on-chain through `AgentJobEscrow`: the requester's wallet runs
+   * createJob → setBudget → approve → fund from the transaction queue, and
+   * the Job reports progress in `escrow.onChainStatus`. Everywhere else the
+   * legacy (DB reservation + optional EscrowModule lock) path is unchanged.
    */
   fastify.post('/v1/jobs', async (request, reply) => {
     const body = createJobSchema.parse(request.body);
@@ -85,8 +105,10 @@ export async function jobRoutes(fastify: FastifyInstance) {
     });
     if (!provider) return reply.code(404).send({ error: 'Provider agent not found or inactive' });
 
-    const rewardChainId = body.reward?.chainId ?? 1;
-    const rewardToken = body.reward?.token ?? 'ETH';
+    // Only read for a paid job (`reward.amount` set), where the schema
+    // guarantees both values; a free job never touches them.
+    const rewardChainId = body.reward?.chainId ?? 0;
+    const rewardToken = body.reward?.token ?? '';
     const useErc8183 = Boolean(body.reward?.amount) && isErc8183Enabled(rewardChainId);
 
     let requester: { id: string; walletId: string; safeAddress: string } | null = null;

@@ -1649,7 +1649,11 @@ export interface paths {
         put?: never;
         /**
          * Create a service request for another agent
-         * @description On a chain where the ERC-8183 `AgentJobEscrow` is configured
+         * @description A paid job (`reward`) must name `reward.chainId` and `reward.token`:
+         *     there is no Ethereum-mainnet / ETH default any more (X3a), so a
+         *     missing one is `400 VALIDATION_FAILED`.
+         *
+         *     On a chain where the ERC-8183 `AgentJobEscrow` is configured
          *     (`AGENT_JOB_ESCROW_ADDRESS_<chainId>`), a paid job is **USDC-only**
          *     (decision D8) and its budget is escrowed on-chain: the requester's wallet
          *     runs `createJob → setBudget → approve → fund` from the transaction queue
@@ -1682,10 +1686,11 @@ export interface paths {
                     };
                 };
                 /**
-                 * @description Escrow reservation failed (daily volume would be exceeded), or on an
-                 *     ERC-8183 chain: `ERC8183_USDC_ONLY` (reward token is not USDC / the
-                 *     escrow token), `ERC8183_PROVIDER_IS_REQUESTER`,
-                 *     `ERC8183_PROVIDER_IS_EVALUATOR`.
+                 * @description `VALIDATION_FAILED` (e.g. a `reward` without `chainId` or `token`;
+                 *     `details` carries the issues), escrow reservation failed (daily
+                 *     volume would be exceeded), or on an ERC-8183 chain:
+                 *     `ERC8183_USDC_ONLY` (reward token is not USDC / the escrow token),
+                 *     `ERC8183_PROVIDER_IS_REQUESTER`, `ERC8183_PROVIDER_IS_EVALUATOR`.
                  */
                 400: {
                     headers: {
@@ -3311,11 +3316,38 @@ export interface components {
             txLimitThisPeriod?: number | null;
             totalFeesCollectedUsd?: string;
         };
+        /**
+         * @description Reward as stored on the job (`{}` for a free job). Jobs created before
+         *     X3a carry the old request defaults (`token: ETH`, `chainId: 1`) when
+         *     the caller left them out.
+         */
         JobReward: {
             amount?: string;
-            /** @default ETH */
+            token?: string;
+            chainId?: number;
+        };
+        /**
+         * @description A paid job names its chain and token; there are no defaults (a missing
+         *     `chainId` or `token` is `400 VALIDATION_FAILED`, the `details` say what
+         *     to set). On an ERC-8183 escrow-enabled chain the token must be USDC
+         *     (`"USDC"` or the escrow's token address), otherwise `400
+         *     ERC8183_USDC_ONLY` (decision D8).
+         */
+        CreateJobReward: {
+            /**
+             * @description Human-readable amount, e.g. `"1.5"` (USDC has 6 decimals).
+             * @example 1.5
+             */
+            amount: string;
+            /**
+             * @description Token symbol or address. New jobs use USDC (D8).
+             * @example USDC
+             */
             token: string;
-            /** @default 1 */
+            /**
+             * @description Chain the reward is paid on, e.g. 84532 (Base Sepolia) or 8453 (Base).
+             * @example 84532
+             */
             chainId: number;
         };
         CreateJobRequest: {
@@ -3324,7 +3356,7 @@ export interface components {
             payload: {
                 [key: string]: unknown;
             };
-            reward?: components["schemas"]["JobReward"];
+            reward?: components["schemas"]["CreateJobReward"];
             signature?: string;
         };
         UpdateJobRequest: {
