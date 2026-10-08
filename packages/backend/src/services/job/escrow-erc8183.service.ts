@@ -1443,8 +1443,9 @@ export async function resolveEscrowJob(deps: Erc8183Deps, params: ResolveParams)
   if (!inFlight.ok) return refusal('SETTLEMENT_IN_PROGRESS', `A settlement transaction may still mine: ${inFlight.reason}`);
 
   const at = nowOf(deps);
+  const previous = { status: job.status, onChainStatus: job.onChainStatus, settleTxHash: job.settleTxHash, reviewLog: job.reviewLog };
   const claimed = await deps.db.job.updateMany({
-    where: { id: job.id, status: job.status, onChainStatus: job.onChainStatus, settleTxHash: job.settleTxHash },
+    where: { id: job.id, status: previous.status, onChainStatus: previous.onChainStatus, settleTxHash: previous.settleTxHash },
     data: {
       onChainStatus: 'SETTLING',
       resolution: params.decision,
@@ -1463,10 +1464,10 @@ export async function resolveEscrowJob(deps: Erc8183Deps, params: ResolveParams)
     by: params.operator,
     decision: params.decision,
     note: params.note,
-    status: job.status,
-    onChainStatus: job.onChainStatus,
+    status: previous.status,
+    onChainStatus: previous.onChainStatus,
   };
-  const log = Array.isArray(job.reviewLog) ? (job.reviewLog as unknown as ReviewLogEntry[]) : [];
+  const log = Array.isArray(previous.reviewLog) ? (previous.reviewLog as unknown as ReviewLogEntry[]) : [];
   await deps.db.job.update({ where: { id: job.id }, data: { reviewLog: [...log, entry] as unknown as Prisma.InputJsonValue } });
 
   let queued = true;
@@ -1479,10 +1480,10 @@ export async function resolveEscrowJob(deps: Erc8183Deps, params: ResolveParams)
     deps.logger.error({ jobId: job.id, err: errorMessage(err) }, 'ERC-8183 resolve recorded but could not be enqueued — recovery will retry');
   }
   deps.logger.warn(
-    { adminAction: 'job_resolve', jobId: job.id, decision: params.decision, by: params.operator, note: params.note, previousStatus: job.status, previousOnChainStatus: job.onChainStatus },
+    { adminAction: 'job_resolve', jobId: job.id, decision: params.decision, by: params.operator, note: params.note, previousStatus: previous.status, previousOnChainStatus: previous.onChainStatus },
     'ERC-8183 operator decision recorded',
   );
-  return { outcome: 'scheduled', resolution: params.decision, previousStatus: job.status, previousOnChainStatus: job.onChainStatus, queued };
+  return { outcome: 'scheduled', resolution: params.decision, previousStatus: previous.status, previousOnChainStatus: previous.onChainStatus, queued };
 }
 
 /**
@@ -1585,7 +1586,7 @@ export function feedbackUriFor(config: Erc8183Config, jobId: string): string {
  * served `no-store`.
  */
 export function isFeedbackFileCommitted(job: { onChainStatus: string | null; feedbackFile: unknown }): boolean {
-  return job.feedbackFile !== null && job.feedbackFile !== undefined && (job.onChainStatus === 'COMPLETED' || job.onChainStatus === 'REJECTED');
+  return job.feedbackFile != null && (job.onChainStatus === 'COMPLETED' || job.onChainStatus === 'REJECTED');
 }
 
 async function buildFeedbackFile(deps: Erc8183Deps, job: EscrowJobRow, outcome: FeedbackFile['outcome']): Promise<FeedbackFile> {
@@ -1853,7 +1854,7 @@ export async function processSettlementJob(deps: Erc8183Deps, jobLike: Settlemen
  *    (a CANCELLED/FAILED job Submitted on-chain is settled only this way).
  */
 async function settle(deps: Erc8183Deps, job: EscrowJobRow, chainStatus: number): Promise<SettlementResult> {
-  const decided = job.resolution !== null;
+  const decided = job.resolution != null;
   if (chainStatus !== CHAIN_JOB_STATUS.Submitted) {
     if (job.status !== 'PAYMENT_PENDING' && !decided) {
       return { outcome: 'noop', reason: `job is ${job.status}, not PAYMENT_PENDING` };
@@ -1959,7 +1960,7 @@ async function executeDecision(deps: Erc8183Deps, job: EscrowJobRow, decision: R
       await deps.db.job.update({ where: { id: job.id }, data: { feedbackFile: file as unknown as Prisma.InputJsonValue } });
     }
     optParams = encodeAbiParameters([{ type: 'string' }, { type: 'bytes32' }], [feedbackUriFor(deps.config, job.id), feedbackHashOf(file)]);
-  } else if (job.feedbackFile !== null) {
+  } else if (job.feedbackFile != null) {
     // Nothing is committed by a "0x" reject: drop a file an earlier, unmined attempt generated.
     await deps.db.job.update({ where: { id: job.id }, data: { feedbackFile: Prisma.DbNull } });
   }
@@ -2112,7 +2113,7 @@ async function rejectForCancellation(
       feedbackStatus: parsed.feedbackStatus,
       escrowError: null,
       // A "0x" reject commits no feedback file (C3d: only a mined complete / verdict publishes one).
-      ...(job.feedbackFile !== null ? { feedbackFile: Prisma.DbNull } : {}),
+      ...(job.feedbackFile != null ? { feedbackFile: Prisma.DbNull } : {}),
     },
   });
   await finalizeAfterRefund(deps, job, `Rejected by evaluator (${reason}) — refunded on-chain in tx ${txHash}`);
@@ -2130,6 +2131,7 @@ async function claimRefund(deps: Erc8183Deps, job: EscrowJobRow, chainStatus: nu
     }
     return { outcome: 'noop', reason: 'on-chain job is Open — nothing to claim' };
   }
+  const before = reviewSnapshot(job);
   const escrow = getAddress(job.escrowContract!);
   const { signer, txHash } = await sendEvaluatorTx(deps, job.escrowChainId!, {
     address: escrow,
@@ -2144,25 +2146,38 @@ async function claimRefund(deps: Erc8183Deps, job: EscrowJobRow, chainStatus: nu
   await deps.db.job.update({
     where: { id: job.id },
     // claimRefund carries no feedback params: a file an earlier, unmined settlement generated was never committed.
-    data: { onChainStatus: 'EXPIRED', settleTxHash: txHash, escrowError: null, ...(job.feedbackFile !== null ? { feedbackFile: Prisma.DbNull } : {}) },
+    data: { onChainStatus: 'EXPIRED', settleTxHash: txHash, escrowError: null, ...(job.feedbackFile != null ? { feedbackFile: Prisma.DbNull } : {}) },
   });
   await finalizeAfterRefund(deps, job, `Expired on-chain — budget refunded in tx ${txHash}`);
-  await alertReviewExpired(deps, job);
+  await alertReviewExpired(deps, job, before);
   deps.logger.warn({ jobId: job.id, txHash }, 'ERC-8183 job expired — refund claimed');
   return { outcome: 'settled', action: 'claimRefund', onChainStatus: 'EXPIRED', txHash, feedbackStatus: null };
 }
 
+type ReviewSnapshot = Pick<EscrowJobRow, 'onChainStatus' | 'status' | 'resolution' | 'contestedAt' | 'settleTxHash'>;
+
+/** The review-relevant fields of a job before a settlement path updates it. */
+function reviewSnapshot(job: EscrowJobRow): ReviewSnapshot {
+  return {
+    onChainStatus: job.onChainStatus,
+    status: job.status,
+    resolution: job.resolution ?? null,
+    contestedAt: job.contestedAt,
+    settleTxHash: job.settleTxHash,
+  };
+}
+
 /** C3d: a job still waiting for an operator decision ended at expiry — full refund, no feedback. */
-async function alertReviewExpired(deps: Erc8183Deps, job: EscrowJobRow): Promise<void> {
-  if (!isHeldForReview(job) || job.resolution !== null) return;
+async function alertReviewExpired(deps: Erc8183Deps, job: EscrowJobRow, before: ReviewSnapshot): Promise<void> {
+  if (!isHeldForReview(before) || before.resolution != null) return;
   await raiseAlert(deps, {
     kind: 'review-expired',
     jobId: job.id,
     chainId: job.escrowChainId,
     message:
-      `Job ${job.id} (${job.onChainStatus === 'CONTESTED' ? 'contested' : `${job.status} while Submitted on-chain`}) expired ` +
+      `Job ${job.id} (${before.onChainStatus === 'CONTESTED' ? 'contested' : `${before.status} while Submitted on-chain`}) expired ` +
       'without an operator decision: the requester was refunded in full and no ERC-8004 feedback was written.',
-    details: { status: job.status, onChainStatus: job.onChainStatus, contestedAt: job.contestedAt?.toISOString() ?? null },
+    details: { status: before.status, onChainStatus: before.onChainStatus, contestedAt: before.contestedAt?.toISOString() ?? null },
   });
 }
 
@@ -2205,20 +2220,21 @@ async function finalizeAfterRefund(deps: Erc8183Deps, job: EscrowJobRow, reason:
 async function reconcileTerminal(deps: Erc8183Deps, job: EscrowJobRow, chainStatus: number): Promise<OnChainStatus> {
   const onChainStatus: OnChainStatus =
     chainStatus === CHAIN_JOB_STATUS.Completed ? 'COMPLETED' : chainStatus === CHAIN_JOB_STATUS.Rejected ? 'REJECTED' : 'EXPIRED';
+  const before = reviewSnapshot(job);
   await deps.db.job.update({
     where: { id: job.id },
     // Expiry carries no feedback params: an uncommitted file must not be published as if it were.
-    data: { onChainStatus, escrowError: null, ...(onChainStatus === 'EXPIRED' && job.feedbackFile !== null ? { feedbackFile: Prisma.DbNull } : {}) },
+    data: { onChainStatus, escrowError: null, ...(onChainStatus === 'EXPIRED' && job.feedbackFile != null ? { feedbackFile: Prisma.DbNull } : {}) },
   });
   deps.logger.warn(
     { jobId: job.id, onChainJobId: job.onChainJobId, onChainStatus, jobStatus: job.status },
     'ERC-8183 job already terminal on-chain — reconciled without sending',
   );
 
-  const decision = job.resolution as ReviewDecision | null;
+  const decision = before.resolution as ReviewDecision | null;
   const contradicted =
     onChainStatus !== 'EXPIRED' &&
-    (decision !== null ? (decision === 'pay') !== (onChainStatus === 'COMPLETED') : isHeldForReview(job) && onChainStatus === 'COMPLETED');
+    (decision !== null ? (decision === 'pay') !== (onChainStatus === 'COMPLETED') : isHeldForReview(before) && onChainStatus === 'COMPLETED');
   if (contradicted) {
     await raiseAlert(deps, {
       kind: 'review-overridden',
@@ -2227,10 +2243,10 @@ async function reconcileTerminal(deps: Erc8183Deps, job: EscrowJobRow, chainStat
       message:
         `Job ${job.id} is ${onChainStatus} on-chain although ${decision ? `the operator decided "${decision}"` : 'it was held for operator review'} — ` +
         'the DB follows the chain; check the settlement transactions of the evaluator key.',
-      details: { status: job.status, onChainStatus: job.onChainStatus, resolution: decision, settleTxHash: job.settleTxHash },
+      details: { status: before.status, onChainStatus: before.onChainStatus, resolution: decision, settleTxHash: before.settleTxHash },
     });
   }
-  if (onChainStatus === 'EXPIRED') await alertReviewExpired(deps, job);
+  if (onChainStatus === 'EXPIRED') await alertReviewExpired(deps, job, before);
 
   if (onChainStatus === 'COMPLETED') {
     if (job.status === 'PAYMENT_PENDING' || decision === 'pay') await finalizeSettled(deps, job, true, '');
@@ -2470,7 +2486,7 @@ export async function reconcileEscrowJob(deps: Erc8183Deps, jobId: string): Prom
   if (chain.status === CHAIN_JOB_STATUS.Submitted) {
     // C3d: a recorded operator decision settles the job (its earlier attempt
     // failed, or it was never enqueued); an undecided contest stays on hold.
-    if (job.resolution !== null && ['SUBMITTED', 'CONTESTED', 'SETTLING'].includes(job.onChainStatus ?? '')) {
+    if (job.resolution != null && ['SUBMITTED', 'CONTESTED', 'SETTLING'].includes(job.onChainStatus ?? '')) {
       await deps.settlement.add({ jobId: job.id, action: 'resolve' });
       return 'advanced';
     }

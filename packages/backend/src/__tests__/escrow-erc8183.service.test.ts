@@ -16,9 +16,13 @@
  *  - expiry sweep enqueues claimRefund; claimRefund finalizes as FAILED
  *  - payment recovery branch never refunds
  *  - feedback file bytes are stable across key reordering (jsonb round-trip)
+ *  - C3d: a contest holds the job (CONTESTED) — never settled automatically;
+ *    operator decisions pay / refund / quality-rejected / payout-blocked send
+ *    the right call, reason and optParams; receipts surface the rated agent
+ *    id and penalties; expiry alerts; delay clamped to the TTL
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { PrismaClient } from '@prisma/client';
+import { Prisma, type PrismaClient } from '@prisma/client';
 import {
   decodeAbiParameters,
   decodeFunctionData,
@@ -43,6 +47,8 @@ import {
   CHAIN_JOB_STATUS,
   SETTLEMENT_REASONS,
   __resetEscrowTokenCacheForTests,
+  alertExpiringReviews,
+  contestEscrowJob,
   deliverableHashOf,
   enqueueSubmit,
   escrowIntentId,
@@ -52,12 +58,17 @@ import {
   handleFailedSettlementJob,
   isErc8183EnabledWith,
   isEscrowTokenReward,
+  isFeedbackFileCommitted,
   onEscrowTxOutcome,
+  parseHookIdentityEvents,
+  parseSettlementReceipt,
   processSettlementJob,
   pumpFunding,
   recoverErc8183Job,
   requestCancellationReject,
+  resolveEscrowJob,
   serializeFeedbackFile,
+  settlementDelay,
   startEscrow,
   sweepExpiredEscrows,
   toJobResponse,
@@ -118,6 +129,14 @@ function escrowJob(overrides: Partial<JobRow> = {}): JobRow {
     contestedAt: null,
     contestReason: null,
     escrowError: null,
+    providerAgentId: null,
+    resolution: null,
+    resolvedBy: null,
+    resolvedAt: null,
+    resolutionNote: null,
+    reviewLog: null,
+    reviewAlertedAt: null,
+    ratedAgentId: null,
     requester: REQUESTER,
     provider: PROVIDER,
     ...overrides,
@@ -184,6 +203,11 @@ function ordered<T>(rows: T[], orderBy?: { createdAt?: 'asc' | 'desc' }): T[] {
   return orderBy?.createdAt === 'desc' ? [...rows].reverse() : rows;
 }
 
+/** Prisma's JSON null sentinels are stored as SQL NULL. */
+function stored(data: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(data).map(([k, v]) => [k, v === Prisma.DbNull || v === Prisma.JsonNull ? null : v]));
+}
+
 /** In-memory Prisma stand-in covering the queries the orchestrator issues. */
 function makeDb(jobs: JobRow[], txs: TxRow[] = []) {
   const jobTable = new Map(jobs.map((j) => [j.id, j]));
@@ -199,14 +223,14 @@ function makeDb(jobs: JobRow[], txs: TxRow[] = []) {
       update: vi.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
         const row = jobTable.get(where.id);
         if (!row) throw new Error(`job ${where.id} not found`);
-        Object.assign(row, data);
+        Object.assign(row, stored(data));
         return row;
       }),
       updateMany: vi.fn(async ({ where, data }: Args) => {
         let count = 0;
         for (const row of jobTable.values()) {
           if (matchesWhere(row, where)) {
-            Object.assign(row, data);
+            Object.assign(row, stored(data ?? {}));
             count++;
           }
         }
@@ -609,7 +633,8 @@ describe('requestCancellationReject', () => {
 
 // ── Settlement ─────────────────────────────────────────────────────────────
 
-const SUBMITTED_JOB = () => escrowJob({ onChainJobId: '7', onChainStatus: 'SUBMITTED', status: 'PAYMENT_PENDING', deliverableHash: '0x' + 'cd'.repeat(32) });
+const SUBMITTED_JOB = (overrides: Partial<JobRow> = {}) =>
+  escrowJob({ onChainJobId: '7', onChainStatus: 'SUBMITTED', status: 'PAYMENT_PENDING', deliverableHash: '0x' + 'cd'.repeat(32), ...overrides });
 const FUND_TX = () => stepTx('fund', 'job-1', { txHash: '0xf00d000000000000000000000000000000000000000000000000000000000001' });
 
 function completeLogs(feedback: 'written' | 'skipped' | 'failed' | 'none' = 'written'): Log[] {
@@ -687,21 +712,23 @@ describe('processSettlementJob — settle', () => {
     expect(none.jobs.get('job-1')!['feedbackStatus']).toBeNull();
   });
 
-  it('contested → reject with keccak("agentfi.contested"), outcome rejected, finalizer FAILED', async () => {
-    const { deps, jobs, signer, finalize, releaseJobEscrow } = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: rejectLogs() });
-    jobs.get('job-1')!['contestedAt'] = NOW;
-
+  it('C3d (D9): a CONTESTED job is never settled automatically — no complete, no reject', async () => {
+    const { deps, jobs, signer, finalize } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'CONTESTED', status: 'PAYMENT_PENDING', contestedAt: NOW })], {
+      txs: [FUND_TX()],
+    });
     const result = await processSettlementJob(deps, settleJob());
+    expect(result).toMatchObject({ outcome: 'noop', reason: expect.stringContaining('held for operator review') });
+    expect(signer.writeContract).not.toHaveBeenCalled();
+    expect(finalize).not.toHaveBeenCalled();
+    expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'CONTESTED', status: 'PAYMENT_PENDING' });
+  });
 
-    expect(result).toMatchObject({ outcome: 'settled', onChainStatus: 'REJECTED', feedbackStatus: 'skipped:budget-too-small' });
-    const call = signer.writeContract.mock.calls[0]![0];
-    expect(call.functionName).toBe('reject');
-    expect(call.args[1]).toBe(SETTLEMENT_REASONS.contested);
-    expect((jobs.get('job-1')!['feedbackFile'] as FeedbackFile).outcome).toBe('rejected');
-    expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'REJECTED', settleTxHash: SETTLE_HASH });
-    expect(finalize).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'job-1', outcome: 'FAILED', transactionId: null, reason: expect.stringContaining('contested') }));
-    // The DB reservation is released by the finalizer's FAILED branch, not here.
-    expect(releaseJobEscrow).not.toHaveBeenCalled();
+  it('C3d: a contest recorded without the hold (pre-C3d row) is put on hold at the claim instead of rejected', async () => {
+    const { deps, jobs, signer } = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()] });
+    jobs.get('job-1')!['contestedAt'] = NOW; // contestedAt set, onChainStatus still SUBMITTED
+    const result = await processSettlementJob(deps, settleJob());
+    expect(result).toMatchObject({ outcome: 'noop' });
+    expect(signer.writeContract).not.toHaveBeenCalled();
   });
 
   it('reuses a stored feedback file (never regenerated once present with the same outcome)', async () => {
@@ -757,8 +784,8 @@ describe('processSettlementJob — settle', () => {
     expect(releaseJobEscrow).not.toHaveBeenCalled();
   });
 
-  it('reverted complete → contest → the retry sends reject with a feedback file whose outcome is "rejected"', async () => {
-    const { deps, jobs, signer } = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: rejectLogs() });
+  it('reverted complete → contest (allowed: the receipt is a revert) → hold → operator verdict rebuilds the file as "rejected"', async () => {
+    const { deps, jobs, signer, getTransactionReceipt, settlement } = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: rejectLogs() });
     // Attempt 1: complete is sent but reverts. settleTxHash is now set, the
     // feedback file says "completed", nothing was mined.
     signer.waitForTransactionReceipt.mockResolvedValueOnce({ status: 'reverted', logs: [] } as never);
@@ -769,16 +796,25 @@ describe('processSettlementJob — settle', () => {
     expect((jobs.get('job-1')!['feedbackFile'] as FeedbackFile).outcome).toBe('completed');
     expect((signer.writeContract.mock.calls[0]![0] as { functionName: string }).functionName).toBe('complete');
 
-    // Requester contests while the job is back to SUBMITTED.
-    jobs.get('job-1')!['contestedAt'] = NOW;
+    // The requester contests: the last settlement's receipt is a revert, so nothing can still mine.
+    getTransactionReceipt.mockResolvedValueOnce({ status: 'reverted', logs: [] } as never);
+    expect(await contestEscrowJob(deps, { jobId: 'job-1', reason: 'not what I asked' })).toMatchObject({ outcome: 'held' });
+    expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'CONTESTED', contestReason: 'not what I asked' });
 
-    // Attempt 2 (recovery re-enqueue): must reject with a REBUILT file.
-    const result = await processSettlementJob(deps, settleJob(1));
+    // Recovery re-enqueues the settle: held, nothing sent.
+    expect(await processSettlementJob(deps, settleJob(1))).toMatchObject({ outcome: 'noop' });
+    expect(signer.writeContract).toHaveBeenCalledTimes(1);
 
-    expect(result).toMatchObject({ outcome: 'settled', onChainStatus: 'REJECTED' });
+    // The operator's verdict: reject with REASON_QUALITY_REJECTED and a REBUILT file.
+    getTransactionReceipt.mockResolvedValueOnce({ status: 'reverted', logs: [] } as never);
+    expect(await resolveEscrowJob(deps, { jobId: 'job-1', decision: 'quality-rejected', note: 'off-brief', operator: 'ops@test' })).toMatchObject({ outcome: 'scheduled' });
+    expect(settlement.add).toHaveBeenCalledWith({ jobId: 'job-1', action: 'resolve' });
+    const result = await processSettlementJob(deps, { data: { jobId: 'job-1', action: 'resolve' }, attemptsMade: 0, opts: { attempts: 3 } });
+
+    expect(result).toMatchObject({ outcome: 'settled', action: 'resolve', onChainStatus: 'REJECTED' });
     const second = signer.writeContract.mock.calls[1]![0] as { functionName: string; args: readonly unknown[] };
     expect(second.functionName).toBe('reject');
-    expect(second.args[1]).toBe(SETTLEMENT_REASONS.contested);
+    expect(second.args[1]).toBe(SETTLEMENT_REASONS.qualityRejected);
     const file = jobs.get('job-1')!['feedbackFile'] as FeedbackFile;
     expect(file.outcome).toBe('rejected');
     const [, hash] = decodeAbiParameters([{ type: 'string' }, { type: 'bytes32' }], second.args[2] as Hex);
@@ -1129,5 +1165,386 @@ describe('toJobResponse', () => {
     const view = toJobResponse({ id: 'legacy', status: 'PENDING', escrowKind: null, onChainStatus: null });
     expect(view.escrow).toBeNull();
     expect(view).not.toHaveProperty('escrowKind');
+  });
+});
+
+// ── C3d: contest → operator review (decision D9) ───────────────────────────
+
+const CONTESTED_JOB = (overrides: Partial<JobRow> = {}) =>
+  escrowJob({
+    onChainJobId: '7',
+    onChainStatus: 'CONTESTED',
+    status: 'PAYMENT_PENDING',
+    contestedAt: NOW,
+    contestReason: 'wrong',
+    deliverableHash: '0x' + 'cd'.repeat(32),
+    ...overrides,
+  });
+
+const resolveJob = (attemptsMade = 0) => ({ data: { jobId: 'job-1', action: 'resolve' as const }, attemptsMade, opts: { attempts: 3 } });
+
+function hookLog(eventName: string, args: Record<string, unknown>): Log {
+  return makeLog(REPUTATION_HOOK_ABI, eventName, args, HOOK);
+}
+
+describe('C3d — contestEscrowJob (race rule)', () => {
+  it('holds a PAYMENT_PENDING + SUBMITTED job: CONTESTED, contestedAt/reason recorded, operator alerted with the resolve path and expiresAt', async () => {
+    const { deps, jobs, alert, signer } = makeDeps([SUBMITTED_JOB()]);
+    const outcome = await contestEscrowJob(deps, { jobId: 'job-1', reason: 'off-brief' });
+    expect(outcome).toEqual({ outcome: 'held', contestedAt: NOW });
+    expect(jobs.get('job-1')).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'CONTESTED', contestedAt: NOW, contestReason: 'off-brief' });
+    expect(alert).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'contested', jobId: 'job-1', message: expect.stringContaining('POST /admin/jobs/job-1/resolve') }),
+    );
+    expect((alert.mock.calls[0]![0] as { message: string }).message).toMatch(/claimRefund/);
+    expect(signer.writeContract).not.toHaveBeenCalled();
+  });
+
+  it('is refused once settlement is claimed (SETTLING) or already contested', async () => {
+    for (const row of [SUBMITTED_JOB(), CONTESTED_JOB()]) {
+      if (row['onChainStatus'] === 'SUBMITTED') row['onChainStatus'] = 'SETTLING';
+      const { deps, alert } = makeDeps([row]);
+      expect(await contestEscrowJob(deps, { jobId: 'job-1', reason: null })).toMatchObject({ outcome: 'refused' });
+      expect(alert).not.toHaveBeenCalled();
+    }
+  });
+
+  it('is refused while an evaluator settlement can still mine (receipt missing) or has mined', async () => {
+    const pending = makeDeps([SUBMITTED_JOB({ settleTxHash: SETTLE_HASH })]);
+    pending.getTransactionReceipt.mockRejectedValueOnce(new Error('TransactionReceiptNotFoundError'));
+    expect(await contestEscrowJob(pending.deps, { jobId: 'job-1', reason: null })).toMatchObject({ outcome: 'refused', reason: expect.stringContaining('pending') });
+    expect(pending.jobs.get('job-1')!['onChainStatus']).toBe('SUBMITTED');
+
+    const mined = makeDeps([SUBMITTED_JOB({ settleTxHash: SETTLE_HASH })]);
+    mined.getTransactionReceipt.mockResolvedValueOnce({ status: 'success', logs: [] } as never);
+    expect(await contestEscrowJob(mined.deps, { jobId: 'job-1', reason: null })).toMatchObject({ outcome: 'refused', reason: expect.stringContaining('mined') });
+  });
+
+  it('is refused when the chain no longer says Submitted (the P3 race: a complete mined behind the DB) and unverifiable when unreadable', async () => {
+    const completed = makeDeps([SUBMITTED_JOB()], { chainStatus: CHAIN_JOB_STATUS.Completed });
+    expect(await contestEscrowJob(completed.deps, { jobId: 'job-1', reason: null })).toMatchObject({ outcome: 'refused' });
+    expect(completed.jobs.get('job-1')!['contestedAt']).toBeNull();
+
+    const down = makeDeps([SUBMITTED_JOB()]);
+    down.readContract.mockRejectedValueOnce(new Error('rpc down'));
+    expect(await contestEscrowJob(down.deps, { jobId: 'job-1', reason: null })).toMatchObject({ outcome: 'unverifiable' });
+    expect(down.jobs.get('job-1')!['onChainStatus']).toBe('SUBMITTED');
+  });
+
+  it('the claim is conditional on the row it checked (incl. settleTxHash): a settlement claimed in between wins', async () => {
+    const { deps, jobs, dbMock } = makeDeps([SUBMITTED_JOB()]);
+    // The settlement claims SUBMITTED → SETTLING right after the contest read the row.
+    dbMock.job.updateMany.mockImplementationOnce(async () => {
+      jobs.get('job-1')!['onChainStatus'] = 'SETTLING';
+      return { count: 0 };
+    });
+    expect(await contestEscrowJob(deps, { jobId: 'job-1', reason: null })).toMatchObject({ outcome: 'refused' });
+    expect(dbMock.job.updateMany).toHaveBeenCalledWith({
+      where: { id: 'job-1', status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', contestedAt: null, settleTxHash: null },
+      data: { onChainStatus: 'CONTESTED', contestedAt: NOW, contestReason: null, escrowError: null },
+    });
+  });
+});
+
+describe('C3d — resolveEscrowJob + the resolve settlement', () => {
+  it('records the decision (who, when, note), appends the review log, claims SETTLING and enqueues `resolve`', async () => {
+    const { deps, jobs, settlement } = makeDeps([CONTESTED_JOB()]);
+    const outcome = await resolveEscrowJob(deps, { jobId: 'job-1', decision: 'pay', note: 'deliverable matches the brief', operator: 'alice' });
+    expect(outcome).toEqual({ outcome: 'scheduled', resolution: 'pay', previousStatus: 'PAYMENT_PENDING', previousOnChainStatus: 'CONTESTED', queued: true });
+    expect(jobs.get('job-1')).toMatchObject({
+      onChainStatus: 'SETTLING',
+      resolution: 'pay',
+      resolvedBy: 'alice',
+      resolvedAt: NOW,
+      resolutionNote: 'deliverable matches the brief',
+      reviewLog: [{ at: NOW.toISOString(), by: 'alice', decision: 'pay', note: 'deliverable matches the brief', status: 'PAYMENT_PENDING', onChainStatus: 'CONTESTED' }],
+    });
+    expect(settlement.add).toHaveBeenCalledWith({ jobId: 'job-1', action: 'resolve' });
+  });
+
+  it('pay → complete(agentfi.completed, feedback "completed") → COMPLETED, finalizer CONFIRMED, rated agent id stored', async () => {
+    const { deps, jobs, signer, finalize } = makeDeps([CONTESTED_JOB({ onChainStatus: 'SETTLING', resolution: 'pay' })], {
+      txs: [FUND_TX()],
+      settleLogs: completeLogs('written'),
+    });
+    const result = await processSettlementJob(deps, resolveJob());
+    expect(result).toMatchObject({ outcome: 'settled', action: 'resolve', onChainStatus: 'COMPLETED', feedbackStatus: 'written' });
+    const call = signer.writeContract.mock.calls[0]![0];
+    expect(call.functionName).toBe('complete');
+    expect(call.args[1]).toBe(SETTLEMENT_REASONS.completed);
+    const [uri, hash] = decodeAbiParameters([{ type: 'string' }, { type: 'bytes32' }], call.args[2] as Hex);
+    expect(uri).toBe(feedbackUriFor(config, 'job-1'));
+    const file = jobs.get('job-1')!['feedbackFile'] as FeedbackFile;
+    expect(file.outcome).toBe('completed');
+    expect(hash).toBe(feedbackHashOf(file));
+    expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'COMPLETED', ratedAgentId: '3', feedbackStatus: 'written' });
+    expect(finalize).toHaveBeenCalledWith({ jobId: 'job-1', outcome: 'CONFIRMED', transactionId: null });
+  });
+
+  it('refund + quality-rejected verdict → reject(REASON_QUALITY_REJECTED, feedback "rejected"); the hook writes 0', async () => {
+    const logs = [
+      makeLog(AGENT_JOB_ESCROW_ABI, 'JobRejected', { jobId: 7n, rejector: EVALUATOR, reason: SETTLEMENT_REASONS.qualityRejected }, ESCROW),
+      makeLog(AGENT_JOB_ESCROW_ABI, 'Refunded', { jobId: 7n, client: REQUESTER.safeAddress, amount: BUDGET }, ESCROW),
+      hookLog('FeedbackWritten', { jobId: 7n, agentId: 3n, value: 0n }),
+    ];
+    const { deps, jobs, signer, finalize } = makeDeps([CONTESTED_JOB({ onChainStatus: 'SETTLING', resolution: 'quality-rejected' })], { txs: [FUND_TX()], settleLogs: logs });
+    expect(await processSettlementJob(deps, resolveJob())).toMatchObject({ outcome: 'settled', onChainStatus: 'REJECTED', feedbackStatus: 'written' });
+    const call = signer.writeContract.mock.calls[0]![0];
+    expect(call.functionName).toBe('reject');
+    expect(call.args[1]).toBe(SETTLEMENT_REASONS.qualityRejected);
+    expect(SETTLEMENT_REASONS.qualityRejected).toBe(keccak256(toBytes('agentfi.quality-rejected')));
+    const [, hash] = decodeAbiParameters([{ type: 'string' }, { type: 'bytes32' }], call.args[2] as Hex);
+    expect(hash).toBe(feedbackHashOf(jobs.get('job-1')!['feedbackFile'] as FeedbackFile));
+    expect((jobs.get('job-1')!['feedbackFile'] as FeedbackFile).outcome).toBe('rejected');
+    expect(finalize).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'FAILED', reason: expect.stringContaining('quality-rejected') }));
+  });
+
+  it('refund without verdict → reject(agentfi.contested, "0x"): nothing rated, an earlier unmined file is dropped', async () => {
+    const { deps, jobs, signer } = makeDeps(
+      [CONTESTED_JOB({ onChainStatus: 'SETTLING', resolution: 'refund', feedbackFile: { outcome: 'completed', stale: true } })],
+      { settleLogs: [hookLog('FeedbackSkipped', { jobId: 7n, reason: stringToHex('no-params', { size: 32 }) })] },
+    );
+    expect(await processSettlementJob(deps, resolveJob())).toMatchObject({ outcome: 'settled', onChainStatus: 'REJECTED', feedbackStatus: 'skipped:no-params' });
+    expect(signer.writeContract.mock.calls[0]![0].args).toEqual([7n, SETTLEMENT_REASONS.contested, '0x']);
+    expect(jobs.get('job-1')!['feedbackFile']).toBeNull();
+  });
+
+  it('payout-blocked → reject(REASON_PAYOUT_BLOCKED, "0x") for a PAYMENT_PENDING job whose complete keeps reverting', async () => {
+    const { deps, jobs, signer, getTransactionReceipt, settlement, finalize } = makeDeps([SUBMITTED_JOB({ settleTxHash: SETTLE_HASH, escrowError: 'settle failed after 3 attempts' })]);
+    getTransactionReceipt.mockResolvedValueOnce({ status: 'reverted', logs: [] } as never); // the last complete reverted
+    expect(await resolveEscrowJob(deps, { jobId: 'job-1', decision: 'payout-blocked', note: 'provider blacklisted by USDC', operator: 'ops' })).toMatchObject({ outcome: 'scheduled' });
+    expect(settlement.add).toHaveBeenCalledWith({ jobId: 'job-1', action: 'resolve' });
+    await processSettlementJob(deps, resolveJob());
+    expect(signer.writeContract.mock.calls[0]![0].args).toEqual([7n, SETTLEMENT_REASONS.payoutBlocked, '0x']);
+    expect(SETTLEMENT_REASONS.payoutBlocked).toBe(keccak256(toBytes('agentfi.payout-blocked')));
+    expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'REJECTED', resolution: 'payout-blocked' });
+    expect(finalize).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'FAILED' }));
+  });
+
+  it('resolves a CANCELLED job Submitted on-chain (C3c conflict): pay → COMPLETED; refund → reject(cancelled), reservation released', async () => {
+    const paid = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'SUBMITTED', status: 'CANCELLED' })], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    expect(await resolveEscrowJob(paid.deps, { jobId: 'job-1', decision: 'pay', note: 'delivered before the cancel', operator: 'ops' })).toMatchObject({
+      outcome: 'scheduled',
+      previousStatus: 'CANCELLED',
+    });
+    await processSettlementJob(paid.deps, resolveJob());
+    expect(paid.signer.writeContract.mock.calls[0]![0].functionName).toBe('complete');
+    expect(paid.jobs.get('job-1')).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED' });
+    expect(paid.finalize).not.toHaveBeenCalled();
+
+    const refunded = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'SUBMITTED', status: 'CANCELLED' })]);
+    await resolveEscrowJob(refunded.deps, { jobId: 'job-1', decision: 'refund', note: 'requester right', operator: 'ops' });
+    await processSettlementJob(refunded.deps, resolveJob());
+    expect(refunded.signer.writeContract.mock.calls[0]![0].args).toEqual([7n, SETTLEMENT_REASONS.cancelled, '0x']);
+    expect(refunded.jobs.get('job-1')).toMatchObject({ status: 'CANCELLED', onChainStatus: 'REJECTED' });
+    expect(refunded.releaseJobEscrow).toHaveBeenCalledWith('job-1');
+  });
+
+  it('refuses what it must not decide: SETTLING (in progress), not held, legacy, chain not Submitted, a settlement still in flight; 503 when unreadable', async () => {
+    const settling = makeDeps([SUBMITTED_JOB({ onChainStatus: 'SETTLING' })]);
+    expect(await resolveEscrowJob(settling.deps, { jobId: 'job-1', decision: 'pay', note: 'x y z', operator: 'o' })).toMatchObject({ outcome: 'refused', code: 'SETTLEMENT_IN_PROGRESS' });
+
+    const funded = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'FUNDED', status: 'ACCEPTED' })]);
+    expect(await resolveEscrowJob(funded.deps, { jobId: 'job-1', decision: 'refund', note: 'x y z', operator: 'o' })).toMatchObject({ outcome: 'refused', code: 'NOT_RESOLVABLE' });
+
+    const legacy = makeDeps([escrowJob({ escrowKind: null, onChainStatus: null })]);
+    expect(await resolveEscrowJob(legacy.deps, { jobId: 'job-1', decision: 'refund', note: 'x y z', operator: 'o' })).toMatchObject({ outcome: 'refused', code: 'NOT_ESCROW_JOB' });
+
+    const missing = makeDeps([]);
+    expect(await resolveEscrowJob(missing.deps, { jobId: 'job-1', decision: 'refund', note: 'x y z', operator: 'o' })).toMatchObject({ outcome: 'refused', code: 'NOT_FOUND' });
+
+    const expired = makeDeps([CONTESTED_JOB()], { chainStatus: CHAIN_JOB_STATUS.Expired });
+    expect(await resolveEscrowJob(expired.deps, { jobId: 'job-1', decision: 'pay', note: 'x y z', operator: 'o' })).toMatchObject({ outcome: 'refused', code: 'CHAIN_NOT_SUBMITTED' });
+
+    const inFlight = makeDeps([CONTESTED_JOB({ settleTxHash: SETTLE_HASH })]);
+    inFlight.getTransactionReceipt.mockRejectedValueOnce(new Error('not found'));
+    expect(await resolveEscrowJob(inFlight.deps, { jobId: 'job-1', decision: 'pay', note: 'x y z', operator: 'o' })).toMatchObject({ outcome: 'refused', code: 'SETTLEMENT_IN_PROGRESS' });
+
+    const down = makeDeps([CONTESTED_JOB()]);
+    down.readContract.mockRejectedValueOnce(new Error('rpc down'));
+    expect(await resolveEscrowJob(down.deps, { jobId: 'job-1', decision: 'pay', note: 'x y z', operator: 'o' })).toMatchObject({ outcome: 'unverifiable' });
+    expect(down.jobs.get('job-1')).toMatchObject({ onChainStatus: 'CONTESTED', resolution: null });
+  });
+
+  it('a decision recorded while the queue is down stays recorded (queued: false) and the recovery retries it', async () => {
+    const { deps, jobs, settlement } = makeDeps([CONTESTED_JOB()]);
+    settlement.add.mockRejectedValueOnce(new Error('redis down'));
+    expect(await resolveEscrowJob(deps, { jobId: 'job-1', decision: 'refund', note: 'x y z', operator: 'o' })).toMatchObject({ outcome: 'scheduled', queued: false });
+    expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'SETTLING', resolution: 'refund' });
+    expect(await recoverErc8183Job(deps, { id: 'job-1', onChainStatus: 'SETTLING' })).toBe('resettled');
+    expect(settlement.add).toHaveBeenLastCalledWith({ jobId: 'job-1', action: 'settle' });
+  });
+
+  it('a decision whose settlement fails for good goes back to the hold (CONTESTED), is alerted (once an hour) and retried by recovery', async () => {
+    const { deps, jobs, alert, settlement } = makeDeps([CONTESTED_JOB({ onChainStatus: 'SETTLING', resolution: 'pay' })], { settleStatus: 'reverted', txs: [FUND_TX()] });
+    const last = resolveJob(3);
+    await expect(processSettlementJob(deps, last)).rejects.toThrow(/reverted on-chain/);
+    await handleFailedSettlementJob(deps, last, new Error('ERC-8183 resolve reverted on-chain'));
+    await handleFailedSettlementJob(deps, last, new Error('ERC-8183 resolve reverted on-chain'));
+    expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'CONTESTED', resolution: 'pay', escrowError: expect.stringMatching(/resolve failed after 3 attempts/) });
+    const failures = alert.mock.calls.filter(([a]) => (a as { kind: string }).kind === 'settlement-failed');
+    expect(failures).toHaveLength(1);
+    expect((failures[0]![0] as { message: string }).message).toMatch(/payout-blocked/);
+
+    expect(await recoverErc8183Job(deps, { id: 'job-1', onChainStatus: 'CONTESTED' })).toBe('resettled');
+    expect(settlement.add).toHaveBeenCalledWith({ jobId: 'job-1', action: 'resolve' });
+  });
+
+  it('recovery leaves an undecided contested job on hold', async () => {
+    const { deps, settlement } = makeDeps([CONTESTED_JOB()]);
+    expect(await recoverErc8183Job(deps, { id: 'job-1', onChainStatus: 'CONTESTED' })).toBe('heldForReview');
+    expect(settlement.add).not.toHaveBeenCalled();
+  });
+
+  it('a stale cancellation reject never overwrites a recorded decision (no refusal alert, nothing sent)', async () => {
+    const { deps, jobs, alert, signer } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'SETTLING', status: 'CANCELLED', resolution: 'pay' })]);
+    expect(await processSettlementJob(deps, { data: { jobId: 'job-1', action: 'reject', reason: 'cancelled' } })).toMatchObject({ outcome: 'noop' });
+    expect(jobs.get('job-1')!['onChainStatus']).toBe('SETTLING');
+    expect(alert).not.toHaveBeenCalled();
+    expect(signer.writeContract).not.toHaveBeenCalled();
+  });
+});
+
+describe('C3d — expiry and contradictions', () => {
+  it('claimRefund of an undecided contested job alerts "review-expired" and drops the uncommitted feedback file', async () => {
+    const { deps, jobs, alert } = makeDeps([CONTESTED_JOB({ feedbackFile: { outcome: 'completed' } })], {
+      settleLogs: [makeLog(AGENT_JOB_ESCROW_ABI, 'JobExpired', { jobId: 7n }, ESCROW)],
+    });
+    expect(await processSettlementJob(deps, { data: { jobId: 'job-1', action: 'claimRefund' } })).toMatchObject({ onChainStatus: 'EXPIRED' });
+    expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'EXPIRED', feedbackFile: null });
+    expect(alert).toHaveBeenCalledWith(expect.objectContaining({ kind: 'review-expired', jobId: 'job-1' }));
+  });
+
+  it('a contested job found Completed on-chain follows the chain and alerts "review-overridden" — never silently', async () => {
+    const { deps, jobs, alert, finalize } = makeDeps([CONTESTED_JOB()], { chainStatus: CHAIN_JOB_STATUS.Completed });
+    expect(await processSettlementJob(deps, settleJob())).toEqual({ outcome: 'reconciled', onChainStatus: 'COMPLETED' });
+    expect(jobs.get('job-1')!['onChainStatus']).toBe('COMPLETED');
+    expect(finalize).toHaveBeenCalledWith({ jobId: 'job-1', outcome: 'CONFIRMED', transactionId: null });
+    expect(alert).toHaveBeenCalledWith(expect.objectContaining({ kind: 'review-overridden', jobId: 'job-1' }));
+  });
+
+  it('a recorded "pay" found Completed is consistent (no alert); a recorded "refund" found Completed is alerted', async () => {
+    const consistent = makeDeps([CONTESTED_JOB({ onChainStatus: 'SETTLING', resolution: 'pay' })], { chainStatus: CHAIN_JOB_STATUS.Completed });
+    await processSettlementJob(consistent.deps, resolveJob());
+    expect(consistent.alert).not.toHaveBeenCalled();
+
+    const contradicted = makeDeps([CONTESTED_JOB({ onChainStatus: 'SETTLING', resolution: 'refund' })], { chainStatus: CHAIN_JOB_STATUS.Completed });
+    await processSettlementJob(contradicted.deps, resolveJob());
+    expect(contradicted.alert).toHaveBeenCalledWith(expect.objectContaining({ kind: 'review-overridden' }));
+  });
+
+  it('alertExpiringReviews alerts once per held job within the lead time (contested or CANCELLED/FAILED + SUBMITTED)', async () => {
+    const soon = new Date(NOW.getTime() + 3_600_000);
+    const later = new Date(NOW.getTime() + 3 * 86_400_000);
+    const { deps, jobs, alert } = makeDeps([
+      CONTESTED_JOB({ id: 'contested-soon', expiresAt: soon }),
+      escrowJob({ id: 'conflict-soon', onChainJobId: '8', onChainStatus: 'SUBMITTED', status: 'CANCELLED', expiresAt: soon }),
+      CONTESTED_JOB({ id: 'contested-later', expiresAt: later }),
+      SUBMITTED_JOB({ id: 'normal-soon', expiresAt: soon }),
+    ]);
+    expect(await alertExpiringReviews(deps)).toBe(2);
+    expect(await alertExpiringReviews(deps)).toBe(0);
+    const ids = alert.mock.calls.map(([a]) => (a as { jobId: string; kind: string }).jobId).sort();
+    expect(ids).toEqual(['conflict-soon', 'contested-soon']);
+    expect(alert.mock.calls.every(([a]) => (a as { kind: string }).kind === 'review-expiring')).toBe(true);
+    expect((alert.mock.calls[0]![0] as { message: string }).message).toMatch(/full refund to the requester without feedback/);
+    expect(jobs.get('contested-soon')!['reviewAlertedAt']).toEqual(NOW);
+    expect(await alertExpiringReviews({ ...deps, config: { ...config, reviewAlertBeforeExpirySeconds: 0 } })).toBe(0);
+  });
+});
+
+describe('C3d — receipt surfacing', () => {
+  it('FeedbackFailed + AgentPenalized → "failed:penalized" with the penalized agent id and count', () => {
+    const parsed = parseSettlementReceipt(
+      [
+        hookLog('FeedbackFailed', { jobId: 7n, reason: '0x' }),
+        hookLog('AgentPenalized', { agentId: 9n, jobId: 7n, penalties: 2n }),
+      ],
+      ESCROW,
+      HOOK,
+    );
+    expect(parsed).toMatchObject({ feedbackStatus: 'failed:penalized', ratedAgentId: '9', penalties: '2' });
+  });
+
+  it('FeedbackSkipped reasons from C2b are surfaced verbatim (not-verdict, payout-blocked, penalized)', () => {
+    for (const reason of ['not-verdict', 'payout-blocked', 'penalized', 'agent-not-provider']) {
+      const parsed = parseSettlementReceipt([hookLog('FeedbackSkipped', { jobId: 7n, reason: stringToHex(reason, { size: 32 }) })], ESCROW, HOOK);
+      expect(parsed.feedbackStatus).toBe(`skipped:${reason}`);
+      expect(parsed.ratedAgentId).toBeNull();
+    }
+  });
+
+  it('a complete skipped as "penalized" stores the canonical id the hook used (canonicalAgentId(provider))', async () => {
+    const { deps, jobs, readContract } = makeDeps([SUBMITTED_JOB()], {
+      txs: [FUND_TX()],
+      settleLogs: [...completeLogs('none'), hookLog('FeedbackSkipped', { jobId: 7n, reason: stringToHex('penalized', { size: 32 }) })],
+    });
+    const base = readContract.getMockImplementation()!;
+    readContract.mockImplementation(async (params: { functionName: string }) => (params.functionName === 'canonicalAgentId' ? 12n : base(params as never)));
+    await processSettlementJob(deps, settleJob());
+    expect(jobs.get('job-1')).toMatchObject({ feedbackStatus: 'skipped:penalized', ratedAgentId: '12' });
+  });
+
+  it('submit receipt: CanonicalAgentIdSet → ratedAgentId; AgentIdNotVerified → providerAgentIdError (feedback will be skipped)', async () => {
+    const events = parseHookIdentityEvents(
+      [hookLog('CanonicalAgentIdSet', { provider: PROVIDER.safeAddress, agentId: 5n, jobId: 7n })],
+      HOOK,
+    );
+    expect(events).toEqual({ canonicalAgentId: '5', notVerifiedAgentId: null });
+
+    const meta = { jobId: 'job-1', erc8183: true, escrowStep: 'submit', deliverable: '0x' + 'ab'.repeat(32) };
+    const set = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'FUNDED', status: 'PAYMENT_PENDING', providerAgentId: '4' })], {
+      txs: [stepTx('submit', 'job-1', { metadata: meta })],
+      receiptLogs: [hookLog('CanonicalAgentIdSet', { provider: PROVIDER.safeAddress, agentId: 5n, jobId: 7n })],
+    });
+    await onEscrowTxOutcome(set.deps, { transactionId: 'tx-submit', status: 'CONFIRMED' });
+    expect(set.jobs.get('job-1')).toMatchObject({ onChainStatus: 'SUBMITTED', ratedAgentId: '5' });
+    expect(set.logger.warn).toHaveBeenCalledWith(expect.objectContaining({ providerAgentId: '4', canonicalAgentId: '5' }), expect.any(String));
+
+    const unverified = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'FUNDED', status: 'PAYMENT_PENDING' })], {
+      txs: [stepTx('submit', 'job-1', { metadata: meta })],
+      receiptLogs: [hookLog('AgentIdNotVerified', { jobId: 7n, provider: PROVIDER.safeAddress, agentId: 6n })],
+    });
+    await onEscrowTxOutcome(unverified.deps, { transactionId: 'tx-submit', status: 'CONFIRMED' });
+    expect(unverified.jobs.get('job-1')!['providerAgentIdError']).toMatch(/did not verify ERC-8004 agent id 6/);
+    expect(unverified.jobs.get('job-1')!['onChainStatus']).toBe('SUBMITTED');
+  });
+
+  it('exposes resolution, resolvedAt and ratedAgentId in `escrow`; the operator fields stay out of agent responses', () => {
+    const view = toJobResponse(CONTESTED_JOB({ resolution: 'pay', resolvedAt: NOW, resolvedBy: 'alice', resolutionNote: 'secret', reviewLog: [{}], ratedAgentId: '3' }));
+    expect(view.escrow).toMatchObject({ onChainStatus: 'CONTESTED', resolution: 'pay', resolvedAt: NOW, ratedAgentId: '3' });
+    expect(JSON.stringify(view)).not.toContain('alice');
+    expect(JSON.stringify(view)).not.toContain('secret');
+    expect(view).not.toHaveProperty('reviewLog');
+  });
+});
+
+describe('C3d — evaluation delay vs expiresAt, committed feedback files', () => {
+  it('clamps the evaluation delay so the settlement runs at least the margin before expiresAt', () => {
+    const cfg = { evaluationDelaySeconds: 3600, jobTtlSeconds: TTL };
+    expect(settlementDelay(cfg, new Date(NOW.getTime() + 86_400_000), NOW)).toEqual({ delayMs: 3_600_000, clamped: false });
+    expect(settlementDelay(cfg, new Date(NOW.getTime() + 600_000), NOW)).toEqual({ delayMs: 480_000, clamped: true });
+    expect(settlementDelay(cfg, new Date(NOW.getTime() + 60_000), NOW)).toEqual({ delayMs: 0, clamped: true });
+    expect(settlementDelay(cfg, null, NOW)).toEqual({ delayMs: 3_600_000, clamped: false });
+    // Short TTLs (tests): 10 % of the TTL instead of 2 minutes.
+    expect(settlementDelay({ evaluationDelaySeconds: 20, jobTtlSeconds: 60 }, new Date(NOW.getTime() + 20_000), NOW)).toEqual({ delayMs: 14_000, clamped: true });
+  });
+
+  it('submit confirmed close to expiry schedules the settlement with the clamped delay', async () => {
+    const { deps, settlement } = makeDeps(
+      [escrowJob({ onChainJobId: '7', onChainStatus: 'FUNDED', status: 'PAYMENT_PENDING', expiresAt: new Date(NOW.getTime() + 300_000) })],
+      { txs: [stepTx('submit', 'job-1', { metadata: { jobId: 'job-1', erc8183: true, escrowStep: 'submit' } })] },
+    );
+    await onEscrowTxOutcome({ ...deps, config: { ...config, evaluationDelaySeconds: 3600 } }, { transactionId: 'tx-submit', status: 'CONFIRMED' });
+    expect(settlement.add).toHaveBeenCalledWith({ jobId: 'job-1', action: 'settle' }, { delayMs: 180_000 });
+  });
+
+  it('a feedback file counts as committed only on COMPLETED / REJECTED', () => {
+    expect(isFeedbackFileCommitted({ onChainStatus: 'COMPLETED', feedbackFile: {} })).toBe(true);
+    expect(isFeedbackFileCommitted({ onChainStatus: 'REJECTED', feedbackFile: {} })).toBe(true);
+    for (const onChainStatus of ['SUBMITTED', 'SETTLING', 'CONTESTED', 'EXPIRED', null]) {
+      expect(isFeedbackFileCommitted({ onChainStatus, feedbackFile: {} })).toBe(false);
+    }
+    expect(isFeedbackFileCommitted({ onChainStatus: 'COMPLETED', feedbackFile: null })).toBe(false);
   });
 });

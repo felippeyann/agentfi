@@ -10,9 +10,14 @@
  *  - PATCH: ACCEPTED requires onChainStatus FUNDED (409 ESCROW_NOT_FUNDED),
  *    paid COMPLETED → PAYMENT_PENDING + submit (no executeA2APayment),
  *    CANCELLED / FAILED schedule the evaluator reject
- *  - POST /v1/jobs/:id/contest guards
+ *  - POST /v1/jobs/:id/contest guards; C3d: the contest is decided by the
+ *    orchestrator (held for operator review), 409 / 503 mapped here
  *  - GET /v1/jobs/:id/feedback.json: 404 until generated, public (no API key),
- *    byte-stable: keccak256(body) == feedbackHashOf(stored file)
+ *    byte-stable: keccak256(body) == feedbackHashOf(stored file); C3d:
+ *    immutable only once the committing settlement is mined, no-store before
+ *  - C3d: escrow jobs go through the requester's policy (reserveEscrowJobSpend:
+ *    403 POLICY_VIOLATION / POLICY_PAUSED, payee = provider wallet); ACCEPT /
+ *    COMPLETE too close to expiresAt is 409 ESCROW_EXPIRING
  *  - X3a: a reward without chainId or token is 400 VALIDATION_FAILED (no
  *    Ethereum-mainnet / ETH default)
  */
@@ -43,6 +48,7 @@ const { mockDb, escrowMock, runtimeMock, reputationMock, paymentMock } = vi.hois
   } as any,
   escrowMock: {
     reserveJobEscrow: vi.fn(),
+    reserveEscrowJobSpend: vi.fn(),
     releaseJobEscrow: vi.fn(),
     markEscrowReleased: vi.fn(),
     queueOnChainEscrowLock: vi.fn(),
@@ -53,7 +59,8 @@ const { mockDb, escrowMock, runtimeMock, reputationMock, paymentMock } = vi.hois
     startEscrow: vi.fn(),
     enqueueSubmit: vi.fn(),
     requestCancellationReject: vi.fn(),
-    erc8183Config: { evaluatorAddress: '0x000000000000000000000000000000000000Ea1D' },
+    contestJob: vi.fn(),
+    erc8183Config: { evaluatorAddress: '0x000000000000000000000000000000000000Ea1D', jobTtlSeconds: 604_800 },
   },
   reputationMock: { recordJobOutcome: vi.fn() },
   paymentMock: { executeA2APayment: vi.fn() },
@@ -143,6 +150,8 @@ beforeEach(() => {
   runtimeMock.enqueueSubmit.mockResolvedValue(undefined);
   runtimeMock.requestCancellationReject.mockResolvedValue(true);
   escrowMock.reserveJobEscrow.mockResolvedValue({ success: true, reservedValueUsd: '12.5' });
+  escrowMock.reserveEscrowJobSpend.mockResolvedValue({ success: true, reservedValueUsd: '12.5' });
+  runtimeMock.contestJob.mockResolvedValue({ outcome: 'held', contestedAt: new Date() });
   escrowMock.releaseJobEscrow.mockResolvedValue(undefined);
   escrowMock.markEscrowReleased.mockResolvedValue(undefined);
   escrowMock.queueOnChainEscrowLock.mockResolvedValue(null);
@@ -168,6 +177,7 @@ describe('POST /v1/jobs on an ERC-8183 chain', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json()).toMatchObject({ error: 'ERC8183_USDC_ONLY', chainId: CHAIN_ID, escrowToken: USDC });
     expect(escrowMock.reserveJobEscrow).not.toHaveBeenCalled();
+    expect(escrowMock.reserveEscrowJobSpend).not.toHaveBeenCalled();
     expect(mockDb.job.create).not.toHaveBeenCalled();
     expect(runtimeMock.startEscrow).not.toHaveBeenCalled();
   });
@@ -189,7 +199,7 @@ describe('POST /v1/jobs on an ERC-8183 chain', () => {
       runtimeMock.isErc8183Enabled.mockReturnValue(true);
       runtimeMock.getEscrowToken.mockResolvedValue(USDC);
       runtimeMock.startEscrow.mockResolvedValue(undefined);
-      escrowMock.reserveJobEscrow.mockResolvedValue({ success: true });
+      escrowMock.reserveEscrowJobSpend.mockResolvedValue({ success: true, reservedValueUsd: '12.5' });
       mockDb.agent.findUnique.mockResolvedValueOnce(PROVIDER).mockResolvedValueOnce(REQUESTER);
       mockDb.job.create.mockResolvedValue({ id: 'job-1', status: 'PENDING', escrowKind: null });
       mockDb.job.findUnique.mockResolvedValue(escrowJob({ onChainStatus: 'CREATING', onChainJobId: null }));
@@ -198,13 +208,26 @@ describe('POST /v1/jobs on an ERC-8183 chain', () => {
       const res = await post(app, { amount: '12.5', token, chainId: CHAIN_ID });
 
       expect(res.statusCode).toBe(201);
-      expect(escrowMock.reserveJobEscrow).toHaveBeenCalledWith({
+      // C3d: the requester's policy, USDC at 1.0, payee = the provider's wallet.
+      expect(escrowMock.reserveEscrowJobSpend).toHaveBeenCalledWith({
         requesterId: REQUESTER.id,
-        reward: { amount: '12.5', token, chainId: CHAIN_ID },
+        chainId: CHAIN_ID,
+        amount: '12.5',
+        token: USDC,
+        payee: PROVIDER.safeAddress,
+        now: expect.any(Date),
       });
+      expect(escrowMock.reserveJobEscrow).not.toHaveBeenCalled();
       expect(mockDb.job.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({ status: 'PENDING', reservedAmount: '12.5', reservedToken: token, reservedChainId: CHAIN_ID, reservationStatus: 'PENDING' }),
+          data: expect.objectContaining({
+            status: 'PENDING',
+            reservedAmount: '12.5',
+            reservedToken: token,
+            reservedChainId: CHAIN_ID,
+            reservationStatus: 'PENDING',
+            reservedValueUsd: '12.5',
+          }),
         }),
       );
       expect(runtimeMock.startEscrow).toHaveBeenCalledWith({
@@ -251,6 +274,52 @@ describe('POST /v1/jobs on an ERC-8183 chain', () => {
     expect(runtimeMock.startEscrow).not.toHaveBeenCalled();
     expect(escrowMock.queueOnChainEscrowLock).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'job-2', token: 'ETH', chainId: 1 }));
     expect(res.json().escrow).toBeNull();
+    expect(escrowMock.reserveEscrowJobSpend).not.toHaveBeenCalled();
+  });
+
+  it('C3d: a policy refusal is 403 POLICY_VIOLATION with the rule and the payee, before anything is created', async () => {
+    mockDb.agent.findUnique.mockResolvedValueOnce(PROVIDER).mockResolvedValueOnce(REQUESTER);
+    escrowMock.reserveEscrowJobSpend.mockResolvedValue({
+      success: false,
+      httpStatus: 403,
+      code: 'POLICY_VIOLATION',
+      rule: 'maxDailyVolume',
+      reason: 'Daily volume limit of 10 USD would be exceeded.',
+      limit: '10',
+      spentToday: '8',
+    });
+    const app = await buildApp();
+
+    const res = await post(app, { amount: '12.5', token: 'USDC', chainId: CHAIN_ID });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({
+      error: 'Daily volume limit of 10 USD would be exceeded.',
+      code: 'POLICY_VIOLATION',
+      rule: 'maxDailyVolume',
+      limit: '10',
+      spentToday: '8',
+      amount: '12.5',
+      payee: PROVIDER.safeAddress,
+    });
+    expect(mockDb.job.create).not.toHaveBeenCalled();
+    expect(runtimeMock.startEscrow).not.toHaveBeenCalled();
+  });
+
+  it('C3d: a paused policy is 403 POLICY_PAUSED; a requester that cannot reserve keeps the 400 shape', async () => {
+    mockDb.agent.findUnique.mockResolvedValueOnce(PROVIDER).mockResolvedValueOnce(REQUESTER);
+    escrowMock.reserveEscrowJobSpend.mockResolvedValueOnce({ success: false, httpStatus: 403, code: 'POLICY_PAUSED', rule: 'policyPaused', reason: 'Agent policy is paused (kill switch active)' });
+    const app = await buildApp();
+    const paused = await post(app, { amount: '1', token: 'USDC', chainId: CHAIN_ID });
+    expect(paused.statusCode).toBe(403);
+    expect(paused.json()).toMatchObject({ code: 'POLICY_PAUSED', rule: 'policyPaused' });
+
+    mockDb.agent.findUnique.mockResolvedValueOnce(PROVIDER).mockResolvedValueOnce(REQUESTER);
+    escrowMock.reserveEscrowJobSpend.mockResolvedValueOnce({ success: false, httpStatus: 400, code: 'RESERVATION_FAILED', reason: 'Requester agent is deactivated' });
+    const inactive = await post(app, { amount: '1', token: 'USDC', chainId: CHAIN_ID });
+    expect(inactive.statusCode).toBe(400);
+    expect(inactive.json()).toEqual({ error: 'Escrow reservation failed', reason: 'Requester agent is deactivated' });
+    expect(mockDb.job.create).not.toHaveBeenCalled();
   });
 });
 
@@ -388,6 +457,30 @@ describe('PATCH /v1/jobs/:id on an ERC-8183 job', () => {
     expect(runtimeMock.requestCancellationReject).toHaveBeenCalledWith({ jobId: 'job-1', reason: 'provider-failed' });
   });
 
+  it('C3d: ACCEPTED / COMPLETED too close to expiresAt is 409 ESCROW_EXPIRING (it would race claimRefund); nothing is written', async () => {
+    const soon = new Date(Date.now() + 60_000); // margin is 2 min with the default TTL
+    mockDb.job.findUnique.mockResolvedValueOnce(escrowJob({ status: 'PENDING', onChainStatus: 'FUNDED', expiresAt: soon }));
+    const app = await buildApp(PROVIDER.id);
+    const accept = await patch(app, { status: 'ACCEPTED' });
+    expect(accept.statusCode).toBe(409);
+    expect(accept.json()).toMatchObject({ error: 'ESCROW_EXPIRING', onChainStatus: 'FUNDED' });
+
+    mockDb.job.findUnique.mockResolvedValueOnce(escrowJob({ status: 'ACCEPTED', onChainStatus: 'FUNDED', expiresAt: new Date(Date.now() - 1_000) }));
+    const complete = await patch(app, { status: 'COMPLETED', result: { late: true } });
+    expect(complete.statusCode).toBe(409);
+    expect(complete.json()).toMatchObject({ error: 'ESCROW_EXPIRING' });
+    expect(mockDb.job.updateMany).not.toHaveBeenCalled();
+    expect(runtimeMock.enqueueSubmit).not.toHaveBeenCalled();
+  });
+
+  it('C3d: a cancellation close to expiresAt is still allowed (it only refunds)', async () => {
+    mockDb.job.findUnique.mockResolvedValueOnce(escrowJob({ status: 'ACCEPTED', onChainStatus: 'FUNDED', expiresAt: new Date(Date.now() + 1_000) }));
+    const app = await buildApp(REQUESTER.id);
+    const res = await patch(app, { status: 'CANCELLED' });
+    expect(res.statusCode).toBe(200);
+    expect(runtimeMock.requestCancellationReject).toHaveBeenCalledWith({ jobId: 'job-1', reason: 'cancelled' });
+  });
+
   it('legacy paid COMPLETED still goes through executeA2APayment', async () => {
     mockDb.job.findUnique.mockResolvedValue(escrowJob({ status: 'ACCEPTED', escrowKind: null, reward: { amount: '0.01', token: 'ETH', chainId: 1 } }));
     mockDb.agent.findUnique.mockResolvedValue({ safeAddress: PROVIDER.safeAddress });
@@ -425,31 +518,49 @@ describe('POST /v1/jobs/:id/contest', () => {
     expect(res.json()).toMatchObject({ error: 'NOT_ESCROW_JOB' });
   });
 
-  it('refuses with 409 CONTEST_NOT_ALLOWED once settlement was claimed (conditional update matched nothing)', async () => {
-    mockDb.job.findUnique.mockResolvedValue(escrowJob({ status: 'PAYMENT_PENDING', onChainStatus: 'SETTLING' }));
-    mockDb.job.updateMany.mockResolvedValue({ count: 0 });
+  it('refuses with 409 CONTEST_NOT_ALLOWED when the orchestrator refuses (settlement claimed / in flight), with the current state', async () => {
+    mockDb.job.findUnique
+      .mockResolvedValueOnce(escrowJob({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED' }))
+      .mockResolvedValueOnce({ status: 'PAYMENT_PENDING', onChainStatus: 'SETTLING', contestedAt: null });
+    runtimeMock.contestJob.mockResolvedValue({ outcome: 'refused', reason: 'Settlement was claimed while the contest was processed' });
     const app = await buildApp();
     const res = await contest(app, { reason: 'late' });
     expect(res.statusCode).toBe(409);
-    expect(res.json()).toMatchObject({ error: 'CONTEST_NOT_ALLOWED', status: 'PAYMENT_PENDING', onChainStatus: 'SETTLING' });
-    expect(mockDb.job.updateMany).toHaveBeenCalledWith({
-      where: { id: 'job-1', status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', contestedAt: null },
-      data: { contestedAt: expect.any(Date), contestReason: 'late' },
+    expect(res.json()).toMatchObject({
+      error: 'CONTEST_NOT_ALLOWED',
+      message: 'Settlement was claimed while the contest was processed',
+      status: 'PAYMENT_PENDING',
+      onChainStatus: 'SETTLING',
     });
+    expect(runtimeMock.contestJob).toHaveBeenCalledWith({ jobId: 'job-1', reason: 'late' });
   });
 
-  it('records contestedAt + reason while PAYMENT_PENDING and SUBMITTED', async () => {
+  it('answers 503 CONTEST_UNVERIFIABLE when the chain cannot be read (nothing recorded)', async () => {
+    mockDb.job.findUnique
+      .mockResolvedValueOnce(escrowJob({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED' }))
+      .mockResolvedValueOnce({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', contestedAt: null });
+    runtimeMock.contestJob.mockResolvedValue({ outcome: 'unverifiable', reason: 'The on-chain job status could not be read; retry the contest' });
+    const app = await buildApp();
+    const res = await contest(app);
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({ error: 'CONTEST_UNVERIFIABLE', onChainStatus: 'SUBMITTED', contestedAt: null });
+  });
+
+  it('C3d: holds the job for operator review (onChainStatus CONTESTED) — no refund is scheduled by the route', async () => {
     const contestedAt = new Date('2026-10-06T13:00:00.000Z');
     mockDb.job.findUnique
       .mockResolvedValueOnce(escrowJob({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED' }))
-      .mockResolvedValueOnce(escrowJob({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', contestedAt, contestReason: 'wrong answer' }));
-    mockDb.job.updateMany.mockResolvedValue({ count: 1 });
+      .mockResolvedValueOnce(escrowJob({ status: 'PAYMENT_PENDING', onChainStatus: 'CONTESTED', contestedAt, contestReason: 'wrong answer' }));
+    runtimeMock.contestJob.mockResolvedValue({ outcome: 'held', contestedAt });
     const app = await buildApp();
 
     const res = await contest(app, { reason: 'wrong answer' });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json().escrow).toMatchObject({ onChainStatus: 'SUBMITTED', contestedAt: contestedAt.toISOString(), contestReason: 'wrong answer' });
+    expect(res.json().escrow).toMatchObject({ onChainStatus: 'CONTESTED', contestedAt: contestedAt.toISOString(), contestReason: 'wrong answer', resolution: null });
+    expect(runtimeMock.contestJob).toHaveBeenCalledWith({ jobId: 'job-1', reason: 'wrong answer' });
+    expect(runtimeMock.requestCancellationReject).not.toHaveBeenCalled();
+    expect(mockDb.job.updateMany).not.toHaveBeenCalled();
   });
 });
 
@@ -482,7 +593,7 @@ describe('GET /v1/jobs/:id/feedback.json', () => {
   it('serves the stored file byte-for-byte: keccak256(body) equals the hash committed on-chain, even after a jsonb key reorder', async () => {
     // Postgres jsonb does not preserve key order — hand the route a reordered copy.
     const reordered = { issuedAt: file.issuedAt, outcome: file.outcome, jobId: file.jobId, type: file.type, evaluator: file.evaluator, deliverableHash: null, proofOfPayment: { toAddress: file.proofOfPayment.toAddress, txHash: file.proofOfPayment.txHash, chainId: CHAIN_ID, fromAddress: file.proofOfPayment.fromAddress }, escrow: { onChainJobId: 7, chainId: CHAIN_ID, contract: ESCROW } };
-    mockDb.job.findUnique.mockResolvedValue({ feedbackFile: reordered });
+    mockDb.job.findUnique.mockResolvedValue({ feedbackFile: reordered, onChainStatus: 'COMPLETED' });
     const app = await buildApp();
 
     const res = await app.inject({ method: 'GET', url: '/v1/jobs/job-1/feedback.json' });
@@ -493,6 +604,20 @@ describe('GET /v1/jobs/:id/feedback.json', () => {
     expect(res.body).toBe(serializeFeedbackFile(file));
     expect(keccak256(toBytes(res.body))).toBe(feedbackHashOf(file));
     expect(JSON.parse(res.body)).toEqual(file);
+  });
+
+  it('C3d: before the committing settlement is mined the file is served no-store (it may still be rebuilt)', async () => {
+    const app = await buildApp();
+    for (const onChainStatus of ['SETTLING', 'SUBMITTED', 'CONTESTED']) {
+      mockDb.job.findUnique.mockResolvedValueOnce({ feedbackFile: file, onChainStatus });
+      const res = await app.inject({ method: 'GET', url: '/v1/jobs/job-1/feedback.json' });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.body).toBe(serializeFeedbackFile(file));
+    }
+    mockDb.job.findUnique.mockResolvedValueOnce({ feedbackFile: file, onChainStatus: 'REJECTED' });
+    const committed = await app.inject({ method: 'GET', url: '/v1/jobs/job-1/feedback.json' });
+    expect(committed.headers['cache-control']).toBe('public, max-age=31536000, immutable');
   });
 
   it('is public: the auth middleware lets it through without an API key', async () => {

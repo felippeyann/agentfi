@@ -16,12 +16,20 @@
  *  - failure knobs: mine automatically or on demand, drop a broadcast's
  *    response while keeping the transaction, hide a hash from the RPC.
  *
+ * C3d adds a small model of `ReputationHook` for jobs created with
+ * `SIM_HOOK`: the canonical-id binding on `submit` (CanonicalAgentIdSet /
+ * AgentIdNotVerified against the identity owners), the gates of
+ * complete/reject (D9: only REASON_QUALITY_REJECTED writes a 0, payout-blocked
+ * and every other reason skip, "0x" skips with no-params), penalties when the
+ * registry is made to fail, and the feedback entries it would write.
+ *
  * What it does not model: gas, blocks with more than one sender interleaving
- * semantics beyond nonce order, hooks (no ReputationHook — feedback is
- * covered by the fork suite).
+ * semantics beyond nonce order, the real ERC-8004 Reputation Registry (the
+ * fork suite covers it).
  */
 
 import {
+  decodeAbiParameters,
   decodeFunctionData,
   encodeAbiParameters,
   encodeEventTopics,
@@ -31,6 +39,8 @@ import {
   keccak256,
   parseTransaction,
   recoverTransactionAddress,
+  stringToHex,
+  toBytes,
   TransactionNotFoundError,
   TransactionReceiptNotFoundError,
   type Abi,
@@ -42,6 +52,12 @@ import {
 import { privateKeyToAccount, generatePrivateKey, type PrivateKeyAccount } from 'viem/accounts';
 import { AGENT_JOB_ESCROW_ABI } from '../../abi/AgentJobEscrow.abi.js';
 import { IDENTITY_REGISTRY_ABI } from '../../abi/IdentityRegistry.abi.js';
+import { REPUTATION_HOOK_ABI } from '../../abi/ReputationHook.abi.js';
+
+const REASON_QUALITY_REJECTED = keccak256(toBytes('agentfi.quality-rejected'));
+const REASON_PAYOUT_BLOCKED = keccak256(toBytes('agentfi.payout-blocked'));
+/** `ReputationHook.minFeedbackBudget` of the deploy script (1 USDC). */
+const MIN_FEEDBACK_BUDGET = 1_000_000n;
 
 export const SIM_CHAIN_ID = 84532;
 export const SIM_ESCROW = getAddress('0x00000000000000000000000000000000000e5c20');
@@ -86,6 +102,17 @@ export interface SimJob {
   hook: Address;
   providerAgentId: bigint;
   deliverable: Hex | null;
+  submittedAt?: bigint;
+}
+
+/** A feedback entry the modelled hook wrote (what `giveFeedback` would record). */
+export interface SimFeedback {
+  jobId: bigint;
+  agentId: bigint;
+  value: number;
+  tag2: 'completed' | 'rejected';
+  feedbackURI: string;
+  feedbackHash: Hex;
 }
 
 interface PendingTx {
@@ -161,7 +188,18 @@ export class FakeEscrowChain {
   /** Every accepted broadcast, in order (from, nonce, function). */
   readonly broadcasts: Array<{ from: Address; nonce: number; functionName: string; hash: Hex }> = [];
   /** Evaluator calls, in order. */
-  readonly evaluatorCalls: Array<{ functionName: string; jobId: bigint; reason?: Hex }> = [];
+  readonly evaluatorCalls: Array<{ functionName: string; jobId: bigint; reason?: Hex; optParams?: Hex }> = [];
+
+  // ── ReputationHook model (C3d) ──────────────────────────────────────────
+  /** `hook.trustedEvaluator()`; null → the evaluator of each job is trusted. */
+  trustedEvaluator: Address | null = null;
+  readonly canonicalAgentId = new Map<string, bigint>();
+  readonly penalties = new Map<bigint, bigint>();
+  readonly feedback: SimFeedback[] = [];
+  /** The Reputation Registry refuses writes (e.g. the provider approved the hook): FeedbackFailed (+ penalty on a verdict). */
+  registryFails = false;
+  /** Providers that cannot receive USDC (blacklisted): `complete` reverts. */
+  readonly blockedPayees = new Set<string>();
 
   // ── accounts ────────────────────────────────────────────────────────────
 
