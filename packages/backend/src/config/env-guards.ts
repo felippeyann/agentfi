@@ -227,8 +227,8 @@ export function nodeEnvUnsetVerdict(
   if (source['NODE_ENV'] !== undefined) return null;
   const warning =
     'WARN: NODE_ENV is not set — running as NODE_ENV=development. Every production guard is OFF: placeholder ' +
-    'secrets, WALLET_PROVIDER=local, plain-http RPC_URL_*, RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS, legacy executors, ' +
-    'mock simulation. Set NODE_ENV=production, staging or development explicitly.';
+    'secrets, WALLET_PROVIDER=local, plain-http RPC_URL_*, RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS, the pay-resource ' +
+    'port policy (80/443), legacy executors, mock simulation. Set NODE_ENV=production, staging or development explicitly.';
   const container = detectContainer(source, fileExists);
   const signals = productionSignals(source);
   const fatal =

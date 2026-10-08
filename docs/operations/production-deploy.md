@@ -47,6 +47,7 @@ Every variable below must be configured on the **backend service** of your host.
 | `TENDERLY_PROJECT` | Your project slug | visible in Tenderly dashboard URL |
 | `TRUST_PROXY` | `1` behind Railway / Fly / Render (one proxy hop); default `false` | Fastify `trustProxy`: `false`, a hop count (1-10), the proxies' IPs / CIDRs, or `true` (trusts a client-chosen `X-Forwarded-For`; warned at boot). Lets per-IP limits (public registration, `/health/ready`) see the client. The admin loopback gate never uses it. |
 | `MCP_SSE_MAX_SESSIONS` / `MCP_SSE_MAX_SESSIONS_PER_KEY` / `MCP_SSE_IDLE_TIMEOUT_SECONDS` | `200` / `5` / `900` | Caps for the backend's hosted MCP (`GET /mcp/sse`): sessions are bound to the opening API key, capped globally and per key, and closed when idle. |
+| `RESOURCE_PAYMENT_ALLOWED_PORTS` | unset (= `80,443` in production / staging) | Ports a `POST /v1/jobs/:id/pay-resource` URL may use (P6). Leave unset unless a seller you trust serves on another port; when set the list replaces the default in every environment. |
 
 ### Boot guards (S6)
 
