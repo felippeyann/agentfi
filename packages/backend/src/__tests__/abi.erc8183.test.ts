@@ -12,15 +12,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import {
-  getAbiItem,
-  toEventSelector,
-  toFunctionSelector,
-  type Abi,
-  type AbiError,
-  type AbiEvent,
-  type AbiFunction,
-} from 'viem';
+import { getAbiItem, toEventSelector, toFunctionSelector, type Abi, type AbiEvent, type AbiFunction } from 'viem';
 import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
 import { REPUTATION_HOOK_ABI } from '../abi/ReputationHook.abi.js';
 
@@ -127,7 +119,9 @@ describe('ReputationHook ABI', () => {
   });
 
   it('declares the R3c gas guard error and the gas-limit getters read by the post-deploy checks', () => {
-    const error = getAbiItem({ abi: HOOK_ABI, name: 'InsufficientGasForFeedback' }) as AbiError | undefined;
+    const error = getAbiItem({ abi: HOOK_ABI, name: 'InsufficientGasForFeedback' }) as
+      | { type: string; inputs: ReadonlyArray<{ type: string; name?: string }> }
+      | undefined;
     expect(error?.type).toBe('error');
     expect(error!.inputs.map((i) => `${i.type} ${i.name}`)).toEqual(['uint256 available', 'uint256 required']);
     for (const name of ['feedbackGasLimit', 'identityCallGasLimit', 'feedbackGasRequirement']) {
