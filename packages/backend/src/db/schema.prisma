@@ -128,6 +128,10 @@ model Job {
   reservedChainId   Int?      // Chain where funds are reserved
   reservedAt        DateTime? // Reservation timestamp
   reservationStatus String?   // "PENDING" | "RELEASED" | "CANCELLED"
+  // C3d (migration 0019): USD the reservation added to DailyVolume ("0" when no
+  // daily limit applied). A release credits back exactly this; NULL on older
+  // rows (released by re-pricing the reward, as before).
+  reservedValueUsd  String?
 
   // Phase 2 of #71 — revenue snapshot captured at payment confirmation.
   // NULL on a COMPLETED job ⇒ oracle was unresolved at finalization;
@@ -142,7 +146,7 @@ model Job {
   escrowChainId     Int?
   escrowContract    String?   // AgentJobEscrow address (checksummed)
   onChainJobId      String?   // uint256 job id as a decimal string
-  onChainStatus     String?   // CREATING | OPEN | BUDGET_SET | APPROVED | FUNDED | SUBMITTED | SETTLING | COMPLETED | REJECTED | EXPIRED | FAILED
+  onChainStatus     String?   // CREATING | OPEN | BUDGET_SET | APPROVED | FUNDED | SUBMITTED | CONTESTED | SETTLING | COMPLETED | REJECTED | EXPIRED | EXPIRED_UNFUNDED | FAILED
   evaluator         String?   // operator/backend signer address (decision D5)
   budgetToken       String?   // escrow ERC-20 (USDC) address
   budgetAmount      String?   // budget in token base units (6 decimals for USDC)
@@ -150,11 +154,19 @@ model Job {
   deliverableHash   String?   // keccak256(JSON.stringify(result)) passed to `submit`
   settleTxHash      String?   // evaluator's complete / reject / claimRefund tx
   platformFeeAmount String?   // PlatformFeeAccrued amount (base units) on completion
-  feedbackStatus    String?   // "written" | "skipped:<reason>" | "failed"
+  feedbackStatus    String?   // "written" | "skipped:<reason>" | "failed" | "failed:penalized"
   feedbackFile      Json?     // ERC-8004 feedback file, generated once before settlement
-  contestedAt       DateTime? // requester contested before settlement → evaluator rejects
+  contestedAt       DateTime? // requester contested before settlement → held for operator review (C3d, D9)
   contestReason     String?
   escrowError       String?   // last escrow step / settlement error
+  // C3d (migration 0019): operator review (decision D9) and receipt surfacing.
+  resolution        String?   // "pay" | "refund" | "quality-rejected" | "payout-blocked"
+  resolvedBy        String?   // operator who decided (admin UI user or "admin-api")
+  resolvedAt        DateTime?
+  resolutionNote    String?
+  reviewLog         Json?     // append-only [{ at, by, decision, note, status, onChainStatus }]
+  reviewAlertedAt   DateTime? // "job held for operator review close to expiresAt" alert sent (once)
+  ratedAgentId      String?   // ERC-8004 agent id the ReputationHook rated (canonicalAgentId[provider])
   // ERC-8004 identity binding (R2, migration 0015): the provider's ERC-8004
   // agent id attached to the on-chain job with `setProviderAgentId`, so the
   // ReputationHook can write feedback on settlement. Never blocks payment.
