@@ -12,7 +12,15 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { getAbiItem, toEventSelector, toFunctionSelector, type Abi, type AbiEvent, type AbiFunction } from 'viem';
+import {
+  getAbiItem,
+  toEventSelector,
+  toFunctionSelector,
+  type Abi,
+  type AbiError,
+  type AbiEvent,
+  type AbiFunction,
+} from 'viem';
 import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
 import { REPUTATION_HOOK_ABI } from '../abi/ReputationHook.abi.js';
 
@@ -116,6 +124,17 @@ describe('ReputationHook ABI', () => {
   it('FeedbackSkipped carries a bytes32 reason (decoded to "skipped:<reason>" by the settlement parser)', () => {
     const item = getAbiItem({ abi: HOOK_ABI, name: 'FeedbackSkipped' }) as AbiEvent;
     expect(item.inputs.map((i) => i.type)).toEqual(['uint256', 'bytes32']);
+  });
+
+  it('declares the R3c gas guard error and the gas-limit getters read by the post-deploy checks', () => {
+    const error = getAbiItem({ abi: HOOK_ABI, name: 'InsufficientGasForFeedback' }) as AbiError | undefined;
+    expect(error?.type).toBe('error');
+    expect(error!.inputs.map((i) => `${i.type} ${i.name}`)).toEqual(['uint256 available', 'uint256 required']);
+    for (const name of ['feedbackGasLimit', 'identityCallGasLimit', 'feedbackGasRequirement']) {
+      const item = getAbiItem({ abi: HOOK_ABI, name }) as AbiFunction | undefined;
+      expect(item?.type, `${name} missing from the generated ABI`).toBe('function');
+      expect(item?.outputs.map((o) => o.type)).toEqual(['uint256']);
+    }
   });
 });
 
