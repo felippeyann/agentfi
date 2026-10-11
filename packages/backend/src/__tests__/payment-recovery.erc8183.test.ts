@@ -28,7 +28,7 @@ vi.hoisted(() => {
   }
 });
 
-const { mockDb, finalizeMock, recoverMock, reconcileMock, repollMock, reviewAlertsMock, captured } = vi.hoisted(() => ({
+const { mockDb, finalizeMock, recoverMock, reconcileMock, repollMock, reviewAlertsMock, sweepMock, captured } = vi.hoisted(() => ({
   mockDb: {
     job: { findMany: vi.fn() },
     transaction: { findUnique: vi.fn() },
@@ -38,8 +38,11 @@ const { mockDb, finalizeMock, recoverMock, reconcileMock, repollMock, reviewAler
   reconcileMock: vi.fn(),
   repollMock: vi.fn(),
   reviewAlertsMock: vi.fn(),
+  sweepMock: vi.fn(),
   captured: { processor: null as null | (() => Promise<unknown>) },
 }));
+// A6 volume sweep: exercised on Postgres in daily-volume.db.test.ts; here only its place in the tick.
+vi.mock('../services/policy/daily-volume.js', () => ({ sweepUnsettledVolume: sweepMock }));
 
 vi.mock('bullmq', () => ({
   Queue: vi.fn().mockImplementation(() => ({ add: vi.fn() })),
@@ -68,6 +71,7 @@ beforeEach(() => {
   repollMock.mockResolvedValue({ scanned: 0, confirmed: 0, reverted: 0, dropped: 0, pending: 0, errors: 0 });
   reconcileMock.mockResolvedValue({ stalledFunding: 0, lostRejects: 0, unsubmittedDeliverables: 0, stalledBindings: 0, outcomes: {} });
   reviewAlertsMock.mockResolvedValue(0);
+  sweepMock.mockResolvedValue({ scanned: 0, committed: 0, released: 0, held: 0, errors: 0 });
 });
 
 async function runScan() {
@@ -131,11 +135,17 @@ describe('payment recovery tick — C3c passes', () => {
       order.push('reviewAlerts');
       return 1;
     });
+    sweepMock.mockImplementation(async () => {
+      order.push('volumeSweep');
+      return { scanned: 1, committed: 1, released: 0, held: 0, errors: 0 };
+    });
 
     const summary = await runScan();
 
-    // C3d: the review expiry alerts run last.
-    expect(order).toEqual(['repoll', 'paymentPending', 'reconcile', 'reviewAlerts']);
+    // C3d: the review expiry alerts, then the A6 volume sweep, run last.
+    expect(order).toEqual(['repoll', 'paymentPending', 'reconcile', 'reviewAlerts', 'volumeSweep']);
+    const [, sweepOpts] = sweepMock.mock.calls[0] as [unknown, { olderThan: Date; limit: number }];
+    expect(sweepOpts.olderThan.getTime()).toBeLessThan(Date.now());
     expect(reviewAlertsMock).toHaveBeenCalledWith({ limit: expect.any(Number) });
     expect(repollMock).toHaveBeenCalledWith();
     const [opts] = reconcileMock.mock.calls[0] as [{ staleBefore: Date; limit: number }];
@@ -161,5 +171,18 @@ describe('payment recovery tick — C3c passes', () => {
     reviewAlertsMock.mockRejectedValue(new Error('db hiccup'));
     const second = await runScan();
     expect(second).toMatchObject({ escrowReconcile: null, repoll: { scanned: 0 }, reviewAlerts: null });
+  });
+
+  it('A6 re-review: a PAYMENT_PENDING scan that throws (a poison job) does not cost the later passes their tick', async () => {
+    mockDb.job.findMany.mockRejectedValue(new Error('finalizer keeps throwing'));
+    const summary = await runScan();
+    expect(reconcileMock).toHaveBeenCalledTimes(1);
+    expect(reviewAlertsMock).toHaveBeenCalledTimes(1);
+    expect(sweepMock).toHaveBeenCalledTimes(1);
+    expect(summary).toMatchObject({ scanned: 0, volumeSweep: { committed: 0 } });
+
+    sweepMock.mockRejectedValue(new Error('db hiccup'));
+    mockDb.job.findMany.mockResolvedValue([]);
+    expect(await runScan()).toMatchObject({ volumeSweep: null });
   });
 });

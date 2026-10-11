@@ -38,10 +38,11 @@
  * is the Job's reservation, `reserveJobEscrow` / `releaseJobEscrow`) and the
  * ERC-8183 escrow steps (the Job's reservation too).
  *
- * The reservation takes the agent row lock (`SELECT … FOR UPDATE` on Agent)
- * that the x402 ledger (`ResourcePaymentService.reserve`, P6) takes, so the two
- * spend paths read each other's committed totals and one daily limit holds
- * across both.
+ * The reservation takes the agent row lock (`SELECT … FOR NO KEY UPDATE` on
+ * Agent), which conflicts with the x402 ledger's `FOR UPDATE`
+ * (`ResourcePaymentService.reserve`, P6) and with the escrow job reservation
+ * (C3d), so the three spend paths read each other's committed totals and one
+ * daily limit holds across them.
  */
 
 import { Prisma, type PrismaClient, type Transaction } from '@prisma/client';
@@ -128,7 +129,11 @@ export async function createTransactionWithVolume(
 
   return db
     .$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${params.agentId} FOR UPDATE`;
+      // NO KEY UPDATE (as C3d's escrow reservation): it conflicts with the x402
+      // ledger's FOR UPDATE and with itself, so one agent's spends are checked
+      // one at a time, without blocking the FOR KEY SHARE a Job insert naming
+      // this agent as provider takes through its foreign key.
+      await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${params.agentId} FOR NO KEY UPDATE`;
 
       const key = params.data.idempotencyKey;
       if (key) {

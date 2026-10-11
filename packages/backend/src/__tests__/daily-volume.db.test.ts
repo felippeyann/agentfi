@@ -712,6 +712,42 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     expect(await volume(agent.id)).toBeCloseTo(0, 6);
   });
 
+  it('after an enqueue failure the client can retry with the same idempotencyKey (the failed row frees it)', async () => {
+    const agent = await mkAgent();
+    const a = await app(agent.id);
+    const key = `retry-${RUN}-${seq}`;
+    h.enqueueFails = true;
+    expect((await transfer(a, '0.01', { idempotencyKey: key })).statusCode).toBe(500);
+    h.enqueueFails = false;
+    const retry = await transfer(a, '0.01', { idempotencyKey: key });
+    expect(retry.statusCode).toBe(202);
+    expect(await volumeStateOf(retry.json().transactionId)).toBe('RESERVED');
+    expect(await volume(agent.id)).toBeCloseTo(20, 6);
+  });
+
+  it('an operator approval that cannot enqueue answers 503 and leaves the row PENDING_APPROVAL (still reserved), then a retry works', async () => {
+    const agent = await mkAgent({ maxValueForAutoApprovalEth: '0.001' });
+    const a = await app(agent.id);
+    const id = (await transfer(a, '0.01')).json().transactionId as string;
+    h.enqueueFails = true;
+    const first = await a.inject({ method: 'POST', url: `/admin/transactions/${id}/approve`, headers: ADMIN });
+    expect(first.statusCode).toBe(503);
+    expect(await txStatus(id)).toBe('PENDING_APPROVAL');
+    expect(await volumeStateOf(id)).toBe('RESERVED');
+    h.enqueueFails = false;
+    const second = await a.inject({ method: 'POST', url: `/admin/transactions/${id}/approve`, headers: ADMIN });
+    expect(second.statusCode).toBe(200);
+    expect(h.queued.filter((q) => q.data['transactionId'] === id)).toHaveLength(1);
+    expect(await volume(agent.id)).toBeCloseTo(20, 6);
+  });
+
+  it('a priced dust amount of native value is not mistaken for an unpriced one', async () => {
+    const agent = await mkAgent({ maxDailyVolumeUsd: '1000' });
+    const res = await transfer(await app(agent.id), '0.000000000000000001'); // 1 wei ≈ 2e-15 USD → "0.000000"
+    expect(res.statusCode).toBe(202);
+    expect(await volumeStateOf(res.json().transactionId)).toBeNull(); // nothing to reserve
+  });
+
   it('the recovery sweep settles reservations a crash left RESERVED on terminal rows, as their first observer would have', async () => {
     const agent = await mkAgent();
     const a = await app(agent.id);
@@ -733,8 +769,9 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     expect(await volumeStateOf(failedStamped)).toBe('HELD');
     expect(await volumeStateOf(failedUnstamped)).toBe('RELEASED');
     expect(await volume(agent.id)).toBeCloseTo(40, 6); // committed 20 + held 20
-    // A second sweep finds nothing left to settle on these rows.
-    await sweepUnsettledVolume(m.db, { olderThan: new Date(Date.now() - 10 * 60_000), limit: 500 });
+    // A second sweep finds nothing left to settle.
+    const again = await sweepUnsettledVolume(m.db, { olderThan: new Date(Date.now() - 10 * 60_000), limit: 500 });
+    expect(again.committed + again.released + again.held).toBe(0);
     expect(await volume(agent.id)).toBeCloseTo(40, 6);
   });
 
@@ -772,9 +809,12 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
 
     let releaseSlowWorker!: () => void;
     const slowWorkerMayContinue = new Promise<void>((resolve) => (releaseSlowWorker = resolve));
+    let slowWorkerPassedGuard!: () => void;
+    const slowWorkerInSubmit = new Promise<void>((resolve) => (slowWorkerPassedGuard = resolve));
     let broadcasts = 0;
     const slowSubmitter = {
       async submit(params: { onBeforeBroadcast?: (hash: Hex) => Promise<void> }) {
+        slowWorkerPassedGuard(); // its guard already said "proceed"
         await slowWorkerMayContinue; // signing / estimateGas / lane wait
         const hash = keccak256(toHex(`slow-${data.transactionId}`));
         await params.onBeforeBroadcast?.(hash);
@@ -792,7 +832,7 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
 
     // Worker 1 passes the guard (agent active) and stalls before broadcasting.
     const slow = m.processor.processTransactionJob({ data }, depsFor(slowSubmitter));
-    await new Promise((r) => setTimeout(r, 100));
+    await slowWorkerInSubmit;
     // The operator pauses the agent; a redelivery's guard fails the row.
     await m.db.agent.update({ where: { id: agent.id }, data: { active: false } });
     const fast = await m.processor.processTransactionJob({ data }, depsFor({ submit: async () => { throw new Error('must not submit'); } }));

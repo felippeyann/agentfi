@@ -2127,7 +2127,9 @@ async function createWithVolumeReservation(
   },
 ): Promise<Transaction | null> {
   const { nativeValueWei, ...rest } = params;
-  const unpricedNativeValue = (nativeValueWei ?? 0n) > 0n && !(Number.parseFloat(params.valueUsd) > 0);
+  // `weiToUsd` answers exactly "0" when the oracle failed; a priced dust amount
+  // is "0.000000" and is not refused.
+  const unpricedNativeValue = (nativeValueWei ?? 0n) > 0n && params.valueUsd === '0';
   try {
     const created = await createTransactionWithVolume(db, { ...rest, unpricedNativeValue });
     if (!created.ok) {
@@ -2157,7 +2159,8 @@ async function createWithVolumeReservation(
  * the row would sit QUEUED forever with its DailyVolume reservation and no
  * job to run it (A6 review): it is marked FAILED — only while still QUEUED
  * without a hash — and its reservation settled (released: nothing was
- * broadcast), then the error propagates to the caller.
+ * broadcast), then the error propagates to the caller. Its idempotencyKey is
+ * cleared so the client can retry with the same key.
  */
 async function enqueueOrFail(
   transactionId: string,
@@ -2172,7 +2175,7 @@ async function enqueueOrFail(
     try {
       const failed = await db.transaction.updateMany({
         where: { id: transactionId, status: 'QUEUED', txHash: null },
-        data: { status: 'FAILED', error },
+        data: { status: 'FAILED', error, idempotencyKey: null },
       });
       if (failed.count > 0) await settleVolumeAfterFailure(db, transactionId);
     } catch (unwindErr) {

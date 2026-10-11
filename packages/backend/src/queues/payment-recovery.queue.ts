@@ -167,7 +167,16 @@ export async function runPaymentRecoveryTick(): Promise<RecoverySummary> {
     logger.error({ err: (err as Error)?.message ?? String(err) }, 'Payment recovery: SUBMITTED re-poll failed');
   }
 
-  const summary = await scanStalePaymentPending();
+  // Guarded like every other pass: a job whose finalizer keeps throwing must
+  // not cost the reconciliation, the review alerts and the volume sweep their
+  // tick (A6 re-review).
+  let summary: RecoverySummary;
+  try {
+    summary = await scanStalePaymentPending();
+  } catch (err) {
+    logger.error({ err: (err as Error)?.message ?? String(err) }, 'Payment recovery: PAYMENT_PENDING scan failed');
+    summary = { scanned: 0, finalizedConfirmed: 0, finalizedFailed: 0, refundedOrphan: 0, stillInFlight: 0, erc8183Recovered: 0 };
+  }
   summary.repoll = repoll;
 
   try {
