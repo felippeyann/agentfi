@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { Prisma } from '@prisma/client';
+import { Prisma, type Transaction } from '@prisma/client';
 import { getAddress, parseUnits, maxUint256, zeroAddress } from 'viem';
 import { db } from '../../db/client.js';
 import { TransactionBuilder } from '../../services/transaction/builder.service.js';
@@ -12,6 +12,7 @@ import {
 import { ExecutorService } from '../../services/transaction/executor.service.js';
 import { AGENT_EXECUTOR_ABI } from '../../abi/AgentExecutor.abi.js';
 import { PolicyService } from '../../services/policy/policy.service.js';
+import { createTransactionWithVolume } from '../../services/policy/daily-volume.js';
 import { FeeService } from '../../services/policy/fee.service.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
 import { weiToUsd, tokenAmountToUsd } from '../../services/transaction/price.service.js';
@@ -366,7 +367,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     });
 
     // Create transaction record
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -392,6 +395,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     // Enqueue for processing — ONLY if it doesn't require manual approval
     if (!policyResult.requiresApproval) {
@@ -514,7 +518,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       tier: request.agentTier,
     });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd: transferValueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -537,6 +543,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
       await transactionQueue.add('transfer', {
@@ -650,7 +657,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const feeCalc = feeService.calculateFee({ grossAmountWei: amountWei, tier: request.agentTier });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd: depositValueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -672,6 +681,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
       await transactionQueue.add('deposit', {
@@ -784,7 +794,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const feeCalc = feeService.calculateFee({ grossAmountWei: amountWei === maxUint256 ? 0n : amountWei, tier: request.agentTier });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd: withdrawValueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -806,6 +818,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
       await transactionQueue.add('withdraw', {
@@ -900,7 +913,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const feeCalc = feeService.calculateFee({ grossAmountWei: amountWei, tier: request.agentTier });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -923,6 +938,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
       await transactionQueue.add('compound-supply', {
@@ -1023,7 +1039,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       tier: request.agentTier,
     });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1046,6 +1064,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
       await transactionQueue.add('compound-withdraw', {
@@ -1138,7 +1157,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const feeCalc = feeService.calculateFee({ grossAmountWei: amountWei, tier: request.agentTier });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1162,6 +1183,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
       await transactionQueue.add('erc4626-deposit', {
@@ -1259,7 +1281,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       tier: request.agentTier,
     });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1283,6 +1307,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
       await transactionQueue.add('erc4626-withdraw', {
@@ -1391,7 +1416,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       tier: request.agentTier,
     });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1417,6 +1444,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
       await transactionQueue.add('curve-swap', {
@@ -1564,7 +1592,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const feeCalc = feeService.calculateFee({ grossAmountWei: executionFeeWei, tier: request.agentTier });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd: '0',
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1591,6 +1621,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
       await transactionQueue.add('gmx-open', {
@@ -1710,7 +1741,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const feeCalc = feeService.calculateFee({ grossAmountWei: executionFeeWei, tier: request.agentTier });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd: '0',
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1736,6 +1769,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
       await transactionQueue.add('gmx-close', {
@@ -1885,7 +1919,13 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const feeCalc = feeService.calculateFee({ grossAmountWei: totalValueWei, tier: request.agentTier });
 
-    const tx = await db.transaction.create({
+    // The native value the batch moves is its daily-volume spend (A6): the
+    // per-action checks above judge each action without it.
+    const batchValueUsd = totalValueWei > 0n ? await weiToUsd(totalValueWei, body.chainId) : '0';
+
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd: batchValueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1897,6 +1937,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         metadata: { actionCount: body.actions.length, actions: body.actions },
       },
     });
+    if (!tx) return;
 
     await transactionQueue.add('batch', {
       transactionId: tx.id,
@@ -2047,6 +2088,44 @@ async function getIdempotentTransaction(agentId: string, idempotencyKey: string)
   };
 }
 
+/**
+ * Creates the Transaction row together with its DailyVolume reservation (A6,
+ * `createTransactionWithVolume`): one database transaction, with the binding
+ * daily-limit check under the agent lock. Sends the reply and returns null
+ * when the limit refuses (403, the policy's wording) or when a concurrent
+ * request with the same idempotencyKey created the row first (its row is the
+ * answer, as for a replay — and the loser's reservation was rolled back).
+ */
+async function createWithVolumeReservation(
+  reply: FastifyReply,
+  params: { agentId: string; valueUsd: string; data: Prisma.TransactionUncheckedCreateInput },
+): Promise<Transaction | null> {
+  try {
+    const created = await createTransactionWithVolume(db, params);
+    if (!created.ok) {
+      reply.code(403).send({ error: created.reason });
+      return null;
+    }
+    return created.transaction;
+  } catch (err) {
+    const key = params.data.idempotencyKey;
+    if (key && isIdempotencyKeyConflict(err)) {
+      const idempotent = await getIdempotentTransaction(params.agentId, key);
+      if (idempotent.existing) {
+        reply.send(idempotent.existing);
+        return null;
+      }
+    }
+    throw err;
+  }
+}
+
+function isIdempotencyKeyConflict(err: unknown): boolean {
+  if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') return false;
+  const target = (err.meta as { target?: unknown } | undefined)?.target;
+  return Array.isArray(target) ? target.includes('idempotencyKey') : String(target ?? '').includes('idempotencyKey');
+}
+
 async function getLatestAgentTxTimestamp(agentId: string): Promise<number | undefined> {
   const latest = await db.transaction.findFirst({
     where: {
@@ -2193,6 +2272,10 @@ export async function executeA2APayment(params: {
     valueEth: isEthTransfer ? params.amount : '0',
     valueUsd: transferValueUsd,
     ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
+    // A6: the Job reserved the reward in DailyVolume at creation
+    // (reserveJobEscrow) and gives it back on failure (releaseJobEscrow); the
+    // payment row reserves nothing and is not judged against the limit twice.
+    dailyVolumeAccounted: true,
   });
   if (!policyResult.allowed) {
     throw new Error(`Policy check failed: ${policyResult.reason}`);

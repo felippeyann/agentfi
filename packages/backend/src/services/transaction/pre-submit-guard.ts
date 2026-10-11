@@ -17,6 +17,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { finalizeA2APaymentJob } from '../job/payment-finalizer.service.js';
 import { onEscrowTxOutcome, vetBindBeforeBroadcast } from '../job/escrow-erc8183.runtime.js';
+import { settleVolumeAfterFailure } from '../policy/daily-volume.js';
 
 export const PAUSED_BEFORE_SUBMISSION = 'Agent paused before submission';
 export const POLICY_EXPIRED_BEFORE_SUBMISSION = 'Agent policy expired before submission';
@@ -59,8 +60,9 @@ function resolveBlockReason(agent: AgentSnapshot, now: Date): string | null {
  * uses, which refunds the escrow reservation (including its DailyVolume
  * commitment) and flips the Job to PAYMENT_FAILED.
  *
- * Note: ordinary (non-A2A) transactions have no DailyVolume release on
- * FAILED/REVERTED anywhere in the codebase today, so none is attempted here.
+ * An ordinary transaction's DailyVolume reservation (A6) is given back when
+ * no earlier attempt reached the broadcast step, and kept (HELD) when one did:
+ * that signed transaction may still be mined.
  */
 export async function preSubmitGuard(
   db: PrismaClient,
@@ -121,6 +123,7 @@ export async function preSubmitGuard(
     where: { id: transactionId },
     data: { status: 'FAILED', error: reason },
   });
+  await settleVolumeAfterFailure(db, transactionId);
 
   const meta = (tx.metadata ?? null) as
     | { jobId?: string; a2aPayment?: boolean; erc8183?: boolean }

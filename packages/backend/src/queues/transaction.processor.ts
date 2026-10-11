@@ -49,6 +49,13 @@ import { preSubmitGuard } from '../services/transaction/pre-submit-guard.js';
 import { finalizeA2APaymentJob } from '../services/job/payment-finalizer.service.js';
 import { onEscrowTxOutcome } from '../services/job/escrow-erc8183.runtime.js';
 import { weiToUsd } from '../services/transaction/price.service.js';
+import {
+  commitTransactionVolume,
+  holdTransactionVolume,
+  markBroadcastAttempt,
+  releaseTransactionVolume,
+  settleVolumeAfterFailure,
+} from '../services/policy/daily-volume.js';
 import type { SubmitterService } from '../services/transaction/submitter.service.js';
 import { recordReceiptOnce, type ConfirmationOutcome } from '../services/transaction/monitor.service.js';
 import type { FeeService } from '../services/policy/fee.service.js';
@@ -117,27 +124,6 @@ export type TransactionJobResult =
   | { txHash: null; outcome: 'skipped' | 'blocked'; reason: string };
 
 /**
- * Atomically adds incoming USD volume to today's DailyVolume row.
- * Uses INSERT ... ON CONFLICT ... DO UPDATE to avoid read-then-write
- * race conditions under concurrent worker execution.
- */
-async function addDailyVolumeAtomic(
-  db: PrismaClient,
-  agentId: string,
-  date: string,
-  valueUsd: string,
-): Promise<void> {
-  await db.$executeRaw`
-    INSERT INTO "DailyVolume" ("id", "agentId", "date", "volumeUsd", "updatedAt")
-    VALUES (gen_random_uuid()::text, ${agentId}, ${date}, ${valueUsd}, NOW())
-    ON CONFLICT ("agentId", "date")
-    DO UPDATE SET
-      "volumeUsd" = (("DailyVolume"."volumeUsd"::numeric) + (${valueUsd}::numeric))::text,
-      "updatedAt" = NOW()
-  `;
-}
-
-/**
  * Processes one transaction job. Throws only when the broadcast itself fails
  * (so BullMQ retries with the tx still QUEUED); every policy/kill-switch block
  * and every idempotent skip returns normally.
@@ -178,6 +164,8 @@ export async function processTransactionJob(
 
   // The tx stays QUEUED while broadcasting. A throw here propagates so BullMQ
   // retries; the next attempt's guard still sees QUEUED + no txHash and proceeds.
+  // `broadcastAttemptedAt` is stamped before the signed transaction is sent
+  // (A6): a permanent failure after it keeps the DailyVolume reservation.
   const { txHash } = await submitter.submit({
     chainId: data.chainId,
     walletId: data.walletId,
@@ -185,6 +173,7 @@ export async function processTransactionJob(
     to: data.to,
     data: data.data,
     value: BigInt(data.value),
+    onBeforeBroadcast: () => markBroadcastAttempt(db, data.transactionId),
   });
 
   // One write: SUBMITTED always carries its txHash. From here on the guard
@@ -220,9 +209,14 @@ export async function processTransactionJob(
 
 /**
  * Everything that follows a recorded outcome (CONFIRMED / REVERTED / dropped
- * FAILED): fee usage, FeeEvent and daily volume for a confirmed transaction,
- * then the job lifecycle — the A2A finalizer or the ERC-8183 orchestrator.
- * Callers guarantee it runs once per transaction (conditional status write).
+ * FAILED): fee usage and FeeEvent for a confirmed transaction, the settlement
+ * of its DailyVolume reservation, then the job lifecycle — the A2A finalizer
+ * or the ERC-8183 orchestrator. Callers guarantee it runs once per transaction
+ * (conditional status write); the reservation settlement is conditional too.
+ *
+ * DailyVolume (A6): the USD was reserved when the row was created and is not
+ * added again here. CONFIRMED commits it, REVERTED gives it back (the value
+ * never moved), a dropped transaction holds it (it may still be mined).
  */
 export async function runPostConfirmation(deps: PostConfirmationDeps, data: PostConfirmationInput): Promise<void> {
   const { db, feeService } = deps;
@@ -230,6 +224,14 @@ export async function runPostConfirmation(deps: PostConfirmationDeps, data: Post
     where: { id: data.transactionId },
     select: { status: true, amountIn: true, error: true, metadata: true },
   });
+  if (tx?.status === 'CONFIRMED') {
+    await commitTransactionVolume(db, data.transactionId);
+  } else if (tx?.status === 'REVERTED') {
+    await releaseTransactionVolume(db, data.transactionId);
+  } else if (tx?.status === 'FAILED') {
+    await holdTransactionVolume(db, data.transactionId);
+  }
+
   if (tx?.status === 'CONFIRMED') {
     await feeService.incrementTxUsage(data.agentId);
 
@@ -247,13 +249,6 @@ export async function runPostConfirmation(deps: PostConfirmationDeps, data: Post
         feeUsd,
         feeBps: data.feeBps,
       });
-    }
-
-    // Update daily volume — atomic upsert avoids race condition under concurrency: 5
-    const valueUsd = BigInt(data.value) > 0n ? await weiToUsd(BigInt(data.value), data.chainId) : '0';
-    if (parseFloat(valueUsd) > 0) {
-      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-      await addDailyVolumeAtomic(db, data.agentId, today, valueUsd);
     }
   }
 
@@ -445,6 +440,7 @@ export async function handleFailedTransactionJob(
     logger.error({ transactionId, dlqErr }, 'Failed to enqueue to dead-letter queue');
   }
 
+  let markedFailed = false;
   try {
     await db.transaction.update({
       where: { id: transactionId },
@@ -453,8 +449,23 @@ export async function handleFailedTransactionJob(
         error: err.message.slice(0, 500),
       },
     });
+    markedFailed = true;
   } catch (dbErr) {
     logger.error({ transactionId, dbErr }, 'Failed to update transaction status to FAILED');
+  }
+
+  // A6: give the DailyVolume reservation back only when no attempt ever
+  // reached the broadcast step; after one, the signed transaction may still
+  // be mined, so it stays counted (HELD).
+  if (markedFailed) {
+    try {
+      const volume = await settleVolumeAfterFailure(db, transactionId);
+      if (volume === 'held') {
+        logger.warn({ transactionId }, 'Permanently failed after a broadcast attempt — daily volume reservation kept');
+      }
+    } catch (volumeErr) {
+      logger.error({ transactionId, volumeErr }, 'Failed to settle the daily volume reservation of a failed transaction');
+    }
   }
 
   // Issue #81: if this tx was an A2A payment, finalize the Job too.

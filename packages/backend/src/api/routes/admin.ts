@@ -21,6 +21,7 @@ import {
   type OperatorResumeOutcome,
 } from '../../services/policy/policy.service.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
+import { settleVolumeAfterFailure } from '../../services/policy/daily-volume.js';
 import { PnLService } from '../../services/billing/pnl.service.js';
 import { OperatorService } from '../../services/billing/operator.service.js';
 
@@ -755,10 +756,15 @@ export async function adminRoutes(fastify: FastifyInstance) {
       const feeAmountWei = BigInt(queuePayload.feeAmountWei || '0');
       const feeBps = queuePayload.feeBps ?? 30;
 
-      await db.transaction.update({
-        where: { id: tx.id },
+      // Conditional (A6): of two concurrent approvals only one moves the row
+      // out of PENDING_APPROVAL and enqueues it.
+      const approved = await db.transaction.updateMany({
+        where: { id: tx.id, status: 'PENDING_APPROVAL' },
         data: { status: 'QUEUED' },
       });
+      if (approved.count === 0) {
+        return reply.code(409).send({ error: 'Transaction is no longer PENDING_APPROVAL.' });
+      }
 
       await transactionQueue.add(tx.type.toLowerCase(), {
         transactionId: tx.id,
@@ -795,10 +801,15 @@ export async function adminRoutes(fastify: FastifyInstance) {
         return reply.code(400).send({ error: 'Can only reject PENDING_APPROVAL transactions.' });
       }
 
-      await db.transaction.update({
-        where: { id: tx.id },
+      const rejected = await db.transaction.updateMany({
+        where: { id: tx.id, status: 'PENDING_APPROVAL' },
         data: { status: 'FAILED', error: 'Operator rejected transaction' },
       });
+      if (rejected.count === 0) {
+        return reply.code(409).send({ error: 'Transaction is no longer PENDING_APPROVAL.' });
+      }
+      // Never broadcast: its DailyVolume reservation is given back (A6).
+      await settleVolumeAfterFailure(db, tx.id);
 
       logger.info({ transactionId: tx.id }, 'Admin rejected transaction');
       return { status: 'FAILED' };
