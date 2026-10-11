@@ -301,6 +301,15 @@ model Transaction {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
   confirmedAt    DateTime?
+  // A6: the USD this transaction reserved in DailyVolume when its row was
+  // created, the UTC day of that DailyVolume row, and how the reservation was
+  // settled (services/policy/daily-volume.ts). NULL state = nothing reserved.
+  volumeReservedUsd    String?
+  volumeReservedDate   String?
+  volumeState          VolumeState?
+  // A6: set before the first signed broadcast; a failure after it is an
+  // unknown outcome, never "never executed". See migration 0020.
+  broadcastAttemptedAt DateTime?
 
   feeEvents  FeeEvent[]
 
@@ -319,6 +328,14 @@ model DailyVolume {
 
   @@unique([agentId, date], name: "agentId_date")
   @@index([date])
+}
+
+/// A6: settlement of a transaction's DailyVolume reservation (migration 0020).
+enum VolumeState {
+  RESERVED
+  COMMITTED
+  RELEASED
+  HELD
 }
 
 enum TxStatus {
