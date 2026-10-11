@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { adminFetch } from '../../../lib/api';
 import { JobReconcileActions } from '../../../components/JobReconcileActions';
+import { JobReviewActions } from '../../../components/JobReviewActions';
 import {
   ArrowLeft,
   Briefcase,
@@ -36,6 +37,32 @@ interface Job {
   updatedAt: string;
   requester: { id: string; name: string };
   provider: { id: string; name: string };
+  // ERC-8183 escrow (raw admin row; C3d operator review)
+  escrowKind?: string | null;
+  escrowChainId?: number | null;
+  onChainJobId?: string | null;
+  onChainStatus?: string | null;
+  expiresAt?: string | null;
+  settleTxHash?: string | null;
+  feedbackStatus?: string | null;
+  contestedAt?: string | null;
+  contestReason?: string | null;
+  escrowError?: string | null;
+  resolution?: string | null;
+  resolvedBy?: string | null;
+  resolvedAt?: string | null;
+  resolutionNote?: string | null;
+  ratedAgentId?: string | null;
+}
+
+/** Final on-chain states: nothing is left for an operator to decide or force. */
+const FINAL_ON_CHAIN = ['COMPLETED', 'REJECTED', 'EXPIRED', 'EXPIRED_UNFUNDED', 'FAILED'];
+
+/** C3d: a job whose deliverable is Submitted on-chain and that only an operator decision settles. */
+function needsReview(job: Job): boolean {
+  if (job.escrowKind !== 'erc8183') return false;
+  if (job.onChainStatus === 'CONTESTED') return true;
+  return job.onChainStatus === 'SUBMITTED' && ['PAYMENT_PENDING', 'CANCELLED', 'FAILED'].includes(job.status);
 }
 
 const STATUS_CONFIG: Record<
@@ -97,6 +124,7 @@ const CHAIN_NAMES: Record<number, string> = {
   8453: 'Base',
   42161: 'Arbitrum',
   137: 'Polygon',
+  84532: 'Base Sepolia',
 };
 
 export default async function JobDetailPage({
@@ -138,8 +166,51 @@ export default async function JobDetailPage({
         </div>
       </div>
 
-      {(job.status === 'PAYMENT_PENDING' || job.status === 'PAYMENT_FAILED') && (
-        <JobReconcileActions jobId={job.id} status={job.status} />
+      {needsReview(job) && (
+        <JobReviewActions
+          jobId={job.id}
+          status={job.status}
+          onChainStatus={job.onChainStatus ?? null}
+          contestReason={job.contestReason ?? null}
+          expiresAt={job.expiresAt ?? null}
+        />
+      )}
+
+      {(job.status === 'PAYMENT_PENDING' || job.status === 'PAYMENT_FAILED') &&
+        // An ERC-8183 job with funds still on-chain is settled by the evaluator (review above), not forced in the DB.
+        (job.escrowKind !== 'erc8183' || FINAL_ON_CHAIN.includes(job.onChainStatus ?? '')) && (
+          <JobReconcileActions jobId={job.id} status={job.status} />
+        )}
+
+      {job.escrowKind === 'erc8183' && (
+        <div className="glass rounded-xl p-5 border border-brand-border">
+          <p className="text-xs text-gray-500 mb-3 uppercase tracking-wider">ERC-8183 escrow</p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+            <div>
+              <p className="text-xs text-gray-500">On-chain status</p>
+              <p className="text-white font-medium mt-0.5">{job.onChainStatus ?? '—'}{job.onChainJobId ? ` (#${job.onChainJobId})` : ''}</p>
+            </div>
+            <div>
+              <p className="text-xs text-gray-500">Expires</p>
+              <p className="text-white font-medium mt-0.5">{job.expiresAt ? new Date(job.expiresAt).toLocaleString() : '—'}</p>
+            </div>
+            <div>
+              <p className="text-xs text-gray-500">Feedback</p>
+              <p className="text-white font-medium mt-0.5">{job.feedbackStatus ?? '—'}{job.ratedAgentId ? ` (agent #${job.ratedAgentId})` : ''}</p>
+            </div>
+            <div>
+              <p className="text-xs text-gray-500">Contested</p>
+              <p className="text-white font-medium mt-0.5">{job.contestedAt ? new Date(job.contestedAt).toLocaleString() : '—'}</p>
+            </div>
+          </div>
+          {job.resolution && (
+            <p className="text-[11px] text-gray-400 mt-3">
+              Operator decision <code className="font-mono text-white">{job.resolution}</code> by {job.resolvedBy ?? 'unknown'}
+              {job.resolvedAt ? ` at ${new Date(job.resolvedAt).toLocaleString()}` : ''}{job.resolutionNote ? ` — “${job.resolutionNote}”` : ''}
+            </p>
+          )}
+          {job.escrowError && <p className="text-[11px] text-yellow-400/80 mt-2 break-words">{job.escrowError}</p>}
+        </div>
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

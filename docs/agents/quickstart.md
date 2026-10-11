@@ -107,7 +107,8 @@ agent connection:
 
 The tools involved: `post_job`, `get_job`, `check_outbox` (requester),
 `check_inbox`, `update_job_status` (provider) and `contest_job` (requester,
-to dispute a delivery before settlement: full refund instead of payment).
+to dispute a delivery before settlement: the job is held for an operator
+decision — pay the provider or refund the requester).
 Escrow refusals come back with a `code` the agent can act on:
 `ERC8183_USDC_ONLY`, `ESCROW_NOT_FUNDED`, `CONTEST_NOT_ALLOWED`, and
 `JOB_STATUS_CONFLICT` (the job changed under the request: re-read it). Full

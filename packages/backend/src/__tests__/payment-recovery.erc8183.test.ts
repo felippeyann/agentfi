@@ -28,7 +28,7 @@ vi.hoisted(() => {
   }
 });
 
-const { mockDb, finalizeMock, recoverMock, reconcileMock, repollMock, captured } = vi.hoisted(() => ({
+const { mockDb, finalizeMock, recoverMock, reconcileMock, repollMock, reviewAlertsMock, captured } = vi.hoisted(() => ({
   mockDb: {
     job: { findMany: vi.fn() },
     transaction: { findUnique: vi.fn() },
@@ -37,6 +37,7 @@ const { mockDb, finalizeMock, recoverMock, reconcileMock, repollMock, captured }
   recoverMock: vi.fn(),
   reconcileMock: vi.fn(),
   repollMock: vi.fn(),
+  reviewAlertsMock: vi.fn(),
   captured: { processor: null as null | (() => Promise<unknown>) },
 }));
 
@@ -49,7 +50,11 @@ vi.mock('bullmq', () => ({
 }));
 vi.mock('../db/client.js', () => ({ db: mockDb }));
 vi.mock('../services/job/payment-finalizer.service.js', () => ({ finalizeA2APaymentJob: finalizeMock }));
-vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({ recoverErc8183Job: recoverMock, reconcileEscrowJobs: reconcileMock }));
+vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({
+  recoverErc8183Job: recoverMock,
+  reconcileEscrowJobs: reconcileMock,
+  alertExpiringReviews: reviewAlertsMock,
+}));
 vi.mock('../queues/transaction.queue.js', () => ({ repollSubmittedTransactionsNow: repollMock }));
 
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -62,6 +67,7 @@ beforeEach(() => {
   recoverMock.mockResolvedValue('resettled');
   repollMock.mockResolvedValue({ scanned: 0, confirmed: 0, reverted: 0, dropped: 0, pending: 0, errors: 0 });
   reconcileMock.mockResolvedValue({ stalledFunding: 0, lostRejects: 0, unsubmittedDeliverables: 0, stalledBindings: 0, outcomes: {} });
+  reviewAlertsMock.mockResolvedValue(0);
 });
 
 async function runScan() {
@@ -121,10 +127,16 @@ describe('payment recovery tick — C3c passes', () => {
       order.push('reconcile');
       return { stalledFunding: 2, lostRejects: 1, unsubmittedDeliverables: 0, stalledBindings: 0, outcomes: { advanced: 2, rejectScheduled: 1 } };
     });
+    reviewAlertsMock.mockImplementation(async () => {
+      order.push('reviewAlerts');
+      return 1;
+    });
 
     const summary = await runScan();
 
-    expect(order).toEqual(['repoll', 'paymentPending', 'reconcile']);
+    // C3d: the review expiry alerts run last.
+    expect(order).toEqual(['repoll', 'paymentPending', 'reconcile', 'reviewAlerts']);
+    expect(reviewAlertsMock).toHaveBeenCalledWith({ limit: expect.any(Number) });
     expect(repollMock).toHaveBeenCalledWith();
     const [opts] = reconcileMock.mock.calls[0] as [{ staleBefore: Date; limit: number }];
     expect(opts.staleBefore).toBeInstanceOf(Date);
@@ -133,6 +145,7 @@ describe('payment recovery tick — C3c passes', () => {
     expect(summary).toMatchObject({
       repoll: { confirmed: 1 },
       escrowReconcile: { stalledFunding: 2, lostRejects: 1 },
+      reviewAlerts: 1,
     });
   });
 
@@ -145,7 +158,8 @@ describe('payment recovery tick — C3c passes', () => {
 
     reconcileMock.mockRejectedValue(new Error('db hiccup'));
     repollMock.mockResolvedValue({ scanned: 0, confirmed: 0, reverted: 0, dropped: 0, pending: 0, errors: 0 });
+    reviewAlertsMock.mockRejectedValue(new Error('db hiccup'));
     const second = await runScan();
-    expect(second).toMatchObject({ escrowReconcile: null, repoll: { scanned: 0 } });
+    expect(second).toMatchObject({ escrowReconcile: null, repoll: { scanned: 0 }, reviewAlerts: null });
   });
 });

@@ -12,7 +12,9 @@
  * C5 makes is exercised here. Skipped (not failed) without E2E_ANVIL_FORK_URL.
  *
  * Paths: happy (fund → bind identity → submit → complete → fee + feedback),
- * contest (reject → full refund, feedback 0 "rejected"), cancellation while
+ * contest → held for operator review (C3d, D9) → admin verdict (reject with
+ * REASON_QUALITY_REJECTED → full refund, feedback 0 "rejected") or admin pay
+ * (complete → feedback 100), cancellation while
  * FUNDED (reject → full refund, no feedback), expiry (claimRefund after
  * expiredAt), and the `examples/escrow-erc8183` script end to end.
  */
@@ -60,6 +62,8 @@ interface EscrowView {
   feedbackStatus: string | null;
   contestedAt: string | null;
   escrowError: string | null;
+  resolution: string | null;
+  ratedAgentId: string | null;
   providerAgentId: string | null;
   providerAgentIdStatus: string | null;
   providerAgentIdError: string | null;
@@ -106,7 +110,9 @@ async function registerAgent(backend: BackendHandle, fork: EscrowForkContext, na
   const res = await call<{ id: string; apiKey: string; safeAddress: string }>(backend.url, '/v1/agents', {
     method: 'POST',
     apiKey: fork.apiSecret,
-    body: { name, chainIds: [fork.chainId] },
+    // C3d: the requester's policy applies to escrow jobs — the default per-tx cap (1.0, read in
+    // USD for USDC) would refuse the 2.5 USDC budget, and the default 60 s cooldown counts a job.
+    body: { name, chainIds: [fork.chainId], policy: { maxValuePerTxEth: '10', cooldownSeconds: 0 } },
   });
   expect(res.status, res.raw).toBe(201);
   return { id: res.body.id, name, apiKey: res.body.apiKey, address: getAddress(res.body.safeAddress) };
@@ -496,30 +502,29 @@ describe.skipIf(!ctx)('ERC-8183 escrow + ERC-8004 reputation on a Base Sepolia f
       await backend?.stop();
     });
 
-    // C2b / D9 (second adversarial review, 2026-10-08): a requester's contest is not an evaluator
-    // verdict. The backend still rejects with `keccak256("agentfi.contested")` (until C3d moves the
-    // contest to operator review), and the hook now refunds WITHOUT writing negative feedback
-    // (`FeedbackSkipped("not-verdict")`). Before C2b this scenario asserted a value-0 entry.
-    it('contest while SUBMITTED: evaluator reject, full refund, no feedback ("not-verdict", D9)', async () => {
-      const { requester, provider } = await fundedPair(backend, fork, 'contest');
-      const feesBefore = await pendingPlatformFees(fork);
+    // C3d / D9 (owner, 2026-10-08): a requester's contest is a claim, not a verdict. It puts the job
+    // on hold for operator review (escrow.onChainStatus CONTESTED): the delayed settlement does not
+    // complete or reject it. The operator decides through POST /admin/jobs/:id/resolve; only the
+    // explicit quality verdict (reject with REASON_QUALITY_REJECTED + feedback params) makes the
+    // hook write a 0, and "pay" completes with a 100.
 
-      const created = await createUsdcJob(backend, fork, requester, provider, { task: 'contested deliverable' });
+    /** Fund, accept, deliver; wait until the deliverable is Submitted on-chain; contest it. */
+    async function contestedJob(label: string) {
+      const { requester, provider } = await fundedPair(backend, fork, label);
+      const created = await createUsdcJob(backend, fork, requester, provider, { task: `${label} deliverable` });
       const funded = await waitForJob(backend, requester.apiKey, created.id, 'FUNDED', (j) => j.escrow?.onChainStatus === 'FUNDED');
       const onChainJobId = funded.escrow!.onChainJobId!;
-
       // Accept and deliver right away: if the ERC-8004 binding is still in
       // flight the submit is deferred behind it (R2) and released when it ends.
       await patchJob(backend, provider.apiKey, created.id, { status: 'ACCEPTED' });
-      const result = { summary: 'not what was asked' };
-      const delivered = await patchJob(backend, provider.apiKey, created.id, { status: 'COMPLETED', result });
-      log(`contest: submit ${delivered.escrow?.deferredSubmitAt ? 'deferred behind the ERC-8004 binding' : 'sent immediately'}`);
-
+      const delivered = await patchJob(backend, provider.apiKey, created.id, { status: 'COMPLETED', result: { summary: `${label}: not what was asked` } });
+      log(`${label}: submit ${delivered.escrow?.deferredSubmitAt ? 'deferred behind the ERC-8004 binding' : 'sent immediately'}`);
       const submitted = await waitForJob(backend, requester.apiKey, created.id, 'SUBMITTED', (j) => j.escrow?.onChainStatus === 'SUBMITTED', {
         timeoutMs: 120_000,
       });
       expect(submitted.escrow!.providerAgentIdStatus).toBe('BOUND');
       const agentId = BigInt(submitted.escrow!.providerAgentId!);
+      const submittedAt = Date.now();
 
       const contest = await call<JobView>(backend.url, `/v1/jobs/${created.id}/contest`, {
         method: 'POST',
@@ -527,7 +532,36 @@ describe.skipIf(!ctx)('ERC-8183 escrow + ERC-8004 reputation on a Base Sepolia f
         body: { reason: 'Deliverable does not match the brief' },
       });
       expect(contest.status, contest.raw).toBe(200);
+      expect(contest.body.escrow).toMatchObject({ onChainStatus: 'CONTESTED', resolution: null });
       expect(contest.body.escrow!.contestedAt).not.toBeNull();
+
+      // (a) Held: the 20 s evaluation delay elapses and the queued settlement sends nothing.
+      const heldUntil = submittedAt + 30_000;
+      await new Promise((r) => setTimeout(r, Math.max(0, heldUntil - Date.now())));
+      const held = await getJob(backend, requester.apiKey, created.id);
+      expect(held).toMatchObject({ status: 'PAYMENT_PENDING' });
+      expect(held.escrow).toMatchObject({ onChainStatus: 'CONTESTED', settleTxHash: null });
+      expect((await readChainJob(fork, onChainJobId)).status).toBe(CHAIN_JOB_STATUS.Submitted);
+      log(`${label}: job ${created.id} (#${onChainJobId}) held for operator review past the evaluation delay — nothing settled`);
+      return { requester, provider, created, onChainJobId, agentId };
+    }
+
+    async function adminResolve(jobId: string, body: Record<string, unknown>) {
+      const res = await fetch(`${backend.url}/admin/jobs/${jobId}/resolve`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-admin-secret': fork.adminSecret },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+    }
+
+    it('contest → held for review → operator verdict (refund + quality-rejected): refund, the hook writes 0 "rejected"', async () => {
+      const { requester, provider, created, onChainJobId, agentId } = await contestedJob('verdict');
+      const feesBefore = await pendingPlatformFees(fork);
+
+      const resolved = await adminResolve(created.id, { decision: 'refund', verdict: 'quality-rejected', note: 'fork: deliverable off-brief', operator: 'c5a-operator' });
+      expect(resolved.status, JSON.stringify(resolved.body)).toBe(202);
+      expect(resolved.body).toMatchObject({ resolution: 'quality-rejected', previousOnChainStatus: 'CONTESTED' });
 
       const rejected = await waitForJob(
         backend,
@@ -537,37 +571,65 @@ describe.skipIf(!ctx)('ERC-8183 escrow + ERC-8004 reputation on a Base Sepolia f
         (j) => j.status === 'PAYMENT_FAILED' && j.escrow?.onChainStatus === 'REJECTED',
         { allowFailed: true, timeoutMs: 120_000 },
       );
-      log(`contest: job ${created.id} (#${onChainJobId}) rejected in ${rejected.escrow!.settleTxHash}`);
+      log(`verdict: job ${created.id} (#${onChainJobId}) rejected by the operator verdict in ${rejected.escrow!.settleTxHash}`);
 
-      const chainJob = await readChainJob(fork, onChainJobId);
-      expect(chainJob.status).toBe(CHAIN_JOB_STATUS.Rejected);
+      // ── on-chain ────────────────────────────────────────────────────────
+      expect((await readChainJob(fork, onChainJobId)).status).toBe(CHAIN_JOB_STATUS.Rejected);
       expect(await usdcBalanceOf(fork.anvilRpc, fork.usdc, requester.address)).toBe(REQUESTER_USDC);
       expect(await usdcBalanceOf(fork.anvilRpc, fork.usdc, provider.address)).toBe(0n);
       expect(await pendingPlatformFees(fork)).toBe(feesBefore);
 
       const events = await settlementEvents(fork, rejected.escrow!.settleTxHash!);
-      expect(events.escrow.map((e) => e.eventName)).toEqual(expect.arrayContaining(['JobRejected', 'Refunded']));
-      expect(events.hook.find((e) => e.eventName === 'FeedbackWritten')).toBeUndefined();
-      const skipped = events.hook.find((e) => e.eventName === 'FeedbackSkipped');
-      expect(skipped).toBeDefined();
-      expect(events.feedback).toHaveLength(0);
-      expect(rejected.escrow!.feedbackStatus).toBe('skipped:not-verdict');
+      const jobRejected = events.escrow.find((e) => e.eventName === 'JobRejected');
+      expect(jobRejected?.args['reason']).toBe(keccak256(toBytes('agentfi.quality-rejected')));
+      expect(events.escrow.map((e) => e.eventName)).toContain('Refunded');
+      const written = events.hook.find((e) => e.eventName === 'FeedbackWritten');
+      expect(written, `hook events: ${JSON.stringify(events.hook, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))}`).toBeDefined();
+      expect(written!.args['agentId']).toBe(agentId);
+      expect(written!.args['value']).toBe(0n);
+      expect(events.feedback).toHaveLength(1);
+      expect(events.feedback[0]).toMatchObject({ agentId, clientAddress: fork.hook, value: 0n, tag1: 'agentfi.job', tag2: 'rejected' });
 
-      const [count, value, decimals] = await forkClient(fork.anvilRpc).readContract({
+      const [count, value] = await forkClient(fork.anvilRpc).readContract({
         address: fork.reputationRegistry,
         abi: REPUTATION_REGISTRY_ABI,
         functionName: 'getSummary',
         args: [agentId, [fork.hook], 'agentfi.job', 'rejected'],
       });
-      expect(count).toBe(0n);
+      expect(count).toBe(1n);
       expect(value).toBe(0n);
-      log(`contest: getSummary(#${agentId}, [hook], "agentfi.job", "rejected") = count ${count}, value ${value}, decimals ${decimals}`);
+      log(`verdict: getSummary(#${agentId}, [hook], "agentfi.job", "rejected") = count ${count}, value ${value}`);
 
-      // The backend still builds and serves the feedback file it committed in optParams; the hook
-      // just did not record it (C3d decides what the contest flow sends once it is an operator review).
+      // ── off-chain ───────────────────────────────────────────────────────
+      expect(rejected.escrow).toMatchObject({ feedbackStatus: 'written', resolution: 'quality-rejected', ratedAgentId: agentId.toString() });
       const file = await fetchFeedbackFile(backend, created.id);
       expect(file.status).toBe(200);
       expect(file.json).toMatchObject({ outcome: 'rejected', jobId: created.id });
+      expect(keccak256(file.bytes)).toBe(events.feedback[0]!.feedbackHash);
+    });
+
+    it('contest → held for review → operator "pay": complete, provider paid, the hook writes 100 "completed"', async () => {
+      const { requester, provider, created, onChainJobId, agentId } = await contestedJob('pay');
+      const feesBefore = await pendingPlatformFees(fork);
+
+      const resolved = await adminResolve(created.id, { decision: 'pay', note: 'fork: deliverable matches the brief', operator: 'c5a-operator' });
+      expect(resolved.status, JSON.stringify(resolved.body)).toBe(202);
+
+      const completed = await waitForJob(backend, requester.apiKey, created.id, 'COMPLETED', (j) => j.status === 'COMPLETED', { timeoutMs: 120_000 });
+      log(`pay: job ${created.id} (#${onChainJobId}) completed by the operator in ${completed.escrow!.settleTxHash}`);
+
+      expect((await readChainJob(fork, onChainJobId)).status).toBe(CHAIN_JOB_STATUS.Completed);
+      expect(await usdcBalanceOf(fork.anvilRpc, fork.usdc, requester.address)).toBe(REQUESTER_USDC - BUDGET_UNITS);
+      expect(await usdcBalanceOf(fork.anvilRpc, fork.usdc, provider.address)).toBe(BUDGET_UNITS - FEE_UNITS);
+      expect((await pendingPlatformFees(fork)) - feesBefore).toBe(FEE_UNITS);
+
+      const events = await settlementEvents(fork, completed.escrow!.settleTxHash!);
+      expect(events.escrow.find((e) => e.eventName === 'JobCompleted')?.args['reason']).toBe(keccak256(toBytes('agentfi.completed')));
+      const written = events.hook.find((e) => e.eventName === 'FeedbackWritten');
+      expect(written!.args['agentId']).toBe(agentId);
+      expect(written!.args['value']).toBe(100n);
+      expect(events.feedback).toEqual([expect.objectContaining({ agentId, value: 100n, tag2: 'completed' })]);
+      expect(completed.escrow).toMatchObject({ onChainStatus: 'COMPLETED', feedbackStatus: 'written', resolution: 'pay', ratedAgentId: agentId.toString() });
     });
   });
 

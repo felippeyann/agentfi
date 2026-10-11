@@ -50,7 +50,7 @@ import {
   type Erc8183Config,
   type Erc8183Deps,
 } from '../services/job/escrow-erc8183.service.js';
-import { bindIntentId, registerIntentId } from '../services/job/erc8004-identity.service.js';
+import { bindIntentId, registerIntentId, vetBindBeforeBroadcast } from '../services/job/erc8004-identity.service.js';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -840,5 +840,40 @@ describe('settlement of jobs already submitted', () => {
     const result = await processSettlementJob(h.deps, { data: { jobId: 'job-1', action: 'settle' } });
     expect(result).toMatchObject({ outcome: 'settled', feedbackStatus: 'written' });
     expect(h.jobs.get('job-1')).toMatchObject({ feedbackStatus: 'written', providerAgentIdStatus: 'BOUND' });
+  });
+});
+
+// ── C3d (H14 dry-run): the bind is re-checked right before it is broadcast ──
+
+describe('vetBindBeforeBroadcast', () => {
+  it('lets a bind go out while the job is BINDING, live and Funded (DB and chain)', async () => {
+    const h = makeDeps({ jobs: [fundedJob({ onChainStatus: 'FUNDED', providerAgentIdStatus: 'BINDING', providerAgentId: '9598' })] });
+    h.chain.status = CHAIN_JOB_STATUS.Funded;
+    expect(await vetBindBeforeBroadcast(h.deps, 'job-1')).toBeNull();
+    expect(h.jobs.get('job-1')!['providerAgentIdStatus']).toBe('BINDING');
+  });
+
+  it('a job cancelled after the bind was queued: SKIPPED with the reason, nothing broadcast (the H14 revert)', async () => {
+    const h = makeDeps({ jobs: [fundedJob({ status: 'CANCELLED', onChainStatus: 'FUNDED', providerAgentIdStatus: 'BINDING', providerAgentId: '9598' })] });
+    const reason = await vetBindBeforeBroadcast(h.deps, 'job-1');
+    expect(reason).toContain('job is CANCELLED / FUNDED');
+    expect(h.jobs.get('job-1')).toMatchObject({ providerAgentIdStatus: 'SKIPPED', providerAgentIdError: expect.stringMatching(/checked before broadcast/) });
+  });
+
+  it('the DB still says FUNDED but the chain says Rejected (refund mined, DB behind): SKIPPED', async () => {
+    const h = makeDeps({ jobs: [fundedJob({ onChainStatus: 'FUNDED', providerAgentIdStatus: 'BINDING', providerAgentId: '9598' })] });
+    h.chain.status = CHAIN_JOB_STATUS.Rejected;
+    expect(await vetBindBeforeBroadcast(h.deps, 'job-1')).toContain('no longer Funded (status 4)');
+    expect(h.jobs.get('job-1')!['providerAgentIdStatus']).toBe('SKIPPED');
+  });
+
+  it('an unreadable chain does not block a bind the DB still allows; a binding already terminal is not re-sent', async () => {
+    const h = makeDeps({ jobs: [fundedJob({ onChainStatus: 'FUNDED', providerAgentIdStatus: 'BINDING', providerAgentId: '9598' })] });
+    (h.deps.publicClient(CHAIN_ID) as unknown as { readContract: ReturnType<typeof vi.fn> }).readContract.mockRejectedValueOnce(new Error('rpc down'));
+    expect(await vetBindBeforeBroadcast(h.deps, 'job-1')).toBeNull();
+
+    const done = makeDeps({ jobs: [fundedJob({ onChainStatus: 'FUNDED', providerAgentIdStatus: 'FAILED' })] });
+    expect(await vetBindBeforeBroadcast(done.deps, 'job-1')).toMatch(/binding is FAILED/);
+    expect(done.jobs.get('job-1')!['providerAgentIdStatus']).toBe('FAILED');
   });
 });

@@ -1,6 +1,7 @@
 /**
  * Agent policy for USDC spend that does not go through `/v1/transactions`
- * (task P6; written so the escrow path — C3d — can reuse it).
+ * (task P6; reused by the ERC-8183 escrow path at `POST /v1/jobs` — C3d,
+ * `reserveEscrowJobSpend` in escrow.service.ts, which adds the cooldown).
  *
  * `PolicyService.validateTransaction` judges a transaction the backend builds
  * and submits. An x402 payment (`POST /v1/jobs/:id/pay-resource`) is different:
@@ -25,12 +26,15 @@
  *                        rows for pay-resource). `"0"` = no daily limit.
  *   allowedTokens        when non-empty, the USDC contract must be listed.
  *   allowedContracts     when non-empty, the COUNTERPARTY — the address that
- *                        receives the USDC (x402 `payTo`; for an escrow, the
- *                        escrow contract) — must be listed. The agent never
- *                        calls the USDC contract itself in an x402 payment
- *                        (the server's facilitator submits the authorization),
- *                        so the list is read as "who this agent may send value
- *                        to", like an ETH transfer's recipient.
+ *                        receives the USDC (x402 `payTo`; for an ERC-8183
+ *                        escrow job, C3d, the provider's wallet, where the
+ *                        budget ends on `complete` — not the escrow contract,
+ *                        which is the operator's own custody) — must be
+ *                        listed. The agent never calls the USDC contract
+ *                        itself in an x402 payment (the server's facilitator
+ *                        submits the authorization), so the list is read as
+ *                        "who this agent may send value to", like an ETH
+ *                        transfer's recipient.
  *
  * Limits are parsed with `policy-numbers.ts` (S1): a value that is not a plain
  * decimal is unlimited — exactly what the authority classifier assumes, so

@@ -179,9 +179,9 @@ export const TOOL_ANNOTATIONS = {
   // duplicate today, but that is not a retry contract — so not idempotent.
   update_job_status: { title: 'Update job status', ...MOVES_FUNDS },
   // Requester disputes a submitted deliverable before settlement. Not
-  // read-only; destructive: it flips the settlement from paying the provider
-  // to a full refund and records a rejection in the provider's on-chain
-  // reputation, and it cannot be withdrawn. Idempotent: the backend's
+  // read-only; destructive: it stops the automatic payment of the provider
+  // and hands the job to an operator decision (pay, refund, or refund with a
+  // negative quality verdict — C3d, D9), and it cannot be withdrawn. Idempotent: the backend's
   // conditional write (contestedAt IS NULL) wins once, so a repeat — with any
   // reason — is a 409 that changes nothing. It moves no funds itself (the
   // evaluator settles). Open world: another agent's payment and the chain.

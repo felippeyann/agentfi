@@ -45,6 +45,16 @@ const identityRegistryFields = Object.fromEntries(
     optionalAddress(`IDENTITY_REGISTRY_ADDRESS_${chainId}`),
   ]),
 ) as Record<`IDENTITY_REGISTRY_ADDRESS_${(typeof ESCROW_CHAIN_IDS)[number]}`, ReturnType<typeof optionalAddress>>;
+// C3d: `REPUTATION_REGISTRY_ADDRESS_<chainId>` — the ERC-8004 Reputation
+// Registry the chain's ReputationHook must write to (checked at boot against
+// `hook.reputationRegistry()`). Blank or unset → the official Base / Base
+// Sepolia default (config/contracts.ts); other chains have no default.
+const reputationRegistryFields = Object.fromEntries(
+  ESCROW_CHAIN_IDS.map((chainId) => [
+    `REPUTATION_REGISTRY_ADDRESS_${chainId}`,
+    optionalAddress(`REPUTATION_REGISTRY_ADDRESS_${chainId}`),
+  ]),
+) as Record<`REPUTATION_REGISTRY_ADDRESS_${(typeof ESCROW_CHAIN_IDS)[number]}`, ReturnType<typeof optionalAddress>>;
 // ── end ERC-8004 identity ─────────────────────────────────────────────────
 
 // ── Per-chain RPC override (C5a) ──────────────────────────────────────────
@@ -168,7 +178,14 @@ const envSchema = z.object({
   ESCROW_JOB_TTL_SECONDS: z.coerce.number().int().positive().default(604_800),
   // Grace period between the provider's `submit` confirming and the evaluator
   // sending `complete`, during which the requester may `POST /v1/jobs/:id/contest`.
+  // C3d: clamped per job so the settlement is scheduled before `expiresAt`.
   ESCROW_EVALUATION_DELAY_SECONDS: z.coerce.number().int().min(0).default(0),
+  // C3d: how long before `expiresAt` the operator is alerted (once) about a
+  // job still waiting for a review decision (contested, or CANCELLED/FAILED
+  // while Submitted on-chain). After `expiresAt` `claimRefund` is
+  // permissionless and the job ends as a full refund without feedback.
+  // Default 86400 (24 h); 0 disables the reminder (the contest alert stays).
+  ESCROW_REVIEW_ALERT_BEFORE_EXPIRY_SECONDS: z.coerce.number().int().min(0).default(86_400),
   // Public base URL of this API, used to build the ERC-8004 `feedbackURI`
   // (`<BACKEND_PUBLIC_URL>/v1/jobs/<id>/feedback.json`) and the on-chain job description.
   BACKEND_PUBLIC_URL: z.preprocess(
@@ -182,6 +199,7 @@ const envSchema = z.object({
   // first funded job, decision D7) bound to the job with setProviderAgentId.
   // Registration file: `<BACKEND_PUBLIC_URL>/v1/agents/<id>/erc8004.json`.
   ...identityRegistryFields,
+  ...reputationRegistryFields,
   // Optional public MCP endpoint advertised as the `MCP` service of every
   // agent's registration file. Omitted from the file when unset.
   MCP_PUBLIC_URL: z.preprocess(blankToUndefined, z.string().url().optional()),

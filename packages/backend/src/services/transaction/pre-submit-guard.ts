@@ -16,10 +16,12 @@
 
 import type { PrismaClient } from '@prisma/client';
 import { finalizeA2APaymentJob } from '../job/payment-finalizer.service.js';
-import { onEscrowTxOutcome } from '../job/escrow-erc8183.runtime.js';
+import { onEscrowTxOutcome, vetBindBeforeBroadcast } from '../job/escrow-erc8183.runtime.js';
 
 export const PAUSED_BEFORE_SUBMISSION = 'Agent paused before submission';
 export const POLICY_EXPIRED_BEFORE_SUBMISSION = 'Agent policy expired before submission';
+/** C3d: prefix of the error of a `setProviderAgentId` the guard did not broadcast. */
+export const BIND_SKIPPED_BEFORE_SUBMISSION = 'setProviderAgentId skipped before submission';
 
 export type PreSubmitDecision =
   /** Transaction is still QUEUED and agent + policy are live — submit it. */
@@ -92,6 +94,26 @@ export async function preSubmitGuard(
 
   const reason = resolveBlockReason(tx.agent, new Date());
   if (!reason) {
+    // C3d (H14 dry-run): the provider's ERC-8004 bind is only valid while the
+    // job is live and Funded. It was enqueued at FUNDED; a cancellation (and
+    // its refund) may have happened since — then broadcasting it only
+    // reverts at the provider's expense. Re-check right before signing.
+    const step = (tx.metadata ?? null) as { escrowStep?: string; jobId?: string } | null;
+    if (step?.escrowStep === 'bindAgent' && typeof step.jobId === 'string') {
+      const skipped = await vetBindBeforeBroadcast(step.jobId);
+      if (skipped) {
+        const error = `${BIND_SKIPPED_BEFORE_SUBMISSION}: ${skipped}`;
+        await db.transaction.update({ where: { id: transactionId }, data: { status: 'FAILED', error } });
+        // The binding is already SKIPPED; the outcome only moves the
+        // provider's identity lane and releases a submit deferred behind it.
+        try {
+          await onEscrowTxOutcome({ transactionId, status: 'FAILED', error });
+        } catch (err) {
+          return { action: 'fail', reason: error, finalizerError: (err as Error)?.message ?? String(err) };
+        }
+        return { action: 'fail', reason: error };
+      }
+    }
     return { action: 'proceed' };
   }
 

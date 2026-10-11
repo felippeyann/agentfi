@@ -337,6 +337,58 @@ async function pumpBindings(deps: IdentityDeps, provider: SigningAgent, chainId:
   }
 }
 
+/** `AgentJobEscrow.JobStatus.Funded`. */
+const CHAIN_FUNDED = 1;
+
+/**
+ * C3d (found by the H14 runbook dry-run on a fork, 2026-10-08): the last
+ * check before the provider's `setProviderAgentId` is signed and broadcast.
+ *
+ * The bind is enqueued when `fund` confirms, but it may sit in the queue (or
+ * behind the provider's register) while the job is cancelled and the
+ * evaluator's refund mines; broadcasting it then only reverts
+ * (`InvalidStatus`, gas paid by the provider). So the pre-submit guard asks
+ * here first: the job must still be BINDING, live (PENDING / ACCEPTED /
+ * PAYMENT_PENDING) and FUNDED in the DB, and — when the chain can be read —
+ * Funded on-chain. Otherwise the binding ends SKIPPED with the reason and
+ * nothing is broadcast. An unreadable chain does not block the bind (the DB
+ * check already caught the cancellation, and the transaction would at worst
+ * revert, as before). Returns null when the bind may go out.
+ */
+export async function vetBindBeforeBroadcast(
+  deps: Omit<IdentityDeps, 'publicClient'> & { publicClient(chainId: number): Pick<PublicClient, 'getTransactionReceipt' | 'readContract'> },
+  jobId: string,
+): Promise<string | null> {
+  const job = await deps.db.job.findUnique({
+    where: { id: jobId },
+    select: { status: true, onChainStatus: true, onChainJobId: true, escrowContract: true, escrowChainId: true, providerAgentIdStatus: true },
+  });
+  if (!job) return 'job not found';
+  let reason: string | null = null;
+  if (job.providerAgentIdStatus !== 'BINDING') {
+    reason = `binding is ${job.providerAgentIdStatus ?? 'not started'}`;
+  } else if (!LIVE_FOR_BINDING.has(job.status) || job.onChainStatus !== 'FUNDED') {
+    reason = `job is ${job.status} / ${job.onChainStatus ?? 'unknown'} — setProviderAgentId is only valid while the job is live and Funded`;
+  } else if (job.onChainJobId && job.escrowContract && job.escrowChainId !== null) {
+    try {
+      const chain = (await deps.publicClient(job.escrowChainId).readContract({
+        address: getAddress(job.escrowContract),
+        abi: AGENT_JOB_ESCROW_ABI,
+        functionName: 'getJob',
+        args: [BigInt(job.onChainJobId)],
+      })) as { status: number };
+      if (Number(chain.status) !== CHAIN_FUNDED) {
+        reason = `the on-chain job is no longer Funded (status ${Number(chain.status)}) — setProviderAgentId would revert`;
+      }
+    } catch (err) {
+      deps.logger.warn({ jobId, err: errorMessage(err) }, 'ERC-8004 bind pre-broadcast chain read failed — bind proceeds on the DB check');
+    }
+  }
+  if (!reason) return null;
+  await endBinding(deps, jobId, 'SKIPPED', `${reason} (checked before broadcast)`);
+  return reason;
+}
+
 /**
  * Called by the orchestrator when `fund` confirmed (`onChainStatus = FUNDED`).
  * Marks the job BINDING and either binds right away (identity REGISTERED) or

@@ -21,6 +21,8 @@ import { releaseJobEscrow } from '../policy/escrow.service.js';
 import { notificationService } from '../notification.service.js';
 import { walletLaneLock } from '../transaction/wallet-lane.runtime.js';
 import { finalizeA2APaymentJob } from './payment-finalizer.service.js';
+import { readHookReputation } from './hook-state.js';
+import * as identity from './erc8004-identity.service.js';
 import * as svc from './escrow-erc8183.service.js';
 import type { Erc8183ChainConfig, Erc8183Config, Erc8183Deps, EscrowAlert } from './escrow-erc8183.service.js';
 
@@ -39,7 +41,11 @@ function evaluatorMinBalanceWei(): bigint | null {
   }
 }
 
-/** Operator alerts from the orchestrator (cancellation refused, chain conflict, evaluator low on gas). */
+/**
+ * Operator alerts from the orchestrator (cancellation refused, chain conflict,
+ * evaluator low on gas; C3d: contest held for review, review expiring /
+ * expired / overridden, settlement failing).
+ */
 async function sendEscrowAlert(alert: EscrowAlert): Promise<void> {
   await notificationService.notify({
     type: 'ESCROW_ALERT',
@@ -75,6 +81,7 @@ export const erc8183Config: Erc8183Config = {
   },
   mcpPublicUrl: env.MCP_PUBLIC_URL ?? null,
   evaluatorMinBalanceWei: evaluatorMinBalanceWei(),
+  reviewAlertBeforeExpirySeconds: env.ESCROW_REVIEW_ALERT_BEFORE_EXPIRY_SECONDS,
 };
 
 const publicClients = new Map<number, ReturnType<typeof createChainPublicClient>>();
@@ -120,3 +127,20 @@ export const recoverErc8183Job = (job: { id: string; onChainStatus: string | nul
   svc.recoverErc8183Job(erc8183Deps(), job);
 export const reconcileEscrowJobs = (opts: { staleBefore: Date; limit: number }) =>
   svc.reconcileEscrowJobs(erc8183Deps(), opts);
+/** C3d: ReputationHook state (canonical id, penalties) of an agent, for the trust report. */
+export const hookReputation = (params: { identities: ReadonlyArray<{ chainId: number; erc8004AgentId: string | null }>; walletAddress: string }) =>
+  readHookReputation(
+    {
+      hook: (chainId) => erc8183Config.chain(chainId)?.hook ?? null,
+      readContract: (chainId, call) => erc8183Deps().publicClient(chainId).readContract(call as never),
+    },
+    params,
+  );
+
+/** C3d (H14 dry-run): re-check a queued `setProviderAgentId` right before it is broadcast; null = go. */
+export const vetBindBeforeBroadcast = (jobId: string) => identity.vetBindBeforeBroadcast(erc8183Deps(), jobId);
+
+// C3d — contest → operator review (decision D9).
+export const contestJob = (params: { jobId: string; reason: string | null }) => svc.contestEscrowJob(erc8183Deps(), params);
+export const resolveJob = (params: svc.ResolveParams) => svc.resolveEscrowJob(erc8183Deps(), params);
+export const alertExpiringReviews = (opts?: { limit?: number }) => svc.alertExpiringReviews(erc8183Deps(), opts);

@@ -38,6 +38,7 @@ import {
 } from './queues/payment-recovery.queue.js';
 import { erc8183Deps } from './services/job/escrow-erc8183.runtime.js';
 import { closeWalletLanes } from './services/transaction/wallet-lane.runtime.js';
+import { announceProcessCapabilities, processCapabilities, runEscrowBootCheck } from './config/escrow-boot.runtime.js';
 
 /** How long a shutdown waits for in-flight confirmation monitors before exiting. */
 export const SHUTDOWN_MONITOR_GRACE_MS = 10_000;
@@ -66,6 +67,10 @@ export async function startWorkerProcess(): Promise<WorkerProcess | null> {
     return null;
   }
 
+  // C3d: same deployment check as the API (FATAL on a mismatch in production /
+  // staging) — the worker is the process that signs settlements.
+  await runEscrowBootCheck('worker');
+
   const worker = startTransactionWorker();
   worker.on('failed', (job, err) => {
     logger.error({ jobId: job?.id, err }, 'Transaction job failed');
@@ -82,7 +87,17 @@ export async function startWorkerProcess(): Promise<WorkerProcess | null> {
     logger.info({ escrowEvaluatorAddress, chainIds: configuredEscrowChainIds }, 'ERC-8183 escrow enabled — evaluator signer configured');
     escrowSettlementWorker = startEscrowSettlementWorker(erc8183Deps);
     await scheduleEscrowExpirySweep();
+  } else if (configuredEscrowChainIds.length > 0) {
+    logger.warn(
+      { chainIds: configuredEscrowChainIds },
+      'AGENT_JOB_ESCROW_ADDRESS_* is set but ESCROW_EVALUATOR_PRIVATE_KEY is not — this worker runs NO escrow settlement worker',
+    );
   }
+
+  // C3d: log what this worker runs and compare it with the API's last boot.
+  await announceProcessCapabilities(
+    processCapabilities('worker', { transactionWorker: true, paymentRecovery: true, settlementWorker: escrowSettlementWorker !== undefined }),
+  );
 
   await repollSubmittedAtBoot();
 

@@ -1687,6 +1687,23 @@ export interface paths {
          *     provider may only accept once it is `FUNDED`. On other chains the
          *     legacy flow (DB reservation + optional EscrowModule lock) is unchanged
          *     and `escrow` is `null`.
+         *
+         *     **Spending policy (C3d).** An escrow job is a spend of the requester:
+         *     its policy applies before anything is reserved or created, with the
+         *     readings of `pay-resource` (P6) and USDC priced at exactly 1.00 USD (no
+         *     oracle): a paused / expired policy refuses (`403 POLICY_PAUSED`);
+         *     `allowedTokens` (when non-empty) must list the escrow USDC;
+         *     `allowedContracts` (when non-empty) is the list of **payees** and must
+         *     list the provider's wallet (the escrow contract is the operator's
+         *     custody, not a payee); the budget must not exceed `maxValuePerTxEth`
+         *     read in USD (the default policy, 1.0, caps a job at 1 USDC); the daily
+         *     volume (`DailyVolume` + counted x402 payments + this budget) must stay
+         *     within `maxDailyVolumeUsd` and is reserved atomically; the cooldown
+         *     applies (the job is refused while the agent's last transaction is
+         *     younger than `cooldownSeconds`). A refusal is `403 POLICY_VIOLATION`
+         *     with `rule`, `limit`, `spentToday` (daily volume), `amount` and
+         *     `payee`. On a legacy chain a reward the oracle cannot price is refused
+         *     (400) when a daily limit applies — it used to reserve $0.
          */
         post: {
             parameters: {
@@ -1718,6 +1735,21 @@ export interface paths {
                  *     `ERC8183_PROVIDER_IS_REQUESTER`, `ERC8183_PROVIDER_IS_EVALUATOR`.
                  */
                 400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /**
+                 * @description ERC-8183 chain only (C3d). `POLICY_PAUSED` (paused or expired
+                 *     policy) or `POLICY_VIOLATION` with `rule` (`allowedTokens`,
+                 *     `allowedContracts` — the provider wallet is not a listed payee,
+                 *     `maxValuePerTx`, `maxDailyVolume`, `cooldown`), `limit`,
+                 *     `spentToday` (`maxDailyVolume`), `amount` and `payee`.
+                 */
+                403: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -1880,7 +1912,8 @@ export interface paths {
          *     `executeA2APayment()` sends the reward directly; on an ERC-8183 chain the
          *     provider's wallet calls `submit(jobId, keccak256(result))` and the
          *     operator evaluator settles (`complete` → provider paid minus the platform
-         *     fee, or `reject` → requester refunded when contested).
+         *     fee). A requester's contest holds the job for operator review instead
+         *     (C3d, see `POST /v1/jobs/{id}/contest`).
          *
          *     ERC-8183 jobs: `ACCEPTED` requires `escrow.onChainStatus = FUNDED`
          *     (409 `ESCROW_NOT_FUNDED`); `CANCELLED` / `FAILED` schedule an evaluator
@@ -1895,7 +1928,15 @@ export interface paths {
          *     `COMPLETED`), this one answers 409 `JOB_STATUS_CONFLICT` and none of
          *     its effects run. A cancellation of an ERC-8183 job whose deliverable
          *     is already Submitted on-chain is accepted in the database but its
-         *     refund is refused (`escrow.escrowError`, operator alert).
+         *     refund is refused (`escrow.escrowError`, operator alert); the operator
+         *     decides it (`POST /admin/jobs/{id}/resolve`).
+         *
+         *     C3d: `ACCEPTED` / `COMPLETED` of an ERC-8183 job less than 2 minutes
+         *     (10 % of the job TTL when that is shorter) before `escrow.expiresAt`
+         *     is `409 ESCROW_EXPIRING`: after `expiresAt` anyone can claim the
+         *     refund, so the deliverable could not be paid for. The evaluation delay
+         *     (`ESCROW_EVALUATION_DELAY_SECONDS`) is clamped per job so the
+         *     settlement runs before `expiresAt`.
          */
         patch: {
             parameters: {
@@ -1931,7 +1972,9 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
                 /**
                  * @description `ESCROW_NOT_FUNDED` — ERC-8183 job accepted before the budget was
-                 *     locked on-chain (body carries `onChainStatus`); `JOB_STATUS_CONFLICT`
+                 *     locked on-chain (body carries `onChainStatus`); `ESCROW_EXPIRING` —
+                 *     too close to `expiresAt` to accept or deliver (body carries
+                 *     `expiresAt`); `JOB_STATUS_CONFLICT`
                  *     — the job changed while this request was processed (body carries the
                  *     current `status` and `onChainStatus`; re-read the job and retry if
                  *     still valid); or the provider record is missing (legacy payment
@@ -1976,12 +2019,21 @@ export interface paths {
         put?: never;
         /**
          * Contest a submitted deliverable (ERC-8183 jobs, requester only)
-         * @description Marks the job as contested so the operator evaluator sends `reject`
-         *     (full refund to the requester) instead of `complete`. Allowed only while
-         *     the job is `PAYMENT_PENDING`, the deliverable is `SUBMITTED` on-chain and
-         *     the settlement has not been claimed yet (`ESCROW_EVALUATION_DELAY_SECONDS`
-         *     is the window). The decision is final and recorded on-chain by the hook as
-         *     negative reputation for the provider.
+         * @description Decision D9 (C3d): a contest is a claim, not a verdict. It puts the job
+         *     **on hold for operator review** (`escrow.onChainStatus = CONTESTED`):
+         *     nothing is settled automatically and the operator alerted. The operator
+         *     then decides (`POST /admin/jobs/{id}/resolve`): pay the provider
+         *     (rating 100), refund the requester (no rating), or refund with an
+         *     explicit quality verdict — the only case that writes a negative (0)
+         *     ERC-8004 rating. `escrow.resolution` / `escrow.resolvedAt` report the
+         *     decision. Unresolved at `escrow.expiresAt`, anyone can claim the refund
+         *     on-chain: the job then ends as a full refund without any rating.
+         *
+         *     Allowed only while the job is `PAYMENT_PENDING`, the deliverable is
+         *     `SUBMITTED` in the database and Submitted on-chain, the settlement has not
+         *     been claimed and no evaluator settlement transaction of the job can
+         *     still mine (`ESCROW_EVALUATION_DELAY_SECONDS` is the window). Contest
+         *     and settlement claim the same row conditionally: exactly one wins.
          */
         post: {
             parameters: {
@@ -1998,7 +2050,7 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Job with `escrow.contestedAt` set. */
+                /** @description Job with `escrow.onChainStatus = CONTESTED` and `escrow.contestedAt` set. */
                 200: {
                     headers: {
                         [name: string]: unknown;
@@ -2011,10 +2063,24 @@ export interface paths {
                 404: components["responses"]["NotFound"];
                 /**
                  * @description `NOT_ESCROW_JOB` (legacy job) or `CONTEST_NOT_ALLOWED` (not
-                 *     `PAYMENT_PENDING` + `SUBMITTED`, or already contested / settling);
-                 *     the body carries the current `status`, `onChainStatus`, `contestedAt`.
+                 *     `PAYMENT_PENDING` + `SUBMITTED`, already contested, settlement claimed,
+                 *     or a settlement transaction already broadcast / mined; `message`
+                 *     says which); the body carries the current `status`,
+                 *     `onChainStatus`, `contestedAt`.
                  */
                 409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /**
+                 * @description `CONTEST_UNVERIFIABLE` — the on-chain job status could not be read;
+                 *     nothing was recorded, retry.
+                 */
+                503: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -2046,7 +2112,12 @@ export interface paths {
          *     `feedbackHash` (see `docs/architecture/erc-8004-integration.md` §4).
          *     Served byte-for-byte (canonical JSON, recursively sorted keys) so
          *     `keccak256(body)` equals the on-chain hash. No API key required.
-         *     `404` until the settlement worker has generated it.
+         *     `404` until the settlement worker has generated it, and for a job
+         *     settled without feedback params (refund without verdict, cancellation,
+         *     expiry, payout blocked). C3d: served `Cache-Control: public,
+         *     max-age=31536000, immutable` only once the settlement that committed its
+         *     hash is mined (`escrow.onChainStatus` `COMPLETED` / `REJECTED`);
+         *     before that `no-store` (another operator decision may rebuild it).
          */
         get: {
             parameters: {
@@ -2062,6 +2133,8 @@ export interface paths {
                 /** @description Feedback file. */
                 200: {
                     headers: {
+                        /** @description `public, max-age=31536000, immutable` once committed on-chain, else `no-store`. */
+                        "Cache-Control"?: string;
                         [name: string]: unknown;
                     };
                     content: {
@@ -2561,6 +2634,122 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/jobs/{id}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Operator decision on an ERC-8183 job held for review (C3d)
+         * @description Decision D9. Resolves an ERC-8183 job whose deliverable is Submitted
+         *     on-chain and that the backend does not settle on its own: a contested
+         *     job (`onChainStatus CONTESTED`), a `CANCELLED` / `FAILED` job Submitted
+         *     on-chain, or a `PAYMENT_PENDING` job whose settlement keeps failing.
+         *     The evaluator then settles from the settlement queue:
+         *
+         *     | Body | On-chain | ERC-8004 rating |
+         *     |---|---|---|
+         *     | `{ "decision": "pay" }` | `complete(agentfi.completed, feedback)` — provider paid | 100 |
+         *     | `{ "decision": "refund" }` | `reject(agentfi.contested \| cancelled \| provider-failed \| operator-refund, "0x")` | none |
+         *     | `{ "decision": "refund", "verdict": "quality-rejected" }` | `reject(REASON_QUALITY_REJECTED, feedback)` | 0 |
+         *     | `{ "decision": "payout-blocked" }` | `reject(REASON_PAYOUT_BLOCKED, "0x")` — the provider cannot receive USDC | none |
+         *
+         *     `note` is required; `operator` (the admin UI sends the signed-in user;
+         *     default `admin-api`) and the time are recorded on the job
+         *     (`resolution`, `resolvedBy`, `resolvedAt`, `resolutionNote`) and
+         *     appended to `reviewLog`. Refused while the chain is not Submitted, while
+         *     a settlement is running or one of its transactions can still mine. A
+         *     decision whose settlement fails for good returns to the hold, is alerted
+         *     and retried by the recovery tick until another decision replaces it.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        decision: "pay" | "refund" | "payout-blocked";
+                        /**
+                         * @description Only with `decision: refund`.
+                         * @enum {string}
+                         */
+                        verdict?: "quality-rejected";
+                        note: string;
+                        operator?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Decision recorded; the evaluator settles it. */
+                202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            jobId?: string;
+                            /** @enum {string} */
+                            resolution?: "pay" | "refund" | "quality-rejected" | "payout-blocked";
+                            previousStatus?: string;
+                            previousOnChainStatus?: string | null;
+                            /** @description false when the settlement queue was unavailable; the recovery tick enqueues it. */
+                            queued?: boolean;
+                        };
+                    };
+                };
+                /** @description Invalid body (`details`). */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                /**
+                 * @description `NOT_ESCROW_JOB`, `NOT_RESOLVABLE` (not held for review),
+                 *     `SETTLEMENT_IN_PROGRESS` (a settlement is running or may still mine;
+                 *     retry later) or `CHAIN_NOT_SUBMITTED`; the body carries `status` and
+                 *     `onChainStatus`.
+                 */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
+                };
+                /** @description `CHAIN_UNREADABLE` — the on-chain status could not be read; nothing recorded. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
+                    };
                 };
             };
         };
@@ -3253,6 +3442,25 @@ export interface components {
             lastActiveAt?: string;
             /** Format: date-time */
             createdAt?: string;
+            /**
+             * @description C3d: per ERC-8004 identity of the agent on a chain with a
+             *     ReputationHook — read on-chain, cached for a minute; `null` fields
+             *     could not be read.
+             */
+            erc8004?: {
+                chainId?: number;
+                /** @description ReputationHook address. */
+                hook?: string;
+                /** @description The id the backend minted for the agent. */
+                agentId?: string;
+                /** @description `canonicalAgentId(agent wallet)`: the id the hook rates this wallet under. */
+                canonicalAgentId?: string | null;
+                /**
+                 * @description `penalties(agentId)`: negative verdicts the Reputation Registry did not
+                 *     record; while non-zero the hook writes no positive entry for the id.
+                 */
+                penalties?: string | null;
+            }[];
         };
         /**
          * @description An AgentFi handshake (S6): `signature` is over the EIP-712 digest of
@@ -3592,8 +3800,14 @@ export interface components {
             contract?: string | null;
             /** @description uint256 job id as a decimal string. */
             onChainJobId?: string | null;
-            /** @enum {string|null} */
-            onChainStatus?: "CREATING" | "OPEN" | "BUDGET_SET" | "APPROVED" | "FUNDED" | "SUBMITTED" | "SETTLING" | "COMPLETED" | "REJECTED" | "EXPIRED" | "EXPIRED_UNFUNDED" | "FAILED" | null;
+            /**
+             * @description Last confirmed escrow step. `CONTESTED` (C3d) is a hold, not a chain
+             *     state: the requester contested, the chain still says Submitted, and
+             *     only an operator decision settles the job. `SETTLING` marks a claimed
+             *     settlement.
+             * @enum {string|null}
+             */
+            onChainStatus?: "CREATING" | "OPEN" | "BUDGET_SET" | "APPROVED" | "FUNDED" | "SUBMITTED" | "CONTESTED" | "SETTLING" | "COMPLETED" | "REJECTED" | "EXPIRED" | "EXPIRED_UNFUNDED" | "FAILED" | null;
             /** @description Operator evaluator signer (decision D5). */
             evaluator?: string | null;
             /** @description Budget in token base units (USDC, 6 decimals). */
@@ -3611,7 +3825,14 @@ export interface components {
             settleTxHash?: string | null;
             /** @description Platform fee accrued on completion (base units). */
             platformFeeAmount?: string | null;
-            /** @description ERC-8004 feedback outcome from the hook — `written`, `skipped:<reason>` or `failed`. */
+            /**
+             * @description ERC-8004 feedback outcome from the hook — `written`,
+             *     `skipped:<reason>` (e.g. `no-params`, `not-verdict`, `payout-blocked`,
+             *     `penalized`, `agent-not-provider`, `budget-too-small`), `failed`, or
+             *     `failed:penalized` (C3d: a verdict the registry did not record — the
+             *     hook penalized the agent id and withholds positive entries until the
+             *     evaluator clears it).
+             */
             feedbackStatus?: string | null;
             /** Format: date-time */
             contestedAt?: string | null;
@@ -3645,6 +3866,22 @@ export interface components {
              *     before the job is Submitted. `null` once released.
              */
             deferredSubmitAt?: string | null;
+            /**
+             * @description C3d: the operator decision on a job held for review (contest,
+             *     cancellation of a delivered job, blocked payout). Who decided and the
+             *     note are operator-only.
+             * @enum {string|null}
+             */
+            resolution?: "pay" | "refund" | "quality-rejected" | "payout-blocked" | null;
+            /** Format: date-time */
+            resolvedAt?: string | null;
+            /**
+             * @description C3d: the ERC-8004 agent id the ReputationHook rated — its canonical id
+             *     for the provider address (first verified binding), which can differ
+             *     from `providerAgentId`. From `FeedbackWritten` / `AgentPenalized` /
+             *     `CanonicalAgentIdSet`.
+             */
+            ratedAgentId?: string | null;
         };
         AgentErc8004Identity: {
             chainId?: number;

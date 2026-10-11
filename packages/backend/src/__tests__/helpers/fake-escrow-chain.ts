@@ -16,12 +16,20 @@
  *  - failure knobs: mine automatically or on demand, drop a broadcast's
  *    response while keeping the transaction, hide a hash from the RPC.
  *
+ * C3d adds a small model of `ReputationHook` for jobs created with
+ * `SIM_HOOK`: the canonical-id binding on `submit` (CanonicalAgentIdSet /
+ * AgentIdNotVerified against the identity owners), the gates of
+ * complete/reject (D9: only REASON_QUALITY_REJECTED writes a 0, payout-blocked
+ * and every other reason skip, "0x" skips with no-params), penalties when the
+ * registry is made to fail, and the feedback entries it would write.
+ *
  * What it does not model: gas, blocks with more than one sender interleaving
- * semantics beyond nonce order, hooks (no ReputationHook — feedback is
- * covered by the fork suite).
+ * semantics beyond nonce order, the real ERC-8004 Reputation Registry (the
+ * fork suite covers it).
  */
 
 import {
+  decodeAbiParameters,
   decodeFunctionData,
   encodeAbiParameters,
   encodeEventTopics,
@@ -31,6 +39,8 @@ import {
   keccak256,
   parseTransaction,
   recoverTransactionAddress,
+  stringToHex,
+  toBytes,
   TransactionNotFoundError,
   TransactionReceiptNotFoundError,
   type Abi,
@@ -42,6 +52,12 @@ import {
 import { privateKeyToAccount, generatePrivateKey, type PrivateKeyAccount } from 'viem/accounts';
 import { AGENT_JOB_ESCROW_ABI } from '../../abi/AgentJobEscrow.abi.js';
 import { IDENTITY_REGISTRY_ABI } from '../../abi/IdentityRegistry.abi.js';
+import { REPUTATION_HOOK_ABI } from '../../abi/ReputationHook.abi.js';
+
+const REASON_QUALITY_REJECTED = keccak256(toBytes('agentfi.quality-rejected'));
+const REASON_PAYOUT_BLOCKED = keccak256(toBytes('agentfi.payout-blocked'));
+/** `ReputationHook.minFeedbackBudget` of the deploy script (1 USDC). */
+const MIN_FEEDBACK_BUDGET = 1_000_000n;
 
 export const SIM_CHAIN_ID = 84532;
 export const SIM_ESCROW = getAddress('0x00000000000000000000000000000000000e5c20');
@@ -86,6 +102,17 @@ export interface SimJob {
   hook: Address;
   providerAgentId: bigint;
   deliverable: Hex | null;
+  submittedAt?: bigint;
+}
+
+/** A feedback entry the modelled hook wrote (what `giveFeedback` would record). */
+export interface SimFeedback {
+  jobId: bigint;
+  agentId: bigint;
+  value: number;
+  tag2: 'completed' | 'rejected';
+  feedbackURI: string;
+  feedbackHash: Hex;
 }
 
 interface PendingTx {
@@ -161,7 +188,18 @@ export class FakeEscrowChain {
   /** Every accepted broadcast, in order (from, nonce, function). */
   readonly broadcasts: Array<{ from: Address; nonce: number; functionName: string; hash: Hex }> = [];
   /** Evaluator calls, in order. */
-  readonly evaluatorCalls: Array<{ functionName: string; jobId: bigint; reason?: Hex }> = [];
+  readonly evaluatorCalls: Array<{ functionName: string; jobId: bigint; reason?: Hex; optParams?: Hex }> = [];
+
+  // ── ReputationHook model (C3d) ──────────────────────────────────────────
+  /** `hook.trustedEvaluator()`; null → the evaluator of each job is trusted. */
+  trustedEvaluator: Address | null = null;
+  readonly canonicalAgentId = new Map<string, bigint>();
+  readonly penalties = new Map<bigint, bigint>();
+  readonly feedback: SimFeedback[] = [];
+  /** The Reputation Registry refuses writes (e.g. the provider approved the hook): FeedbackFailed (+ penalty on a verdict). */
+  registryFails = false;
+  /** Providers that cannot receive USDC (blacklisted): `complete` reverts. */
+  readonly blockedPayees = new Set<string>();
 
   // ── accounts ────────────────────────────────────────────────────────────
 
@@ -297,7 +335,13 @@ export class FakeEscrowChain {
   /** viem-shaped read client used by the orchestrator and the re-poll. */
   get publicClient() {
     return {
-      readContract: async (params: { address: Address; functionName: string; args?: readonly unknown[] }) => this.read(params),
+      readContract: async (params: { address: Address; functionName: string; args?: readonly unknown[] }) => {
+        if (this.failReads > 0) {
+          this.failReads--;
+          throw new Error('HTTP request failed (rpc down)');
+        }
+        return this.read(params);
+      },
       getTransactionReceipt: async ({ hash }: { hash: Hex }) => this.getReceipt(hash),
       getTransaction: async ({ hash }: { hash: Hex }) => this.getTransaction(hash),
       getBalance: async ({ address }: { address: Address }) => this.nativeBalances.get(lower(address)) ?? 10n ** 18n,
@@ -335,20 +379,36 @@ export class FakeEscrowChain {
         this.evaluatorCalls.push({
           functionName: params.functionName,
           jobId: params.args[0] as bigint,
-          ...(params.functionName === 'reject' || params.functionName === 'complete' ? { reason: params.args[1] as Hex } : {}),
+          ...(params.functionName === 'reject' || params.functionName === 'complete'
+            ? { reason: params.args[1] as Hex, optParams: params.args[2] as Hex }
+            : {}),
         });
         this.receipts.set(hash, this.receipt(hash, status, logs));
         return hash;
       },
-      waitForTransactionReceipt: async (hash: Hex) => this.getReceipt(hash),
+      waitForTransactionReceipt: async (hash: Hex) => {
+        if (this.evaluatorReceiptTimeouts > 0) {
+          this.evaluatorReceiptTimeouts--;
+          throw new Error(`Timed out while waiting for transaction with hash "${hash}" to be confirmed.`);
+        }
+        return this.getReceipt(hash);
+      },
     };
   }
+
+  /** The next N evaluator receipt waits time out although the transaction mined (lost confirmation). */
+  evaluatorReceiptTimeouts = 0;
+  /** The next N `readContract` calls fail (RPC outage). */
+  failReads = 0;
 
   private snapshot() {
     return {
       jobs: new Map([...this.jobs].map(([k, v]) => [k, { ...v }])),
       usdc: new Map(this.usdc),
       allowances: new Map(this.allowances),
+      canonicalAgentId: new Map(this.canonicalAgentId),
+      penalties: new Map(this.penalties),
+      feedback: this.feedback.length,
     };
   }
 
@@ -359,6 +419,73 @@ export class FakeEscrowChain {
     for (const [k, v] of s.usdc) this.usdc.set(k, v);
     this.allowances.clear();
     for (const [k, v] of s.allowances) this.allowances.set(k, v);
+    this.canonicalAgentId.clear();
+    for (const [k, v] of s.canonicalAgentId) this.canonicalAgentId.set(k, v);
+    this.penalties.clear();
+    for (const [k, v] of s.penalties) this.penalties.set(k, v);
+    this.feedback.length = s.feedback;
+  }
+
+  // ── ReputationHook model (C3d) ──────────────────────────────────────────
+
+  private hooked(job: SimJob): boolean {
+    return lower(job.hook) === lower(SIM_HOOK);
+  }
+
+  private trusted(job: SimJob): boolean {
+    return lower(job.evaluator) === lower(this.trustedEvaluator ?? job.evaluator);
+  }
+
+  private hookLog(eventName: string, args: Record<string, unknown>, hash: Hex): Log {
+    return makeLog(REPUTATION_HOOK_ABI as unknown as Abi, eventName, args, SIM_HOOK, hash);
+  }
+
+  /** `_bindOnSubmit`: the provider's first verified id becomes its canonical id. */
+  private hookOnSubmit(job: SimJob, hash: Hex): Log[] {
+    if (!this.hooked(job) || !this.trusted(job)) return [];
+    if ((this.canonicalAgentId.get(lower(job.provider)) ?? 0n) !== 0n || job.providerAgentId === 0n) return [];
+    if (lower(this.identityOwners.get(job.providerAgentId) ?? '') === lower(job.provider)) {
+      this.canonicalAgentId.set(lower(job.provider), job.providerAgentId);
+      return [this.hookLog('CanonicalAgentIdSet', { provider: job.provider, agentId: job.providerAgentId, jobId: job.id }, hash)];
+    }
+    return [this.hookLog('AgentIdNotVerified', { jobId: job.id, provider: job.provider, agentId: job.providerAgentId }, hash)];
+  }
+
+  /** `afterAction(complete | reject)`: the gates of ReputationHook in their order, then the write. */
+  private hookOnSettle(job: SimJob, completed: boolean, reason: Hex, optParams: Hex, hash: Hex): Log[] {
+    if (!this.hooked(job)) return [];
+    const skip = (why: string) => [this.hookLog('FeedbackSkipped', { jobId: job.id, reason: stringToHex(why, { size: 32 }) }, hash)];
+    if (!this.trusted(job)) return skip('untrusted-evaluator');
+    if (!optParams || optParams === '0x') return skip('no-params');
+    if (!completed) {
+      if (!job.submittedAt) return skip('not-submitted');
+      if (reason === REASON_PAYOUT_BLOCKED) return skip('payout-blocked');
+      if (reason !== REASON_QUALITY_REJECTED) return skip('not-verdict');
+    }
+    const agentId = this.canonicalAgentId.get(lower(job.provider)) ?? 0n;
+    if (agentId === 0n && job.providerAgentId === 0n) return skip('no-agent-id');
+    if (job.budget < MIN_FEEDBACK_BUDGET) return skip('budget-too-small');
+    if (agentId === 0n) return skip('agent-not-provider');
+    if (completed && (this.penalties.get(agentId) ?? 0n) !== 0n) return skip('penalized');
+    let uri: string;
+    let feedbackHash: Hex;
+    try {
+      [uri, feedbackHash] = decodeAbiParameters([{ type: 'string' }, { type: 'bytes32' }], optParams) as [string, Hex];
+    } catch {
+      return skip('bad-params');
+    }
+    if (this.registryFails) {
+      const logs = [this.hookLog('FeedbackFailed', { jobId: job.id, reason: '0x' }, hash)];
+      if (!completed) {
+        const count = (this.penalties.get(agentId) ?? 0n) + 1n;
+        this.penalties.set(agentId, count);
+        logs.push(this.hookLog('AgentPenalized', { agentId, jobId: job.id, penalties: count }, hash));
+      }
+      return logs;
+    }
+    const value = completed ? 100 : 0;
+    this.feedback.push({ jobId: job.id, agentId, value, tag2: completed ? 'completed' : 'rejected', feedbackURI: uri, feedbackHash });
+    return [this.hookLog('FeedbackWritten', { jobId: job.id, agentId, value: BigInt(value) }, hash)];
   }
 
   // ── contracts ───────────────────────────────────────────────────────────
@@ -384,6 +511,8 @@ export class FakeEscrowChain {
       return { ...job };
     }
     if (params.functionName === 'allowance') return this.allowance(params.args![0] as Address, params.args![1] as Address);
+    if (params.functionName === 'canonicalAgentId') return this.canonicalAgentId.get(lower(params.args![0] as string)) ?? 0n;
+    if (params.functionName === 'penalties') return this.penalties.get(params.args![0] as bigint) ?? 0n;
     throw new Error(`FakeEscrowChain: unexpected read ${params.functionName}`);
   }
 
@@ -479,13 +608,15 @@ export class FakeEscrowChain {
         if (lower(from) !== lower(job.provider)) throw new Revert('Unauthorized');
         job.status = JobStatus.Submitted;
         job.deliverable = deliverable;
-        return [];
+        job.submittedAt = this.time;
+        return this.hookOnSubmit(job, hash);
       }
       case 'complete': {
-        const [id, reason] = a as [bigint, Hex];
+        const [id, reason, optParams] = a as [bigint, Hex, Hex];
         const job = this.job(id);
         if (job.status !== JobStatus.Submitted) throw new Revert('InvalidStatus');
         if (lower(from) !== lower(job.evaluator)) throw new Revert('Unauthorized');
+        if (this.blockedPayees.has(lower(job.provider))) throw new Revert('TransferFailed (provider blacklisted)');
         const fee = (job.budget * 30n) / 10_000n;
         job.status = JobStatus.Completed;
         this.usdc.set(lower(SIM_ESCROW), this.usdcOf(SIM_ESCROW) - job.budget);
@@ -494,10 +625,11 @@ export class FakeEscrowChain {
           escrowLog('JobCompleted', { jobId: id, evaluator: from, reason }),
           escrowLog('PaymentReleased', { jobId: id, provider: job.provider, amount: job.budget - fee }),
           escrowLog('PlatformFeeAccrued', { jobId: id, amount: fee }),
+          ...this.hookOnSettle(job, true, reason, optParams, hash),
         ];
       }
       case 'reject': {
-        const [id, reason] = a as [bigint, Hex];
+        const [id, reason, optParams] = a as [bigint, Hex, Hex];
         const job = this.job(id);
         const status = job.status;
         if (status === JobStatus.Open) {
@@ -514,7 +646,7 @@ export class FakeEscrowChain {
           this.usdc.set(lower(job.client), this.usdcOf(job.client) + job.budget);
           logs.push(escrowLog('Refunded', { jobId: id, client: job.client, amount: job.budget }));
         }
-        return logs;
+        return [...logs, ...this.hookOnSettle(job, false, reason, optParams, hash)];
       }
       case 'claimRefund': {
         const [id] = a as [bigint];

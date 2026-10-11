@@ -31,6 +31,7 @@ import {
 } from './queues/escrow-settlement.queue.js';
 import { erc8183Deps } from './services/job/escrow-erc8183.runtime.js';
 import { configuredEscrowChainIds, escrowEvaluatorAddress } from './config/env.js';
+import { announceProcessCapabilities, processCapabilities, runEscrowBootCheck } from './config/escrow-boot.runtime.js';
 
 // Fastify v5 expects a logger CONFIG object (not a pino instance). We pass
 // the same options that middleware/logger.ts uses for its standalone export,
@@ -75,6 +76,11 @@ registerJsonBodyParser(fastify);
 registerErrorHandler(fastify);
 
 async function start() {
+  // C3d: the deployed escrow / ReputationHook must match this configuration
+  // (hook.acp, trustedEvaluator, registries, escrow.token). A mismatch exits
+  // here in production / staging, before anything is served or started.
+  await runEscrowBootCheck('api');
+
   // Security middleware
   // CORS_ORIGIN: comma-separated list of allowed origins in production.
   // Default allows the admin frontend on the same Railway project.
@@ -191,6 +197,17 @@ async function start() {
       );
     }
   }
+
+  // C3d: say what this process runs, and compare with the worker's last boot
+  // (an API that creates escrow jobs next to a worker without the escrow
+  // config used to fail silently). Not awaited: Redis must not delay `listen`.
+  void announceProcessCapabilities(
+    processCapabilities('api', {
+      transactionWorker: worker !== undefined,
+      paymentRecovery: paymentRecoveryWorker !== undefined,
+      settlementWorker: escrowSettlementWorker !== undefined,
+    }),
+  );
 
   // Graceful shutdown
   const shutdown = async () => {

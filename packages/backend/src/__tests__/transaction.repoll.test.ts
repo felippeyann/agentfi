@@ -25,7 +25,7 @@ const { finalizeMock, weiToUsdMock, escrowOutcomeMock } = vi.hoisted(() => ({
 
 vi.mock('../services/job/payment-finalizer.service.js', () => ({ finalizeA2APaymentJob: finalizeMock }));
 vi.mock('../services/transaction/price.service.js', () => ({ weiToUsd: weiToUsdMock }));
-vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({ onEscrowTxOutcome: escrowOutcomeMock }));
+vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({ onEscrowTxOutcome: escrowOutcomeMock, vetBindBeforeBroadcast: async () => null }));
 vi.mock('../api/middleware/logger.js', () => ({ logger: { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined } }));
 vi.mock('../config/chains.js', () => ({ getChain: () => ({}), withFallbackRpc: vi.fn() }));
 

@@ -40,6 +40,7 @@ vi.mock('../config/env.js', () => ({
   },
 }));
 vi.mock('../api/middleware/logger.js', () => ({ logger: { info: () => undefined, warn: () => undefined, error: () => undefined } }));
+// Never reach a real Redis / RPC from this unit test.
 vi.mock('../queues/transaction.queue.js', () => ({
   startTransactionWorker: () => {
     calls.push('startTransactionWorker');
@@ -73,6 +74,18 @@ vi.mock('../queues/escrow-settlement.queue.js', () => ({
   },
 }));
 vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({ erc8183Deps: () => ({}) }));
+// C3d: the deployment check and the capabilities exchange (Redis) are their own module.
+vi.mock('../config/escrow-boot.runtime.js', () => ({
+  runEscrowBootCheck: async (role: string) => {
+    calls.push(`bootCheck:${role}`);
+    return null;
+  },
+  processCapabilities: (role: string, started: Record<string, boolean>) => ({ role, ...started }),
+  announceProcessCapabilities: async (caps: { role: string; settlementWorker: boolean }) => {
+    calls.push(`announce:${caps.role}:settlement=${caps.settlementWorker}`);
+    return [];
+  },
+}));
 vi.mock('../services/transaction/wallet-lane.runtime.js', () => ({
   closeWalletLanes: async () => {
     calls.push('closeWalletLanes');
@@ -112,6 +125,19 @@ describe('worker process (worker.ts)', () => {
     expect(calls).not.toContain('startEscrowSettlementWorker');
   });
 
+  it('C3d: checks the deployed escrow / hook before starting anything, and announces what it runs', async () => {
+    await startWorkerProcess();
+    expect(calls[0]).toBe('bootCheck:worker');
+    expect(calls).toContain('announce:worker:settlement=true');
+  });
+
+  it('C3d: an escrow address without the evaluator key → no settlement worker, and the announcement says so', async () => {
+    envState.escrowEvaluatorAddress = null;
+    await startWorkerProcess();
+    expect(calls).not.toContain('startEscrowSettlementWorker');
+    expect(calls).toContain('announce:worker:settlement=false');
+  });
+
   it('stop() closes every worker, drains in-flight monitors for a grace period and closes the lane client', async () => {
     const running = await startWorkerProcess();
     calls.length = 0;
@@ -125,7 +151,7 @@ describe('worker process (worker.ts)', () => {
     ]);
   });
 
-  it('starts nothing when TRANSACTION_WORKER_ENABLED=false', async () => {
+  it('starts nothing (not even the boot check) when TRANSACTION_WORKER_ENABLED=false', async () => {
     envState.env.TRANSACTION_WORKER_ENABLED = 'false';
     expect(await startWorkerProcess()).toBeNull();
     expect(calls).toEqual([]);
