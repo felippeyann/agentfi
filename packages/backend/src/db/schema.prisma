@@ -308,8 +308,10 @@ model Transaction {
   volumeReservedDate   String?
   volumeState          VolumeState?
   // A6: set before the first signed broadcast; a failure after it is an
-  // unknown outcome, never "never executed". See migration 0020.
+  // unknown outcome, never "never executed". `broadcastAttempts` counts the
+  // signed broadcasts: a revert releases only after exactly one. Migration 0020.
   broadcastAttemptedAt DateTime?
+  broadcastAttempts    Int       @default(0)
 
   feeEvents  FeeEvent[]
 
@@ -317,6 +319,7 @@ model Transaction {
   @@unique([agentId, idempotencyKey])
   @@index([status])
   @@index([txHash])
+  @@index([volumeState, updatedAt])
 }
 
 model DailyVolume {

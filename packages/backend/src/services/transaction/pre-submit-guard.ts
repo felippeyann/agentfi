@@ -119,11 +119,18 @@ export async function preSubmitGuard(
     return { action: 'proceed' };
   }
 
-  await db.transaction.update({
-    where: { id: transactionId },
+  // Conditional (A6): a concurrent delivery may have stamped and broadcast the
+  // row since it was read above; then it is not ours to fail.
+  const failed = await db.transaction.updateMany({
+    where: { id: transactionId, status: 'QUEUED', txHash: null },
     data: { status: 'FAILED', error: reason },
   });
-  await settleVolumeAfterFailure(db, transactionId);
+  if (failed.count === 0) {
+    return { action: 'skip', reason: 'Transaction left QUEUED while it was being checked' };
+  }
+  // Released when no attempt reached the broadcast, held otherwise. A failure
+  // here must not skip the finalizers below; the recovery sweep settles it.
+  await settleVolumeAfterFailure(db, transactionId).catch(() => undefined);
 
   const meta = (tx.metadata ?? null) as
     | { jobId?: string; a2aPayment?: boolean; erc8183?: boolean }

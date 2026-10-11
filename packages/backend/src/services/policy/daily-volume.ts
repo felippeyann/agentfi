@@ -14,18 +14,24 @@
  *                                the binding daily-limit check; a refusal or a
  *                                failed insert rolls both back.
  *   commitTransactionVolume      RESERVED → COMMITTED  confirmed; stays counted
- *   releaseTransactionVolume     RESERVED → RELEASED   never executed; usd is
- *                                subtracted from the row's own UTC day
+ *   settleVolumeAfterRevert      RESERVED → RELEASED after exactly one signed
+ *                                broadcast (the value never moved), HELD after
+ *                                more (an earlier one may have been mined)
  *   settleVolumeAfterFailure     RESERVED → RELEASED when no broadcast was
- *                                ever attempted, RESERVED → HELD otherwise
- *   holdTransactionVolume        RESERVED → HELD       outcome unknown (dropped);
- *                                stays counted — it may still settle
+ *                                ever attempted, HELD otherwise
+ *   holdTransactionVolume        RESERVED → HELD       outcome unknown (dropped)
+ *
+ * RELEASED subtracts the reserved USD from the row's own UTC day; HELD keeps
+ * it counted because the transaction may still settle.
  *
  * Every settlement is a conditional write on `volumeState = RESERVED`, so a
  * replayed confirmation, a duplicated failure event or two observers racing
- * settle the reservation once. `broadcastAttemptedAt` is written by the
- * transaction processor before the first signed broadcast; after it, a
- * failure is never treated as "never executed".
+ * settle the reservation once. The transaction processor stamps the row
+ * (`markBroadcastAttempt`) after signing and before every broadcast; the stamp
+ * is itself conditional on the row still being QUEUED without a hash, so a
+ * worker that lost the row to the pre-submit guard does not broadcast. A
+ * status write and its settlement are separate writes: a crash between them
+ * is repaired by `sweepUnsettledVolume` on the payment-recovery tick.
  *
  * Rows that reserve nothing keep `volumeState` NULL and every settlement is a
  * no-op for them: zero-value transactions, the legacy A2A payment (its spend
@@ -45,11 +51,29 @@ import { resourcePaymentSpentToday, utcDay } from '../payments/resource-payment-
 export type VolumeDb = Pick<PrismaClient, '$transaction' | 'transaction'>;
 
 export type CreateWithVolumeResult =
-  | { ok: true; transaction: Transaction }
-  | { ok: false; reason: string };
+  /** `replayed`: a row with the same idempotencyKey already existed; it is returned and nothing was reserved. */
+  | { ok: true; transaction: Transaction; replayed: boolean }
+  | { ok: false; code: 'DAILY_LIMIT' | 'PRICE_UNAVAILABLE'; reason: string };
 
 /** Thrown inside the reservation transaction to roll it back; never escapes this module. */
-class DailyLimitRefusal extends Error {}
+class ReservationRefusal extends Error {
+  constructor(
+    readonly code: 'DAILY_LIMIT' | 'PRICE_UNAVAILABLE',
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Thrown by `markBroadcastAttempt` when the row is no longer broadcastable
+ * (the guard or an operator failed it, or another attempt already recorded a
+ * hash). The submitter aborts before sending anything.
+ */
+export class BroadcastNotAllowedError extends Error {}
+
+/** Interactive-transaction limits: waiting for the agent lock counts against `timeout`. */
+const RESERVATION_TX_OPTIONS = { maxWait: 5_000, timeout: 10_000 } as const;
 
 /** USD as a positive finite number, or 0 when there is nothing to reserve. */
 function reservableUsd(valueUsd: string | undefined): number {
@@ -60,13 +84,21 @@ function reservableUsd(valueUsd: string | undefined): number {
 /**
  * Creates the Transaction row and its DailyVolume reservation atomically.
  *
- * The daily limit is checked here, under the agent row lock and after the
- * upsert, against everything committed today: DailyVolume (this reservation
- * included) plus the counted x402 payments. `PolicyService.validateTransaction`
- * only pre-checks it (read-only) to fail before simulating.
+ * Under the agent row lock, in order:
+ *  1. a row with the same idempotencyKey already exists → it is returned
+ *     (`replayed`), nothing is reserved;
+ *  2. native value the oracle could not price (`unpricedNativeValue`) while a
+ *     daily limit applies → refused (`PRICE_UNAVAILABLE`, fail closed): an
+ *     unpriced spend would never be counted;
+ *  3. DailyVolume += usd, then the binding limit check against everything
+ *     committed today (DailyVolume, this reservation included, plus the
+ *     counted x402 payments) → refused (`DAILY_LIMIT`) and rolled back;
+ *  4. the row is inserted as RESERVED.
+ * `PolicyService.validateTransaction` only pre-checks the limit (read-only) to
+ * fail before simulating.
  *
- * Throws what `transaction.create` throws (e.g. P2002 on a duplicate
- * idempotencyKey); the DailyVolume increment is rolled back with it.
+ * Throws what `transaction.create` throws; the DailyVolume increment is
+ * rolled back with it.
  */
 export async function createTransactionWithVolume(
   db: VolumeDb,
@@ -74,63 +106,93 @@ export async function createTransactionWithVolume(
     agentId: string;
     /** The USD value the policy judged (decimal string). 0 / unparsable: nothing reserved. */
     valueUsd: string | undefined;
+    /**
+     * The transaction moves native value whose USD price did not resolve
+     * (`weiToUsd` returns "0" when the oracle fails). Refused when a daily
+     * limit applies; reserves nothing otherwise.
+     */
+    unpricedNativeValue?: boolean;
     data: Prisma.TransactionUncheckedCreateInput;
     now?: Date;
   },
 ): Promise<CreateWithVolumeResult> {
   const usd = reservableUsd(params.valueUsd);
-  if (usd === 0) {
-    return { ok: true, transaction: await db.transaction.create({ data: params.data }) };
+  const needsLock = usd > 0 || params.unpricedNativeValue === true || Boolean(params.data.idempotencyKey);
+  if (!needsLock) {
+    return { ok: true, transaction: await db.transaction.create({ data: params.data }), replayed: false };
   }
 
   const now = params.now ?? new Date();
   const day = utcDay(now);
   const reservedUsd = usd.toFixed(6);
 
-  return db.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${params.agentId} FOR UPDATE`;
+  return db
+    .$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${params.agentId} FOR UPDATE`;
 
-    const [row] = await tx.$queryRaw<[{ volumeUsd: string }]>`
-      INSERT INTO "DailyVolume" ("id", "agentId", "date", "volumeUsd", "updatedAt")
-      VALUES (gen_random_uuid()::text, ${params.agentId}, ${day}, ${reservedUsd}, NOW())
-      ON CONFLICT ("agentId", "date")
-      DO UPDATE SET
-        "volumeUsd" = (("DailyVolume"."volumeUsd"::numeric) + (${reservedUsd}::numeric))::text,
-        "updatedAt" = NOW()
-      RETURNING "volumeUsd"
-    `;
-
-    const policy = await tx.agentPolicy.findUnique({
-      where: { agentId: params.agentId },
-      select: { active: true, maxDailyVolumeUsd: true },
-    });
-    // Same reading as validateTransaction: 0 / unparsable = no daily limit.
-    const limit = policy?.active ? parsePolicyDecimal(policy.maxDailyVolumeUsd) ?? 0 : 0;
-    if (limit > 0) {
-      const x402Usd = Number(await resourcePaymentSpentToday(tx, params.agentId, now)) / 1e6;
-      const projected = Number.parseFloat(row?.volumeUsd ?? '0') + x402Usd;
-      if (projected > limit) {
-        // Throwing rolls the DailyVolume increment back with the transaction.
-        throw new DailyLimitRefusal(
-          `Daily volume limit of ${policy?.maxDailyVolumeUsd} USD would be exceeded. ` +
-            `Current: ${(projected - usd).toFixed(2)}, requested: ${usd.toFixed(2)}`,
-        );
+      const key = params.data.idempotencyKey;
+      if (key) {
+        const existing = await tx.transaction.findUnique({
+          where: { agentId_idempotencyKey: { agentId: params.agentId, idempotencyKey: key } },
+        });
+        if (existing) return { ok: true as const, transaction: existing, replayed: true };
       }
-    }
 
-    const transaction = await tx.transaction.create({
-      data: {
-        ...params.data,
-        volumeReservedUsd: reservedUsd,
-        volumeReservedDate: day,
-        volumeState: 'RESERVED',
-      },
+      const policy = await tx.agentPolicy.findUnique({
+        where: { agentId: params.agentId },
+        select: { active: true, maxDailyVolumeUsd: true },
+      });
+      // Same reading as validateTransaction: 0 / unparsable = no daily limit.
+      const limit = policy?.active ? parsePolicyDecimal(policy.maxDailyVolumeUsd) ?? 0 : 0;
+
+      if (usd === 0) {
+        if (params.unpricedNativeValue && limit > 0) {
+          throw new ReservationRefusal(
+            'PRICE_UNAVAILABLE',
+            'The USD price of the native value could not be resolved, so the daily volume limit cannot be ' +
+              'checked. Retry shortly.',
+          );
+        }
+        return { ok: true as const, transaction: await tx.transaction.create({ data: params.data }), replayed: false };
+      }
+
+      const [row] = await tx.$queryRaw<[{ volumeUsd: string }]>`
+        INSERT INTO "DailyVolume" ("id", "agentId", "date", "volumeUsd", "updatedAt")
+        VALUES (gen_random_uuid()::text, ${params.agentId}, ${day}, ${reservedUsd}, NOW())
+        ON CONFLICT ("agentId", "date")
+        DO UPDATE SET
+          "volumeUsd" = (("DailyVolume"."volumeUsd"::numeric) + (${reservedUsd}::numeric))::text,
+          "updatedAt" = NOW()
+        RETURNING "volumeUsd"
+      `;
+
+      if (limit > 0) {
+        const x402Usd = Number(await resourcePaymentSpentToday(tx, params.agentId, now)) / 1e6;
+        const projected = Number.parseFloat(row?.volumeUsd ?? '0') + x402Usd;
+        if (projected > limit) {
+          // Throwing rolls the DailyVolume increment back with the transaction.
+          throw new ReservationRefusal(
+            'DAILY_LIMIT',
+            `Daily volume limit of ${policy?.maxDailyVolumeUsd} USD would be exceeded. ` +
+              `Current: ${(projected - usd).toFixed(2)}, requested: ${usd.toFixed(2)}`,
+          );
+        }
+      }
+
+      const transaction = await tx.transaction.create({
+        data: {
+          ...params.data,
+          volumeReservedUsd: reservedUsd,
+          volumeReservedDate: day,
+          volumeState: 'RESERVED',
+        },
+      });
+      return { ok: true as const, transaction, replayed: false };
+    }, RESERVATION_TX_OPTIONS)
+    .catch((err: unknown) => {
+      if (err instanceof ReservationRefusal) return { ok: false as const, code: err.code, reason: err.message };
+      throw err;
     });
-    return { ok: true as const, transaction };
-  }).catch((err: unknown) => {
-    if (err instanceof DailyLimitRefusal) return { ok: false as const, reason: err.message };
-    throw err;
-  });
 }
 
 /** RESERVED → COMMITTED (the transaction confirmed). Returns whether this call settled it. */
@@ -152,31 +214,32 @@ export async function holdTransactionVolume(db: VolumeDb, transactionId: string)
 }
 
 /**
- * RESERVED → RELEASED and DailyVolume -= the reserved USD on the day it was
- * reserved, in one database transaction. Only for a transaction that never
- * executed: refused or rejected before broadcasting, or mined and REVERTED.
+ * The settlement of a REVERTED receipt: the recorded transaction moved no
+ * value. Released when it was the only signed broadcast for the row; held
+ * when an earlier attempt also broadcast (that one may have been mined, e.g.
+ * its SUBMITTED write was lost and the retry reverted for lack of funds).
  */
-export async function releaseTransactionVolume(db: VolumeDb, transactionId: string): Promise<boolean> {
-  return releaseWhere(db, transactionId, {});
+export async function settleVolumeAfterRevert(
+  db: VolumeDb,
+  transactionId: string,
+): Promise<'released' | 'held' | 'none'> {
+  if (await releaseWhere(db, transactionId, { broadcastAttempts: { lte: 1 } })) return 'released';
+  return (await holdTransactionVolume(db, transactionId)) ? 'held' : 'none';
 }
 
 /**
  * The settlement of a transaction marked FAILED without a receipt (permanent
- * broadcast failure, pre-submit guard, operator rejection): released when no
- * broadcast was ever attempted for it, held otherwise — a signed transaction
- * that reached a node may still mine. Returns what happened, `none` when the
- * row had no live reservation.
+ * broadcast failure, pre-submit guard, operator rejection, enqueue failure):
+ * released when no broadcast was ever attempted for it and it carries no hash,
+ * held otherwise — a signed transaction that reached a node may still mine.
+ * Returns what happened, `none` when the row had no live reservation.
  */
 export async function settleVolumeAfterFailure(
   db: VolumeDb,
   transactionId: string,
 ): Promise<'released' | 'held' | 'none'> {
-  if (await releaseWhere(db, transactionId, { broadcastAttemptedAt: null })) return 'released';
-  const { count } = await db.transaction.updateMany({
-    where: { id: transactionId, volumeState: 'RESERVED', broadcastAttemptedAt: { not: null } },
-    data: { volumeState: 'HELD' },
-  });
-  return count > 0 ? 'held' : 'none';
+  if (await releaseWhere(db, transactionId, { broadcastAttemptedAt: null, txHash: null })) return 'released';
+  return (await holdTransactionVolume(db, transactionId)) ? 'held' : 'none';
 }
 
 async function releaseWhere(
@@ -207,13 +270,69 @@ async function releaseWhere(
 }
 
 /**
- * Stamps the first broadcast attempt (before the signed transaction is sent).
- * The transaction processor passes it to the submitter; if the write fails the
- * submit is aborted before anything is broadcast.
+ * Stamps a broadcast attempt, after signing and before the signed transaction
+ * is sent: the first one sets `broadcastAttemptedAt`, every one increments
+ * `broadcastAttempts`. Conditional on the row still being QUEUED without a
+ * hash; otherwise throws `BroadcastNotAllowedError` and the submitter sends
+ * nothing (a stalled-job redelivery whose row the guard already failed and
+ * released). Any other error also aborts the submit before broadcasting.
  */
-export async function markBroadcastAttempt(db: VolumeDb, transactionId: string, now: Date = new Date()): Promise<void> {
-  await db.transaction.updateMany({
-    where: { id: transactionId, broadcastAttemptedAt: null },
-    data: { broadcastAttemptedAt: now },
+export async function markBroadcastAttempt(db: Pick<PrismaClient, '$executeRaw'>, transactionId: string): Promise<void> {
+  const updated = await db.$executeRaw`
+    UPDATE "Transaction"
+    SET "broadcastAttemptedAt" = COALESCE("broadcastAttemptedAt", NOW()),
+        "broadcastAttempts" = "broadcastAttempts" + 1
+    WHERE "id" = ${transactionId} AND "status" = 'QUEUED' AND "txHash" IS NULL
+  `;
+  if (updated === 0) {
+    throw new BroadcastNotAllowedError(`Transaction ${transactionId} is no longer QUEUED without a hash — not broadcasting`);
+  }
+}
+
+export interface VolumeSweepSummary {
+  scanned: number;
+  committed: number;
+  released: number;
+  held: number;
+  errors: number;
+}
+
+/**
+ * Repairs reservations left RESERVED on a terminal row: the status write and
+ * the settlement are separate writes, so a crash or a database error between
+ * them would otherwise keep the reservation counted (or never commit it)
+ * forever. Runs on the payment-recovery tick for rows untouched since
+ * `olderThan`: CONFIRMED commits, REVERTED and FAILED settle exactly as their
+ * first observer would have. Idempotent (every settlement is conditional).
+ */
+export async function sweepUnsettledVolume(
+  db: VolumeDb,
+  opts: { olderThan: Date; limit: number },
+): Promise<VolumeSweepSummary> {
+  const rows = await db.transaction.findMany({
+    where: {
+      volumeState: 'RESERVED',
+      status: { in: ['CONFIRMED', 'REVERTED', 'FAILED'] },
+      updatedAt: { lte: opts.olderThan },
+    },
+    orderBy: { updatedAt: 'asc' },
+    take: opts.limit,
+    select: { id: true, status: true },
   });
+  const summary: VolumeSweepSummary = { scanned: rows.length, committed: 0, released: 0, held: 0, errors: 0 };
+  for (const row of rows) {
+    try {
+      if (row.status === 'CONFIRMED') {
+        if (await commitTransactionVolume(db, row.id)) summary.committed++;
+        continue;
+      }
+      const outcome =
+        row.status === 'REVERTED' ? await settleVolumeAfterRevert(db, row.id) : await settleVolumeAfterFailure(db, row.id);
+      if (outcome === 'released') summary.released++;
+      if (outcome === 'held') summary.held++;
+    } catch {
+      summary.errors++;
+    }
+  }
+  return summary;
 }

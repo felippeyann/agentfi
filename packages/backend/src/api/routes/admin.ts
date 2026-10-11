@@ -766,21 +766,33 @@ export async function adminRoutes(fastify: FastifyInstance) {
         return reply.code(409).send({ error: 'Transaction is no longer PENDING_APPROVAL.' });
       }
 
-      await transactionQueue.add(tx.type.toLowerCase(), {
-        transactionId: tx.id,
-        chainId: tx.chainId,
-        walletId: tx.agent.walletId,
-        from: getAddress(tx.agent.safeAddress),
-        to,
-        data,
-        value: value.toString(),
-        agentId: tx.agentId,
-        tier: tx.agent.tier,
-        feeAmountWei: feeAmountWei.toString(),
-        feeUsd: '0',
-        feeBps,
-        routedViaExecutor,
-      });
+      try {
+        await transactionQueue.add(tx.type.toLowerCase(), {
+          transactionId: tx.id,
+          chainId: tx.chainId,
+          walletId: tx.agent.walletId,
+          from: getAddress(tx.agent.safeAddress),
+          to,
+          data,
+          value: value.toString(),
+          agentId: tx.agentId,
+          tier: tx.agent.tier,
+          feeAmountWei: feeAmountWei.toString(),
+          feeUsd: '0',
+          feeBps,
+          routedViaExecutor,
+        });
+      } catch (err) {
+        // Not enqueued: back to PENDING_APPROVAL (still holding its daily-volume
+        // reservation) so the operator can approve again, instead of a QUEUED
+        // row no worker will ever run (A6 review).
+        await db.transaction.updateMany({
+          where: { id: tx.id, status: 'QUEUED', txHash: null },
+          data: { status: 'PENDING_APPROVAL' },
+        });
+        logger.error({ transactionId: tx.id, err: (err as Error)?.message ?? String(err) }, 'Admin approval could not enqueue the transaction');
+        return reply.code(503).send({ error: 'Could not enqueue the transaction; it is still PENDING_APPROVAL. Retry the approval.' });
+      }
 
       logger.info({ transactionId: tx.id }, 'Admin approved transaction');
       return { status: 'QUEUED' };
@@ -808,8 +820,11 @@ export async function adminRoutes(fastify: FastifyInstance) {
       if (rejected.count === 0) {
         return reply.code(409).send({ error: 'Transaction is no longer PENDING_APPROVAL.' });
       }
-      // Never broadcast: its DailyVolume reservation is given back (A6).
-      await settleVolumeAfterFailure(db, tx.id);
+      // Never broadcast: its DailyVolume reservation is given back (A6). The
+      // rejection stands even if this fails; the recovery sweep settles it.
+      await settleVolumeAfterFailure(db, tx.id).catch((err: unknown) =>
+        logger.error({ transactionId: tx.id, err: (err as Error)?.message ?? String(err) }, 'Rejected transaction: volume settlement left for the sweep'),
+      );
 
       logger.info({ transactionId: tx.id }, 'Admin rejected transaction');
       return { status: 'FAILED' };

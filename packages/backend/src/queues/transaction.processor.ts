@@ -53,8 +53,8 @@ import {
   commitTransactionVolume,
   holdTransactionVolume,
   markBroadcastAttempt,
-  releaseTransactionVolume,
   settleVolumeAfterFailure,
+  settleVolumeAfterRevert,
 } from '../services/policy/daily-volume.js';
 import type { SubmitterService } from '../services/transaction/submitter.service.js';
 import { recordReceiptOnce, type ConfirmationOutcome } from '../services/transaction/monitor.service.js';
@@ -224,12 +224,21 @@ export async function runPostConfirmation(deps: PostConfirmationDeps, data: Post
     where: { id: data.transactionId },
     select: { status: true, amountIn: true, error: true, metadata: true },
   });
-  if (tx?.status === 'CONFIRMED') {
-    await commitTransactionVolume(db, data.transactionId);
-  } else if (tx?.status === 'REVERTED') {
-    await releaseTransactionVolume(db, data.transactionId);
-  } else if (tx?.status === 'FAILED') {
-    await holdTransactionVolume(db, data.transactionId);
+  // A failed settlement must not skip fees or the job lifecycle below; the
+  // payment-recovery volume sweep settles a row left RESERVED.
+  try {
+    if (tx?.status === 'CONFIRMED') {
+      await commitTransactionVolume(db, data.transactionId);
+    } else if (tx?.status === 'REVERTED') {
+      await settleVolumeAfterRevert(db, data.transactionId);
+    } else if (tx?.status === 'FAILED') {
+      await holdTransactionVolume(db, data.transactionId);
+    }
+  } catch (volumeErr) {
+    deps.logger.error(
+      { transactionId: data.transactionId, err: (volumeErr as Error)?.message ?? String(volumeErr) },
+      'Daily volume settlement failed — left for the recovery sweep',
+    );
   }
 
   if (tx?.status === 'CONFIRMED') {
@@ -440,15 +449,26 @@ export async function handleFailedTransactionJob(
     logger.error({ transactionId, dlqErr }, 'Failed to enqueue to dead-letter queue');
   }
 
+  // Conditional on QUEUED: a stalled-job redelivery can reach this handler
+  // while another delivery of the same job already broadcast it (SUBMITTED, or
+  // later). That row is in flight — its own observer settles it and finalizes
+  // its job — so it is neither overwritten nor finalized as FAILED here.
   let markedFailed = false;
   try {
-    await db.transaction.update({
-      where: { id: transactionId },
+    const { count } = await db.transaction.updateMany({
+      where: { id: transactionId, status: 'QUEUED' },
       data: {
         status: 'FAILED',
         error: err.message.slice(0, 500),
       },
     });
+    if (count === 0) {
+      logger.warn(
+        { transactionId },
+        'Permanently failed job, but the transaction already left QUEUED — left to its own outcome',
+      );
+      return;
+    }
     markedFailed = true;
   } catch (dbErr) {
     logger.error({ transactionId, dbErr }, 'Failed to update transaction status to FAILED');
