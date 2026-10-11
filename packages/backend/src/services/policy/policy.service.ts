@@ -31,6 +31,13 @@ export class PolicyService {
   /**
    * Validates a proposed transaction against the agent's policy (off-chain check).
    * This runs before on-chain validation to fail fast and save gas.
+   *
+   * Writes nothing (A6). The daily volume is only pre-checked here, read-only,
+   * so a request that cannot fit fails before simulating; the binding check
+   * and the reservation happen when the Transaction row is created
+   * (`createTransactionWithVolume` in `daily-volume.ts`), atomically with it.
+   * A refusal here or any failure between here and the row therefore leaves
+   * nothing to give back.
    */
   async validateTransaction(params: {
     agentId: string;
@@ -39,6 +46,12 @@ export class PolicyService {
     valueEth: string; // as decimal string, e.g. "0.5"
     valueUsd?: string; // as decimal string, e.g. "150.00"
     lastTxTimestamp?: number; // unix seconds
+    /**
+     * The spend is already counted elsewhere — the legacy A2A payment, whose
+     * Job reserved the reward at creation (`reserveJobEscrow`). Skips the
+     * daily pre-check so the reward is not judged twice.
+     */
+    dailyVolumeAccounted?: boolean;
   }): Promise<PolicyValidationResult> {
     const policy = await this.db.agentPolicy.findUnique({
       where: { agentId: params.agentId },
@@ -100,46 +113,6 @@ export class PolicyService {
       }
     }
 
-    // Check max daily volume in USD (0 or unparsable = no daily limit, same as the classifier)
-    const dailyLimitUsd = parsePolicyDecimal(policy.maxDailyVolumeUsd) ?? 0;
-    if (dailyLimitUsd > 0) {
-      const now = new Date();
-      const today = now.toISOString().slice(0, 10); // YYYY-MM-DD
-      const incomingVolumeUsd = parseFloat(params.valueUsd ?? '0');
-      // x402 payments (pay-resource, P6) are not in DailyVolume: they count
-      // from their ledger rows (counted states, reserved today), so one daily
-      // limit covers both paths.
-      const x402TodayUsd = Number(await resourcePaymentSpentToday(this.db, params.agentId, now)) / 1e6;
-
-      // Atomic reserve: upsert adds the incoming volume first, then we check.
-      // This prevents TOCTOU race conditions where concurrent requests both
-      // read the same pre-update value and both pass the limit check.
-      const reserved = await this.db.$queryRaw<[{ volumeUsd: string }]>`
-        INSERT INTO "DailyVolume" ("id", "agentId", "date", "volumeUsd", "updatedAt")
-        VALUES (gen_random_uuid()::text, ${params.agentId}, ${today}, ${incomingVolumeUsd.toFixed(6)}, NOW())
-        ON CONFLICT ("agentId", "date")
-        DO UPDATE SET
-          "volumeUsd" = (("DailyVolume"."volumeUsd"::numeric) + (${incomingVolumeUsd}::numeric))::text,
-          "updatedAt" = NOW()
-        RETURNING "volumeUsd"
-      `;
-      const projectedVolumeUsd = parseFloat(reserved[0]?.volumeUsd ?? '0') + x402TodayUsd;
-
-      if (projectedVolumeUsd > dailyLimitUsd) {
-        // Rollback the reservation � subtract back
-        await this.db.$executeRaw`
-          UPDATE "DailyVolume"
-          SET "volumeUsd" = (("volumeUsd"::numeric) - (${incomingVolumeUsd}::numeric))::text,
-              "updatedAt" = NOW()
-          WHERE "agentId" = ${params.agentId} AND "date" = ${today}
-        `;
-        return {
-          allowed: false,
-          reason: `Daily volume limit of ${policy.maxDailyVolumeUsd} USD would be exceeded. Current: ${(projectedVolumeUsd - incomingVolumeUsd).toFixed(2)}, requested: ${incomingVolumeUsd.toFixed(2)}`,
-        };
-      }
-    }
-
     // Check cooldown
     if (params.lastTxTimestamp && policy.cooldownSeconds > 0) {
       const elapsed = Math.floor(Date.now() / 1000) - params.lastTxTimestamp;
@@ -148,6 +121,32 @@ export class PolicyService {
         return {
           allowed: false,
           reason: `Cooldown active. ${remaining} seconds remaining before next transaction is allowed`,
+        };
+      }
+    }
+
+    // Pre-check max daily volume in USD (0 or unparsable = no daily limit, same
+    // as the classifier). Read-only: the binding check runs under the agent
+    // lock when the row is created (daily-volume.ts).
+    const dailyLimitUsd = parsePolicyDecimal(policy.maxDailyVolumeUsd) ?? 0;
+    if (dailyLimitUsd > 0 && !params.dailyVolumeAccounted) {
+      const now = new Date();
+      const today = now.toISOString().slice(0, 10); // YYYY-MM-DD
+      const incomingVolumeUsd = parseFloat(params.valueUsd ?? '0');
+      // x402 payments (pay-resource, P6) are not in DailyVolume: they count
+      // from their ledger rows (counted states, reserved today), so one daily
+      // limit covers both paths.
+      const x402TodayUsd = Number(await resourcePaymentSpentToday(this.db, params.agentId, now)) / 1e6;
+      const committed = await this.db.dailyVolume.findUnique({
+        where: { agentId_date: { agentId: params.agentId, date: today } },
+        select: { volumeUsd: true },
+      });
+      const currentVolumeUsd = parseFloat(committed?.volumeUsd ?? '0') + x402TodayUsd;
+
+      if (currentVolumeUsd + incomingVolumeUsd > dailyLimitUsd) {
+        return {
+          allowed: false,
+          reason: `Daily volume limit of ${policy.maxDailyVolumeUsd} USD would be exceeded. Current: ${currentVolumeUsd.toFixed(2)}, requested: ${incomingVolumeUsd.toFixed(2)}`,
         };
       }
     }

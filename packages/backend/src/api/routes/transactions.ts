@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { Prisma } from '@prisma/client';
+import { Prisma, type Transaction } from '@prisma/client';
 import { getAddress, parseUnits, maxUint256, zeroAddress } from 'viem';
 import { db } from '../../db/client.js';
 import { TransactionBuilder } from '../../services/transaction/builder.service.js';
@@ -12,6 +12,7 @@ import {
 import { ExecutorService } from '../../services/transaction/executor.service.js';
 import { AGENT_EXECUTOR_ABI } from '../../abi/AgentExecutor.abi.js';
 import { PolicyService } from '../../services/policy/policy.service.js';
+import { createTransactionWithVolume, settleVolumeAfterFailure } from '../../services/policy/daily-volume.js';
 import { FeeService } from '../../services/policy/fee.service.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
 import { weiToUsd, tokenAmountToUsd } from '../../services/transaction/price.service.js';
@@ -366,7 +367,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     });
 
     // Create transaction record
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd,
+      nativeValueWei: isNativeInput ? amountInWei : 0n,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -392,10 +396,11 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     // Enqueue for processing — ONLY if it doesn't require manual approval
     if (!policyResult.requiresApproval) {
-      await transactionQueue.add(
+      await enqueueOrFail(tx.id, 
         'swap',
         {
           transactionId: tx.id,
@@ -514,7 +519,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       tier: request.agentTier,
     });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd: transferValueUsd,
+      nativeValueWei: txData.value,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -537,9 +545,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
-      await transactionQueue.add('transfer', {
+      await enqueueOrFail(tx.id, 'transfer', {
         transactionId: tx.id,
         chainId: body.chainId,
         walletId: agent.walletId,
@@ -650,7 +659,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const feeCalc = feeService.calculateFee({ grossAmountWei: amountWei, tier: request.agentTier });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd: depositValueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -672,9 +683,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
-      await transactionQueue.add('deposit', {
+      await enqueueOrFail(tx.id, 'deposit', {
         transactionId: tx.id,
         chainId: body.chainId,
         walletId: agent.walletId,
@@ -784,7 +796,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const feeCalc = feeService.calculateFee({ grossAmountWei: amountWei === maxUint256 ? 0n : amountWei, tier: request.agentTier });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd: withdrawValueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -806,9 +820,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
-      await transactionQueue.add('withdraw', {
+      await enqueueOrFail(tx.id, 'withdraw', {
         transactionId: tx.id,
         chainId: body.chainId,
         walletId: agent.walletId,
@@ -900,7 +915,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const feeCalc = feeService.calculateFee({ grossAmountWei: amountWei, tier: request.agentTier });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -923,9 +940,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
-      await transactionQueue.add('compound-supply', {
+      await enqueueOrFail(tx.id, 'compound-supply', {
         transactionId: tx.id,
         chainId: body.chainId,
         walletId: agent.walletId,
@@ -1023,7 +1041,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       tier: request.agentTier,
     });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1046,9 +1066,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
-      await transactionQueue.add('compound-withdraw', {
+      await enqueueOrFail(tx.id, 'compound-withdraw', {
         transactionId: tx.id,
         chainId: body.chainId,
         walletId: agent.walletId,
@@ -1138,7 +1159,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const feeCalc = feeService.calculateFee({ grossAmountWei: amountWei, tier: request.agentTier });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1162,9 +1185,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
-      await transactionQueue.add('erc4626-deposit', {
+      await enqueueOrFail(tx.id, 'erc4626-deposit', {
         transactionId: tx.id,
         chainId: body.chainId,
         walletId: agent.walletId,
@@ -1259,7 +1283,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       tier: request.agentTier,
     });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1283,9 +1309,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
-      await transactionQueue.add('erc4626-withdraw', {
+      await enqueueOrFail(tx.id, 'erc4626-withdraw', {
         transactionId: tx.id,
         chainId: body.chainId,
         walletId: agent.walletId,
@@ -1391,7 +1418,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       tier: request.agentTier,
     });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1417,9 +1446,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
-      await transactionQueue.add('curve-swap', {
+      await enqueueOrFail(tx.id, 'curve-swap', {
         transactionId: tx.id,
         chainId: body.chainId,
         walletId: agent.walletId,
@@ -1564,7 +1594,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const feeCalc = feeService.calculateFee({ grossAmountWei: executionFeeWei, tier: request.agentTier });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd: '0',
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1591,9 +1623,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
-      await transactionQueue.add('gmx-open', {
+      await enqueueOrFail(tx.id, 'gmx-open', {
         transactionId: tx.id,
         chainId: body.chainId,
         walletId: agent.walletId,
@@ -1710,7 +1743,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const feeCalc = feeService.calculateFee({ grossAmountWei: executionFeeWei, tier: request.agentTier });
 
-    const tx = await db.transaction.create({
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd: '0',
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1736,9 +1771,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         },
       },
     });
+    if (!tx) return;
 
     if (!policyResult.requiresApproval) {
-      await transactionQueue.add('gmx-close', {
+      await enqueueOrFail(tx.id, 'gmx-close', {
         transactionId: tx.id,
         chainId: body.chainId,
         walletId: agent.walletId,
@@ -1885,7 +1921,14 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const feeCalc = feeService.calculateFee({ grossAmountWei: totalValueWei, tier: request.agentTier });
 
-    const tx = await db.transaction.create({
+    // The native value the batch moves is its daily-volume spend (A6): the
+    // per-action checks above judge each action without it.
+    const batchValueUsd = totalValueWei > 0n ? await weiToUsd(totalValueWei, body.chainId) : '0';
+
+    const tx = await createWithVolumeReservation(reply, {
+      agentId: request.agentId,
+      valueUsd: batchValueUsd,
+      nativeValueWei: totalValueWei,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1897,8 +1940,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         metadata: { actionCount: body.actions.length, actions: body.actions },
       },
     });
+    if (!tx) return;
 
-    await transactionQueue.add('batch', {
+    await enqueueOrFail(tx.id, 'batch', {
       transactionId: tx.id,
       chainId: body.chainId,
       walletId: agent.walletId,
@@ -2000,7 +2044,23 @@ export async function transactionRoutes(fastify: FastifyInstance) {
  * Everything else is returned as stored; the DB keeps the full text.
  */
 function toTransactionResponse<T>(tx: T, ctx: SanitizeContext = sanitizeContextFromEnv()): T {
-  return sanitizeErrorFields(tx, {}, ctx);
+  return sanitizeErrorFields(withoutVolumeBookkeeping(tx), {}, ctx);
+}
+
+/** A6 reservation bookkeeping is internal to the backend; agents never see it. */
+const VOLUME_BOOKKEEPING_FIELDS = [
+  'volumeReservedUsd',
+  'volumeReservedDate',
+  'volumeState',
+  'broadcastAttemptedAt',
+  'broadcastAttempts',
+] as const;
+
+function withoutVolumeBookkeeping<T>(tx: T): T {
+  if (!tx || typeof tx !== 'object') return tx;
+  const copy = { ...(tx as Record<string, unknown>) };
+  for (const field of VOLUME_BOOKKEEPING_FIELDS) delete copy[field];
+  return copy as T;
 }
 
 async function getAgent(agentId: string) {
@@ -2045,6 +2105,93 @@ async function getIdempotentTransaction(agentId: string, idempotencyKey: string)
     existing: null,
     conflictWithAnotherAgent: !!existingForOtherAgent,
   };
+}
+
+/**
+ * Creates the Transaction row together with its DailyVolume reservation (A6,
+ * `createTransactionWithVolume`): one database transaction, with the binding
+ * daily-limit check under the agent lock. Sends the reply and returns null
+ * when the limit refuses (403, the policy's wording), when native value could
+ * not be priced while a daily limit applies (503, fail closed), or when a
+ * concurrent request with the same idempotencyKey created the row first (its
+ * row is the answer, as for a replay — and nothing was reserved twice).
+ */
+async function createWithVolumeReservation(
+  reply: FastifyReply,
+  params: {
+    agentId: string;
+    valueUsd: string;
+    /** Native value (wei) behind `valueUsd`; "0" USD for a positive amount means the oracle failed. */
+    nativeValueWei?: bigint;
+    data: Prisma.TransactionUncheckedCreateInput;
+  },
+): Promise<Transaction | null> {
+  const { nativeValueWei, ...rest } = params;
+  // `weiToUsd` answers exactly "0" when the oracle failed; a priced dust amount
+  // is "0.000000" and is not refused.
+  const unpricedNativeValue = (nativeValueWei ?? 0n) > 0n && params.valueUsd === '0';
+  try {
+    const created = await createTransactionWithVolume(db, { ...rest, unpricedNativeValue });
+    if (!created.ok) {
+      reply.code(created.code === 'PRICE_UNAVAILABLE' ? 503 : 403).send({ error: created.reason });
+      return null;
+    }
+    if (created.replayed) {
+      reply.send(toTransactionResponse(created.transaction));
+      return null;
+    }
+    return created.transaction;
+  } catch (err) {
+    const key = params.data.idempotencyKey;
+    if (key && isIdempotencyKeyConflict(err)) {
+      const idempotent = await getIdempotentTransaction(params.agentId, key);
+      if (idempotent.existing) {
+        reply.send(idempotent.existing);
+        return null;
+      }
+    }
+    throw err;
+  }
+}
+
+/**
+ * Enqueues a created transaction. When the queue refuses (Redis down, quota),
+ * the row would sit QUEUED forever with its DailyVolume reservation and no
+ * job to run it (A6 review): it is marked FAILED — only while still QUEUED
+ * without a hash — and its reservation settled (released: nothing was
+ * broadcast), then the error propagates to the caller. Its idempotencyKey is
+ * cleared so the client can retry with the same key.
+ */
+async function enqueueOrFail(
+  transactionId: string,
+  name: string,
+  data: Parameters<typeof transactionQueue.add>[1],
+  opts?: Parameters<typeof transactionQueue.add>[2],
+): Promise<void> {
+  try {
+    await transactionQueue.add(name, data, opts);
+  } catch (err) {
+    const error = `enqueue failed: ${(err as Error)?.message ?? String(err)}`.slice(0, 500);
+    try {
+      const failed = await db.transaction.updateMany({
+        where: { id: transactionId, status: 'QUEUED', txHash: null },
+        data: { status: 'FAILED', error, idempotencyKey: null },
+      });
+      if (failed.count > 0) await settleVolumeAfterFailure(db, transactionId);
+    } catch (unwindErr) {
+      logger.error(
+        { transactionId, err: (unwindErr as Error)?.message ?? String(unwindErr) },
+        'Enqueue failed AND the transaction could not be marked FAILED — the volume sweep repairs the reservation',
+      );
+    }
+    throw err;
+  }
+}
+
+function isIdempotencyKeyConflict(err: unknown): boolean {
+  if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') return false;
+  const target = (err.meta as { target?: unknown } | undefined)?.target;
+  return Array.isArray(target) ? target.includes('idempotencyKey') : String(target ?? '').includes('idempotencyKey');
 }
 
 async function getLatestAgentTxTimestamp(agentId: string): Promise<number | undefined> {
@@ -2193,6 +2340,10 @@ export async function executeA2APayment(params: {
     valueEth: isEthTransfer ? params.amount : '0',
     valueUsd: transferValueUsd,
     ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
+    // A6: the Job reserved the reward in DailyVolume at creation
+    // (reserveJobEscrow) and gives it back on failure (releaseJobEscrow); the
+    // payment row reserves nothing and is not judged against the limit twice.
+    dailyVolumeAccounted: true,
   });
   if (!policyResult.allowed) {
     throw new Error(`Policy check failed: ${policyResult.reason}`);
@@ -2276,7 +2427,7 @@ export async function executeA2APayment(params: {
   }
 
   if (!policyResult.requiresApproval) {
-    await transactionQueue.add('a2a-payment', {
+    await enqueueOrFail(tx.id, 'a2a-payment', {
       transactionId: tx.id,
       chainId: params.chainId,
       walletId: requester.walletId,

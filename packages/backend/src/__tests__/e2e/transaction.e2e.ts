@@ -374,12 +374,17 @@ describe('Transaction Pipeline E2E', () => {
 
   // ── Test 2: Fee accounting ──────────────────────────────────────────────
 
-  it('records a FeeEvent and updates DailyVolume after confirmation', async () => {
+  it('records a FeeEvent and counts the transfer once in DailyVolume (A6)', async () => {
     const transferValue = parseEther('0.05');
     const feeBps = 30;
     const feeAmount = (transferValue * BigInt(feeBps)) / 10_000n;
 
-    const tx = await db.transaction.create({
+    // A6: the row is created the way the routes create it — together with
+    // its DailyVolume reservation (0.05 ETH at the mocked $2 000/ETH = $100).
+    const { createTransactionWithVolume } = await import('../../services/policy/daily-volume.js');
+    const created = await createTransactionWithVolume(db, {
+      agentId: testAgentId,
+      valueUsd: '100',
       data: {
         agentId: testAgentId,
         chainId: 8453,
@@ -388,6 +393,8 @@ describe('Transaction Pipeline E2E', () => {
         amountIn: transferValue.toString(),
       },
     });
+    if (!created.ok) throw new Error(`reservation refused: ${created.reason}`);
+    const tx = created.transaction;
 
     await transactionQueue.add(
       'eth-transfer-fee',
@@ -419,7 +426,10 @@ describe('Transaction Pipeline E2E', () => {
 
     const today = new Date().toISOString().slice(0, 10);
     const volume = await waitForDailyVolume(db, testAgentId, today, 15_000);
-    expect(parseFloat(volume.volumeUsd)).toBeGreaterThan(0);
+    // Counted once: the reservation made with the row, not added again on confirmation.
+    expect(parseFloat(volume.volumeUsd)).toBeCloseTo(100, 6);
+    const settled = await db.transaction.findUnique({ where: { id: tx.id }, select: { volumeState: true } });
+    expect(settled?.volumeState).toBe('COMMITTED');
   });
 
   // ── Test 3: Failed transaction ──────────────────────────────────────────

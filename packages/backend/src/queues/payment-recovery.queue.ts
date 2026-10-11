@@ -41,6 +41,10 @@
  *      ESCROW_REVIEW_ALERT_BEFORE_EXPIRY_SECONDS of `expiresAt` are alerted
  *      once (after expiry `claimRefund` is permissionless: full refund, no
  *      feedback).
+ *   4. `sweepUnsettledVolume` (A6) — DailyVolume reservations still RESERVED
+ *      on a CONFIRMED / REVERTED / FAILED transaction older than
+ *      VOLUME_SWEEP_STALE_SEC (default 600 s) are settled as their first
+ *      observer would have (committed, released, or held).
  * Every pass is independent: one failing never skips the others.
  *
  * Topology: this worker runs in `worker.ts` (the documented API + worker
@@ -57,10 +61,19 @@ import { logger } from '../api/middleware/logger.js';
 import { finalizeA2APaymentJob } from '../services/job/payment-finalizer.service.js';
 import { alertExpiringReviews, reconcileEscrowJobs, recoverErc8183Job } from '../services/job/escrow-erc8183.runtime.js';
 import { repollSubmittedTransactionsNow } from './transaction.queue.js';
+import { sweepUnsettledVolume, type VolumeSweepSummary } from '../services/policy/daily-volume.js';
 
 /** ERC-8183 jobs whose state has not moved for this long are reconciled from the chain (C3c). */
 const ESCROW_RECONCILE_STALE_MS =
   parseInt(process.env['ESCROW_RECONCILE_STALE_SEC'] ?? '600', 10) * 1000;
+
+/**
+ * A6: a terminal transaction whose DailyVolume reservation is still RESERVED
+ * after this long (its first observer crashed between the status write and
+ * the settlement) is settled by the sweep.
+ */
+const VOLUME_SWEEP_STALE_MS =
+  parseInt(process.env['VOLUME_SWEEP_STALE_SEC'] ?? '600', 10) * 1000;
 
 const RECOVERY_QUEUE_NAME = 'payment-recovery';
 
@@ -138,6 +151,8 @@ interface RecoverySummary {
   escrowReconcile?: Awaited<ReturnType<typeof reconcileEscrowJobs>> | null;
   /** C3d: "held for review, expires soon" alerts sent this tick (null when the pass failed). */
   reviewAlerts?: number | null;
+  /** A6: DailyVolume reservations left RESERVED on a terminal row (null when the pass failed). */
+  volumeSweep?: VolumeSweepSummary | null;
 }
 
 /** One recovery tick: re-poll SUBMITTED rows, the PAYMENT_PENDING scan, then the escrow reconciliation. */
@@ -152,7 +167,16 @@ export async function runPaymentRecoveryTick(): Promise<RecoverySummary> {
     logger.error({ err: (err as Error)?.message ?? String(err) }, 'Payment recovery: SUBMITTED re-poll failed');
   }
 
-  const summary = await scanStalePaymentPending();
+  // Guarded like every other pass: a job whose finalizer keeps throwing must
+  // not cost the reconciliation, the review alerts and the volume sweep their
+  // tick (A6 re-review).
+  let summary: RecoverySummary;
+  try {
+    summary = await scanStalePaymentPending();
+  } catch (err) {
+    logger.error({ err: (err as Error)?.message ?? String(err) }, 'Payment recovery: PAYMENT_PENDING scan failed');
+    summary = { scanned: 0, finalizedConfirmed: 0, finalizedFailed: 0, refundedOrphan: 0, stillInFlight: 0, erc8183Recovered: 0 };
+  }
   summary.repoll = repoll;
 
   try {
@@ -170,6 +194,19 @@ export async function runPaymentRecoveryTick(): Promise<RecoverySummary> {
   } catch (err) {
     summary.reviewAlerts = null;
     logger.error({ err: (err as Error)?.message ?? String(err) }, 'Payment recovery: review expiry alerts failed');
+  }
+
+  try {
+    summary.volumeSweep = await sweepUnsettledVolume(db, {
+      olderThan: new Date(Date.now() - VOLUME_SWEEP_STALE_MS),
+      limit: PER_TICK_LIMIT,
+    });
+    if (summary.volumeSweep.committed + summary.volumeSweep.released + summary.volumeSweep.held > 0) {
+      logger.warn(summary.volumeSweep, 'Payment recovery: settled DailyVolume reservations left on terminal transactions');
+    }
+  } catch (err) {
+    summary.volumeSweep = null;
+    logger.error({ err: (err as Error)?.message ?? String(err) }, 'Payment recovery: DailyVolume sweep failed');
   }
   return summary;
 }

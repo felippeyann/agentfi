@@ -38,6 +38,21 @@ export interface SubmissionResult {
   nonce: number;
 }
 
+export interface SubmitParams {
+  chainId: number;
+  walletId: string;
+  from: Address;
+  to: Address;
+  data: Hex;
+  value: bigint;
+  gasLimit?: bigint;
+  /**
+   * Awaited after signing, right before the first broadcast call, with the
+   * locally computed hash. A throw aborts the submit before anything is sent.
+   */
+  onBeforeBroadcast?: (txHash: Hex) => Promise<void>;
+}
+
 /** The slice of a viem public client the submitter uses. */
 export type SubmitterClient = Pick<
   PublicClient,
@@ -69,24 +84,13 @@ export class SubmitterService {
    * Signs a transaction via Turnkey MPC and broadcasts it.
    * Automatically retries with fallback RPC if primary fails.
    */
-  async submit(params: {
-    chainId: number;
-    walletId: string;
-    from: Address;
-    to: Address;
-    data: Hex;
-    value: bigint;
-    gasLimit?: bigint;
-  }): Promise<SubmissionResult> {
+  async submit(params: SubmitParams): Promise<SubmissionResult> {
     const lane = this.deps.lane ?? NO_LANE;
     const laneKey = walletLaneKey(params.chainId, params.from);
     return lane.run(laneKey, () => this.submitInLane(params, laneKey));
   }
 
-  private async submitInLane(
-    params: { chainId: number; walletId: string; from: Address; to: Address; data: Hex; value: bigint; gasLimit?: bigint },
-    laneKey: string,
-  ): Promise<SubmissionResult> {
+  private async submitInLane(params: SubmitParams, laneKey: string): Promise<SubmissionResult> {
     const client = this.getPublicClient(params.chainId, false);
 
     // Estimate gas if not provided
@@ -127,6 +131,11 @@ export class SubmitterService {
       unsignedTx: serialized,
       chainId: params.chainId,
     })) as Hex;
+
+    // From here on the transaction may reach a node even if every call below
+    // throws. The caller records that before anything is sent (A6); if it
+    // cannot, nothing is broadcast.
+    await params.onBeforeBroadcast?.(keccak256(signedTx));
 
     const txHash = await this.broadcast(params.chainId, signedTx);
     await this.deps.nonces?.recordUsed(laneKey, nonce).catch(() => undefined);

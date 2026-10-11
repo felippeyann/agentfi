@@ -17,6 +17,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { finalizeA2APaymentJob } from '../job/payment-finalizer.service.js';
 import { onEscrowTxOutcome, vetBindBeforeBroadcast } from '../job/escrow-erc8183.runtime.js';
+import { settleVolumeAfterFailure } from '../policy/daily-volume.js';
 
 export const PAUSED_BEFORE_SUBMISSION = 'Agent paused before submission';
 export const POLICY_EXPIRED_BEFORE_SUBMISSION = 'Agent policy expired before submission';
@@ -59,8 +60,9 @@ function resolveBlockReason(agent: AgentSnapshot, now: Date): string | null {
  * uses, which refunds the escrow reservation (including its DailyVolume
  * commitment) and flips the Job to PAYMENT_FAILED.
  *
- * Note: ordinary (non-A2A) transactions have no DailyVolume release on
- * FAILED/REVERTED anywhere in the codebase today, so none is attempted here.
+ * An ordinary transaction's DailyVolume reservation (A6) is given back when
+ * no earlier attempt reached the broadcast step, and kept (HELD) when one did:
+ * that signed transaction may still be mined.
  */
 export async function preSubmitGuard(
   db: PrismaClient,
@@ -117,10 +119,18 @@ export async function preSubmitGuard(
     return { action: 'proceed' };
   }
 
-  await db.transaction.update({
-    where: { id: transactionId },
+  // Conditional (A6): a concurrent delivery may have stamped and broadcast the
+  // row since it was read above; then it is not ours to fail.
+  const failed = await db.transaction.updateMany({
+    where: { id: transactionId, status: 'QUEUED', txHash: null },
     data: { status: 'FAILED', error: reason },
   });
+  if (failed.count === 0) {
+    return { action: 'skip', reason: 'Transaction left QUEUED while it was being checked' };
+  }
+  // Released when no attempt reached the broadcast, held otherwise. A failure
+  // here must not skip the finalizers below; the recovery sweep settles it.
+  await settleVolumeAfterFailure(db, transactionId).catch(() => undefined);
 
   const meta = (tx.metadata ?? null) as
     | { jobId?: string; a2aPayment?: boolean; erc8183?: boolean }

@@ -198,6 +198,22 @@ callers, so a value can never mean "0" to the tighten-only check and "no limit"
 to enforcement. An optional `reason` (string, max 500 chars) is appended to the
 audit log line; it is not stored and does not gate the change.
 
+**How a transaction counts against `maxDailyVolumeUsd`.** The USD value the
+policy judged is reserved in the agent's daily volume (UTC day) in the same
+database write that creates the transaction, after the limit check; a refusal
+anywhere before that (cooldown, simulation, the limit itself) reserves
+nothing. The reservation is then settled once: it stays counted when the
+transaction confirms, is given back when the transaction never executed
+(rejected by the operator, blocked, failed before any broadcast attempt or not
+enqueued, or mined and reverted after a single signed broadcast), and stays
+counted when the outcome is unknown (a failure after a broadcast attempt, a
+revert after more than one signed broadcast, or a transaction dropped from the
+mempool) because it may still be mined. A paid job's reward is counted by the
+job (at creation) and not again by its payment transaction. A batch counts the
+native value it moves. When the USD price of the native value cannot be
+resolved and a daily limit is set, the request is refused with `503` (the limit
+cannot be checked); without a daily limit it proceeds and counts nothing.
+
 ---
 
 ## Transactions
@@ -372,8 +388,8 @@ All admin routes require `x-admin-secret` header. Local-only by default.
 | POST | `/admin/agents/:id/resume` | Idempotent resume. Sets `agent.active = true` and re-activates the DB policy **only if the pause deactivated it** (`AgentPolicy.pausedByOperatorAt`); a policy that was inactive before the pause stays inactive. Response: `{ active: true, agentReactivated, policyReactivated, policyNote, onChainSync }`. Body `{ "syncOnChain": true }` returns `resume(safe)` calldata |
 | POST | `/admin/jobs/:id/reconcile` | Force a legacy payment job `COMPLETED` / `PAYMENT_FAILED` (`{ action, reason }`). Refuses an ERC-8183 job whose funds may still be on-chain (`409 USE_RESOLVE`) |
 | POST | `/admin/jobs/:id/resolve` | C3d operator decision on an ERC-8183 job held for review (contested, `CANCELLED`/`FAILED` while Submitted on-chain, or a settlement that keeps failing): `{ "decision": "pay" \| "refund" \| "payout-blocked", "verdict"?: "quality-rejected", "note", "operator"? }` → 202; the evaluator settles (`pay` = complete, rating 100; `refund` = reject without rating; `refund` + verdict = reject with `REASON_QUALITY_REJECTED`, rating 0; `payout-blocked` = reject with `REASON_PAYOUT_BLOCKED`, no rating). Recorded on the job (who, when, note). `409` `NOT_RESOLVABLE` / `SETTLEMENT_IN_PROGRESS` / `CHAIN_NOT_SUBMITTED`, `503 CHAIN_UNREADABLE` |
-| POST | `/admin/transactions/:id/approve` | Approve PENDING_APPROVAL tx |
-| POST | `/admin/transactions/:id/reject` | Reject PENDING_APPROVAL tx |
+| POST | `/admin/transactions/:id/approve` | Approve PENDING_APPROVAL tx (`409` when a concurrent approve/reject already moved it) |
+| POST | `/admin/transactions/:id/reject` | Reject PENDING_APPROVAL tx; its daily-volume reservation is given back (`409` when it already left PENDING_APPROVAL) |
 | GET | `/admin/volume` | Daily volume chart (7 days) |
 | GET | `/admin/revenue` | Revenue breakdown by tier |
 | POST | `/admin/reputation/recompute` | Recompute reputation (all or single agent via body) |

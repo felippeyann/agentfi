@@ -21,6 +21,7 @@ import {
   type OperatorResumeOutcome,
 } from '../../services/policy/policy.service.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
+import { settleVolumeAfterFailure } from '../../services/policy/daily-volume.js';
 import { PnLService } from '../../services/billing/pnl.service.js';
 import { OperatorService } from '../../services/billing/operator.service.js';
 
@@ -755,26 +756,43 @@ export async function adminRoutes(fastify: FastifyInstance) {
       const feeAmountWei = BigInt(queuePayload.feeAmountWei || '0');
       const feeBps = queuePayload.feeBps ?? 30;
 
-      await db.transaction.update({
-        where: { id: tx.id },
+      // Conditional (A6): of two concurrent approvals only one moves the row
+      // out of PENDING_APPROVAL and enqueues it.
+      const approved = await db.transaction.updateMany({
+        where: { id: tx.id, status: 'PENDING_APPROVAL' },
         data: { status: 'QUEUED' },
       });
+      if (approved.count === 0) {
+        return reply.code(409).send({ error: 'Transaction is no longer PENDING_APPROVAL.' });
+      }
 
-      await transactionQueue.add(tx.type.toLowerCase(), {
-        transactionId: tx.id,
-        chainId: tx.chainId,
-        walletId: tx.agent.walletId,
-        from: getAddress(tx.agent.safeAddress),
-        to,
-        data,
-        value: value.toString(),
-        agentId: tx.agentId,
-        tier: tx.agent.tier,
-        feeAmountWei: feeAmountWei.toString(),
-        feeUsd: '0',
-        feeBps,
-        routedViaExecutor,
-      });
+      try {
+        await transactionQueue.add(tx.type.toLowerCase(), {
+          transactionId: tx.id,
+          chainId: tx.chainId,
+          walletId: tx.agent.walletId,
+          from: getAddress(tx.agent.safeAddress),
+          to,
+          data,
+          value: value.toString(),
+          agentId: tx.agentId,
+          tier: tx.agent.tier,
+          feeAmountWei: feeAmountWei.toString(),
+          feeUsd: '0',
+          feeBps,
+          routedViaExecutor,
+        });
+      } catch (err) {
+        // Not enqueued: back to PENDING_APPROVAL (still holding its daily-volume
+        // reservation) so the operator can approve again, instead of a QUEUED
+        // row no worker will ever run (A6 review).
+        await db.transaction.updateMany({
+          where: { id: tx.id, status: 'QUEUED', txHash: null },
+          data: { status: 'PENDING_APPROVAL' },
+        });
+        logger.error({ transactionId: tx.id, err: (err as Error)?.message ?? String(err) }, 'Admin approval could not enqueue the transaction');
+        return reply.code(503).send({ error: 'Could not enqueue the transaction; it is still PENDING_APPROVAL. Retry the approval.' });
+      }
 
       logger.info({ transactionId: tx.id }, 'Admin approved transaction');
       return { status: 'QUEUED' };
@@ -795,10 +813,18 @@ export async function adminRoutes(fastify: FastifyInstance) {
         return reply.code(400).send({ error: 'Can only reject PENDING_APPROVAL transactions.' });
       }
 
-      await db.transaction.update({
-        where: { id: tx.id },
+      const rejected = await db.transaction.updateMany({
+        where: { id: tx.id, status: 'PENDING_APPROVAL' },
         data: { status: 'FAILED', error: 'Operator rejected transaction' },
       });
+      if (rejected.count === 0) {
+        return reply.code(409).send({ error: 'Transaction is no longer PENDING_APPROVAL.' });
+      }
+      // Never broadcast: its DailyVolume reservation is given back (A6). The
+      // rejection stands even if this fails; the recovery sweep settles it.
+      await settleVolumeAfterFailure(db, tx.id).catch((err: unknown) =>
+        logger.error({ transactionId: tx.id, err: (err as Error)?.message ?? String(err) }, 'Rejected transaction: volume settlement left for the sweep'),
+      );
 
       logger.info({ transactionId: tx.id }, 'Admin rejected transaction');
       return { status: 'FAILED' };

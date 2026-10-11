@@ -20,11 +20,22 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
 import type { Hex } from 'viem';
 
-const { finalizeMock, weiToUsdMock, escrowOutcomeMock } = vi.hoisted(() => ({
+const { finalizeMock, weiToUsdMock, escrowOutcomeMock, volume } = vi.hoisted(() => ({
   finalizeMock: vi.fn(),
   weiToUsdMock: vi.fn(),
   escrowOutcomeMock: vi.fn(),
+  volume: {
+    commitTransactionVolume: vi.fn(),
+    holdTransactionVolume: vi.fn(),
+    settleVolumeAfterRevert: vi.fn(),
+    settleVolumeAfterFailure: vi.fn(),
+    markBroadcastAttempt: vi.fn(),
+  },
 }));
+
+// The DailyVolume reservation (A6) is exercised on Postgres in
+// daily-volume.db.test.ts; here only which settlement runs is checked.
+vi.mock('../services/policy/daily-volume.js', () => volume);
 
 // The finalizer pulls in the real `db` singleton, the logger/env chain and the
 // escrow service (which instantiates BullMQ queues). Stub the module.
@@ -99,11 +110,18 @@ function makeDb(row: TxRow) {
     Object.assign(row, data);
     return row;
   });
+  // Conditional writes (A6): applied only when the row matches `status` / `txHash`.
+  const updateMany = vi.fn(async ({ where, data }: { where: { status?: string; txHash?: string | null }; data: Partial<TxRow> }) => {
+    const matches =
+      (where.status === undefined || row.status === where.status) && (!('txHash' in where) || row.txHash === where.txHash);
+    if (matches) Object.assign(row, data);
+    return { count: matches ? 1 : 0 };
+  });
   const db = {
-    transaction: { findUnique, update },
+    transaction: { findUnique, update, updateMany },
     $executeRaw: vi.fn().mockResolvedValue(1),
   } as unknown as PrismaClient;
-  return { db, findUnique, update, row };
+  return { db, findUnique, update, updateMany, row };
 }
 
 function makeDeps(row: TxRow) {
@@ -140,6 +158,8 @@ beforeEach(() => {
   finalizeMock.mockReset().mockResolvedValue(undefined);
   weiToUsdMock.mockReset().mockResolvedValue('0');
   escrowOutcomeMock.mockReset().mockResolvedValue(undefined);
+  for (const fn of Object.values(volume)) fn.mockReset().mockResolvedValue(true);
+  volume.settleVolumeAfterFailure.mockResolvedValue('released');
 });
 
 // ── Happy path ─────────────────────────────────────────────────────────────
@@ -159,7 +179,12 @@ describe('processTransactionJob — successful broadcast', () => {
       to: JOB_DATA.to,
       data: JOB_DATA.data,
       value: 1000n,
+      onBeforeBroadcast: expect.any(Function),
     });
+    // A6: the hook the submitter awaits before broadcasting stamps the row.
+    const [{ onBeforeBroadcast }] = submitter.submit.mock.calls[0] as unknown as [{ onBeforeBroadcast: (h: Hex) => Promise<void> }];
+    await onBeforeBroadcast(TX_HASH);
+    expect(volume.markBroadcastAttempt).toHaveBeenCalledWith(deps.db, TX_ID);
     expect(update).toHaveBeenCalledTimes(1);
     expect(update).toHaveBeenCalledWith({
       where: { id: TX_ID },
@@ -270,7 +295,7 @@ describe('processTransactionJob — broadcast failure', () => {
 
 describe('processTransactionJob — pre-submit guard', () => {
   it('paused agent → marked FAILED, no submit, returns `blocked` without throwing', async () => {
-    const { deps, submitter, update, row } = makeDeps(
+    const { deps, submitter, update, updateMany, row } = makeDeps(
       txRow({ agent: { active: false, policy: { active: true, expiresAt: null } } }),
     );
 
@@ -278,9 +303,10 @@ describe('processTransactionJob — pre-submit guard', () => {
 
     expect(result).toEqual({ txHash: null, outcome: 'blocked', reason: PAUSED_BEFORE_SUBMISSION });
     expect(submitter.submit).not.toHaveBeenCalled();
-    expect(update).toHaveBeenCalledTimes(1);
-    expect(update).toHaveBeenCalledWith({
-      where: { id: TX_ID },
+    expect(update).not.toHaveBeenCalled();
+    expect(updateMany).toHaveBeenCalledTimes(1);
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: TX_ID, status: 'QUEUED', txHash: null },
       data: { status: 'FAILED', error: PAUSED_BEFORE_SUBMISSION },
     });
     expect(row.status).toBe('FAILED');
@@ -323,7 +349,7 @@ describe('handleFailedTransactionJob', () => {
   });
 
   it('last attempt + A2A payment → FAILED, dead-lettered, Job finalized as FAILED', async () => {
-    const { db, update, row, deadLetterQueue, logger } = makeDeps(
+    const { db, updateMany, row, deadLetterQueue, logger } = makeDeps(
       txRow({ metadata: { a2aPayment: true, jobId: 'job-42' } }),
     );
 
@@ -333,8 +359,8 @@ describe('handleFailedTransactionJob', () => {
       logger,
     });
 
-    expect(update).toHaveBeenCalledWith({
-      where: { id: TX_ID },
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: TX_ID, status: 'QUEUED' },
       data: { status: 'FAILED', error: 'rpc down' },
     });
     expect(row).toMatchObject({ status: 'FAILED', error: 'rpc down' });
@@ -362,6 +388,37 @@ describe('handleFailedTransactionJob', () => {
 
     expect(row.status).toBe('FAILED');
     expect(deadLetterQueue.add).toHaveBeenCalledTimes(1);
+    expect(finalizeMock).not.toHaveBeenCalled();
+    // A6: released if no attempt reached the broadcast, held otherwise.
+    expect(volume.settleVolumeAfterFailure).toHaveBeenCalledWith(db, TX_ID);
+  });
+
+  it('the FAILED write itself fails → the DailyVolume reservation is left alone (A6)', async () => {
+    const { db, updateMany, deadLetterQueue, logger } = makeDeps(txRow());
+    updateMany.mockRejectedValueOnce(new Error('db down'));
+
+    await handleFailedTransactionJob(job({ attemptsMade: 3, opts: { attempts: 3 } }), err, {
+      db,
+      deadLetterQueue,
+      logger,
+    });
+
+    expect(volume.settleVolumeAfterFailure).not.toHaveBeenCalled();
+  });
+
+  it('a stalled redelivery whose row another delivery already broadcast (SUBMITTED) → left alone: no FAILED, no settlement, no finalizer (A6)', async () => {
+    const { db, row, deadLetterQueue, logger } = makeDeps(
+      txRow({ status: 'SUBMITTED', txHash: TX_HASH, metadata: { a2aPayment: true, jobId: 'job-42' } }),
+    );
+
+    await handleFailedTransactionJob(job({ attemptsMade: 3, opts: { attempts: 3 } }), err, {
+      db,
+      deadLetterQueue,
+      logger,
+    });
+
+    expect(row.status).toBe('SUBMITTED');
+    expect(volume.settleVolumeAfterFailure).not.toHaveBeenCalled();
     expect(finalizeMock).not.toHaveBeenCalled();
   });
 
@@ -428,6 +485,9 @@ describe('ERC-8183 escrow steps route to the orchestrator, not the A2A finalizer
 
     expect(escrowOutcomeMock).toHaveBeenCalledWith({ transactionId: TX_ID, status: 'CONFIRMED', error: null });
     expect(finalizeMock).not.toHaveBeenCalled();
+    // A6: confirmation commits the reservation; nothing is added to DailyVolume.
+    expect(volume.commitTransactionVolume).toHaveBeenCalledWith(deps.db, TX_ID);
+    expect((deps.db as unknown as { $executeRaw: ReturnType<typeof vi.fn> }).$executeRaw).not.toHaveBeenCalled();
   });
 
   it('post-confirmation: timed-out step → onEscrowTxOutcome(FAILED) with the recorded error', async () => {
@@ -446,6 +506,9 @@ describe('ERC-8183 escrow steps route to the orchestrator, not the A2A finalizer
       error: 'Confirmation timeout after max polling attempts',
     });
     expect(finalizeMock).not.toHaveBeenCalled();
+    // A6: an outcome without a receipt holds the reservation (it may still mine).
+    expect(volume.holdTransactionVolume).toHaveBeenCalledWith(deps.db, TX_ID);
+    expect(volume.settleVolumeAfterRevert).not.toHaveBeenCalled();
   });
 
   it('failed handler, last attempt → FAILED + DLQ + onEscrowTxOutcome(FAILED); finalizer untouched', async () => {

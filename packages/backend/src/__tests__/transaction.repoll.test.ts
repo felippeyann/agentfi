@@ -17,11 +17,21 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
 import type { Hex, TransactionReceipt } from 'viem';
 
-const { finalizeMock, weiToUsdMock, escrowOutcomeMock } = vi.hoisted(() => ({
+const { finalizeMock, weiToUsdMock, escrowOutcomeMock, volume } = vi.hoisted(() => ({
   finalizeMock: vi.fn(),
   weiToUsdMock: vi.fn(),
   escrowOutcomeMock: vi.fn(),
+  volume: {
+    commitTransactionVolume: vi.fn(),
+    holdTransactionVolume: vi.fn(),
+    settleVolumeAfterRevert: vi.fn(),
+    settleVolumeAfterFailure: vi.fn(),
+    markBroadcastAttempt: vi.fn(),
+  },
 }));
+
+// DailyVolume settlement (A6) runs on Postgres in daily-volume.db.test.ts.
+vi.mock('../services/policy/daily-volume.js', () => volume);
 
 vi.mock('../services/job/payment-finalizer.service.js', () => ({ finalizeA2APaymentJob: finalizeMock }));
 vi.mock('../services/transaction/price.service.js', () => ({ weiToUsd: weiToUsdMock }));
@@ -91,6 +101,7 @@ beforeEach(() => {
   finalizeMock.mockResolvedValue(undefined);
   weiToUsdMock.mockResolvedValue('0');
   escrowOutcomeMock.mockResolvedValue(undefined);
+  for (const fn of Object.values(volume)) fn.mockResolvedValue(true);
 });
 
 describe('MonitorService', () => {
@@ -200,6 +211,8 @@ describe('repollSubmittedTransactions', () => {
     const { db } = makeDb([row()]);
     await repollSubmittedTransactions(deps(db, { receipt: receipt('reverted') }), { olderThanMs: 0, dropAfterMs: 0, limit: 10 });
     expect(escrowOutcomeMock).toHaveBeenCalledWith(expect.objectContaining({ transactionId: 'tx-1', status: 'REVERTED' }));
+    // A6: a revert means the value never moved — the reservation is given back.
+    expect(volume.settleVolumeAfterRevert).toHaveBeenCalledWith(db, 'tx-1');
   });
 
   it('no receipt: left alone while a node knows it, and before the drop grace even when none does', async () => {
@@ -218,6 +231,9 @@ describe('repollSubmittedTransactions', () => {
     expect(summary.dropped).toBe(1);
     expect(table.get('tx-1')).toMatchObject({ status: 'FAILED', error: expect.stringMatching(/^Dropped: no receipt and unknown to the RPC/) });
     expect(escrowOutcomeMock).toHaveBeenCalledWith(expect.objectContaining({ transactionId: 'tx-1', status: 'FAILED' }));
+    // A6: dropped is not "never executed" — the reservation is held, not released.
+    expect(volume.holdTransactionVolume).toHaveBeenCalledWith(db, 'tx-1');
+    expect(volume.settleVolumeAfterRevert).not.toHaveBeenCalled();
   });
 
   it('an RPC error leaves the row for the next tick', async () => {

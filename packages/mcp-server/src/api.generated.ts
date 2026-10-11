@@ -2901,6 +2901,20 @@ export interface paths {
                     };
                     content?: never;
                 };
+                /** @description A concurrent approve or reject already moved the transaction out of PENDING_APPROVAL. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description The transaction could not be enqueued; it is still PENDING_APPROVAL and the approval can be retried. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -2920,7 +2934,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Reject a PENDING_APPROVAL transaction */
+        /**
+         * Reject a PENDING_APPROVAL transaction
+         * @description The transaction never broadcast, so its daily-volume reservation is given back.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -2934,6 +2951,13 @@ export interface paths {
             responses: {
                 /** @description Rejected. */
                 200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description A concurrent approve or reject already moved the transaction out of PENDING_APPROVAL. */
+                409: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -4193,6 +4217,12 @@ export interface components {
          *     simulation: Tenderly is used when configured, otherwise a real `eth_call`
          *     (`estimateGas`) dry-run. This response is the defense-in-depth guard for
          *     the case where only a mock result exists in such an environment.
+         *
+         *     The same status is returned when the USD price of the native value the
+         *     transaction moves could not be resolved while the agent has a daily
+         *     volume limit: the limit cannot be checked, so the transaction is refused
+         *     before it is created (`{ "error": "The USD price of the native value could
+         *     not be resolved, …" }`). Retry shortly.
          */
         SimulationUnavailable: {
             headers: {
