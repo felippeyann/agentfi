@@ -102,6 +102,26 @@ describe('checkEscrowDeployments + escrowBootVerdict', () => {
     }
   });
 
+  it.each([
+    ['acp', { acp: OTHER }, /acp\(\) is .* not AGENT_JOB_ESCROW_ADDRESS_84532/],
+    ['trustedEvaluator', { trustedEvaluator: OTHER }, /trustedEvaluator\(\) is .*ESCROW_EVALUATOR_PRIVATE_KEY/],
+    ['identityRegistry', { identityRegistry: OTHER }, /identityRegistry\(\) is .*IDENTITY_REGISTRY_ADDRESS_84532/],
+    ['reputationRegistry', { reputationRegistry: OTHER }, /reputationRegistry\(\) is .*REPUTATION_REGISTRY_ADDRESS_84532/],
+    ['escrow.token', { token: OTHER }, /token\(\) is .*not the chain's USDC/],
+  ] as const)('%s mismatch alone: exactly one problem — FATAL in production and staging, error (boot continues) in development and test', async (_field, override, pattern) => {
+    const checks = await checkEscrowDeployments({ chains: [expected], reader: () => readerFor({ ...matching, ...override }) });
+    expect(checks[0]!.problems).toEqual([expect.stringMatching(pattern)]);
+    for (const env of ['production', 'staging']) {
+      expect(escrowBootVerdict(env, checks).fatal).toMatch(pattern);
+    }
+    for (const env of ['development', 'test']) {
+      const verdict = escrowBootVerdict(env, checks);
+      expect(verdict.fatal).toBeNull();
+      expect(verdict.errors).toEqual([expect.stringMatching(pattern)]);
+      expect(verdict.verified).toEqual([]);
+    }
+  });
+
   it('a mismatch is FATAL in production and staging, a loud error in development / test', async () => {
     const checks = await checkEscrowDeployments({ chains: [expected], reader: () => readerFor({ ...matching, trustedEvaluator: OTHER }) });
     for (const env of ['production', 'staging']) {
