@@ -2230,6 +2230,7 @@ async function reconcileTerminal(deps: Erc8183Deps, job: EscrowJobRow, chainStat
     { jobId: job.id, onChainJobId: job.onChainJobId, onChainStatus, jobStatus: job.status },
     'ERC-8183 job already terminal on-chain — reconciled without sending',
   );
+  if (onChainStatus !== 'EXPIRED') await recordLostSettlementReceipt(deps, job);
 
   const decision = before.resolution as ReviewDecision | null;
   const contradicted =
@@ -2254,6 +2255,32 @@ async function reconcileTerminal(deps: Erc8183Deps, job: EscrowJobRow, chainStat
   }
   await finalizeAfterRefund(deps, job, `${onChainStatus.toLowerCase()} on-chain (reconciled)`);
   return onChainStatus;
+}
+
+/**
+ * C3d: a settlement whose receipt the worker never saw (timeout, crash after
+ * broadcast) and that the chain shows mined: read its receipt once and record
+ * what the hook did (feedbackStatus, rated agent id, fee), so the surfaced
+ * outcome does not depend on which attempt observed it. Best effort.
+ */
+async function recordLostSettlementReceipt(deps: Erc8183Deps, job: EscrowJobRow): Promise<void> {
+  if (!job.settleTxHash || !job.escrowContract || job.escrowChainId === null || job.feedbackStatus != null) return;
+  try {
+    const receipt = await deps.publicClient(job.escrowChainId).getTransactionReceipt({ hash: job.settleTxHash as Hex });
+    if (receipt.status !== 'success') return;
+    const parsed = parseSettlementReceipt(receipt.logs, getAddress(job.escrowContract), deps.config.chain(job.escrowChainId)?.hook ?? null);
+    if (!parsed.completed && !parsed.rejected) return;
+    await deps.db.job.update({
+      where: { id: job.id },
+      data: {
+        feedbackStatus: parsed.feedbackStatus,
+        ...(parsed.ratedAgentId ? { ratedAgentId: parsed.ratedAgentId } : {}),
+        ...(parsed.platformFee !== null ? { platformFeeAmount: parsed.platformFee.toString() } : {}),
+      },
+    });
+  } catch {
+    // The receipt is gone or unreadable: the terminal status above is what matters.
+  }
 }
 
 /** Minimum gap between two "settlement failed" alerts for one job (the recovery tick retries every few minutes). */

@@ -335,7 +335,13 @@ export class FakeEscrowChain {
   /** viem-shaped read client used by the orchestrator and the re-poll. */
   get publicClient() {
     return {
-      readContract: async (params: { address: Address; functionName: string; args?: readonly unknown[] }) => this.read(params),
+      readContract: async (params: { address: Address; functionName: string; args?: readonly unknown[] }) => {
+        if (this.failReads > 0) {
+          this.failReads--;
+          throw new Error('HTTP request failed (rpc down)');
+        }
+        return this.read(params);
+      },
       getTransactionReceipt: async ({ hash }: { hash: Hex }) => this.getReceipt(hash),
       getTransaction: async ({ hash }: { hash: Hex }) => this.getTransaction(hash),
       getBalance: async ({ address }: { address: Address }) => this.nativeBalances.get(lower(address)) ?? 10n ** 18n,
@@ -392,6 +398,8 @@ export class FakeEscrowChain {
 
   /** The next N evaluator receipt waits time out although the transaction mined (lost confirmation). */
   evaluatorReceiptTimeouts = 0;
+  /** The next N `readContract` calls fail (RPC outage). */
+  failReads = 0;
 
   private snapshot() {
     return {

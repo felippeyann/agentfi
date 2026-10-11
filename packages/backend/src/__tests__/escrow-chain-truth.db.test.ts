@@ -1070,6 +1070,118 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(sim.alerts.map((a) => a.kind)).toContain('review-expired');
     });
 
+    // ── Owner's checklist: concurrency, retries, reconciliation ─────────────
+
+    it('race: contest vs the evaluator settlement (10 runs, both orders) — exactly one wins, the loser is a 409 or a no-op', async () => {
+      const wins = { contest: 0, settle: 0 };
+      for (let i = 0; i < 10; i++) {
+        const { requester, provider, jobId } = await submittedJob();
+        sim.settlements.clear();
+        const settleRun = () => m.svc.processSettlementJob(sim.deps, { data: { jobId, action: 'settle' }, attemptsMade: 0, opts: { attempts: 3 } });
+        const contestRun = () => contest(requester.id, jobId);
+        const [contestRes, settleRes] =
+          i % 2 === 0
+            ? await Promise.all([contestRun(), settleRun()])
+            : await Promise.all([settleRun(), contestRun()]).then(([s, c]) => [c, s] as const);
+        const after = await job(jobId);
+        const calls = sim.chain.evaluatorCalls.filter((c) => c.jobId === BigInt(after.onChainJobId!));
+        if (contestRes.statusCode === 200) {
+          wins.contest++;
+          expect(settleRes).toMatchObject({ outcome: 'noop' });
+          expect(after).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'CONTESTED' });
+          expect(calls).toHaveLength(0);
+          expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC);
+        } else {
+          wins.settle++;
+          expect(contestRes.statusCode).toBe(409);
+          expect(contestRes.json()).toMatchObject({ error: 'CONTEST_NOT_ALLOWED' });
+          expect(settleRes).toMatchObject({ outcome: 'settled', onChainStatus: 'COMPLETED' });
+          expect(after).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', contestedAt: null });
+          expect(calls).toHaveLength(1);
+        }
+      }
+      expect(wins.contest + wins.settle).toBe(10);
+    });
+
+    it('two concurrent resolve calls: exactly one decision is recorded and executed, the other is refused', async () => {
+      const { requester, jobId } = await submittedJob();
+      expect((await contest(requester.id, jobId)).statusCode).toBe(200);
+      sim.settlements.clear();
+      const [a, b] = await Promise.all([resolve(jobId, 'pay'), resolve(jobId, 'quality-rejected')]);
+      expect([a.outcome, b.outcome].sort()).toEqual(['refused', 'scheduled']);
+      const winner = (a.outcome === 'scheduled' ? a : b) as { resolution: string };
+      const loser = a.outcome === 'refused' ? a : b;
+      expect(loser).toMatchObject({ code: 'SETTLEMENT_IN_PROGRESS' });
+      await sim.drive();
+      const after = await job(jobId);
+      expect(after.resolution).toBe(winner.resolution);
+      expect(after.reviewLog).toHaveLength(1);
+      expect(sim.chain.evaluatorCalls).toHaveLength(1);
+      expect(after.onChainStatus).toBe(winner.resolution === 'pay' ? 'COMPLETED' : 'REJECTED');
+    });
+
+    it('retry: a settlement attempt that failed before claiming, retried after a contest, does not settle', async () => {
+      const { requester, jobId } = await submittedJob();
+      sim.chain.failReads = 1; // the attempt's getJob fails → BullMQ retry
+      await sim.drive(1);
+      expect(sim.settlements.size).toBe(1);
+      expect(await job(jobId)).toMatchObject({ onChainStatus: 'SUBMITTED' });
+
+      expect((await contest(requester.id, jobId)).statusCode).toBe(200);
+      await sim.drive(); // the retry runs
+      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'CONTESTED' });
+      expect(sim.chain.evaluatorCalls).toHaveLength(0);
+    });
+
+    it('retry: an operator decision whose tx mined but whose receipt was lost is not sent twice — the retry reads the chain first', async () => {
+      const { requester, jobId } = await submittedJob();
+      expect((await contest(requester.id, jobId)).statusCode).toBe(200);
+      sim.settlements.clear();
+      await resolve(jobId, 'quality-rejected');
+      sim.chain.evaluatorReceiptTimeouts = 1; // attempt 1: reject mined, receipt wait times out
+      await sim.drive();
+
+      expect(sim.chain.evaluatorCalls).toHaveLength(1);
+      const after = await job(jobId);
+      expect(after).toMatchObject({ status: 'PAYMENT_FAILED', onChainStatus: 'REJECTED', resolution: 'quality-rejected', feedbackStatus: 'written' });
+      expect(after.ratedAgentId).toBe(after.providerAgentId);
+      expect(sim.chain.feedback).toEqual([expect.objectContaining({ value: 0 })]);
+      expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC);
+      expect(sim.alerts.map((a) => a.kind)).not.toContain('review-overridden');
+    });
+
+    it('a contest survives the boot re-poll of SUBMITTED rows, the recovery tick and the reconciliation (never dropped or overwritten)', async () => {
+      const { requester, provider, jobId } = await fundedJob();
+      expect((await patchJob(provider.id, jobId, { status: 'ACCEPTED' })).statusCode).toBe(200);
+      sim.lostMonitors.add('submit'); // the submit mines; its monitor dies, the row stays SUBMITTED
+      expect((await patchJob(provider.id, jobId, { status: 'COMPLETED', result: { ok: 9 } })).statusCode).toBe(200);
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'FUNDED' });
+      expect((await stepRows(jobId, 'submit'))[0]).toMatchObject({ status: 'SUBMITTED' });
+
+      // The reconciliation follows the chain (Submitted) and queues the settlement …
+      expect(await m.svc.reconcileEscrowJob(sim.deps, jobId)).toBe('advanced');
+      expect(await job(jobId)).toMatchObject({ onChainStatus: 'SUBMITTED' });
+      // … and the requester contests while that settlement is queued.
+      expect((await contest(requester.id, jobId)).statusCode).toBe(200);
+
+      // The lost submit outcome is replayed by the boot re-poll, then every tick runs.
+      sim.lostMonitors.clear();
+      await m.repollSubmittedAtBoot();
+      expect((await stepRows(jobId, 'submit'))[0]).toMatchObject({ status: 'CONFIRMED' });
+      await m.runPaymentRecoveryTick();
+      expect(await m.svc.reconcileEscrowJob(sim.deps, jobId)).toBe('heldForReview');
+      expect(await m.svc.recoverErc8183Job(sim.deps, { id: jobId, onChainStatus: 'CONTESTED' })).toBe('heldForReview');
+      await m.svc.processSettlementJob(sim.deps, { data: { jobId: '*', action: 'sweep' } }); // not expired yet
+      await sim.drive();
+
+      const after = await job(jobId);
+      expect(after).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'CONTESTED', contestReason: 'not what I asked for', resolution: null });
+      expect(after.contestedAt).toBeInstanceOf(Date);
+      expect(sim.chain.evaluatorCalls).toHaveLength(0);
+      expect(onChain(after.onChainJobId).status).toBe(JobStatus.Submitted);
+    });
+
     it('H14 dry-run: a setProviderAgentId queued at FUNDED is not broadcast after the job was cancelled and refunded (SKIPPED, no revert)', async () => {
       // The provider already has an ERC-8004 identity (first job registered it).
       const { provider } = await fundedJob();
