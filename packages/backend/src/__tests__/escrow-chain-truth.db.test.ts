@@ -1310,6 +1310,21 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(await job(firstId)).toMatchObject({ reservationStatus: 'CANCELLED' });
     });
 
+    it('two parallel POST /v1/jobs near the daily limit (5 runs): exactly one job is created and reserved, the other is 403 maxDailyVolume', async () => {
+      for (let i = 0; i < 5; i++) {
+        const requester = await sim.agent(`twin-req${i}`);
+        const provider = await sim.agent(`twin-prov${i}`);
+        await policy(requester.id, { maxDailyVolumeUsd: '8' });
+        const [a, b] = await Promise.all([postRaw(requester.id, provider.id, '5'), postRaw(requester.id, provider.id, '5')]);
+        expect([a.statusCode, b.statusCode].sort()).toEqual([201, 403]);
+        expect((a.statusCode === 403 ? a : b).json()).toMatchObject({ code: 'POLICY_VIOLATION', rule: 'maxDailyVolume', spentToday: '5' });
+        expect(await m.db.job.count({ where: { requesterId: requester.id } })).toBe(1);
+        const today = new Date().toISOString().slice(0, 10);
+        const row = await m.db.dailyVolume.findUnique({ where: { agentId_date: { agentId: requester.id, date: today } } });
+        expect(Number(row?.volumeUsd)).toBe(5);
+      }
+    });
+
     it('cooldown: a job is refused while the agent\'s last transaction is younger than cooldownSeconds', async () => {
       const requester = await sim.agent('requester');
       const provider = await sim.agent('provider');

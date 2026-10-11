@@ -13,6 +13,8 @@ const { state, logged, redisStore } = vi.hoisted(() => ({
     hookAcp: '0x00000000000000000000000000000000000E5C20',
     trustedEvaluator: '0x90F79bf6EB2c4f870365E785982E1f101E93b906',
     readFails: false,
+    hookHasCode: true,
+    hookConfigured: true,
   },
   logged: { error: [] as string[], warn: [] as string[], info: [] as string[] },
   redisStore: new Map<string, string>(),
@@ -26,7 +28,10 @@ vi.mock('../config/env.js', () => ({
   escrowEvaluatorAddress: '0x90F79bf6EB2c4f870365E785982E1f101E93b906',
 }));
 vi.mock('../config/contracts.js', () => ({
-  getContracts: () => ({ agentJobEscrow: '0x00000000000000000000000000000000000E5C20', reputationHook: '0x000000000000000000000000000000000000400C' }),
+  getContracts: () => ({
+    agentJobEscrow: '0x00000000000000000000000000000000000E5C20',
+    reputationHook: state.hookConfigured ? '0x000000000000000000000000000000000000400C' : undefined,
+  }),
   resolveIdentityRegistry: () => '0x8004A818BFB912233c491871b3d84c89A494BD9e',
   resolveReputationRegistry: () => '0x8004B663056A597Dffe9eCcC1965A193B7388713',
 }));
@@ -34,6 +39,13 @@ vi.mock('../config/chains.js', () => ({
   createChainPublicClient: () => ({
     readContract: async ({ functionName }: { functionName: string }) => {
       if (state.readFails) throw new Error('rpc down');
+      if (!state.hookHasCode && functionName !== 'token') {
+        // what viem's readContract throws for an address without code
+        throw Object.assign(new Error('The contract function returned no data ("0x").'), {
+          name: 'ContractFunctionExecutionError',
+          cause: { name: 'ContractFunctionZeroDataError', shortMessage: `The contract function "${functionName}" returned no data ("0x").` },
+        });
+      }
       return {
         token: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
         acp: state.hookAcp,
@@ -79,6 +91,8 @@ beforeEach(() => {
   state.hookAcp = '0x00000000000000000000000000000000000E5C20';
   state.trustedEvaluator = '0x90F79bf6EB2c4f870365E785982E1f101E93b906';
   state.readFails = false;
+  state.hookHasCode = true;
+  state.hookConfigured = true;
   logged.error.length = 0;
   logged.warn.length = 0;
   logged.info.length = 0;
@@ -114,6 +128,30 @@ describe('runEscrowBootCheck', () => {
     expect(exitSpy).not.toHaveBeenCalled();
     expect(verdict?.fatal).toBeNull();
     expect(logged.error.join('\n')).toMatch(/would be FATAL in production\/staging.*trustedEvaluator/);
+  });
+
+  it.each(['production', 'staging'])('NODE_ENV=%s: no code at the hook address (wrong chain / typo) exits with code 1 — not "unreadable"', async (nodeEnv) => {
+    state.nodeEnv = nodeEnv;
+    state.hookHasCode = false;
+    const verdict = await runEscrowBootCheck('api');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(verdict).toMatchObject({ unreadable: [] });
+    expect(String(consoleSpy.mock.calls[0]?.[0])).toMatch(/^FATAL: .*no ReputationHook at REPUTATION_HOOK_ADDRESS_84532=/);
+  });
+
+  it('NODE_ENV=development: no code at the hook address is a loud error and the process boots', async () => {
+    state.nodeEnv = 'development';
+    state.hookHasCode = false;
+    await runEscrowBootCheck('worker');
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(logged.error.join('\n')).toMatch(/would be FATAL in production\/staging\): chain 84532: no ReputationHook at/);
+  });
+
+  it('a chain with an escrow but no hook is still checked (escrow.token())', async () => {
+    state.hookConfigured = false;
+    const verdict = await runEscrowBootCheck('api');
+    expect(verdict).toMatchObject({ fatal: null, verified: [84532] });
+    expect(logged.warn.join('\n')).toMatch(/only escrow\.token\(\) checked/);
   });
 
   it('an unreadable chain is an error in production too, never fatal and never "verified"', async () => {

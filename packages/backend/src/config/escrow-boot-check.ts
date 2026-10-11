@@ -15,12 +15,16 @@
  *   hook.reputationRegistry() ≠ configured feedback lands in a registry nobody reads
  *   escrow.token() ≠ USDC of the chain     budgets priced at 1 USD are not USDC
  *
- * So at backend and worker boot, for every chain with both addresses, the
- * five values are read and compared with the configuration. A mismatch is
- * FATAL in production / staging (the process refuses to boot) and a loud
- * error in development / test. A chain whose contracts cannot be read (RPC
- * down) is an error, never silently "ok"; the runtime re-checks it in the
- * background and applies the same rule once it can read it.
+ * So at backend and worker boot, for every chain with an escrow address, the
+ * values are read and compared with the configuration (escrow.token() always,
+ * the four hook views when a hook is configured). A mismatch is FATAL in
+ * production / staging (the process refuses to boot) and a loud error in
+ * development / test. An address with no code, a view that reverts or returns
+ * zero / undecodable data is a mismatch too ("no ReputationHook at X": a typo
+ * or the wrong chain), not "unreadable". Only a transport error or a timeout
+ * (RPC down) makes a chain unreadable: an error, never silently "ok"; the
+ * runtime re-checks it in the background and applies the same rule once it
+ * can read it.
  *
  * Pure apart from `checkEscrowDeployments`, which takes the contract reader
  * as a parameter, so every rule is unit-testable without an RPC.
@@ -29,13 +33,15 @@
 import { getAddress, type Abi, type Address } from 'viem';
 import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
 import { REPUTATION_HOOK_ABI } from '../abi/ReputationHook.abi.js';
+import { sanitizeText } from '../api/errors/sanitize.js';
 import { PRODUCTION_LIKE } from './env-guards.js';
 
 /** What the backend is configured with for one escrow chain. */
 export interface EscrowChainExpectation {
   chainId: number;
   escrow: Address;
-  hook: Address;
+  /** REPUTATION_HOOK_ADDRESS_<id>, or null: only the escrow is checked. */
+  hook: Address | null;
   /** Address of ESCROW_EVALUATOR_PRIVATE_KEY (null: escrow disabled, nothing to compare). */
   evaluator: Address | null;
   /** IDENTITY_REGISTRY_ADDRESS_<id> or the official default (null: none configured). */
@@ -46,24 +52,24 @@ export interface EscrowChainExpectation {
   usdc: Address | null;
 }
 
-/** What the chain says. */
+/** What the chain says (the hook views are absent when no hook is configured). */
 export interface EscrowChainReading {
   token: Address;
-  acp: Address;
-  trustedEvaluator: Address;
-  identityRegistry: Address;
-  reputationRegistry: Address;
+  acp?: Address;
+  trustedEvaluator?: Address;
+  identityRegistry?: Address;
+  reputationRegistry?: Address;
 }
 
 export interface EscrowChainCheck {
   chainId: number;
   escrow: Address;
-  hook: Address;
-  /** Mismatches between the chain and the configuration. */
+  hook: Address | null;
+  /** Mismatches between the chain and the configuration (incl. "no contract at the address"). */
   problems: string[];
   /** Values that could not be compared (nothing configured to compare with). */
   notes: string[];
-  /** Set when the contracts could not be read; `problems` is then empty. */
+  /** Set when the RPC could not be reached (transport error, timeout); `problems` is then empty. */
   unreadable: string | null;
 }
 
@@ -80,35 +86,48 @@ export function compareEscrowDeployment(
   const notes: string[] = [];
   const label = `chain ${expected.chainId}`;
 
-  if (!same(reading.acp, expected.escrow)) {
-    problems.push(
-      `${label}: ReputationHook ${expected.hook}.acp() is ${reading.acp}, not AGENT_JOB_ESCROW_ADDRESS_${expected.chainId}=${expected.escrow} ` +
-        '(every hooked submit / complete / reject would revert with OnlyACP)',
-    );
-  }
-  if (expected.evaluator === null) {
-    notes.push(`${label}: no ESCROW_EVALUATOR_PRIVATE_KEY — hook.trustedEvaluator() (${reading.trustedEvaluator}) not compared`);
-  } else if (!same(reading.trustedEvaluator, expected.evaluator)) {
-    problems.push(
-      `${label}: hook.trustedEvaluator() is ${reading.trustedEvaluator}, but the backend evaluator (ESCROW_EVALUATOR_PRIVATE_KEY) is ` +
-        `${expected.evaluator} (every settlement would skip feedback: untrusted-evaluator)`,
-    );
-  }
-  if (expected.identityRegistry === null) {
-    notes.push(`${label}: no Identity Registry configured — hook.identityRegistry() (${reading.identityRegistry}) not compared`);
-  } else if (!same(reading.identityRegistry, expected.identityRegistry)) {
-    problems.push(
-      `${label}: hook.identityRegistry() is ${reading.identityRegistry}, but the backend mints identities in ${expected.identityRegistry} ` +
-        `(IDENTITY_REGISTRY_ADDRESS_${expected.chainId} or the official default; bindings would never verify)`,
-    );
-  }
-  if (expected.reputationRegistry === null) {
-    notes.push(`${label}: no Reputation Registry configured — hook.reputationRegistry() (${reading.reputationRegistry}) not compared`);
-  } else if (!same(reading.reputationRegistry, expected.reputationRegistry)) {
-    problems.push(
-      `${label}: hook.reputationRegistry() is ${reading.reputationRegistry}, expected ${expected.reputationRegistry} ` +
-        `(REPUTATION_REGISTRY_ADDRESS_${expected.chainId} or the official default)`,
-    );
+  const hook =
+    reading.acp && reading.trustedEvaluator && reading.identityRegistry && reading.reputationRegistry
+      ? {
+          acp: reading.acp,
+          trustedEvaluator: reading.trustedEvaluator,
+          identityRegistry: reading.identityRegistry,
+          reputationRegistry: reading.reputationRegistry,
+        }
+      : null;
+  if (expected.hook === null || !hook) {
+    notes.push(`${label}: no REPUTATION_HOOK_ADDRESS_${expected.chainId} — only escrow.token() checked (no ERC-8004 feedback on this chain)`);
+  } else {
+    if (!same(hook.acp, expected.escrow)) {
+      problems.push(
+        `${label}: ReputationHook ${expected.hook}.acp() is ${hook.acp}, not AGENT_JOB_ESCROW_ADDRESS_${expected.chainId}=${expected.escrow} ` +
+          '(every hooked submit / complete / reject would revert with OnlyACP)',
+      );
+    }
+    if (expected.evaluator === null) {
+      notes.push(`${label}: no ESCROW_EVALUATOR_PRIVATE_KEY — hook.trustedEvaluator() (${hook.trustedEvaluator}) not compared`);
+    } else if (!same(hook.trustedEvaluator, expected.evaluator)) {
+      problems.push(
+        `${label}: hook.trustedEvaluator() is ${hook.trustedEvaluator}, but the backend evaluator (ESCROW_EVALUATOR_PRIVATE_KEY) is ` +
+          `${expected.evaluator} (every settlement would skip feedback: untrusted-evaluator)`,
+      );
+    }
+    if (expected.identityRegistry === null) {
+      notes.push(`${label}: no Identity Registry configured — hook.identityRegistry() (${hook.identityRegistry}) not compared`);
+    } else if (!same(hook.identityRegistry, expected.identityRegistry)) {
+      problems.push(
+        `${label}: hook.identityRegistry() is ${hook.identityRegistry}, but the backend mints identities in ${expected.identityRegistry} ` +
+          `(IDENTITY_REGISTRY_ADDRESS_${expected.chainId} or the official default; bindings would never verify)`,
+      );
+    }
+    if (expected.reputationRegistry === null) {
+      notes.push(`${label}: no Reputation Registry configured — hook.reputationRegistry() (${hook.reputationRegistry}) not compared`);
+    } else if (!same(hook.reputationRegistry, expected.reputationRegistry)) {
+      problems.push(
+        `${label}: hook.reputationRegistry() is ${hook.reputationRegistry}, expected ${expected.reputationRegistry} ` +
+          `(REPUTATION_REGISTRY_ADDRESS_${expected.chainId} or the official default)`,
+      );
+    }
   }
   if (expected.usdc === null) {
     notes.push(`${label}: no USDC in the token registry — escrow.token() (${reading.token}) not compared`);
@@ -124,21 +143,103 @@ export function compareEscrowDeployment(
 /** `readContract` of one chain (a viem public client satisfies it). */
 export type ContractReader = (params: { address: Address; abi: Abi; functionName: string }) => Promise<unknown>;
 
+/**
+ * viem errors that are an ANSWER from the chain, not a failure to reach it:
+ * the call executed and reverted, or returned no / undecodable data (no code
+ * at the address, or a contract without that function — typo, wrong chain,
+ * wrong contract). A deployment like that is a mismatch, never "unreadable".
+ */
+const DEFINITIVE_ERROR_NAMES = new Set([
+  'ContractFunctionZeroDataError',
+  'ContractFunctionRevertedError',
+  'ExecutionRevertedError',
+  'AbiDecodingZeroDataError',
+  'AbiDecodingDataSizeTooSmallError',
+  'AbiDecodingDataSizeInvalidError',
+  'PositionOutOfBoundsError',
+  'InvalidAddressError',
+]);
+
+/** True when `err` (or anything in its cause chain) says the contract answered "no". */
+export function isDefinitiveContractError(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; current && depth < 10; depth++) {
+    const e = current as { name?: string; message?: string; shortMessage?: string; cause?: unknown };
+    if (e.name && DEFINITIVE_ERROR_NAMES.has(e.name)) return true;
+    if (/returned no data \("0x"\)|execution reverted/i.test(`${e.shortMessage ?? ''} ${e.message ?? ''}`)) return true;
+    current = e.cause;
+  }
+  return false;
+}
+
+/** A contract at a configured address that answered "not me" (no code, revert, bad data). */
+class DeploymentMismatchError extends Error {
+  constructor(readonly problems: string[]) {
+    super(problems.join('; '));
+  }
+}
+
+function firstLine(err: unknown): string {
+  const e = err as { shortMessage?: string; message?: string } | null;
+  return sanitizeText((e?.shortMessage ?? e?.message ?? String(err)).split('\n')[0] ?? '') || 'unknown error';
+}
+
 async function readOnce(read: ContractReader, expected: EscrowChainExpectation): Promise<EscrowChainReading> {
-  const hookCall = (functionName: string) => read({ address: expected.hook, abi: REPUTATION_HOOK_ABI as unknown as Abi, functionName });
-  const [token, acp, trustedEvaluator, identityRegistry, reputationRegistry] = await Promise.all([
-    read({ address: expected.escrow, abi: AGENT_JOB_ESCROW_ABI as unknown as Abi, functionName: 'token' }),
-    hookCall('acp'),
-    hookCall('trustedEvaluator'),
-    hookCall('identityRegistry'),
-    hookCall('reputationRegistry'),
-  ]);
+  const calls: Array<{ contract: 'escrow' | 'hook'; address: Address; abi: Abi; functionName: string }> = [
+    { contract: 'escrow', address: expected.escrow, abi: AGENT_JOB_ESCROW_ABI as unknown as Abi, functionName: 'token' },
+    ...(expected.hook
+      ? (['acp', 'trustedEvaluator', 'identityRegistry', 'reputationRegistry'] as const).map((functionName) => ({
+          contract: 'hook' as const,
+          address: expected.hook!,
+          abi: REPUTATION_HOOK_ABI as unknown as Abi,
+          functionName,
+        }))
+      : []),
+  ];
+  const settled = await Promise.allSettled(calls.map((call) => read({ address: call.address, abi: call.abi, functionName: call.functionName })));
+
+  const values = new Map<string, Address>();
+  const broken = new Map<'escrow' | 'hook', string>();
+  let transport: unknown = null;
+  settled.forEach((outcome, i) => {
+    const call = calls[i]!;
+    const key = `${call.contract}.${call.functionName}`;
+    if (outcome.status === 'fulfilled') {
+      try {
+        values.set(key, getAddress(outcome.value as string));
+      } catch {
+        if (!broken.has(call.contract)) broken.set(call.contract, `${call.functionName}() returned ${JSON.stringify(outcome.value)}`);
+      }
+    } else if (isDefinitiveContractError(outcome.reason)) {
+      if (!broken.has(call.contract)) broken.set(call.contract, `${call.functionName}() ${firstLine(outcome.reason)}`);
+    } else {
+      transport ??= outcome.reason;
+    }
+  });
+
+  // A contract that answered "not me" is conclusive even if another call hit a transport error.
+  if (broken.size > 0) {
+    const label = `chain ${expected.chainId}`;
+    throw new DeploymentMismatchError(
+      [...broken].map(([contract, why]) =>
+        contract === 'escrow'
+          ? `${label}: no AgentJobEscrow at AGENT_JOB_ESCROW_ADDRESS_${expected.chainId}=${expected.escrow} (${why} — no code, wrong address or wrong chain)`
+          : `${label}: no ReputationHook at REPUTATION_HOOK_ADDRESS_${expected.chainId}=${expected.hook} (${why} — no code, wrong address or wrong chain; ` +
+            'every hooked createJob would fail)',
+      ),
+    );
+  }
+  if (transport) throw transport;
   return {
-    token: getAddress(token as string),
-    acp: getAddress(acp as string),
-    trustedEvaluator: getAddress(trustedEvaluator as string),
-    identityRegistry: getAddress(identityRegistry as string),
-    reputationRegistry: getAddress(reputationRegistry as string),
+    token: values.get('escrow.token')!,
+    ...(expected.hook
+      ? {
+          acp: values.get('hook.acp')!,
+          trustedEvaluator: values.get('hook.trustedEvaluator')!,
+          identityRegistry: values.get('hook.identityRegistry')!,
+          reputationRegistry: values.get('hook.reputationRegistry')!,
+        }
+      : {}),
   };
 }
 
@@ -159,8 +260,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 /**
- * Reads and compares every chain. A chain that cannot be read within
- * `timeoutMs` (per attempt, `attempts` tries) is reported `unreadable`.
+ * Reads and compares every chain. Only a transport failure or a timeout
+ * (`timeoutMs` per attempt, `attempts` tries) makes a chain `unreadable`; a
+ * configured address that reverts, has no code or returns undecodable data is
+ * a definitive mismatch (C3d review).
  */
 export async function checkEscrowDeployments(params: {
   chains: readonly EscrowChainExpectation[];
@@ -172,16 +275,18 @@ export async function checkEscrowDeployments(params: {
   const attempts = Math.max(1, params.attempts ?? 2);
   return Promise.all(
     params.chains.map(async (expected): Promise<EscrowChainCheck> => {
+      const base = { chainId: expected.chainId, escrow: expected.escrow, hook: expected.hook };
       let lastError = 'unknown error';
       for (let attempt = 1; attempt <= attempts; attempt++) {
         try {
           const reading = await withTimeout(readOnce(params.reader(expected.chainId), expected), timeoutMs);
-          return { chainId: expected.chainId, escrow: expected.escrow, hook: expected.hook, ...compareEscrowDeployment(expected, reading), unreadable: null };
+          return { ...base, ...compareEscrowDeployment(expected, reading), unreadable: null };
         } catch (err) {
-          lastError = (err as Error)?.message?.split('\n')[0] ?? String(err);
+          if (err instanceof DeploymentMismatchError) return { ...base, problems: err.problems, notes: [], unreadable: null };
+          lastError = firstLine(err);
         }
       }
-      return { chainId: expected.chainId, escrow: expected.escrow, hook: expected.hook, problems: [], notes: [], unreadable: lastError };
+      return { ...base, problems: [], notes: [], unreadable: lastError };
     }),
   );
 }
@@ -215,7 +320,7 @@ export function escrowBootVerdict(nodeEnv: string, checks: readonly EscrowChainC
       ...(strict ? [] : problems.map((problem) => `ERC-8183 deployment mismatch (would be FATAL in production/staging): ${problem}`)),
       ...unreadable.map(
         (check) =>
-          `ERC-8183 deployment on chain ${check.chainId} could not be verified (escrow ${check.escrow}, hook ${check.hook}): ${check.unreadable} — ` +
+          `ERC-8183 deployment on chain ${check.chainId} could not be verified (escrow ${check.escrow}, hook ${check.hook ?? 'none'}): ${check.unreadable} — ` +
           're-checked in the background',
       ),
     ],

@@ -30,7 +30,10 @@ import {
   type ProcessRole,
 } from './process-capabilities.js';
 
-/** Escrow chains with BOTH an escrow and a hook address: what the deployment check verifies. */
+/**
+ * Every chain with an escrow address: what the deployment check verifies
+ * (escrow.token() always; the hook's wiring when a hook is configured).
+ */
 export function escrowExpectations(): EscrowChainExpectation[] {
   const expectations: EscrowChainExpectation[] = [];
   for (const chainId of configuredEscrowChainIds) {
@@ -40,11 +43,11 @@ export function escrowExpectations(): EscrowChainExpectation[] {
     } catch {
       continue;
     }
-    if (!contracts.agentJobEscrow || !contracts.reputationHook) continue;
+    if (!contracts.agentJobEscrow) continue;
     expectations.push({
       chainId,
       escrow: contracts.agentJobEscrow,
-      hook: contracts.reputationHook,
+      hook: contracts.reputationHook ?? null,
       evaluator: escrowEvaluatorAddress,
       identityRegistry: resolveIdentityRegistry(chainId) ?? null,
       reputationRegistry: resolveReputationRegistry(chainId) ?? null,
@@ -67,7 +70,7 @@ function applyVerdict(role: ProcessRole, verdict: EscrowBootVerdict): void {
   for (const warning of verdict.warnings) logger.warn({ role }, `ERC-8183 boot check: ${warning}`);
   for (const error of verdict.errors) logger.error({ role }, error);
   if (verdict.verified.length > 0) {
-    logger.info({ role, chainIds: verdict.verified }, 'ERC-8183 boot check: escrow + ReputationHook match the configuration');
+    logger.info({ role, chainIds: verdict.verified }, 'ERC-8183 boot check: escrow (+ ReputationHook where configured) match the configuration');
   }
   if (verdict.fatal) {
     console.error(verdict.fatal);

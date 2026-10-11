@@ -5,11 +5,13 @@
  * loop with a fake `readContract`; no RPC, no Redis.
  */
 import { describe, expect, it } from 'vitest';
-import type { Address } from 'viem';
+import { createPublicClient, custom, encodeAbiParameters, HttpRequestError, type Address } from 'viem';
+import { baseSepolia } from 'viem/chains';
 import {
   checkEscrowDeployments,
   compareEscrowDeployment,
   escrowBootVerdict,
+  isDefinitiveContractError,
   type ContractReader,
   type EscrowChainExpectation,
   type EscrowChainReading,
@@ -164,12 +166,122 @@ describe('checkEscrowDeployments + escrowBootVerdict', () => {
     expect(verdict.fatal).toMatch(/chain 8453: ReputationHook .*acp\(\)/);
   });
 
+  it('escrow without a hook: escrow.token() is still verified (a wrong token is FATAL), the hook views are not read', async () => {
+    const noHook = { ...expected, hook: null };
+    const reads: string[] = [];
+    const reader = (token: Address): ContractReader => async ({ address, functionName }) => {
+      reads.push(`${address}.${functionName}`);
+      return token;
+    };
+    const ok = await checkEscrowDeployments({ chains: [noHook], reader: () => reader(USDC) });
+    expect(reads).toEqual([`${ESCROW}.token`]);
+    expect(ok[0]).toMatchObject({ hook: null, problems: [], unreadable: null });
+    expect(ok[0]!.notes).toEqual([expect.stringMatching(/no REPUTATION_HOOK_ADDRESS_84532 — only escrow\.token\(\) checked/)]);
+    expect(escrowBootVerdict('production', ok)).toMatchObject({ fatal: null, verified: [84532] });
+
+    const wrong = await checkEscrowDeployments({ chains: [noHook], reader: () => reader(OTHER) });
+    expect(escrowBootVerdict('production', wrong).fatal).toMatch(/token\(\) is .*not the chain's USDC/);
+  });
+
   it('the reputation registry defaults to the official Base / Base Sepolia deployments, overridable per chain', () => {
     expect(resolveReputationRegistry(84532, {})).toBe(DEFAULT_REPUTATION_REGISTRIES[84532]);
     expect(resolveReputationRegistry(84532, {})).toBe(REPUTATION);
     expect(resolveReputationRegistry(8453, {})).toBe('0x8004BAa17C55a88189AE136b182e5fdA19dE9b63');
     expect(resolveReputationRegistry(84532, { REPUTATION_REGISTRY_ADDRESS_84532: OTHER })).toBe(OTHER);
     expect(resolveReputationRegistry(1, {})).toBeUndefined();
+  });
+});
+
+/**
+ * A REAL viem public client (custom transport, no network): `eth_call` to the
+ * escrow returns the ABI-encoded `escrowToken`; to any other address it runs
+ * `hookCall`. So the errors below are the ones `readContract` really throws.
+ */
+/** viem validates checksums: the escrow fixture above is not checksummed, so the viem tests use it lower-cased. */
+const V_ESCROW = ESCROW.toLowerCase() as Address;
+const vExpected: EscrowChainExpectation = { ...expected, escrow: V_ESCROW };
+
+function viemReader(hookCall: () => Promise<unknown>, escrowCall?: () => Promise<unknown>): ContractReader {
+  const client = createPublicClient({
+    chain: baseSepolia,
+    transport: custom({
+      request: async ({ method, params }: { method: string; params?: unknown }) => {
+        if (method === 'eth_chainId') return '0x14a34';
+        if (method !== 'eth_call') throw new Error(`unexpected ${method}`);
+        const to = String((params as Array<{ to?: string }>)[0]?.to ?? '').toLowerCase();
+        if (to === V_ESCROW) return escrowCall ? escrowCall() : encodeAbiParameters([{ type: 'address' }], [USDC]);
+        return hookCall();
+      },
+    }),
+  });
+  return (params) => client.readContract(params as never) as Promise<unknown>;
+}
+
+const reverted = async (): Promise<never> => {
+  throw Object.assign(new Error('execution reverted'), { code: 3, data: '0x' });
+};
+const ALCHEMY_KEY = 'AbCdEf0123456789ghIJklMNop';
+const rpcDown = async (): Promise<never> => {
+  throw new HttpRequestError({ url: `https://base-sepolia.g.alchemy.com/v2/${ALCHEMY_KEY}`, status: 503 });
+};
+
+describe('boot check: no contract / revert / zero data is a mismatch; only transport errors and timeouts are "unreadable" (C3d review P2-1)', () => {
+  const NO_HOOK = /chain 84532: no ReputationHook at REPUTATION_HOOK_ADDRESS_84532=0x000000000000000000000000000000000000400C \(acp\(\) .*no code, wrong address or wrong chain/;
+
+  it.each([
+    ['eth_call returns 0x (no code at the hook address)', async () => '0x', /returned no data/],
+    ['the hook views revert (another contract at that address)', reverted, /reverted/],
+    ['the call returns 2 bytes (undecodable)', async () => '0x1234', /too small/],
+  ] as const)('real viem client — %s: FATAL in production / staging, loud error in development / test', async (_case, hookCall, why) => {
+    const checks = await checkEscrowDeployments({ chains: [vExpected], reader: () => viemReader(hookCall), attempts: 2 });
+    expect(checks[0]).toMatchObject({ unreadable: null });
+    expect(checks[0]!.problems).toEqual([expect.stringMatching(NO_HOOK)]);
+    expect(checks[0]!.problems[0]).toMatch(why);
+    for (const env of ['production', 'staging']) {
+      expect(escrowBootVerdict(env, checks)).toMatchObject({ fatal: expect.stringMatching(NO_HOOK), unreadable: [], verified: [] });
+    }
+    for (const env of ['development', 'test']) {
+      const verdict = escrowBootVerdict(env, checks);
+      expect(verdict).toMatchObject({ fatal: null, unreadable: [], verified: [] });
+      expect(verdict.errors).toEqual([expect.stringMatching(/would be FATAL in production\/staging\): chain 84532: no ReputationHook at/)]);
+    }
+  });
+
+  it('a reader that RESOLVES "0x" (not an address) is a mismatch, not unreadable', async () => {
+    const zeroHook: ContractReader = async ({ functionName }) => (functionName === 'token' ? USDC : '0x');
+    const checks = await checkEscrowDeployments({ chains: [expected], reader: () => zeroHook });
+    expect(checks[0]).toMatchObject({ unreadable: null, problems: [expect.stringMatching(/no ReputationHook at .*acp\(\) returned "0x"/)] });
+    expect(escrowBootVerdict('production', checks).fatal).toMatch(/^FATAL: .*no ReputationHook at/);
+  });
+
+  it('no code at the escrow address: "no AgentJobEscrow at …" (also on a chain without a hook)', async () => {
+    for (const chain of [vExpected, { ...vExpected, hook: null }]) {
+      const checks = await checkEscrowDeployments({ chains: [chain], reader: () => viemReader(async () => encodeAbiParameters([{ type: 'address' }], [V_ESCROW]), async () => '0x') });
+      expect(checks[0]!.problems).toEqual(expect.arrayContaining([expect.stringMatching(/no AgentJobEscrow at AGENT_JOB_ESCROW_ADDRESS_84532=0x00000000000000000000000000000000000e5c20 \(token\(\) .*returned no data/)]));
+      expect(escrowBootVerdict('staging', checks).fatal).toMatch(/no AgentJobEscrow at/);
+    }
+  });
+
+  it('a transport error (HTTP 503 through viem) stays unreadable — never fatal — and the RPC key is not in the message', async () => {
+    const checks = await checkEscrowDeployments({ chains: [vExpected], reader: () => viemReader(rpcDown, rpcDown), attempts: 2 });
+    expect(checks[0]).toMatchObject({ problems: [], unreadable: 'HTTP request failed.' });
+    const verdict = escrowBootVerdict('production', checks);
+    expect(verdict).toMatchObject({ fatal: null, unreadable: [84532], verified: [] });
+    expect(JSON.stringify(verdict)).not.toContain(ALCHEMY_KEY);
+  });
+
+  it('a definitive answer from the hook wins over a transport error on the escrow read', async () => {
+    const checks = await checkEscrowDeployments({ chains: [vExpected], reader: () => viemReader(async () => '0x', rpcDown) });
+    expect(checks[0]).toMatchObject({ unreadable: null, problems: [expect.stringMatching(NO_HOOK)] });
+  });
+
+  it('isDefinitiveContractError: names and messages through the cause chain', () => {
+    expect(isDefinitiveContractError({ name: 'ContractFunctionExecutionError', cause: { name: 'ContractFunctionZeroDataError' } })).toBe(true);
+    expect(isDefinitiveContractError({ name: 'X', cause: { name: 'Y', cause: { name: 'ExecutionRevertedError' } } })).toBe(true);
+    expect(isDefinitiveContractError(new Error('execution reverted: OnlyACP'))).toBe(true);
+    expect(isDefinitiveContractError({ name: 'ContractFunctionExecutionError', cause: { name: 'HttpRequestError', shortMessage: 'HTTP request failed.' } })).toBe(false);
+    expect(isDefinitiveContractError(new Error('timed out after 10000 ms'))).toBe(false);
+    expect(isDefinitiveContractError(Object.assign(new Error('fetch failed'), { cause: { code: 'ECONNREFUSED' } }))).toBe(false);
   });
 });
 
