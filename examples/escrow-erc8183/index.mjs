@@ -109,7 +109,14 @@ async function registerAgent(name) {
   const agent = await api('/v1/agents', {
     method: 'POST',
     apiKey: OPERATOR_SECRET,
-    body: { name, chainIds: [CHAIN_ID] },
+    // The requester's policy applies to an escrow job (C3d): its per-transaction cap is read in
+    // USD for the USDC budget (the default 1.0 caps a job at 1 USDC) and the cooldown counts the
+    // job as a spend. Demo agents get a cap that covers the reward and no cooldown.
+    body: {
+      name,
+      chainIds: [CHAIN_ID],
+      policy: { maxValuePerTxEth: String(Math.max(Number(REWARD_USDC), 1)), cooldownSeconds: 0 },
+    },
   });
   return { id: agent.id, name: agent.name, apiKey: agent.apiKey, address: agent.safeAddress };
 }

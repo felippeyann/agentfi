@@ -65,7 +65,7 @@ For C5's failure path, run it again with `AGENTFI_FLOW=cancel` and the same keys
 | `AGENTFI_CHAIN_ID` | `84532` | chain of the job; `84532` and `8453` have RPC/USDC defaults |
 | `AGENTFI_RPC_URL` | `https://sepolia.base.org` for 84532 | JSON-RPC for balance reads (and cheat codes on a fork) |
 | `AGENTFI_USDC_ADDRESS` | Circle USDC of the chain | the escrow token |
-| `AGENTFI_REWARD_USDC` | `1.0` | job budget; ≥ 1 USDC, the hook's `minFeedbackBudget`, or no feedback is written |
+| `AGENTFI_REWARD_USDC` | `1.0` | job budget; ≥ 1 USDC, the hook's `minFeedbackBudget`, or no feedback is written. Agents the script registers get `maxValuePerTxEth` = max(reward, 1) and no cooldown: the requester's policy applies to an escrow job (C3d), its per-tx cap read in USD for the USDC budget. Reused agents (`*_API_KEY`) keep their own policy |
 | `AGENTFI_FLOW` | `happy` | `happy` (deliver → complete) or `cancel` (cancel while funded → full refund) |
 | `AGENTFI_FORK_FUNDING` | `false` | fund the wallets with Anvil cheat codes (localhost RPC only) |
 | `AGENTFI_POLL_INTERVAL_MS` | `3000` | job polling interval (stay under the FREE tier's 30 requests/min) |

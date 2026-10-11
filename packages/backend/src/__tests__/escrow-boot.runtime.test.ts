@@ -71,8 +71,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { announceProcessCapabilities, processCapabilities, runEscrowBootCheck } from '../config/escrow-boot.runtime.js';
 
 const OTHER = '0x1111111111111111111111111111111111111111';
-let exitSpy: ReturnType<typeof vi.spyOn>;
-let consoleSpy: ReturnType<typeof vi.spyOn>;
+let exitSpy: { mockRestore(): void; mock: { calls: unknown[][] } };
+let consoleSpy: { mockRestore(): void; mock: { calls: unknown[][] } };
 
 beforeEach(() => {
   state.nodeEnv = 'production';
