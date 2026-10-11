@@ -22,6 +22,7 @@ import { notificationService } from '../notification.service.js';
 import { walletLaneLock } from '../transaction/wallet-lane.runtime.js';
 import { finalizeA2APaymentJob } from './payment-finalizer.service.js';
 import { readHookReputation } from './hook-state.js';
+import * as identity from './erc8004-identity.service.js';
 import * as svc from './escrow-erc8183.service.js';
 import type { Erc8183ChainConfig, Erc8183Config, Erc8183Deps, EscrowAlert } from './escrow-erc8183.service.js';
 
@@ -135,6 +136,9 @@ export const hookReputation = (params: { identities: ReadonlyArray<{ chainId: nu
     },
     params,
   );
+
+/** C3d (H14 dry-run): re-check a queued `setProviderAgentId` right before it is broadcast; null = go. */
+export const vetBindBeforeBroadcast = (jobId: string) => identity.vetBindBeforeBroadcast(erc8183Deps(), jobId);
 
 // C3d — contest → operator review (decision D9).
 export const contestJob = (params: { jobId: string; reason: string | null }) => svc.contestEscrowJob(erc8183Deps(), params);

@@ -14,13 +14,15 @@
  *  - policy expired                        → FAILED, submitter not called
  *  - already SUBMITTED / has txHash        → skipped, submitter not called
  *  - A2A payment blocked                   → Job finalized as FAILED
+ *  - C3d: a setProviderAgentId whose job is no longer live + Funded → not broadcast
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
 
-const { finalizeMock, escrowOutcomeMock } = vi.hoisted(() => ({
+const { finalizeMock, escrowOutcomeMock, vetBindMock } = vi.hoisted(() => ({
   finalizeMock: vi.fn(),
   escrowOutcomeMock: vi.fn(),
+  vetBindMock: vi.fn(),
 }));
 
 // The finalizer pulls in the real `db` singleton, the logger/env chain and the
@@ -31,10 +33,12 @@ vi.mock('../services/job/payment-finalizer.service.js', () => ({
 // The ERC-8183 runtime binds the real db / queues / signer. Stub the module.
 vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({
   onEscrowTxOutcome: escrowOutcomeMock,
+  vetBindBeforeBroadcast: vetBindMock,
 }));
 
 import {
   preSubmitGuard,
+  BIND_SKIPPED_BEFORE_SUBMISSION,
   PAUSED_BEFORE_SUBMISSION,
   POLICY_EXPIRED_BEFORE_SUBMISSION,
 } from '../services/transaction/pre-submit-guard.js';
@@ -93,6 +97,7 @@ async function runWorkerStep(db: PrismaClient, submitter: ReturnType<typeof make
 beforeEach(() => {
   finalizeMock.mockReset().mockResolvedValue(undefined);
   escrowOutcomeMock.mockReset().mockResolvedValue(undefined);
+  vetBindMock.mockReset().mockResolvedValue(null);
 });
 
 // ── Happy path ─────────────────────────────────────────────────────────────
@@ -381,5 +386,37 @@ describe('preSubmitGuard — ERC-8183 escrow steps', () => {
       where: { id: TX_ID },
       data: { status: 'FAILED', error: PAUSED_BEFORE_SUBMISSION },
     });
+  });
+});
+
+// ── C3d (H14 dry-run): ERC-8004 bind re-checked before broadcast ───────────
+
+describe('preSubmitGuard — setProviderAgentId (bindAgent) of a job no longer Funded', () => {
+  const bindMeta = { jobId: 'job-1', erc8183: true, erc8004: true, escrowStep: 'bindAgent' };
+
+  it('the job is still live and Funded → proceed (the check ran)', async () => {
+    vetBindMock.mockResolvedValue(null);
+    const { db } = makeMockDb(snapshot({ metadata: bindMeta }));
+    const submitter = makeSubmitter();
+    expect(await runWorkerStep(db, submitter)).toEqual({ action: 'proceed' });
+    expect(vetBindMock).toHaveBeenCalledWith('job-1');
+    expect(submitter.submit).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancelled meanwhile → not broadcast: tx FAILED with the reason, the identity lane moves on (no revert, no gas)', async () => {
+    vetBindMock.mockResolvedValue('job is CANCELLED / FUNDED — setProviderAgentId is only valid while the job is live and Funded');
+    const { db, update } = makeMockDb(snapshot({ metadata: bindMeta }));
+    const submitter = makeSubmitter();
+    const decision = await runWorkerStep(db, submitter);
+    expect(decision).toMatchObject({ action: 'fail', reason: expect.stringContaining(BIND_SKIPPED_BEFORE_SUBMISSION) });
+    expect(submitter.submit).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith({ where: { id: TX_ID }, data: { status: 'FAILED', error: expect.stringContaining('job is CANCELLED') } });
+    expect(escrowOutcomeMock).toHaveBeenCalledWith({ transactionId: TX_ID, status: 'FAILED', error: expect.stringContaining(BIND_SKIPPED_BEFORE_SUBMISSION) });
+  });
+
+  it('other escrow steps are not re-checked here', async () => {
+    const { db } = makeMockDb(snapshot({ metadata: { jobId: 'job-1', erc8183: true, escrowStep: 'submit' } }));
+    expect(await runWorkerStep(db, makeSubmitter())).toEqual({ action: 'proceed' });
+    expect(vetBindMock).not.toHaveBeenCalled();
   });
 });

@@ -37,6 +37,8 @@ vi.mock('../services/transaction/price.service.js', () => ({
 // The ERC-8183 runtime binds the real db / queues / signer. Stub the module.
 vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({
   onEscrowTxOutcome: escrowOutcomeMock,
+  // C3d: the guard re-checks ERC-8004 binds before broadcast (none in these tests).
+  vetBindBeforeBroadcast: async () => null,
 }));
 
 import {

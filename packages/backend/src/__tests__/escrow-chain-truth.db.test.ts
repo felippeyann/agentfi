@@ -107,6 +107,10 @@ vi.mock('../services/job/escrow-erc8183.runtime.js', async () => {
     requestCancellationReject: (p: Parameters<typeof svc.requestCancellationReject>[1]) => svc.requestCancellationReject(reg.simDeps(), p),
     recoverErc8183Job: (j: Parameters<typeof svc.recoverErc8183Job>[1]) => svc.recoverErc8183Job(reg.simDeps(), j),
     reconcileEscrowJobs: (o: Parameters<typeof svc.reconcileEscrowJobs>[1]) => svc.reconcileEscrowJobs(reg.simDeps(), o),
+    vetBindBeforeBroadcast: async (jobId: string) => {
+      const identity = await vi.importActual<typeof import('../services/job/erc8004-identity.service.js')>('../services/job/erc8004-identity.service.js');
+      return identity.vetBindBeforeBroadcast(reg.simDeps() as never, jobId);
+    },
     contestJob: (p: Parameters<typeof svc.contestEscrowJob>[1]) => svc.contestEscrowJob(reg.simDeps(), p),
     resolveJob: (p: Parameters<typeof svc.resolveEscrowJob>[1]) => svc.resolveEscrowJob(reg.simDeps(), p),
     alertExpiringReviews: (o?: Parameters<typeof svc.alertExpiringReviews>[1]) => svc.alertExpiringReviews(reg.simDeps(), o),
@@ -1064,6 +1068,39 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC);
       expect(sim.chain.feedback).toHaveLength(0);
       expect(sim.alerts.map((a) => a.kind)).toContain('review-expired');
+    });
+
+    it('H14 dry-run: a setProviderAgentId queued at FUNDED is not broadcast after the job was cancelled and refunded (SKIPPED, no revert)', async () => {
+      // The provider already has an ERC-8004 identity (first job registered it).
+      const { provider } = await fundedJob();
+      const requester = await sim.agent('requester2');
+      const jobId = await postJob(requester.id, provider.id);
+      // Drive until the bind of the new job is queued (fund confirmed → bind enqueued), then hold it.
+      for (let round = 0; round < 20; round++) {
+        if (await m.db.transaction.findUnique({ where: { intentId: `erc8183:bindAgent:${jobId}` } })) break;
+        await sim.drive(1);
+      }
+      expect(await job(jobId)).toMatchObject({ onChainStatus: 'FUNDED', providerAgentIdStatus: 'BINDING' });
+      const heldBind = sim.txQueue.splice(0);
+      expect(heldBind).toHaveLength(1);
+
+      // The requester cancels; the evaluator's refund mines before the bind goes out.
+      expect((await patchJob(requester.id, jobId, { status: 'CANCELLED' })).statusCode).toBe(200);
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'CANCELLED', onChainStatus: 'REJECTED' });
+
+      sim.txQueue.push(...heldBind);
+      await sim.drive();
+      const after = await job(jobId);
+      expect(after).toMatchObject({ providerAgentIdStatus: 'SKIPPED' });
+      expect(after.providerAgentIdError).toMatch(/checked before broadcast/);
+      const [bind] = await stepRows(jobId, 'bindAgent');
+      expect(bind).toMatchObject({ status: 'FAILED', txHash: null, error: expect.stringMatching(/^setProviderAgentId skipped before submission/) });
+      const onChainJobId = BigInt(after.onChainJobId!);
+      expect(sim.chain.broadcasts.filter((b) => b.functionName === 'setProviderAgentId' && b.from.toLowerCase() === provider.safeAddress.toLowerCase())).toHaveLength(1); // only the first job's
+      expect(onChain(after.onChainJobId).providerAgentId).toBe(0n);
+      expect(onChainJobId).toBeGreaterThan(0n);
+      expect(await m.db.transaction.count({ where: { agentId: provider.id, status: 'REVERTED' } })).toBe(0);
     });
 
     // ── Escrow spending policy (POST /v1/jobs) ─────────────────────────────
