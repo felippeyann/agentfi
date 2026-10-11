@@ -296,7 +296,10 @@ export const agentTools = [
       'On an escrow-enabled chain (e.g. Base Sepolia, 84532) the budget is escrowed on-chain from YOUR wallet ' +
       '(ERC-8183) and progress shows in escrow.onChainStatus (read it with get_job); the provider can accept only ' +
       'once it is FUNDED. When the provider completes, the evaluator settles: the provider is paid from the escrow ' +
-      'and ERC-8004 reputation is written on-chain, unless you contest_job the deliverable first (full refund). ' +
+      'and ERC-8004 reputation is written on-chain, unless you contest_job the deliverable first (it is then held for an ' +
+      'operator decision: pay the provider or refund you). Your operator policy applies to the budget (USDC counted at ' +
+      '1 USD: per-transaction cap, daily volume, token allowlist, the provider as an allowed payee, cooldown); a refusal ' +
+      'is POLICY_VIOLATION with `rule`. ' +
       'Optionally sign the payload with sign_handshake first.',
     inputSchema: z.object({
       provider_id: agentIdSchema('The ID of the agent you are hiring.'),
@@ -370,7 +373,8 @@ export const agentTools = [
     description:
       'Reads one job you posted or were hired for: status, payload, result and, for an escrowed job, the `escrow` ' +
       'object (onChainStatus CREATING → OPEN → BUDGET_SET → APPROVED → FUNDED → SUBMITTED → SETTLING → COMPLETED or ' +
-      'REJECTED; EXPIRED / FAILED; plus settleTxHash, feedbackStatus, contestedAt, escrowError). `escrow` is null for ' +
+      'REJECTED; CONTESTED while a contest waits for the operator; EXPIRED / FAILED; plus settleTxHash, feedbackStatus, ' +
+      'contestedAt, resolution, escrowError). `escrow` is null for ' +
       'free and non-escrow jobs. Poll it to follow funding and settlement.',
     inputSchema: z.object({
       job_id: jobIdSchema('The ID of the job.'),
@@ -428,9 +432,10 @@ export const agentTools = [
     description:
       'Disputes the deliverable of an escrowed job you posted (requester only) before the evaluator settles it. ' +
       'Allowed only while the job is PAYMENT_PENDING with escrow.onChainStatus SUBMITTED; once settlement has started ' +
-      'it is refused (409 CONTEST_NOT_ALLOWED). The evaluator then rejects instead of completing: your budget is ' +
-      'refunded in full and the rejection is recorded in the provider\'s on-chain ERC-8004 reputation. Final — read ' +
-      'the result with get_job first.',
+      'it is refused (409 CONTEST_NOT_ALLOWED). A contest does not refund automatically: the job is held for an operator ' +
+      'decision (escrow.onChainStatus CONTESTED), who either pays the provider or refunds your budget in full, and only ' +
+      'an explicit operator quality verdict records a negative ERC-8004 rating; unresolved at escrow.expiresAt, the ' +
+      'budget is refunded without any rating. Cannot be withdrawn — read the result with get_job first.',
     inputSchema: z.object({
       job_id: jobIdSchema('The ID of the job you posted.'),
       reason: z

@@ -176,9 +176,12 @@ Prompts (replace `<provider-id>` and `<job-id>`):
 Contest instead of paying: with `ESCROW_EVALUATION_DELAY_SECONDS` above 0 on
 the backend (default 0 settles as soon as `submit` confirms), replace step 4
 with "read job `<job-id>` with get_job; while it is PAYMENT_PENDING and
-SUBMITTED, contest_job it with a reason". The evaluator then sends `reject`:
-`escrow.onChainStatus = REJECTED`, the requester is refunded in full and the
-job ends `PAYMENT_FAILED`.
+SUBMITTED, contest_job it with a reason". The job is then held for review
+(`escrow.onChainStatus = CONTESTED`, decision D9): nothing settles until the
+operator decides on the admin job page (or `POST /admin/jobs/<job-id>/resolve`).
+"Refund requester" ends it `REJECTED` / `PAYMENT_FAILED` with the requester
+refunded in full and no rating; "Refund + quality verdict" does the same and
+writes an ERC-8004 rating of 0; "Pay provider" completes it as in step 4.
 
 ## Demo talk track
 

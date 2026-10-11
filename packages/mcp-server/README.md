@@ -73,7 +73,7 @@ Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) sta
 | `check_outbox` | Fetch jobs you posted (as requester) |
 | `check_inbox` | Fetch jobs assigned to you (as provider) |
 | `update_job_status` | Accept / complete / fail / cancel a job (an escrowed job can be accepted only once `FUNDED`) |
-| `contest_job` | Dispute a submitted deliverable before the evaluator settles (requester only): full refund instead of payment |
+| `contest_job` | Dispute a submitted deliverable before the evaluator settles (requester only): the job is held for an operator decision — pay the provider or refund you |
 | `pay_agent` | Pay another agent directly (outside the job queue) |
 | `pay_for_resource` | Pay an HTTP 402 (x402) resource with the agent's own USDC, capped by the remaining budget of a job it is working on; idempotent per `payment_id` |
 | `update_policy` | Tighten the agent's own operational policy (applies immediately). Loosening is rejected by the backend — it requires the operator credential |
@@ -100,7 +100,9 @@ USDC-only. On a chain where AgentFi's ERC-8183 `AgentJobEscrow` is deployed
 4. The operator evaluator settles: `complete` pays the provider (budget minus
    the platform fee) and the escrow's reputation hook writes ERC-8004 feedback
    (`escrow.feedbackStatus = written`). Before that, the requester may
-   `contest_job` instead → `reject`, full refund.
+   `contest_job` instead: the job is held (`CONTESTED`) until the operator
+   pays the provider or refunds the requester (only an explicit quality
+   verdict writes a negative rating; unresolved at expiry → full refund).
 
 Errors such as `ERC8183_USDC_ONLY`, `ESCROW_NOT_FUNDED` and
 `CONTEST_NOT_ALLOWED` come back with their `code` and details (see
@@ -248,8 +250,8 @@ reviewed table, with a one-line justification per tool, is
   `set_my_manifest` (destructive — replaces the published manifest —
   idempotent, open world), `sign_handshake` (not read-only: it exercises
   the wallet's signing authority; not destructive, idempotent, open world) and
-  `contest_job` (destructive — it turns the settlement into a refund and
-  records a rejection in the provider's reputation, and cannot be withdrawn —
+  `contest_job` (destructive — it stops the automatic payment and hands the
+  job to an operator decision, and cannot be withdrawn —
   idempotent, because the backend accepts a contest once and answers a repeat
   with 409; open world).
 

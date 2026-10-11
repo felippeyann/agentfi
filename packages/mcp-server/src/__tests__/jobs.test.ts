@@ -254,7 +254,7 @@ describe('contest_job', () => {
   it('posts to /v1/jobs/:id/contest with the reason', async () => {
     const contested = escrowedJob({
       status: 'PAYMENT_PENDING',
-      escrow: { ...escrowedJob().escrow, onChainStatus: 'SUBMITTED', contestedAt: '2026-10-07T12:00:00.000Z' },
+      escrow: { ...escrowedJob().escrow, onChainStatus: 'CONTESTED', contestedAt: '2026-10-07T12:00:00.000Z' },
     });
     apiMock.post.mockResolvedValue(contested);
 
