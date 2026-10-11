@@ -76,6 +76,31 @@ describe('POST /admin/jobs/:id/resolve', () => {
     expect(resolveJobMock).not.toHaveBeenCalled();
   });
 
+  it('is local-only like every admin route: a remote caller with the right secret is refused (403), also behind a spoofed X-Forwarded-For', async () => {
+    const app = Fastify({ logger: false, trustProxy: true });
+    await app.register(adminRoutes);
+    const body = { decision: 'pay', note: 'looks right' };
+    for (const req of [
+      { remoteAddress: '203.0.113.9', headers: {} },
+      { remoteAddress: '203.0.113.9', headers: { 'x-forwarded-for': '127.0.0.1' } },
+      { remoteAddress: '127.0.0.1', headers: { 'x-forwarded-for': '203.0.113.9' } },
+    ]) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/admin/jobs/job-1/resolve',
+        remoteAddress: req.remoteAddress,
+        headers: { 'x-admin-secret': ADMIN_SECRET, ...req.headers },
+        payload: body,
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toMatchObject({ error: expect.stringContaining('local-only') });
+    }
+    expect(resolveJobMock).not.toHaveBeenCalled();
+    // The loopback control: the same request from 127.0.0.1 is accepted.
+    expect((await app.inject({ method: 'POST', url: '/admin/jobs/job-1/resolve', remoteAddress: '127.0.0.1', headers: { 'x-admin-secret': ADMIN_SECRET }, payload: body })).statusCode).toBe(202);
+    await app.close();
+  });
+
   it('pay → 202 with the decision; the operator defaults to "admin-api" and the note is required', async () => {
     const app = await buildApp();
     const res = await resolve(app, { decision: 'pay', note: '  deliverable matches the brief  ' });

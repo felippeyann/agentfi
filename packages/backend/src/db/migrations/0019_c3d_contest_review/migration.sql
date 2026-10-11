@@ -18,9 +18,15 @@
 --     requester's DailyVolume ("0" when no daily limit applied), so a release
 --     credits back exactly what was reserved instead of re-pricing the reward.
 --
--- Rows contested before C3d and not yet settled (PAYMENT_PENDING + SUBMITTED
--- with contestedAt) are moved to the new CONTESTED hold, so the settlement
--- worker does not reject them automatically any more.
+-- Rows contested before C3d and not yet settled (PAYMENT_PENDING with
+-- contestedAt, SUBMITTED or SETTLING) are moved to the new CONTESTED hold, so
+-- the settlement worker does not reject them automatically any more. A
+-- SETTLING row is included (C3d review P3-3): its pre-C3d automatic reject
+-- may be in flight, and the C3d settlement claim never takes a contested row
+-- without a decision, so left SETTLING it would be stuck. Safe either way:
+-- every C3d path reads the chain first — if that reject mined, the
+-- reconciliation pass mirrors the refund (Rejected on-chain) from the hold;
+-- if it is still pending, resolve refuses while its receipt is missing.
 
 ALTER TABLE "Job"
   ADD COLUMN IF NOT EXISTS "resolution" TEXT,
@@ -37,4 +43,5 @@ SET "onChainStatus" = 'CONTESTED'
 WHERE "escrowKind" = 'erc8183'
   AND "contestedAt" IS NOT NULL
   AND "status" = 'PAYMENT_PENDING'
-  AND "onChainStatus" = 'SUBMITTED';
+  AND "onChainStatus" IN ('SUBMITTED', 'SETTLING')
+  AND "resolution" IS NULL;

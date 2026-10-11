@@ -97,7 +97,7 @@ import {
 import { AGENT_JOB_ESCROW_ABI } from '../../abi/AgentJobEscrow.abi.js';
 import { REPUTATION_HOOK_ABI } from '../../abi/ReputationHook.abi.js';
 import { getKnownTokenBySymbol } from '../transaction/token-registry.js';
-import { sanitizeStoredError } from '../../api/errors/sanitize.js';
+import { publicErrorMessage, sanitizeContextFromEnv, sanitizeStoredError, sanitizeText, sanitizeValue } from '../../api/errors/sanitize.js';
 import type { EvaluatorSigner, EvaluatorWriteParams } from '../escrow/evaluator-signer.js';
 import type { FinalizeA2APaymentJobParams } from './payment-finalizer.service.js';
 import type { ProcessorLogger, TransactionJobData } from '../../queues/transaction.processor.js';
@@ -150,6 +150,12 @@ export const CHAIN_JOB_STATUS = {
   Rejected: 4,
   Expired: 5,
 } as const;
+
+/** " = Completed" for a known on-chain status, "" otherwise (for messages). */
+function chainStatusName(status: number): string {
+  const name = Object.entries(CHAIN_JOB_STATUS).find(([, value]) => value === status)?.[0];
+  return name ? ` = ${name}` : '';
+}
 
 /** `bytes32 reason` values the evaluator passes to complete/reject (hash of the human-readable reason). */
 export const SETTLEMENT_REASONS = {
@@ -322,12 +328,39 @@ function isUniqueViolation(err: unknown): boolean {
   return (err as { code?: string } | null)?.code === 'P2002';
 }
 
-async function raiseAlert(deps: Erc8183Deps, alert: EscrowAlert): Promise<void> {
-  deps.logger.error({ alert: alert.kind, jobId: alert.jobId, chainId: alert.chainId, ...alert.details }, `ESCROW ALERT: ${alert.message}`);
+/** Longest requester-supplied text an alert carries (the contest reason). */
+export const ALERT_TEXT_MAX_CHARS = 200;
+
+/** Requester- or chain-supplied text for an alert: sanitized FIRST, then clipped (a clipped key would escape the exact-match rule). */
+function alertText(value: string | null | undefined, max = ALERT_TEXT_MAX_CHARS): string | null {
+  if (value === null || value === undefined) return null;
+  const clean = sanitizeText(value);
+  return clean.length > max ? `${clean.slice(0, max)}…` : clean;
+}
+
+/**
+ * Logs and delivers an operator alert. C3d review P2-2: alerts leave the
+ * process (webhook / chat channel) and error texts from viem embed the RPC URL
+ * with the provider key in its path, so the message and every string in
+ * `details` go through the S5 sanitizer here, whatever the caller built.
+ * Returns whether the alert was delivered (true without a channel: the log
+ * line is the alert).
+ */
+async function raiseAlert(deps: Erc8183Deps, alert: EscrowAlert): Promise<boolean> {
+  const ctx = sanitizeContextFromEnv();
+  const clean: EscrowAlert = {
+    ...alert,
+    message: sanitizeText(alert.message, ctx),
+    ...(alert.details ? { details: sanitizeValue(alert.details, ctx) as Record<string, unknown> } : {}),
+  };
+  deps.logger.error({ alert: clean.kind, jobId: clean.jobId, chainId: clean.chainId, ...clean.details }, `ESCROW ALERT: ${clean.message}`);
+  if (!deps.alert) return true;
   try {
-    await deps.alert?.(alert);
+    await deps.alert(clean);
+    return true;
   } catch (err) {
-    deps.logger.warn({ alert: alert.kind, err: errorMessage(err) }, 'Escrow alert could not be delivered');
+    deps.logger.warn({ alert: clean.kind, jobId: clean.jobId, err: publicErrorMessage(err) }, 'Escrow alert could not be delivered');
+    return false;
   }
 }
 
@@ -1360,9 +1393,10 @@ export async function contestEscrowJob(deps: Erc8183Deps, params: { jobId: strin
       `POST /admin/jobs/${job.id}/resolve (pay | refund | refund + quality-rejected verdict) before expiresAt ` +
       `${job.expiresAt?.toISOString() ?? '(unknown)'}. After expiresAt anyone can claimRefund: the contest then ends as a ` +
       'full refund to the requester without feedback.',
-    details: { reason: params.reason, expiresAt: job.expiresAt?.toISOString() ?? null, onChainJobId: job.onChainJobId },
+    // The requester's free text: sanitized and clipped before it reaches the channel.
+    details: { reason: alertText(params.reason), expiresAt: job.expiresAt?.toISOString() ?? null, onChainJobId: job.onChainJobId },
   });
-  deps.logger.warn({ jobId: job.id, reason: params.reason }, 'ERC-8183 job contested — held for operator review');
+  deps.logger.warn({ jobId: job.id, reason: alertText(params.reason) }, 'ERC-8183 job contested — held for operator review');
   return { outcome: 'held', contestedAt };
 }
 
@@ -1437,7 +1471,15 @@ export async function resolveEscrowJob(deps: Erc8183Deps, params: ResolveParams)
     return { outcome: 'unverifiable', message: 'The on-chain job status could not be read; retry' };
   }
   if (chain.status !== CHAIN_JOB_STATUS.Submitted) {
-    return refusal('CHAIN_NOT_SUBMITTED', `The job is not Submitted on-chain (status ${chain.status}); the recovery tick mirrors the chain`);
+    // Nothing is written here. The payment-recovery tick records the chain's
+    // outcome once the row is stale: the reconciliation pass for a held job
+    // (read-only, review P3-1), the PAYMENT_PENDING scan for the others.
+    return refusal(
+      'CHAIN_NOT_SUBMITTED',
+      `The job is no longer Submitted on-chain (status ${chain.status}${chainStatusName(chain.status)}): there is nothing left to decide. ` +
+        'This call changes nothing; the payment-recovery tick records the on-chain outcome in the DB on its next pass over stale ' +
+        'escrow jobs (and alerts when it overrode a review).',
+    );
   }
   const inFlight = await noSettlementInFlight(deps, job);
   if (!inFlight.ok) return refusal('SETTLEMENT_IN_PROGRESS', `A settlement transaction may still mine: ${inFlight.reason}`);
@@ -1492,7 +1534,8 @@ export async function resolveEscrowJob(deps: Erc8183Deps, params: ResolveParams)
  * `reviewAlertBeforeExpirySeconds` of `expiresAt` unresolved. Past
  * `expiresAt`, `claimRefund` is permissionless: the job ends as a full refund
  * to the requester without feedback. Runs on the payment-recovery tick.
- * Returns how many alerts were sent.
+ * Returns how many alerts were delivered; a job whose alert could not be
+ * delivered is released and alerted again on the next tick.
  */
 export async function alertExpiringReviews(deps: Erc8183Deps, opts: { limit?: number } = {}): Promise<number> {
   const lead = deps.config.reviewAlertBeforeExpirySeconds ?? DEFAULT_REVIEW_ALERT_BEFORE_EXPIRY_SECONDS;
@@ -1514,7 +1557,7 @@ export async function alertExpiringReviews(deps: Erc8183Deps, opts: { limit?: nu
     const claimed = await deps.db.job.updateMany({ where: { id: job.id, reviewAlertedAt: null }, data: { reviewAlertedAt: now } });
     if (claimed.count === 0) continue;
     const minutes = job.expiresAt ? Math.round((job.expiresAt.getTime() - now.getTime()) / 60_000) : null;
-    await raiseAlert(deps, {
+    const delivered = await raiseAlert(deps, {
       kind: 'review-expiring',
       jobId: job.id,
       chainId: job.escrowChainId,
@@ -1526,6 +1569,13 @@ export async function alertExpiringReviews(deps: Erc8183Deps, opts: { limit?: nu
         'refund to the requester without feedback.',
       details: { status: job.status, onChainStatus: job.onChainStatus, expiresAt: job.expiresAt?.toISOString() ?? null },
     });
+    if (!delivered) {
+      // C3d review P3-6: the claim is the "once per job" guard — a channel
+      // outage must not swallow the only warning. Give it back (only our own
+      // claim) so the next tick retries the delivery.
+      await deps.db.job.updateMany({ where: { id: job.id, reviewAlertedAt: now }, data: { reviewAlertedAt: null } });
+      continue;
+    }
     sent++;
   }
   return sent;
@@ -1901,13 +1951,13 @@ async function settle(deps: Erc8183Deps, job: EscrowJobRow, chainStatus: number)
 
   const fresh = await loadEscrowJob(deps, job.id);
   if (!fresh) return { outcome: 'noop', reason: 'job vanished' };
-  const decision = (fresh.resolution as ReviewDecision | null) ?? (fresh.contestedAt !== null ? null : 'pay');
-  if (decision === null) {
-    // A contest recorded without the CONTESTED hold (a row from before C3d):
-    // put it on hold instead of deciding for the operator.
-    await deps.db.job.updateMany({ where: { id: job.id, onChainStatus: 'SETTLING', resolution: null }, data: { onChainStatus: 'CONTESTED' } });
-    return { outcome: 'noop', reason: 'contested — held for operator review (POST /admin/jobs/:id/resolve)' };
-  }
+  // No decision ⇒ automatic `pay`: the claim above took either a row with a
+  // recorded decision, or an UNCONTESTED one without (contestedAt: null). A
+  // contest cannot land afterwards (it needs SUBMITTED; the row is SETTLING)
+  // and nothing clears a decision, so a contested row never gets here
+  // without one (pre-C3d contested rows are moved to CONTESTED by migration
+  // 0019 — review P3-3).
+  const decision = (fresh.resolution as ReviewDecision | null) ?? 'pay';
   return executeDecision(deps, fresh, decision);
 }
 
@@ -2167,9 +2217,28 @@ function reviewSnapshot(job: EscrowJobRow): ReviewSnapshot {
   };
 }
 
-/** C3d: a job still waiting for an operator decision ended at expiry — full refund, no feedback. */
+/**
+ * C3d: a job ended at expiry (claimRefund — full refund, no feedback) while an
+ * operator decision was recorded but not executed (review P3-2:
+ * `review-overridden` — a "pay" did not pay, a verdict wrote no feedback), or
+ * while it was still waiting for one (`review-expired`).
+ */
 async function alertReviewExpired(deps: Erc8183Deps, job: EscrowJobRow, before: ReviewSnapshot): Promise<void> {
-  if (!isHeldForReview(before) || before.resolution != null) return;
+  const decision = (before.resolution ?? null) as ReviewDecision | null;
+  if (decision !== null) {
+    await raiseAlert(deps, {
+      kind: 'review-overridden',
+      jobId: job.id,
+      chainId: job.escrowChainId,
+      message:
+        `Job ${job.id} expired on-chain before the operator decision "${decision}" was executed: the requester was refunded ` +
+        `in full by claimRefund${decision === 'pay' ? ', the provider was NOT paid' : ''} and no ERC-8004 feedback was written. ` +
+        'Check why the decision did not settle before expiresAt (settlement failures, evaluator gas).',
+      details: { status: before.status, onChainStatus: before.onChainStatus, resolution: decision, settleTxHash: before.settleTxHash },
+    });
+    return;
+  }
+  if (!isHeldForReview(before)) return;
   await raiseAlert(deps, {
     kind: 'review-expired',
     jobId: job.id,
@@ -2232,10 +2301,12 @@ async function reconcileTerminal(deps: Erc8183Deps, job: EscrowJobRow, chainStat
   );
   if (onChainStatus !== 'EXPIRED') await recordLostSettlementReceipt(deps, job);
 
-  const decision = before.resolution as ReviewDecision | null;
+  const decision = (before.resolution ?? null) as ReviewDecision | null;
+  // A recorded decision the chain contradicts, or a job held for a decision
+  // that the chain settled without one (no automatic path settles a held job:
+  // the money moved by another hand). Expiry has its own alert below.
   const contradicted =
-    onChainStatus !== 'EXPIRED' &&
-    (decision !== null ? (decision === 'pay') !== (onChainStatus === 'COMPLETED') : isHeldForReview(before) && onChainStatus === 'COMPLETED');
+    onChainStatus !== 'EXPIRED' && (decision !== null ? (decision === 'pay') !== (onChainStatus === 'COMPLETED') : isHeldForReview(before));
   if (contradicted) {
     await raiseAlert(deps, {
       kind: 'review-overridden',
@@ -2329,7 +2400,8 @@ export async function handleFailedSettlementJob(deps: Erc8183Deps, jobLike: Sett
       chainId: job.escrowChainId,
       message:
         `Settlement of job ${jobId} (${job.resolution ? `operator decision "${job.resolution}"` : 'automatic complete'}) failed after ` +
-        `${jobLike.attemptsMade ?? 0} attempts: ${err.message.slice(0, 200)}. The recovery tick retries it. If the provider cannot ` +
+        // viem summary, sanitized BEFORE clipping (C3d review P2-2: err.message carries the keyed RPC URL).
+        `${jobLike.attemptsMade ?? 0} attempts: ${alertText(publicErrorMessage(err))}. The recovery tick retries it. If the provider cannot ` +
         `receive USDC (complete keeps reverting), unwind it with POST /admin/jobs/${jobId}/resolve {"decision":"payout-blocked"}.`,
       details: { action, status: job.status, resolution: job.resolution },
     });
@@ -2380,7 +2452,8 @@ export type Erc8183RecoveryOutcome =
   | 'submitReleased'
   | 'reconciled'
   | 'chainUnreadable'
-  | 'heldForReview';
+  | 'heldForReview'
+  | 'awaitingEvaluation';
 
 /**
  * Payment-recovery branch for a stale PAYMENT_PENDING escrow job. Never
@@ -2389,7 +2462,8 @@ export type Erc8183RecoveryOutcome =
  *
  * C3d: a CONTESTED job is held for the operator (`heldForReview`) — unless an
  * operator decision is recorded on it (its settlement failed earlier), which
- * is retried.
+ * is retried. A SUBMITTED job inside its evaluation window waits for its
+ * delayed settle (`awaitingEvaluation`, review P3-4).
  *
  * R2: a FUNDED job whose `submit` is deferred behind the ERC-8004 binding is
  * not stuck while an identity transaction is in flight (`awaitingBinding`);
@@ -2445,8 +2519,39 @@ export async function recoverErc8183Job(
     await deps.settlement.add({ jobId: job.id, action: 'resolve' });
     return 'resettled';
   }
+  if (job.onChainStatus === 'SUBMITTED' && (await awaitingEvaluation(deps, job.id))) return 'awaitingEvaluation';
   await deps.settlement.add({ jobId: job.id, action: 'settle' });
   return 'resettled';
+}
+
+/**
+ * C3d review P3-4: an undecided SUBMITTED job whose evaluation window
+ * (ESCROW_EVALUATION_DELAY_SECONDS from the submit confirmation, clamped
+ * before expiry like the original schedule) is still open is not stuck — its
+ * settle is a delayed queue entry. Re-adds it with the REMAINING delay (a
+ * no-op while queued; restores a lost one without shortening the contest
+ * window — an immediate settle here would close it early) and bumps
+ * `updatedAt` so the job leaves the head of the oldest-first scan until the
+ * window has passed. The anchor is the submit transaction, never `updatedAt`
+ * (bumping it must not slide the window).
+ */
+async function awaitingEvaluation(deps: Erc8183Deps, jobId: string): Promise<boolean> {
+  if (deps.config.evaluationDelaySeconds <= 0) return false;
+  const row = await deps.db.job.findUnique({ where: { id: jobId }, select: { resolution: true, contestedAt: true, expiresAt: true, status: true } });
+  if (!row || row.resolution != null || row.contestedAt !== null || row.status !== 'PAYMENT_PENDING') return false;
+  const submit = await deps.db.transaction.findFirst({
+    where: { ...intentAttemptsFilter(escrowIntentId('submit', jobId)), status: 'CONFIRMED' },
+    orderBy: { createdAt: 'desc' },
+    select: { confirmedAt: true, updatedAt: true },
+  });
+  const submittedAt = submit?.confirmedAt ?? submit?.updatedAt ?? null;
+  if (!submittedAt) return false;
+  const now = nowOf(deps);
+  const remainingMs = submittedAt.getTime() + settlementDelay(deps.config, row.expiresAt, submittedAt).delayMs - now.getTime();
+  if (remainingMs <= 0) return false;
+  await deps.settlement.add({ jobId, action: 'settle' }, { delayMs: remainingMs });
+  await deps.db.job.updateMany({ where: { id: jobId, status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED' }, data: { updatedAt: now } });
+  return true;
 }
 
 // ── Reconciliation (C3c) ───────────────────────────────────────────────────
@@ -2591,6 +2696,28 @@ async function resumeFundingStep(deps: Erc8183Deps, job: EscrowJobRow, chain: Ch
   return 'advanced';
 }
 
+/**
+ * C3d review P3-1: READ-ONLY reconciliation of a job held for an operator
+ * decision with none recorded (CONTESTED, or CANCELLED/FAILED while Submitted
+ * on-chain). Nothing is sent or enqueued — the hold is the operator's. When
+ * the chain moved on without the operator (another settlement path, a manual
+ * evaluator transaction, an expiry claimed by anyone), the DB mirrors it and
+ * the operator is alerted (`review-overridden`, or `review-expired` for a
+ * claimRefund). Still Submitted → `heldForReview` (quiet: the pass bumps
+ * `updatedAt`, so held jobs rotate instead of starving the pick).
+ */
+export async function reconcileHeldReview(deps: Erc8183Deps, jobId: string): Promise<ReconcileOutcome> {
+  const job = await loadEscrowJob(deps, jobId);
+  if (!job || job.resolution != null || !isHeldForReview(job)) return 'skipped';
+  const chain = await tryReadChainJob(deps, job);
+  if (!chain) return 'chainUnreadable';
+  if (chain.status >= CHAIN_JOB_STATUS.Completed) {
+    await reconcileTerminal(deps, job, chain.status);
+    return 'reconciled';
+  }
+  return chain.status === CHAIN_JOB_STATUS.Submitted ? 'heldForReview' : 'unchanged';
+}
+
 const QUIET_OUTCOMES = new Set<ReconcileOutcome>(['unchanged', 'inFlight', 'waitingForLane', 'chainUnreadable', 'skipped', 'heldForReview']);
 
 export interface ReconcileSummary {
@@ -2600,6 +2727,8 @@ export interface ReconcileSummary {
   stalledBindings: number;
   /** C3d: operator decisions on CANCELLED/FAILED jobs whose settlement is not running (queue outage, failed attempt). */
   stalledDecisions: number;
+  /** C3d review P3-1: undecided jobs held for review, checked read-only against the chain. */
+  heldReviews: number;
   outcomes: Partial<Record<ReconcileOutcome, number>>;
 }
 
@@ -2616,7 +2745,10 @@ export interface ReconcileSummary {
  *    and which are still FUNDED in the DB: Submitted on-chain → settled;
  *  - jobs whose ERC-8004 binding has been BINDING for `staleBefore`;
  *  - C3d: CANCELLED/FAILED jobs with an operator decision recorded whose
- *    settlement is not running (re-enqueued as `resolve`).
+ *    settlement is not running (re-enqueued as `resolve`);
+ *  - C3d review P3-1: undecided jobs held for review (CONTESTED, or
+ *    CANCELLED/FAILED while SUBMITTED) — read-only (`reconcileHeldReview`):
+ *    a chain that settled without the operator is mirrored and alerted.
  * Stale PAYMENT_PENDING jobs keep their own branch (`recoverErc8183Job`).
  */
 export async function reconcileEscrowJobs(deps: Erc8183Deps, opts: { staleBefore: Date; limit: number }): Promise<ReconcileSummary> {
@@ -2624,7 +2756,7 @@ export async function reconcileEscrowJobs(deps: Erc8183Deps, opts: { staleBefore
   const pick = (where: Prisma.JobWhereInput) =>
     deps.db.job.findMany({ where: { ...base, ...where }, select: { id: true }, orderBy: { updatedAt: 'asc' }, take: opts.limit });
 
-  const [stalledFunding, lostRejects, unsubmitted, stalledBindings, stalledDecisions] = await Promise.all([
+  const [stalledFunding, lostRejects, unsubmitted, stalledBindings, stalledDecisions, heldReviews] = await Promise.all([
     pick({ status: { in: [...LIVE_JOB_STATUS_LIST] }, onChainStatus: { in: ['CREATING', 'OPEN', 'BUDGET_SET', 'APPROVED'] } }),
     pick({
       status: { in: ['CANCELLED', 'FAILED'] },
@@ -2640,6 +2772,10 @@ export async function reconcileEscrowJobs(deps: Erc8183Deps, opts: { staleBefore
     pick({ status: 'ACCEPTED', onChainStatus: 'FUNDED', deliverableHash: { not: null } }),
     pick({ status: { in: ['PENDING', 'ACCEPTED', 'PAYMENT_PENDING'] }, providerAgentIdStatus: 'BINDING' }),
     pick({ status: { in: ['CANCELLED', 'FAILED'] }, resolution: { not: null }, onChainStatus: { in: ['SUBMITTED', 'SETTLING'] } }),
+    pick({
+      resolution: null,
+      OR: [{ onChainStatus: 'CONTESTED' }, { onChainStatus: 'SUBMITTED', status: { in: ['CANCELLED', 'FAILED'] } }],
+    }),
   ]);
 
   const summary: ReconcileSummary = {
@@ -2648,14 +2784,16 @@ export async function reconcileEscrowJobs(deps: Erc8183Deps, opts: { staleBefore
     unsubmittedDeliverables: unsubmitted.length,
     stalledBindings: stalledBindings.length,
     stalledDecisions: stalledDecisions.length,
+    heldReviews: heldReviews.length,
     outcomes: {},
   };
+  const held = new Set(heldReviews.map(({ id }) => id));
   const seen = new Set<string>();
-  for (const { id } of [...stalledFunding, ...lostRejects, ...unsubmitted, ...stalledBindings, ...stalledDecisions]) {
+  for (const { id } of [...stalledFunding, ...lostRejects, ...unsubmitted, ...stalledBindings, ...stalledDecisions, ...heldReviews]) {
     if (seen.has(id)) continue;
     seen.add(id);
     try {
-      const outcome = await reconcileEscrowJob(deps, id);
+      const outcome = held.has(id) ? await reconcileHeldReview(deps, id) : await reconcileEscrowJob(deps, id);
       summary.outcomes[outcome] = (summary.outcomes[outcome] ?? 0) + 1;
       if (QUIET_OUTCOMES.has(outcome)) {
         // Nothing to do yet: send the job to the back of the queue so jobs

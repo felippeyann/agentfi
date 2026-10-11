@@ -117,8 +117,11 @@ vi.mock('../services/job/escrow-erc8183.runtime.js', async () => {
   };
 });
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { PrismaClient } from '@prisma/client';
+import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { parseUnits, TransactionReceiptNotFoundError, type Hex } from 'viem';
 import { FakeEscrowChain, FakeWallets, JobStatus, SIM_ESCROW, SIM_USDC } from './helpers/fake-escrow-chain.js';
@@ -1180,6 +1183,167 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(after.contestedAt).toBeInstanceOf(Date);
       expect(sim.chain.evaluatorCalls).toHaveLength(0);
       expect(onChain(after.onChainJobId).status).toBe(JobStatus.Submitted);
+    });
+
+    // ── Review follow-ups: deterministic interleavings, held-job reconciliation ──
+
+    /** `sim.deps` whose NEXT on-chain getJob read first runs `between` — a deterministic interleaving point. */
+    function depsInterleaving(between: () => Promise<void>): Erc8183Deps {
+      let pending: (() => Promise<void>) | null = between;
+      return {
+        ...sim.deps,
+        publicClient: () => {
+          const client = sim.chain.publicClient;
+          return {
+            ...client,
+            readContract: async (params: Parameters<typeof client.readContract>[0]) => {
+              if (params.functionName === 'getJob' && pending) {
+                const run = pending;
+                pending = null;
+                await run();
+              }
+              return client.readContract(params);
+            },
+          } as never;
+        },
+      };
+    }
+
+    it('race, deterministic: the contest commits between the settlement\'s row snapshot and its claim — the claim fails, nothing is sent', async () => {
+      const { requester, provider, jobId } = await submittedJob();
+      sim.settlements.clear();
+      let contestStatus = 0;
+      // processSettlementJob loads the row (SUBMITTED), then reads the chain: the contest lands right there.
+      const deps = depsInterleaving(async () => {
+        contestStatus = (await contest(requester.id, jobId)).statusCode;
+      });
+      const result = await m.svc.processSettlementJob(deps, { data: { jobId, action: 'settle' }, attemptsMade: 0, opts: { attempts: 3 } });
+      expect(contestStatus).toBe(200);
+      expect(result).toMatchObject({ outcome: 'noop', reason: expect.stringContaining('cannot be settled') });
+      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'CONTESTED', resolution: null });
+      expect(sim.chain.evaluatorCalls).toHaveLength(0);
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC);
+    });
+
+    it('race, deterministic: another decision is claimed between resolve\'s checks and its claim (claimed.count === 0) — refused, one decision, one log entry', async () => {
+      const { requester, jobId } = await submittedJob();
+      expect((await contest(requester.id, jobId)).statusCode).toBe(200);
+      sim.settlements.clear();
+      let inner: unknown;
+      // The outer resolve has read the CONTESTED row; during its chain read a first operator decides "pay".
+      const deps = depsInterleaving(async () => {
+        inner = await resolve(jobId, 'pay');
+      });
+      const outer = await m.svc.resolveEscrowJob(deps, { jobId, decision: 'quality-rejected', note: 'second operator', operator: 'ops2@test' });
+      expect(inner).toMatchObject({ outcome: 'scheduled', resolution: 'pay' });
+      expect(outer).toMatchObject({ outcome: 'refused', code: 'SETTLEMENT_IN_PROGRESS', message: expect.stringMatching(/changed while the decision was processed/) });
+      const recorded = await job(jobId);
+      expect(recorded).toMatchObject({ onChainStatus: 'SETTLING', resolution: 'pay', resolvedBy: 'ops@test' });
+      expect(recorded.reviewLog).toEqual([expect.objectContaining({ decision: 'pay', by: 'ops@test', onChainStatus: 'CONTESTED' })]);
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', resolution: 'pay' });
+      expect(sim.chain.evaluatorCalls).toEqual([expect.objectContaining({ functionName: 'complete' })]);
+    });
+
+    it('review P3-1: the reconciliation checks undecided held jobs read-only — one settled by another hand is mirrored and alerted, one still Submitted only rotates', async () => {
+      const a = await submittedJob();
+      expect((await contest(a.requester.id, a.jobId)).statusCode).toBe(200);
+      const b = await submittedJob();
+      expect((await contest(b.requester.id, b.jobId)).statusCode).toBe(200);
+      sim.settlements.clear();
+      // The evaluator key is used outside the backend: job A is completed on-chain.
+      const onChainA = BigInt((await job(a.jobId)).onChainJobId!);
+      await sim.chain
+        .evaluatorSigner(SIM_EVALUATOR)
+        .writeContract({ address: SIM_ESCROW, abi: AGENT_JOB_ESCROW_ABI as never, functionName: 'complete', args: [onChainA, m.svc.SETTLEMENT_REASONS.completed, '0x'] });
+      const bBefore = (await job(b.jobId)).updatedAt;
+
+      const summary = await m.svc.reconcileEscrowJobs(sim.deps, { staleBefore: new Date(Date.now() + 60_000), limit: 50 });
+      expect(summary.heldReviews).toBe(2);
+      expect(summary.outcomes).toMatchObject({ reconciled: 1, heldForReview: 1 });
+      expect(await job(a.jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', resolution: null });
+      expect(sim.alerts.filter((x) => x.kind === 'review-overridden')).toEqual([expect.objectContaining({ jobId: a.jobId })]);
+      const bAfter = await job(b.jobId);
+      expect(bAfter).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'CONTESTED', resolution: null });
+      expect(bAfter.updatedAt.getTime()).toBeGreaterThan(bBefore.getTime());
+      expect(sim.settlements.size).toBe(0); // nothing enqueued: the hold is the operator's
+      expect(sim.chain.evaluatorCalls).toHaveLength(1); // only the outside complete
+    });
+
+    it('review P3-2: a decision whose settlement kept failing until expiry ends EXPIRED and is alerted "review-overridden"', async () => {
+      const { requester, provider, jobId } = await submittedJob();
+      expect((await contest(requester.id, jobId)).statusCode).toBe(200);
+      sim.chain.blockedPayees.add(provider.safeAddress.toLowerCase()); // "pay" (complete) reverts
+      expect(await resolve(jobId, 'pay')).toMatchObject({ outcome: 'scheduled' });
+      await sim.drive();
+      const held = await job(jobId);
+      expect(held).toMatchObject({ onChainStatus: 'CONTESTED', resolution: 'pay' });
+
+      setNowOffset(simConfig.jobTtlSeconds * 1000 + 60_000);
+      sim.chain.time = onChain(held.onChainJobId).expiredAt + 1n;
+      await m.svc.processSettlementJob(sim.deps, { data: { jobId: '*', action: 'sweep' } });
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_FAILED', onChainStatus: 'EXPIRED', resolution: 'pay' });
+      expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC);
+      expect(sim.alerts.filter((x) => x.kind === 'review-overridden')).toEqual([
+        expect.objectContaining({ jobId, message: expect.stringMatching(/expired on-chain before the operator decision "pay" was executed.*NOT paid/) }),
+      ]);
+      expect(sim.alerts.map((x) => x.kind)).not.toContain('review-expired');
+    });
+
+    it('review P3-4: recovery inside the evaluation window restores the delayed settle with the REMAINING delay and rotates the job; after it, settles', async () => {
+      const { jobId } = await submittedJob();
+      sim.settlements.clear();
+      const added: Array<{ data: EscrowSettlementJobData; delayMs: number | undefined }> = [];
+      const deps: Erc8183Deps = {
+        ...sim.deps,
+        config: { ...simConfig, evaluationDelaySeconds: 600 },
+        settlement: {
+          add: async (data, opts) => {
+            added.push({ data, delayMs: opts?.delayMs });
+          },
+        },
+      };
+      await m.db.$executeRaw`UPDATE "Job" SET "updatedAt" = now() - interval '10 minutes' WHERE "id" = ${jobId}`;
+      const staleAt = (await job(jobId)).updatedAt;
+
+      expect(await m.svc.recoverErc8183Job(deps, { id: jobId, onChainStatus: 'SUBMITTED' })).toBe('awaitingEvaluation');
+      expect(added).toEqual([{ data: { jobId, action: 'settle' }, delayMs: expect.any(Number) }]);
+      expect(added[0]!.delayMs!).toBeGreaterThan(500_000);
+      expect(added[0]!.delayMs!).toBeLessThanOrEqual(600_000);
+      expect((await job(jobId)).updatedAt.getTime()).toBeGreaterThan(staleAt.getTime());
+      // Bumping updatedAt does not slide the window: it is anchored on the submit confirmation.
+      expect(await m.svc.recoverErc8183Job(deps, { id: jobId, onChainStatus: 'SUBMITTED' })).toBe('awaitingEvaluation');
+      expect(added[1]!.delayMs!).toBeLessThanOrEqual(added[0]!.delayMs!);
+
+      setNowOffset(601_000);
+      added.length = 0;
+      expect(await m.svc.recoverErc8183Job(deps, { id: jobId, onChainStatus: 'SUBMITTED' })).toBe('resettled');
+      expect(added).toEqual([{ data: { jobId, action: 'settle' }, delayMs: undefined }]);
+    });
+
+    it('review P3-3: migration 0019 moves pre-C3d contested rows (SUBMITTED or SETTLING, no decision) to CONTESTED — and nothing else', async () => {
+      const sql = readFileSync(fileURLToPath(new URL('../db/migrations/0019_c3d_contest_review/migration.sql', import.meta.url)), 'utf8');
+      const update = sql.slice(sql.indexOf('UPDATE "Job"')).trim();
+      expect(update).toMatch(/^UPDATE "Job"[\s\S]*;$/);
+      const requester = await sim.agent('mig-req');
+      const provider = await sim.agent('mig-prov');
+      const row = (data: Record<string, unknown>) =>
+        m.db.job.create({
+          data: { requesterId: requester.id, providerId: provider.id, payload: {}, reward: {}, status: 'PAYMENT_PENDING', escrowKind: 'erc8183', onChainJobId: '1', ...data },
+        });
+      const at = new Date();
+      const submitted = await row({ onChainStatus: 'SUBMITTED', contestedAt: at });
+      const settling = await row({ onChainStatus: 'SETTLING', contestedAt: at });
+      const decided = await row({ onChainStatus: 'SETTLING', contestedAt: at, resolution: 'pay' });
+      const uncontested = await row({ onChainStatus: 'SETTLING' });
+      const cancelled = await row({ onChainStatus: 'SUBMITTED', contestedAt: at, status: 'CANCELLED' });
+      await m.db.$executeRawUnsafe(update);
+      expect((await job(submitted.id)).onChainStatus).toBe('CONTESTED');
+      expect((await job(settling.id)).onChainStatus).toBe('CONTESTED');
+      expect((await job(decided.id)).onChainStatus).toBe('SETTLING');
+      expect((await job(uncontested.id)).onChainStatus).toBe('SETTLING');
+      expect((await job(cancelled.id)).onChainStatus).toBe('SUBMITTED');
     });
 
     it('the stale PAYMENT_PENDING scan skips an undecided contest (no starvation) but still picks legacy rows and a contest with a decision', async () => {

@@ -30,6 +30,7 @@ import {
   encodeEventTopics,
   getAbiItem,
   getAddress,
+  HttpRequestError,
   keccak256,
   parseUnits,
   stringToHex,
@@ -44,6 +45,7 @@ import { InMemoryLaneLock } from '../services/transaction/wallet-lane.js';
 import type { EvaluatorWriteParams } from '../services/escrow/evaluator-signer.js';
 import { REPUTATION_HOOK_ABI } from '../abi/ReputationHook.abi.js';
 import {
+  ALERT_TEXT_MAX_CHARS,
   CHAIN_JOB_STATUS,
   SETTLEMENT_REASONS,
   __resetEscrowTokenCacheForTests,
@@ -64,6 +66,7 @@ import {
   parseSettlementReceipt,
   processSettlementJob,
   pumpFunding,
+  reconcileHeldReview,
   recoverErc8183Job,
   requestCancellationReject,
   resolveEscrowJob,
@@ -723,12 +726,15 @@ describe('processSettlementJob — settle', () => {
     expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'CONTESTED', status: 'PAYMENT_PENDING' });
   });
 
-  it('C3d: a contest recorded without the hold (pre-C3d row) is put on hold at the claim instead of rejected', async () => {
-    const { deps, jobs, signer } = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()] });
-    jobs.get('job-1')!['contestedAt'] = NOW; // contestedAt set, onChainStatus still SUBMITTED
-    const result = await processSettlementJob(deps, settleJob());
-    expect(result).toMatchObject({ outcome: 'noop' });
-    expect(signer.writeContract).not.toHaveBeenCalled();
+  it('C3d: a contest recorded without the hold (pre-C3d row; migration 0019 moves those to CONTESTED) is never claimed by the automatic settlement', async () => {
+    for (const onChainStatus of ['SUBMITTED', 'SETTLING']) {
+      const { deps, jobs, signer } = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()] });
+      Object.assign(jobs.get('job-1')!, { contestedAt: NOW, onChainStatus });
+      const result = await processSettlementJob(deps, settleJob());
+      expect(result).toMatchObject({ outcome: 'noop', reason: expect.stringContaining('cannot be settled') });
+      expect(signer.writeContract).not.toHaveBeenCalled();
+      expect(jobs.get('job-1')).toMatchObject({ onChainStatus, status: 'PAYMENT_PENDING' });
+    }
   });
 
   it('reuses a stored feedback file (never regenerated once present with the same outcome)', async () => {
@@ -1450,6 +1456,104 @@ describe('C3d — expiry and contradictions', () => {
     expect((alert.mock.calls[0]![0] as { message: string }).message).toMatch(/full refund to the requester without feedback/);
     expect(jobs.get('contested-soon')!['reviewAlertedAt']).toEqual(NOW);
     expect(await alertExpiringReviews({ ...deps, config: { ...config, reviewAlertBeforeExpirySeconds: 0 } })).toBe(0);
+  });
+
+  it('review P3-6: an expiring-review alert the channel fails to deliver releases its claim and is retried next tick', async () => {
+    const soon = new Date(NOW.getTime() + 3_600_000);
+    const { deps, jobs, alert } = makeDeps([CONTESTED_JOB({ expiresAt: soon })]);
+    alert.mockRejectedValueOnce(new Error('webhook down'));
+    expect(await alertExpiringReviews(deps)).toBe(0);
+    expect(jobs.get('job-1')!['reviewAlertedAt']).toBeNull();
+    expect(deps.logger.warn).toHaveBeenCalledWith(expect.objectContaining({ alert: 'review-expiring' }), 'Escrow alert could not be delivered');
+    expect(await alertExpiringReviews(deps)).toBe(1);
+    expect(jobs.get('job-1')!['reviewAlertedAt']).toEqual(NOW);
+    expect(await alertExpiringReviews(deps)).toBe(0);
+    expect(alert).toHaveBeenCalledTimes(2);
+  });
+
+  it('review P3-2: a job that expires with a recorded decision (its settlement kept failing) is alerted "review-overridden", not "review-expired"', async () => {
+    for (const decision of ['pay', 'quality-rejected'] as const) {
+      const { deps, jobs, alert } = makeDeps([CONTESTED_JOB({ resolution: decision, escrowError: 'resolve failed after 3 attempts' })]);
+      expect(await processSettlementJob(deps, { data: { jobId: 'job-1', action: 'claimRefund' } })).toMatchObject({ onChainStatus: 'EXPIRED' });
+      expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'EXPIRED', resolution: decision });
+      const kinds = alert.mock.calls.map(([a]) => (a as { kind: string }).kind);
+      expect(kinds).toEqual(['review-overridden']);
+      const message = (alert.mock.calls[0]![0] as { message: string }).message;
+      expect(message).toMatch(new RegExp(`expired on-chain before the operator decision "${decision}" was executed`));
+      expect(message.includes('NOT paid')).toBe(decision === 'pay');
+    }
+    // The same when the expiry is found by a reconciliation (chain already Expired).
+    const found = makeDeps([CONTESTED_JOB({ resolution: 'pay' })], { chainStatus: CHAIN_JOB_STATUS.Expired });
+    expect(await reconcileHeldReview(found.deps, 'job-1')).toBe('skipped'); // decided → not the read-only pass's job
+    await processSettlementJob(found.deps, resolveJob());
+    expect(found.alert).toHaveBeenCalledWith(expect.objectContaining({ kind: 'review-overridden' }));
+    expect(found.alert).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'review-expired' }));
+  });
+
+  it('review P3-1: reconcileHeldReview is read-only — still Submitted → held (nothing written or queued); settled by another hand → mirrored + "review-overridden"', async () => {
+    const held = makeDeps([CONTESTED_JOB()]);
+    expect(await reconcileHeldReview(held.deps, 'job-1')).toBe('heldForReview');
+    expect(held.dbMock.job.update).not.toHaveBeenCalled();
+    expect(held.dbMock.job.updateMany).not.toHaveBeenCalled();
+    expect(held.settlement.add).not.toHaveBeenCalled();
+    expect(held.signer.writeContract).not.toHaveBeenCalled();
+
+    for (const [row, chainStatus, onChainStatus] of [
+      [CONTESTED_JOB(), CHAIN_JOB_STATUS.Rejected, 'REJECTED'],
+      [escrowJob({ onChainJobId: '7', onChainStatus: 'SUBMITTED', status: 'CANCELLED' }), CHAIN_JOB_STATUS.Completed, 'COMPLETED'],
+    ] as const) {
+      const moved = makeDeps([row], { chainStatus });
+      expect(await reconcileHeldReview(moved.deps, 'job-1')).toBe('reconciled');
+      expect(moved.jobs.get('job-1')!['onChainStatus']).toBe(onChainStatus);
+      expect(moved.alert).toHaveBeenCalledWith(expect.objectContaining({ kind: 'review-overridden', jobId: 'job-1' }));
+      expect(moved.settlement.add).not.toHaveBeenCalled();
+      expect(moved.signer.writeContract).not.toHaveBeenCalled();
+    }
+
+    const down = makeDeps([CONTESTED_JOB()]);
+    down.readContract.mockRejectedValueOnce(new Error('rpc down'));
+    expect(await reconcileHeldReview(down.deps, 'job-1')).toBe('chainUnreadable');
+    expect(await reconcileHeldReview(makeDeps([SUBMITTED_JOB()]).deps, 'job-1')).toBe('skipped'); // not held
+  });
+});
+
+describe('C3d review P2-2 — alerts are sanitized', () => {
+  const KEY = 'AbCdEf0123456789ghIJklMNop';
+  const KEYED_URL = `https://base-sepolia.g.alchemy.com/v2/${KEY}`;
+
+  it('the settlement-failed alert carries the sanitized error (no keyed RPC URL), sanitized BEFORE it is clipped', async () => {
+    const { deps, alert, logger } = makeDeps([CONTESTED_JOB({ onChainStatus: 'SETTLING', resolution: 'pay' })]);
+    // A long prefix pushes the URL across the old 200-char cut: clipping first would leave a key fragment.
+    const err = new Error(`${'x'.repeat(170)} request to ${KEYED_URL} failed: 503`);
+    await handleFailedSettlementJob(deps, resolveJob(3), err);
+    const delivered = alert.mock.calls.map(([a]) => a as { kind: string; message: string; details?: Record<string, unknown> });
+    expect(delivered.map((a) => a.kind)).toEqual(['settlement-failed']);
+    const serialized = JSON.stringify(delivered);
+    expect(serialized).not.toContain(KEY);
+    expect(serialized).not.toContain(KEY.slice(0, 8));
+    // The log line of the alert is sanitized the same way.
+    const alertLog = logger.error.mock.calls.find(([, m]) => String(m).startsWith('ESCROW ALERT'));
+    expect(JSON.stringify(alertLog)).not.toContain(KEY);
+  });
+
+  it('a viem HttpRequestError (URL with the key in its message) never reaches the alert', async () => {
+    const { deps, alert } = makeDeps([CONTESTED_JOB({ onChainStatus: 'SETTLING', resolution: 'pay' })]);
+    await handleFailedSettlementJob(deps, resolveJob(3), new HttpRequestError({ url: KEYED_URL, status: 503 }));
+    const message = (alert.mock.calls[0]![0] as { message: string }).message;
+    expect(message).toMatch(/HTTP request failed/);
+    expect(message).not.toContain(KEY);
+  });
+
+  it('the requester\'s contest reason is sanitized and clipped in the "contested" alert (the row keeps the reason as given)', async () => {
+    const { deps, jobs, alert } = makeDeps([SUBMITTED_JOB()]);
+    const reason = `the deliverable called ${KEYED_URL} and api_key=supersecretvalue123 ${'y'.repeat(600)}`;
+    expect(await contestEscrowJob(deps, { jobId: 'job-1', reason })).toMatchObject({ outcome: 'held' });
+    const details = (alert.mock.calls[0]![0] as { details: { reason: string } }).details;
+    expect(details.reason).not.toContain(KEY);
+    expect(details.reason).not.toContain('supersecretvalue123');
+    expect(details.reason.length).toBeLessThanOrEqual(ALERT_TEXT_MAX_CHARS + 1);
+    expect(details.reason).toMatch(/^the deliverable called https:\/\/base-sepolia\.g\.alchemy\.com\/\[redacted\]/);
+    expect(jobs.get('job-1')!['contestReason']).toBe(reason);
   });
 });
 
