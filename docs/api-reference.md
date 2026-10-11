@@ -204,12 +204,15 @@ database write that creates the transaction, after the limit check; a refusal
 anywhere before that (cooldown, simulation, the limit itself) reserves
 nothing. The reservation is then settled once: it stays counted when the
 transaction confirms, is given back when the transaction never executed
-(rejected by the operator, blocked or failed before any broadcast attempt, or
-mined and reverted), and stays counted when the outcome is unknown (a failure
-after a broadcast attempt, or a transaction dropped from the mempool) because
-it may still be mined. A paid job's reward is counted by the job (at creation)
-and not again by its payment transaction. A batch counts the native value it
-moves.
+(rejected by the operator, blocked, failed before any broadcast attempt or not
+enqueued, or mined and reverted after a single signed broadcast), and stays
+counted when the outcome is unknown (a failure after a broadcast attempt, a
+revert after more than one signed broadcast, or a transaction dropped from the
+mempool) because it may still be mined. A paid job's reward is counted by the
+job (at creation) and not again by its payment transaction. A batch counts the
+native value it moves. When the USD price of the native value cannot be
+resolved and a daily limit is set, the request is refused with `503` (the limit
+cannot be checked); without a daily limit it proceeds and counts nothing.
 
 ---
 

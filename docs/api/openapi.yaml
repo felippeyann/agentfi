@@ -1574,6 +1574,7 @@ paths:
       responses:
         '200': { description: Approved. }
         '409': { description: A concurrent approve or reject already moved the transaction out of PENDING_APPROVAL. }
+        '503': { description: The transaction could not be enqueued; it is still PENDING_APPROVAL and the approval can be retried. }
 
   /admin/transactions/{id}/reject:
     parameters:
@@ -1803,6 +1804,12 @@ components:
         simulation: Tenderly is used when configured, otherwise a real `eth_call`
         (`estimateGas`) dry-run. This response is the defense-in-depth guard for
         the case where only a mock result exists in such an environment.
+
+        The same status is returned when the USD price of the native value the
+        transaction moves could not be resolved while the agent has a daily
+        volume limit: the limit cannot be checked, so the transaction is refused
+        before it is created (`{ "error": "The USD price of the native value could
+        not be resolved, …" }`). Retry shortly.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
