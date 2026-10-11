@@ -2901,6 +2901,13 @@ export interface paths {
                     };
                     content?: never;
                 };
+                /** @description A concurrent approve or reject already moved the transaction out of PENDING_APPROVAL. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
             };
         };
         delete?: never;
@@ -2920,7 +2927,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Reject a PENDING_APPROVAL transaction */
+        /**
+         * Reject a PENDING_APPROVAL transaction
+         * @description The transaction never broadcast, so its daily-volume reservation is given back.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -2934,6 +2944,13 @@ export interface paths {
             responses: {
                 /** @description Rejected. */
                 200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description A concurrent approve or reject already moved the transaction out of PENDING_APPROVAL. */
+                409: {
                     headers: {
                         [name: string]: unknown;
                     };

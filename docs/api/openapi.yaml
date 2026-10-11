@@ -1573,6 +1573,7 @@ paths:
         - adminSecret: []
       responses:
         '200': { description: Approved. }
+        '409': { description: A concurrent approve or reject already moved the transaction out of PENDING_APPROVAL. }
 
   /admin/transactions/{id}/reject:
     parameters:
@@ -1583,10 +1584,12 @@ paths:
     post:
       tags: [Admin]
       summary: Reject a PENDING_APPROVAL transaction
+      description: The transaction never broadcast, so its daily-volume reservation is given back.
       security:
         - adminSecret: []
       responses:
         '200': { description: Rejected. }
+        '409': { description: A concurrent approve or reject already moved the transaction out of PENDING_APPROVAL. }
 
   /admin/volume:
     get:
