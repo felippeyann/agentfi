@@ -198,6 +198,13 @@ async function scanStalePaymentPending(): Promise<RecoverySummary> {
     where: {
       status: 'PAYMENT_PENDING',
       updatedAt: { lt: cutoff },
+      // C3d: a contest waiting for the operator is not stuck — it can sit
+      // PAYMENT_PENDING for days and, oldest first, would fill every tick and
+      // starve the jobs that are. Its reminders come from alertExpiringReviews;
+      // a contest WITH a recorded decision is still picked (its settlement is
+      // retried). Written as an OR because `onChainStatus <> 'CONTESTED'` is
+      // NULL (not true) for legacy rows.
+      OR: [{ onChainStatus: null }, { onChainStatus: { not: 'CONTESTED' } }, { resolution: { not: null } }],
     },
     select: { id: true, updatedAt: true, escrowKind: true, onChainStatus: true },
     take: PER_TICK_LIMIT,

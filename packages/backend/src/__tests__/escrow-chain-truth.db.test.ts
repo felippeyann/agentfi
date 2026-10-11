@@ -1182,6 +1182,27 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(onChain(after.onChainJobId).status).toBe(JobStatus.Submitted);
     });
 
+    it('the stale PAYMENT_PENDING scan skips an undecided contest (no starvation) but still picks legacy rows and a contest with a decision', async () => {
+      const { requester, provider, jobId } = await submittedJob();
+      expect((await contest(requester.id, jobId)).statusCode).toBe(200);
+      sim.settlements.clear();
+      // A legacy paid job stuck in PAYMENT_PENDING (onChainStatus NULL): it must still be scanned.
+      const legacy = await m.db.job.create({
+        data: { requesterId: requester.id, providerId: provider.id, payload: {}, reward: { amount: '1', token: 'ETH', chainId: 1 }, status: 'PAYMENT_PENDING' },
+      });
+
+      const first = await m.runPaymentRecoveryTick();
+      expect(first).toMatchObject({ scanned: 1, refundedOrphan: 1, erc8183Recovered: 0 });
+      expect((await job(legacy.id)).status).toBe('PAYMENT_FAILED');
+      expect(sim.settlements.size).toBe(0);
+
+      // A decision whose settlement failed went back to the hold: the scan retries it.
+      await m.db.job.update({ where: { id: jobId }, data: { resolution: 'refund', resolvedBy: 'ops', resolvedAt: new Date() } });
+      const second = await m.runPaymentRecoveryTick();
+      expect(second).toMatchObject({ scanned: 1, erc8183Recovered: 1 });
+      expect([...sim.settlements.values()].map((q) => q.data)).toEqual([{ jobId, action: 'resolve' }]);
+    });
+
     it('H14 dry-run: a setProviderAgentId queued at FUNDED is not broadcast after the job was cancelled and refunded (SKIPPED, no revert)', async () => {
       // The provider already has an ERC-8004 identity (first job registered it).
       const { provider } = await fundedJob();
