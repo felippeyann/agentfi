@@ -15,6 +15,8 @@ Constructor parameters actually used (fill in after the broadcast): `EXPECTED_CH
 
 ## 2. C4 runbook (owner runs it; the agent prepared it)
 
+One-page checklist with the expected results and the evidence to keep: [c4-c5-checklist.md](c4-c5-checklist.md).
+
 Deploys `AgentPolicyModule` + `AgentExecutor` (`script/Deploy.s.sol`) and `AgentJobEscrow` + `ReputationHook` (`script/DeployEscrow.s.sol`) on Base Sepolia. Run it in **Git Bash** (any bash works) from the repository root of an up-to-date `main` checkout. Background and every option: [docs/operations/contract-deployment.md](../operations/contract-deployment.md). This runbook was dry-run as written on an Anvil fork on 2026-10-08 (§5.5).
 
 ### 2.0 Prerequisites
@@ -130,7 +132,7 @@ Expected: `=== Results: 4 passed, 0 failed ===`. Then paste the second block of 
 2. `STATE.md` §3 (Base Sepolia row) and the address registry in `docs/operations/contract-deployment.md`.
 3. Keep both copy blocks and the evaluator key for the backend `.env` of C5 (§5.4).
 
-**Backend boot check (C3d).** Once C3d is merged, the backend compares the hook's on-chain configuration (`acp`, `trustedEvaluator`, `identityRegistry`) with its own env at boot (`AGENT_JOB_ESCROW_ADDRESS_84532`, the address of `ESCROW_EVALUATOR_PRIVATE_KEY`, `IDENTITY_REGISTRY_ADDRESS_84532` or its default), so a hook deployed with the wrong `TRUSTED_EVALUATOR` shows up at the first boot of §5.4 instead of as silently skipped feedback. Details: [erc-8183-mapping.md](../architecture/erc-8183-mapping.md) §6.
+**Backend boot check (C3d, merged in #162).** The backend compares the hook's on-chain configuration (`acp`, `trustedEvaluator`, `identityRegistry`) with its own env at boot (`AGENT_JOB_ESCROW_ADDRESS_84532`, the address of `ESCROW_EVALUATOR_PRIVATE_KEY`, `IDENTITY_REGISTRY_ADDRESS_84532` or its default), so a hook deployed with the wrong `TRUSTED_EVALUATOR` shows up at the first boot of §5.4 instead of as silently skipped feedback. Details: [erc-8183-mapping.md](../architecture/erc-8183-mapping.md) §6.
 
 ## 3. Jobs settled on testnet (tasks C5, G2, G5)
 
@@ -199,7 +201,7 @@ Deployment (deterministic for the pinned block): `AgentJobEscrow` `0x70449abF99B
 
 **Recommendation before C4 (contract change) — done in R3c.** Bug 2 was fixed for AgentFi's own evaluator, but the hook still let *any* caller that trusts gas estimation lose the feedback (another evaluator client, a manual `cast send`, future third-party evaluators). R3c fixed it in the contract before deployment: every registry call forwards a fixed gas cap (`feedbackGasLimit` 500 000 to `giveFeedback`, `identityCallGasLimit` 50 000 to each identity call) and, once the cheap gates pass, the hook reverts the whole settlement with `InsufficientGasForFeedback` when the caller's gas cannot cover those caps (`feedbackGasRequirement` = 667 937 inside the hook). Estimators now converge on the full path: on this fork the lowest gas at which `complete` succeeds (777 522 for the escrow call) writes the feedback and one unit less reverts (`test/ReputationHook.fork.t.sol`); a registry that burns gas still cannot block settlement (it costs at most its cap). Design and measurements: [erc-8004-integration.md §4](../architecture/erc-8004-integration.md#4-agentfi-design-feedback-written-by-the-escrow-hook) "Gas policy". The backend's 400 000 headroom stays as insurance.
 
-**Observation (not a bug).** On Base Sepolia CoinGecko has no prices, so a USDC reward resolves to $0: the requester's daily-volume reservation is skipped (`Escrow: USD value resolved to 0`) and the revenue snapshot stays NULL. Expected on testnet; on Base mainnet USDC is priced.
+**Observation (not a bug).** On Base Sepolia CoinGecko has no prices, so a USDC reward resolves to $0: the requester's daily-volume reservation is skipped (`Escrow: USD value resolved to 0`) and the revenue snapshot stays NULL. Expected on testnet; on Base mainnet USDC is priced. *(Superseded by C3d: an escrow job prices USDC at exactly 1.00 and counts it in the daily volume; the default policy caps it at 1 USDC, so `examples/escrow-erc8183` registers its agents with a higher cap and no cooldown.)*
 
 ### 5.4 C5 runbook — Base Sepolia (owner runs it after C4)
 
@@ -257,7 +259,7 @@ That is the full list the boot needs (`API_SECRET`, `ADMIN_SECRET`, `DATABASE_UR
 ```bash
 cd packages/backend
 npx prisma generate          # npm ci does not generate the client
-npx prisma migrate deploy    # applies every migration (0001…0018) to agentfi_c5
+npx prisma migrate deploy    # applies every migration (0001…0020) to agentfi_c5
 ```
 
 Both read `DATABASE_URL` from `packages/backend/.env`.
