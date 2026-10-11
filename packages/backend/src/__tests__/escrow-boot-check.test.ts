@@ -54,7 +54,7 @@ function readerFor(reading: EscrowChainReading, opts: { fail?: number; hang?: bo
       failures--;
       throw new Error('HTTP request failed.\nURL: https://rpc.example/key');
     }
-    const map: Record<string, Address> = {
+    const map: Record<string, Address | undefined> = {
       token: reading.token,
       acp: reading.acp,
       trustedEvaluator: reading.trustedEvaluator,
@@ -228,11 +228,12 @@ const rpcDown = async (): Promise<never> => {
 describe('boot check: no contract / revert / zero data is a mismatch; only transport errors and timeouts are "unreadable" (C3d review P2-1)', () => {
   const NO_HOOK = /chain 84532: no ReputationHook at REPUTATION_HOOK_ADDRESS_84532=0x000000000000000000000000000000000000400C \(acp\(\) .*no code, wrong address or wrong chain/;
 
-  it.each([
+  const definitive: Array<[string, () => Promise<unknown>, RegExp]> = [
     ['eth_call returns 0x (no code at the hook address)', async () => '0x', /returned no data/],
     ['the hook views revert (another contract at that address)', reverted, /reverted/],
     ['the call returns 2 bytes (undecodable)', async () => '0x1234', /too small/],
-  ] as const)('real viem client — %s: FATAL in production / staging, loud error in development / test', async (_case, hookCall, why) => {
+  ];
+  it.each(definitive)('real viem client — %s: FATAL in production / staging, loud error in development / test', async (_case, hookCall, why) => {
     const checks = await checkEscrowDeployments({ chains: [vExpected], reader: () => viemReader(hookCall), attempts: 2 });
     expect(checks[0]).toMatchObject({ unreadable: null });
     expect(checks[0]!.problems).toEqual([expect.stringMatching(NO_HOOK)]);
