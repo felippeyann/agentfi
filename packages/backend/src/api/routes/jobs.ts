@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import type { JobStatus } from '@prisma/client';
+import type { Job, JobStatus, Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
 import { logger } from '../middleware/logger.js';
@@ -160,21 +160,45 @@ export async function jobRoutes(fastify: FastifyInstance) {
 
     // v2 Escrow: if reward is specified, reserve funds before creating the job.
     // This prevents requesters from creating paid jobs they can't honor.
-    let reservedAt: Date | null = null;
-    let reservedValueUsd: string | null = null;
+    const jobData = (reservation: { at: Date; reservedValueUsd: string | null } | null): Prisma.JobUncheckedCreateInput => ({
+      requesterId: request.agentId,
+      providerId: body.providerId,
+      payload: body.payload,
+      reward: body.reward ?? {},
+      signature: body.signature ?? null,
+      status: 'PENDING',
+      ...(body.reward?.amount && reservation
+        ? {
+            reservedAmount: body.reward.amount,
+            reservedToken: rewardToken,
+            reservedChainId: rewardChainId,
+            reservedAt: reservation.at,
+            reservationStatus: 'PENDING',
+            reservedValueUsd: reservation.reservedValueUsd,
+          }
+        : {}),
+    });
+
+    let job: Job;
     if (body.reward?.amount && useErc8183 && escrowToken) {
       // C3d: the requester's policy applies to an escrow job like to any
       // spend — allowlists (payee = provider wallet), per-tx cap and daily
-      // volume with USDC at 1.00 USD (no oracle), cooldown.
+      // volume with USDC at 1.00 USD (no oracle), cooldown. The check, the
+      // DailyVolume increment and the Job row commit in ONE transaction under
+      // the requester's Agent row lock: a refusal or a failed insert leaves
+      // no reserved volume behind.
       const at = new Date();
-      const spend = await reserveEscrowJobSpend({
-        requesterId: request.agentId,
-        chainId: rewardChainId,
-        amount: body.reward.amount,
-        token: escrowToken,
-        payee: provider.safeAddress,
-        now: at,
-      });
+      const spend = await reserveEscrowJobSpend(
+        {
+          requesterId: request.agentId,
+          chainId: rewardChainId,
+          amount: body.reward.amount,
+          token: escrowToken,
+          payee: provider.safeAddress,
+          now: at,
+        },
+        (tx, reservation) => tx.job.create({ data: jobData({ at, reservedValueUsd: reservation.reservedValueUsd }) }),
+      );
       if (!spend.success) {
         if (spend.code === 'RESERVATION_FAILED') {
           return reply.code(400).send({ error: 'Escrow reservation failed', reason: spend.reason });
@@ -189,8 +213,7 @@ export async function jobRoutes(fastify: FastifyInstance) {
           payee: provider.safeAddress,
         });
       }
-      reservedAt = at;
-      reservedValueUsd = spend.reservedValueUsd;
+      job = spend.created;
     } else if (body.reward?.amount) {
       const reservation = await reserveJobEscrow({
         requesterId: request.agentId,
@@ -206,30 +229,10 @@ export async function jobRoutes(fastify: FastifyInstance) {
           reason: reservation.reason,
         });
       }
-      reservedAt = new Date();
-      reservedValueUsd = reservation.reservedValueUsd ?? null;
+      job = await db.job.create({ data: jobData({ at: new Date(), reservedValueUsd: reservation.reservedValueUsd ?? null }) });
+    } else {
+      job = await db.job.create({ data: jobData(null) });
     }
-
-    const job = await db.job.create({
-      data: {
-        requesterId: request.agentId,
-        providerId: body.providerId,
-        payload: body.payload,
-        reward: body.reward ?? {},
-        signature: body.signature ?? null,
-        status: 'PENDING',
-        ...(body.reward?.amount && reservedAt
-          ? {
-              reservedAmount: body.reward.amount,
-              reservedToken: rewardToken,
-              reservedChainId: rewardChainId,
-              reservedAt,
-              reservationStatus: 'PENDING',
-              reservedValueUsd,
-            }
-          : {}),
-      },
-    });
 
     if (useErc8183 && requester && body.reward?.amount) {
       try {
@@ -254,7 +257,7 @@ export async function jobRoutes(fastify: FastifyInstance) {
         logger.error({ jobId: job.id, err: errorMessage(err) }, 'ERC-8183 escrow could not be started');
         return reply.code(503).send({ error: 'ERC8183_START_FAILED', jobId: job.id, reason: publicErrorMessage(err) });
       }
-    } else if (body.reward?.amount && reservedAt) {
+    } else if (body.reward?.amount) {
       // Escrow v3: queue on-chain lock if EscrowModule is deployed on the target chain.
       // Fire-and-forget — the DB reservation is already committed above.
       queueOnChainEscrowLock({

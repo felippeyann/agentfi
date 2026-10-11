@@ -30,6 +30,7 @@
  *   - No automatic cleanup of stale ACCEPTED jobs (operator task)
  */
 
+import type { Prisma, PrismaClient } from '@prisma/client';
 import { db } from '../../db/client.js';
 import { logger } from '../../api/middleware/logger.js';
 import { resolveRewardUsd } from '../billing/reward-pricing.js';
@@ -69,9 +70,12 @@ async function rewardToUsd(reward: RewardSpec): Promise<string> {
   return resolved.resolved ? resolved.usd : '0';
 }
 
+/** Raw-SQL capable client: the singleton or an interactive transaction. */
+type SqlClient = Pick<PrismaClient, '$queryRaw' | '$executeRaw'> | Prisma.TransactionClient;
+
 /** Adds `usd` to the agent's DailyVolume of `date` atomically and returns the new total (numeric text). */
-async function addDailyVolume(agentId: string, date: string, usd: string): Promise<string> {
-  const reserved = await db.$queryRaw<[{ volumeUsd: string }]>`
+async function addDailyVolume(agentId: string, date: string, usd: string, client: SqlClient = db): Promise<string> {
+  const reserved = await client.$queryRaw<[{ volumeUsd: string }]>`
     INSERT INTO "DailyVolume" ("id", "agentId", "date", "volumeUsd", "updatedAt")
     VALUES (gen_random_uuid()::text, ${agentId}, ${date}, ${usd}, NOW())
     ON CONFLICT ("agentId", "date")
@@ -84,8 +88,8 @@ async function addDailyVolume(agentId: string, date: string, usd: string): Promi
 }
 
 /** Subtracts `usd` from the agent's DailyVolume of `date` (never below 0). */
-async function subtractDailyVolume(agentId: string, date: string, usd: string): Promise<void> {
-  await db.$executeRaw`
+async function subtractDailyVolume(agentId: string, date: string, usd: string, client: SqlClient = db): Promise<void> {
+  await client.$executeRaw`
     UPDATE "DailyVolume"
     SET "volumeUsd" = GREATEST(0, (("volumeUsd"::numeric) - (${usd}::numeric)))::text,
         "updatedAt" = NOW()
@@ -183,23 +187,30 @@ export async function reserveJobEscrow(params: {
 
 export type EscrowSpendRule = UsdcSpendRule | 'cooldown';
 
-export type EscrowSpendResult =
-  | { success: true; reservedValueUsd: string }
-  | {
-      success: false;
-      /** 403 for a policy refusal, 400 for a requester that cannot reserve at all. */
-      httpStatus: 400 | 403;
-      code: 'POLICY_VIOLATION' | 'POLICY_PAUSED' | 'RESERVATION_FAILED';
-      reason: string;
-      rule?: EscrowSpendRule;
-      limit?: string;
-      /** USD already committed today, without this job (`maxDailyVolume`). */
-      spentToday?: string;
-    };
+export type EscrowSpendRefusal = {
+  success: false;
+  /** 403 for a policy refusal, 400 for a requester that cannot reserve at all. */
+  httpStatus: 400 | 403;
+  code: 'POLICY_VIOLATION' | 'POLICY_PAUSED' | 'RESERVATION_FAILED';
+  reason: string;
+  rule?: EscrowSpendRule;
+  limit?: string;
+  /** USD already committed today, without this job (`maxDailyVolume`). */
+  spentToday?: string;
+};
+
+export type EscrowSpendResult<T> = { success: true; reservedValueUsd: string; created: T } | EscrowSpendRefusal;
+
+/** Thrown inside the reservation transaction to roll it back with a refusal. */
+class SpendRefused extends Error {
+  constructor(readonly refusal: EscrowSpendRefusal) {
+    super(refusal.reason);
+  }
+}
 
 /** Latest transaction of the agent that counts for the cooldown (same statuses as the transaction routes). */
-async function latestAgentTxAt(agentId: string): Promise<Date | null> {
-  const latest = await db.transaction.findFirst({
+async function latestAgentTxAt(client: Pick<PrismaClient, 'transaction'> | Prisma.TransactionClient, agentId: string): Promise<Date | null> {
+  const latest = await client.transaction.findFirst({
     where: { agentId, status: { in: ['PENDING_APPROVAL', 'QUEUED', 'SUBMITTED', 'CONFIRMED'] } },
     orderBy: { createdAt: 'desc' },
     select: { createdAt: true },
@@ -228,26 +239,42 @@ async function latestAgentTxAt(agentId: string): Promise<Date | null> {
  *     recipient (P6: "who this agent may send value to");
  *   - maxValuePerTxEth: read in USD for USDC (the whole budget is one spend);
  *   - maxDailyVolumeUsd: DailyVolume (transactions + earlier jobs) + counted
- *     x402 rows + this budget ≤ limit, reserved atomically (increment, then
- *     check, roll back on excess) so two concurrent jobs cannot both pass.
+ *     x402 rows + this budget ≤ limit.
  * The cooldown applies too: creating a paid job commits funds (the
  * requester's wallet then signs createJob / setBudget / approve / fund), so a
  * job is refused while the agent's last transaction is younger than
  * `cooldownSeconds` — the same rule the transaction routes apply per spend.
  * `maxValueForAutoApprovalEth` does not apply (an escrow job cannot wait for a
  * human approval; the operator's limit is the per-tx cap above).
+ *
+ * Atomicity (C3d review): the check, the DailyVolume increment and the Job
+ * row (`create`, called inside the same interactive transaction) commit or
+ * roll back together — a refusal, a failed check or a failed insert leaves
+ * nothing behind. The transaction first locks the requester's Agent row
+ * (`FOR NO KEY UPDATE`): it conflicts with the `FOR UPDATE` the x402 ledger
+ * (P6) and the transaction policy take on the same row, so an escrow job and
+ * an x402 payment (or another job) of one agent are checked one after the
+ * other and neither can overshoot the limit by the other's amount. Lock order
+ * Agent → DailyVolume, as in those paths. `NO KEY UPDATE` rather than
+ * `UPDATE`: the Job insert takes `FOR KEY SHARE` on the provider's Agent row
+ * (foreign key), which `FOR UPDATE` would block — two agents creating jobs for
+ * each other at the same time would deadlock.
  */
-export async function reserveEscrowJobSpend(params: {
-  requesterId: string;
-  chainId: number;
-  /** Human-readable USDC amount (`reward.amount`). */
-  amount: string;
-  /** The escrow's token (USDC) on `chainId`. */
-  token: string;
-  /** The payee: the provider's wallet address. */
-  payee: string;
-  now?: Date;
-}): Promise<EscrowSpendResult> {
+export async function reserveEscrowJobSpend<T>(
+  params: {
+    requesterId: string;
+    chainId: number;
+    /** Human-readable USDC amount (`reward.amount`). */
+    amount: string;
+    /** The escrow's token (USDC) on `chainId`. */
+    token: string;
+    /** The payee: the provider's wallet address. */
+    payee: string;
+    now?: Date;
+  },
+  /** Creates the Job row inside the reservation transaction (it receives the USD actually reserved). */
+  create: (tx: Prisma.TransactionClient, reservation: { reservedValueUsd: string }) => Promise<T>,
+): Promise<EscrowSpendResult<T>> {
   const now = params.now ?? new Date();
   const requester = await db.agent.findUnique({
     where: { id: params.requesterId },
@@ -268,64 +295,78 @@ export async function reserveEscrowJobSpend(params: {
   if (amount <= 0n) return { success: false, httpStatus: 400, code: 'RESERVATION_FAILED', reason: 'reward.amount must be greater than zero' };
   const amountUsd = formatMicroUsd(amount);
 
-  const policy = await db.agentPolicy.findUnique({ where: { agentId: params.requesterId } });
-  if (!policy) return { success: true, reservedValueUsd: '0' }; // no policy = no restrictions
+  try {
+    return await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${params.requesterId} FOR NO KEY UPDATE`;
 
-  // Static rules (paused / expired / allowlists / per-tx cap; the daily limit
-  // against this budget alone). The committed volume is checked atomically below.
-  const verdict = evaluateUsdcSpend(policy, { amount, token: params.token, counterparty: params.payee, spentTodayMicroUsd: 0n, now });
-  if (!verdict.allowed) {
-    return {
-      success: false,
-      httpStatus: 403,
-      code: verdict.rule === 'policyPaused' || verdict.rule === 'policyExpired' ? 'POLICY_PAUSED' : 'POLICY_VIOLATION',
-      reason: verdict.rule === 'allowedContracts' ? `Provider wallet ${params.payee} is not in the agent's allowed contracts (payees) whitelist` : verdict.reason,
-      rule: verdict.rule,
-      ...(verdict.limit !== undefined ? { limit: verdict.limit } : {}),
-    };
-  }
+      const policy = await tx.agentPolicy.findUnique({ where: { agentId: params.requesterId } });
+      if (!policy) {
+        // No policy = no restrictions (same as validateTransaction).
+        return { success: true as const, reservedValueUsd: '0', created: await create(tx, { reservedValueUsd: '0' }) };
+      }
 
-  if (policy.cooldownSeconds > 0) {
-    const last = await latestAgentTxAt(params.requesterId);
-    if (last) {
-      const elapsed = Math.floor((now.getTime() - last.getTime()) / 1000);
-      if (elapsed < policy.cooldownSeconds) {
-        return {
+      // Static rules (paused / expired / allowlists / per-tx cap; the daily
+      // limit against this budget alone). The committed volume follows.
+      const verdict = evaluateUsdcSpend(policy, { amount, token: params.token, counterparty: params.payee, spentTodayMicroUsd: 0n, now });
+      if (!verdict.allowed) {
+        throw new SpendRefused({
+          success: false,
+          httpStatus: 403,
+          code: verdict.rule === 'policyPaused' || verdict.rule === 'policyExpired' ? 'POLICY_PAUSED' : 'POLICY_VIOLATION',
+          reason: verdict.rule === 'allowedContracts' ? `Provider wallet ${params.payee} is not in the agent's allowed contracts (payees) whitelist` : verdict.reason,
+          rule: verdict.rule,
+          ...(verdict.limit !== undefined ? { limit: verdict.limit } : {}),
+        });
+      }
+
+      if (policy.cooldownSeconds > 0) {
+        const last = await latestAgentTxAt(tx, params.requesterId);
+        if (last) {
+          const elapsed = Math.floor((now.getTime() - last.getTime()) / 1000);
+          if (elapsed < policy.cooldownSeconds) {
+            throw new SpendRefused({
+              success: false,
+              httpStatus: 403,
+              code: 'POLICY_VIOLATION',
+              rule: 'cooldown',
+              reason: `Cooldown active. ${policy.cooldownSeconds - elapsed} seconds remaining before the agent may commit funds again`,
+              limit: String(policy.cooldownSeconds),
+            });
+          }
+        }
+      }
+
+      const daily = policyDecimalToMicro(policy.maxDailyVolumeUsd);
+      if (daily === null || daily === 0n) {
+        return { success: true as const, reservedValueUsd: '0', created: await create(tx, { reservedValueUsd: '0' }) };
+      }
+
+      const total = await addDailyVolume(params.requesterId, utcDay(now), amountUsd, tx);
+      const x402 = await resourcePaymentSpentToday(tx, params.requesterId, now);
+      const projected = usdTextToMicroCeil(total) + x402;
+      if (projected > daily) {
+        const spentToday = projected - amount;
+        // Rolls the increment back with the rest of the transaction.
+        throw new SpendRefused({
           success: false,
           httpStatus: 403,
           code: 'POLICY_VIOLATION',
-          rule: 'cooldown',
-          reason: `Cooldown active. ${policy.cooldownSeconds - elapsed} seconds remaining before the agent may commit funds again`,
-          limit: String(policy.cooldownSeconds),
-        };
+          rule: 'maxDailyVolume',
+          reason:
+            `Daily volume limit of ${policy.maxDailyVolumeUsd} USD would be exceeded. ` +
+            `Already committed today: ${formatMicroUsd(spentToday)}, requested: ${amountUsd} (USDC at 1.00 USD)`,
+          limit: policy.maxDailyVolumeUsd,
+          spentToday: formatMicroUsd(spentToday),
+        });
       }
-    }
+      const created = await create(tx, { reservedValueUsd: amountUsd });
+      logger.info({ requesterId: params.requesterId, chainId: params.chainId, reservedValueUsd: amountUsd }, 'ERC-8183 job budget reserved against the daily limit');
+      return { success: true as const, reservedValueUsd: amountUsd, created };
+    });
+  } catch (err) {
+    if (err instanceof SpendRefused) return err.refusal;
+    throw err;
   }
-
-  const daily = policyDecimalToMicro(policy.maxDailyVolumeUsd);
-  if (daily === null || daily === 0n) return { success: true, reservedValueUsd: '0' };
-
-  const today = utcDay(now);
-  const total = await addDailyVolume(params.requesterId, today, amountUsd);
-  const x402 = await resourcePaymentSpentToday(db, params.requesterId, now);
-  const projected = usdTextToMicroCeil(total) + x402;
-  if (projected > daily) {
-    await subtractDailyVolume(params.requesterId, today, amountUsd);
-    const spentToday = projected - amount;
-    return {
-      success: false,
-      httpStatus: 403,
-      code: 'POLICY_VIOLATION',
-      rule: 'maxDailyVolume',
-      reason:
-        `Daily volume limit of ${policy.maxDailyVolumeUsd} USD would be exceeded. ` +
-        `Already committed today: ${formatMicroUsd(spentToday)}, requested: ${amountUsd} (USDC at 1.00 USD)`,
-      limit: policy.maxDailyVolumeUsd,
-      spentToday: formatMicroUsd(spentToday),
-    };
-  }
-  logger.info({ requesterId: params.requesterId, chainId: params.chainId, reservedValueUsd: amountUsd }, 'ERC-8183 job budget reserved against the daily limit');
-  return { success: true, reservedValueUsd: amountUsd };
 }
 
 /**

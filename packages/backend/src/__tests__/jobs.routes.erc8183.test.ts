@@ -150,7 +150,11 @@ beforeEach(() => {
   runtimeMock.enqueueSubmit.mockResolvedValue(undefined);
   runtimeMock.requestCancellationReject.mockResolvedValue(true);
   escrowMock.reserveJobEscrow.mockResolvedValue({ success: true, reservedValueUsd: '12.5' });
-  escrowMock.reserveEscrowJobSpend.mockResolvedValue({ success: true, reservedValueUsd: '12.5' });
+  escrowMock.reserveEscrowJobSpend.mockImplementation(async (_params: unknown, create: (tx: unknown, r: { reservedValueUsd: string }) => Promise<unknown>) => ({
+    success: true,
+    reservedValueUsd: '12.5',
+    created: await create(mockDb, { reservedValueUsd: '12.5' }),
+  }));
   runtimeMock.contestJob.mockResolvedValue({ outcome: 'held', contestedAt: new Date() });
   escrowMock.releaseJobEscrow.mockResolvedValue(undefined);
   escrowMock.markEscrowReleased.mockResolvedValue(undefined);
@@ -199,7 +203,11 @@ describe('POST /v1/jobs on an ERC-8183 chain', () => {
       runtimeMock.isErc8183Enabled.mockReturnValue(true);
       runtimeMock.getEscrowToken.mockResolvedValue(USDC);
       runtimeMock.startEscrow.mockResolvedValue(undefined);
-      escrowMock.reserveEscrowJobSpend.mockResolvedValue({ success: true, reservedValueUsd: '12.5' });
+      escrowMock.reserveEscrowJobSpend.mockImplementation(async (_params: unknown, create: (tx: unknown, r: { reservedValueUsd: string }) => Promise<unknown>) => ({
+        success: true,
+        reservedValueUsd: '12.5',
+        created: await create(mockDb, { reservedValueUsd: '12.5' }),
+      }));
       mockDb.agent.findUnique.mockResolvedValueOnce(PROVIDER).mockResolvedValueOnce(REQUESTER);
       mockDb.job.create.mockResolvedValue({ id: 'job-1', status: 'PENDING', escrowKind: null });
       mockDb.job.findUnique.mockResolvedValue(escrowJob({ onChainStatus: 'CREATING', onChainJobId: null }));
@@ -216,7 +224,7 @@ describe('POST /v1/jobs on an ERC-8183 chain', () => {
         token: USDC,
         payee: PROVIDER.safeAddress,
         now: expect.any(Date),
-      });
+      }, expect.any(Function));
       expect(escrowMock.reserveJobEscrow).not.toHaveBeenCalled();
       expect(mockDb.job.create).toHaveBeenCalledWith(
         expect.objectContaining({
