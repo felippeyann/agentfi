@@ -20,11 +20,22 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
 import type { Hex } from 'viem';
 
-const { finalizeMock, weiToUsdMock, escrowOutcomeMock } = vi.hoisted(() => ({
+const { finalizeMock, weiToUsdMock, escrowOutcomeMock, volume } = vi.hoisted(() => ({
   finalizeMock: vi.fn(),
   weiToUsdMock: vi.fn(),
   escrowOutcomeMock: vi.fn(),
+  volume: {
+    commitTransactionVolume: vi.fn(),
+    holdTransactionVolume: vi.fn(),
+    releaseTransactionVolume: vi.fn(),
+    settleVolumeAfterFailure: vi.fn(),
+    markBroadcastAttempt: vi.fn(),
+  },
 }));
+
+// The DailyVolume reservation (A6) is exercised on Postgres in
+// daily-volume.db.test.ts; here only which settlement runs is checked.
+vi.mock('../services/policy/daily-volume.js', () => volume);
 
 // The finalizer pulls in the real `db` singleton, the logger/env chain and the
 // escrow service (which instantiates BullMQ queues). Stub the module.
@@ -140,6 +151,8 @@ beforeEach(() => {
   finalizeMock.mockReset().mockResolvedValue(undefined);
   weiToUsdMock.mockReset().mockResolvedValue('0');
   escrowOutcomeMock.mockReset().mockResolvedValue(undefined);
+  for (const fn of Object.values(volume)) fn.mockReset().mockResolvedValue(true);
+  volume.settleVolumeAfterFailure.mockResolvedValue('released');
 });
 
 // ── Happy path ─────────────────────────────────────────────────────────────
@@ -159,7 +172,12 @@ describe('processTransactionJob — successful broadcast', () => {
       to: JOB_DATA.to,
       data: JOB_DATA.data,
       value: 1000n,
+      onBeforeBroadcast: expect.any(Function),
     });
+    // A6: the hook the submitter awaits before broadcasting stamps the row.
+    const [{ onBeforeBroadcast }] = submitter.submit.mock.calls[0] as unknown as [{ onBeforeBroadcast: (h: Hex) => Promise<void> }];
+    await onBeforeBroadcast(TX_HASH);
+    expect(volume.markBroadcastAttempt).toHaveBeenCalledWith(deps.db, TX_ID);
     expect(update).toHaveBeenCalledTimes(1);
     expect(update).toHaveBeenCalledWith({
       where: { id: TX_ID },
@@ -363,6 +381,21 @@ describe('handleFailedTransactionJob', () => {
     expect(row.status).toBe('FAILED');
     expect(deadLetterQueue.add).toHaveBeenCalledTimes(1);
     expect(finalizeMock).not.toHaveBeenCalled();
+    // A6: released if no attempt reached the broadcast, held otherwise.
+    expect(volume.settleVolumeAfterFailure).toHaveBeenCalledWith(db, TX_ID);
+  });
+
+  it('the FAILED write itself fails → the DailyVolume reservation is left alone (A6)', async () => {
+    const { db, update, deadLetterQueue, logger } = makeDeps(txRow());
+    update.mockRejectedValueOnce(new Error('db down'));
+
+    await handleFailedTransactionJob(job({ attemptsMade: 3, opts: { attempts: 3 } }), err, {
+      db,
+      deadLetterQueue,
+      logger,
+    });
+
+    expect(volume.settleVolumeAfterFailure).not.toHaveBeenCalled();
   });
 
   it('end to end: A2A broadcast fails on every attempt → the handler path is reachable and finalizes', async () => {
@@ -428,6 +461,9 @@ describe('ERC-8183 escrow steps route to the orchestrator, not the A2A finalizer
 
     expect(escrowOutcomeMock).toHaveBeenCalledWith({ transactionId: TX_ID, status: 'CONFIRMED', error: null });
     expect(finalizeMock).not.toHaveBeenCalled();
+    // A6: confirmation commits the reservation; nothing is added to DailyVolume.
+    expect(volume.commitTransactionVolume).toHaveBeenCalledWith(deps.db, TX_ID);
+    expect((deps.db as unknown as { $executeRaw: ReturnType<typeof vi.fn> }).$executeRaw).not.toHaveBeenCalled();
   });
 
   it('post-confirmation: timed-out step → onEscrowTxOutcome(FAILED) with the recorded error', async () => {
@@ -446,6 +482,9 @@ describe('ERC-8183 escrow steps route to the orchestrator, not the A2A finalizer
       error: 'Confirmation timeout after max polling attempts',
     });
     expect(finalizeMock).not.toHaveBeenCalled();
+    // A6: an outcome without a receipt holds the reservation (it may still mine).
+    expect(volume.holdTransactionVolume).toHaveBeenCalledWith(deps.db, TX_ID);
+    expect(volume.releaseTransactionVolume).not.toHaveBeenCalled();
   });
 
   it('failed handler, last attempt → FAILED + DLQ + onEscrowTxOutcome(FAILED); finalizer untouched', async () => {

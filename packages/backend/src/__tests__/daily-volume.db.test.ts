@@ -489,7 +489,11 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
       a.inject({ method: 'POST', url: `/admin/transactions/${id}/approve`, headers: ADMIN }),
       a.inject({ method: 'POST', url: `/admin/transactions/${id}/approve`, headers: ADMIN }),
     ]);
-    expect([x.statusCode, y.statusCode].sort()).toEqual([200, 409]);
+    // The loser sees 409 when it lost the conditional write, 400 when the
+    // winner had already committed before its first read.
+    const codes = [x.statusCode, y.statusCode].sort();
+    expect(codes[0]).toBe(200);
+    expect([400, 409]).toContain(codes[1]);
     expect(h.queued.filter((q) => q.data['transactionId'] === id)).toHaveLength(1);
     expect(await volume(agent.id)).toBeCloseTo(20, 6);
   });
@@ -585,6 +589,9 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     await runJob(jobOf(ok.paid.transactionId), { receipt: 'success' });
     expect((await m.db.job.findUnique({ where: { id: ok.job.id } }))?.status).toBe('COMPLETED');
     expect(await volume(requester.id)).toBeCloseTo(20, 6);
+    // The payment row reserves nothing: the Job's reservation is the count.
+    const paymentRow = await m.db.transaction.findUnique({ where: { id: ok.paid.transactionId }, select: { volumeState: true } });
+    expect(paymentRow?.volumeState).toBeNull();
 
     const bad = await paidJob();
     expect(await volume(requester.id)).toBeCloseTo(40, 6);
@@ -613,6 +620,68 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     expect(await volume(agent.id)).toBeCloseTo(60, 6);
     await runJob(jobOf(fits.json().transactionId), { receipt: 'success' });
     expect(await volume(agent.id)).toBeCloseTo(60, 6);
+  });
+
+  // ── Settlement bookkeeping (columns added by migration 0020) ───────────────
+
+  it('every settlement is recorded on the row: COMMITTED, RELEASED (reverted / never broadcast), HELD', async () => {
+    const agent = await mkAgent();
+    const a = await app(agent.id);
+    const ids = {
+      confirmed: (await transfer(a, '0.01')).json().transactionId as string,
+      reverted: (await transfer(a, '0.01')).json().transactionId as string,
+      preBroadcast: (await transfer(a, '0.01')).json().transactionId as string,
+      postBroadcast: (await transfer(a, '0.01')).json().transactionId as string,
+    };
+    await runJob(jobOf(ids.confirmed), { receipt: 'success' });
+    await runJob(jobOf(ids.reverted), { receipt: 'reverted' });
+    await runJob(jobOf(ids.preBroadcast), { broadcast: 'fail-before-broadcast', attempts: 2 });
+    await runJob(jobOf(ids.postBroadcast), { broadcast: 'fail-after-broadcast', attempts: 2 });
+    const rows = await m.db.transaction.findMany({
+      where: { id: { in: Object.values(ids) } },
+      select: { id: true, volumeState: true, volumeReservedUsd: true, volumeReservedDate: true, broadcastAttemptedAt: true },
+    });
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    expect(byId.get(ids.confirmed)).toMatchObject({ volumeState: 'COMMITTED', volumeReservedUsd: '20.000000', volumeReservedDate: utcDay() });
+    expect(byId.get(ids.reverted)?.volumeState).toBe('RELEASED');
+    expect(byId.get(ids.preBroadcast)).toMatchObject({ volumeState: 'RELEASED', broadcastAttemptedAt: null });
+    expect(byId.get(ids.postBroadcast)?.volumeState).toBe('HELD');
+    expect(byId.get(ids.postBroadcast)?.broadcastAttemptedAt).toBeInstanceOf(Date);
+    // 20 committed + 20 held
+    expect(await volume(agent.id)).toBeCloseTo(40, 6);
+  });
+
+  it('a reservation made on an earlier UTC day is released from that day, not from today', async () => {
+    const agent = await mkAgent();
+    const a = await app(agent.id);
+    const res = await transfer(a, '0.01');
+    const id = res.json().transactionId as string;
+    // Move the reservation to "yesterday", as if the request came in before midnight.
+    const yesterday = utcDay(new Date(Date.now() - 86_400_000));
+    await m.db.transaction.update({ where: { id }, data: { volumeReservedDate: yesterday } });
+    await m.db.dailyVolume.update({ where: { agentId_date: { agentId: agent.id, date: utcDay() } }, data: { volumeUsd: '7' } });
+    await m.db.dailyVolume.create({ data: { agentId: agent.id, date: yesterday, volumeUsd: '20' } });
+    await runJob(jobOf(id), { receipt: 'reverted' });
+    expect(await volume(agent.id, yesterday)).toBeCloseTo(0, 6);
+    expect(await volume(agent.id)).toBeCloseTo(7, 6);
+  });
+
+  it('a confirmed and a reverted settlement racing on one row: exactly one wins', async () => {
+    const agent = await mkAgent();
+    const a = await app(agent.id);
+    const res = await transfer(a, '0.01');
+    const id = res.json().transactionId as string;
+    const { commitTransactionVolume, releaseTransactionVolume, settleVolumeAfterFailure } = await import('../services/policy/daily-volume.js');
+    const outcomes = await Promise.all([
+      commitTransactionVolume(m.db, id),
+      releaseTransactionVolume(m.db, id),
+      releaseTransactionVolume(m.db, id),
+      settleVolumeAfterFailure(m.db, id),
+    ]);
+    const settled = outcomes.filter((o) => o === true || o === 'released' || o === 'held');
+    expect(settled).toHaveLength(1);
+    const state = (await m.db.transaction.findUnique({ where: { id }, select: { volumeState: true } }))?.volumeState;
+    expect(await volume(agent.id)).toBeCloseTo(state === 'RELEASED' ? 0 : 20, 6);
   });
 
   it('an ERC-20 transfer reserves its USD value and releases it on revert', async () => {

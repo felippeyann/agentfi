@@ -72,6 +72,11 @@ vi.mock('../services/billing/operator.service.js', () => ({
 vi.mock('../services/job/payment-finalizer.service.js', () => ({
   finalizeA2APaymentJob: finalizeMock,
 }));
+// The guard settles a blocked transaction's DailyVolume reservation (A6);
+// that runs on Postgres in daily-volume.db.test.ts.
+vi.mock('../services/policy/daily-volume.js', () => ({
+  settleVolumeAfterFailure: vi.fn().mockResolvedValue('released'),
+}));
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';

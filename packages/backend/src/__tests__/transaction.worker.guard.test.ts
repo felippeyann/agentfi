@@ -19,10 +19,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
 
-const { finalizeMock, escrowOutcomeMock, vetBindMock } = vi.hoisted(() => ({
+const { finalizeMock, escrowOutcomeMock, vetBindMock, settleVolumeMock } = vi.hoisted(() => ({
   finalizeMock: vi.fn(),
   escrowOutcomeMock: vi.fn(),
   vetBindMock: vi.fn(),
+  settleVolumeMock: vi.fn(),
+}));
+
+// The DailyVolume settlement (A6) runs on Postgres in daily-volume.db.test.ts;
+// here only the call is checked.
+vi.mock('../services/policy/daily-volume.js', () => ({
+  settleVolumeAfterFailure: settleVolumeMock,
 }));
 
 // The finalizer pulls in the real `db` singleton, the logger/env chain and the
@@ -98,6 +105,7 @@ beforeEach(() => {
   finalizeMock.mockReset().mockResolvedValue(undefined);
   escrowOutcomeMock.mockReset().mockResolvedValue(undefined);
   vetBindMock.mockReset().mockResolvedValue(null);
+  settleVolumeMock.mockReset().mockResolvedValue('released');
 });
 
 // ── Happy path ─────────────────────────────────────────────────────────────
@@ -180,6 +188,9 @@ describe('preSubmitGuard — blocks and marks FAILED', () => {
       data: { status: 'FAILED', error: PAUSED_BEFORE_SUBMISSION },
     });
     expect(finalizeMock).not.toHaveBeenCalled();
+    // A6: the blocked transaction's DailyVolume reservation is settled
+    // (released, or held when an earlier attempt reached the broadcast).
+    expect(settleVolumeMock).toHaveBeenCalledWith(db, TX_ID);
   });
 
   it('policy inactive (agent still active) → FAILED, submitter not called', async () => {
@@ -239,6 +250,7 @@ describe('preSubmitGuard — skips already-processed transactions', () => {
     });
     expect(submitter.submit).not.toHaveBeenCalled();
     expect(update).not.toHaveBeenCalled();
+    expect(settleVolumeMock).not.toHaveBeenCalled();
   });
 
   it('QUEUED but already has a txHash → skipped, submitter not called', async () => {

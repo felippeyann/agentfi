@@ -293,8 +293,8 @@ describe('PolicyService.validateTransaction', () => {
 
   it('allows when projected volume stays under the daily limit', async () => {
     const db = makeMockDb(basePolicy({ maxDailyVolumeUsd: '1000' }));
-    // $queryRaw returns the post-upsert volume (existing 500 + incoming 400 = 900)
-    (db as any).$queryRaw.mockResolvedValue([{ volumeUsd: '900' }]);
+    // Committed today: 500 (read-only pre-check, A6); incoming 400 → 900
+    (db as any).dailyVolume.findUnique.mockResolvedValue({ volumeUsd: '500' });
     const svc = new PolicyService(db);
     const result = await svc.validateTransaction({
       agentId: 'agent-1',
@@ -307,8 +307,8 @@ describe('PolicyService.validateTransaction', () => {
 
   it('blocks when projected volume exceeds the daily limit', async () => {
     const db = makeMockDb(basePolicy({ maxDailyVolumeUsd: '1000' }));
-    // $queryRaw returns post-upsert volume (800 + 300 = 1100 > 1000)
-    (db as any).$queryRaw.mockResolvedValue([{ volumeUsd: '1100' }]);
+    // Committed today: 800; incoming 300 → 1100 > 1000
+    (db as any).dailyVolume.findUnique.mockResolvedValue({ volumeUsd: '800' });
     const svc = new PolicyService(db);
     const result = await svc.validateTransaction({
       agentId: 'agent-1',
@@ -322,8 +322,7 @@ describe('PolicyService.validateTransaction', () => {
 
   it('first tx of the day allowed when no DailyVolume row exists yet', async () => {
     const db = makeMockDb(basePolicy({ maxDailyVolumeUsd: '500' }));
-    // $queryRaw returns the newly inserted volume (0 + 200 = 200)
-    (db as any).$queryRaw.mockResolvedValue([{ volumeUsd: '200' }]);
+    // No DailyVolume row yet (findUnique → null): 0 + 200 < 500
     const svc = new PolicyService(db);
     const result = await svc.validateTransaction({
       agentId: 'agent-1',
@@ -336,8 +335,7 @@ describe('PolicyService.validateTransaction', () => {
 
   it("counts today's x402 spend (pay-resource ledger rows) against the same daily limit (P6)", async () => {
     const db = makeMockDb(basePolicy({ maxDailyVolumeUsd: '500' }));
-    // DailyVolume after the upsert: 200 (this tx). x402 today: 350 USDC.
-    (db as any).$queryRaw.mockResolvedValue([{ volumeUsd: '200' }]);
+    // No DailyVolume yet. x402 today: 350 USDC.
     (db as any).resourcePayment.findMany.mockResolvedValue([{ amount: '300000000' }, { amount: '50000000' }]);
     const svc = new PolicyService(db);
     const result = await svc.validateTransaction({
@@ -352,8 +350,57 @@ describe('PolicyService.validateTransaction', () => {
     const where = (db as any).resourcePayment.findMany.mock.calls[0][0].where;
     expect(where).toMatchObject({ agentId: 'agent-1', reservedAt: { gte: expect.any(Date) } });
     expect(where.OR).toEqual(expect.arrayContaining([{ status: { in: ['reserved', 'pending', 'settled', 'unknown'] } }]));
-    // The DailyVolume reservation is rolled back.
-    expect((db as any).$executeRaw).toHaveBeenCalled();
+    // A6: the pre-check writes nothing, so there is nothing to roll back.
+    expect((db as any).$executeRaw).not.toHaveBeenCalled();
+    expect((db as any).$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('A6: an allowed transaction reserves nothing here (the reservation is made with the row)', async () => {
+    const db = makeMockDb(basePolicy({ maxDailyVolumeUsd: '1000' }));
+    const svc = new PolicyService(db);
+    const result = await svc.validateTransaction({
+      agentId: 'agent-1',
+      targetContract: UNISWAP_ROUTER,
+      valueEth: '0.1',
+      valueUsd: '400',
+    });
+    expect(result.allowed).toBe(true);
+    expect((db as any).$queryRaw).not.toHaveBeenCalled();
+    expect((db as any).$executeRaw).not.toHaveBeenCalled();
+    expect((db as any).dailyVolume.findUnique).toHaveBeenCalledWith({
+      where: { agentId_date: { agentId: 'agent-1', date: new Date().toISOString().slice(0, 10) } },
+      select: { volumeUsd: true },
+    });
+  });
+
+  it('A6: dailyVolumeAccounted (legacy A2A payment, counted by its Job) skips the daily pre-check', async () => {
+    const db = makeMockDb(basePolicy({ maxDailyVolumeUsd: '100' }));
+    (db as any).dailyVolume.findUnique.mockResolvedValue({ volumeUsd: '100' }); // the Job's own reservation
+    const svc = new PolicyService(db);
+    const result = await svc.validateTransaction({
+      agentId: 'agent-1',
+      targetContract: UNISWAP_ROUTER,
+      valueEth: '0',
+      valueUsd: '100',
+      dailyVolumeAccounted: true,
+    });
+    expect(result.allowed).toBe(true);
+    expect((db as any).dailyVolume.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('A6: a cooldown refusal is decided before the daily volume is read', async () => {
+    const db = makeMockDb(basePolicy({ maxDailyVolumeUsd: '1000', cooldownSeconds: 3600 }));
+    const svc = new PolicyService(db);
+    const result = await svc.validateTransaction({
+      agentId: 'agent-1',
+      targetContract: UNISWAP_ROUTER,
+      valueEth: '0.1',
+      valueUsd: '10',
+      lastTxTimestamp: Math.floor(Date.now() / 1000) - 10,
+    });
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toMatch(/Cooldown/);
+    expect((db as any).dailyVolume.findUnique).not.toHaveBeenCalled();
   });
 
   // ── cooldown ───────────────────────────────────────────────────────────
