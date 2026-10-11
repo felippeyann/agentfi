@@ -17,6 +17,8 @@ Welcome to the AgentFi documentation. This hub is designed for both human operat
 - **[ERC-8004 integration](architecture/erc-8004-integration.md)** — identity and settlement-anchored reputation design.
 - **[x402 payments](architecture/x402-payments.md)** — buyer-side client: spend caps, idempotency, receipt verification, what the fake-facilitator tests do not prove.
 - **[Testnet log and runbooks](project/testnet-log.md)** — Base Sepolia evidence tables, the C4 deploy runbook, the C5 runbook (Turnkey wallets, faucets) and the fork rehearsal.
+- **[C4 / C5 checklist](project/c4-c5-checklist.md)** — the owner's one-page version: prerequisites, steps, expected results, evidence to keep.
+- **[Operator interviews](project/interviews/README.md)** — WS7 script (25 minutes), log template and the G4 decision rule.
 
 ### 🚀 Run the thing (fastest path)
 - **[Dev Quickstart](dev-quickstart.md)** — `docker compose up` → stack running in ~3 minutes, **zero external accounts**.
