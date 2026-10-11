@@ -24,7 +24,7 @@ const { finalizeMock, weiToUsdMock, escrowOutcomeMock, volume } = vi.hoisted(() 
   volume: {
     commitTransactionVolume: vi.fn(),
     holdTransactionVolume: vi.fn(),
-    releaseTransactionVolume: vi.fn(),
+    settleVolumeAfterRevert: vi.fn(),
     settleVolumeAfterFailure: vi.fn(),
     markBroadcastAttempt: vi.fn(),
   },
@@ -212,7 +212,7 @@ describe('repollSubmittedTransactions', () => {
     await repollSubmittedTransactions(deps(db, { receipt: receipt('reverted') }), { olderThanMs: 0, dropAfterMs: 0, limit: 10 });
     expect(escrowOutcomeMock).toHaveBeenCalledWith(expect.objectContaining({ transactionId: 'tx-1', status: 'REVERTED' }));
     // A6: a revert means the value never moved — the reservation is given back.
-    expect(volume.releaseTransactionVolume).toHaveBeenCalledWith(db, 'tx-1');
+    expect(volume.settleVolumeAfterRevert).toHaveBeenCalledWith(db, 'tx-1');
   });
 
   it('no receipt: left alone while a node knows it, and before the drop grace even when none does', async () => {
@@ -233,7 +233,7 @@ describe('repollSubmittedTransactions', () => {
     expect(escrowOutcomeMock).toHaveBeenCalledWith(expect.objectContaining({ transactionId: 'tx-1', status: 'FAILED' }));
     // A6: dropped is not "never executed" — the reservation is held, not released.
     expect(volume.holdTransactionVolume).toHaveBeenCalledWith(db, 'tx-1');
-    expect(volume.releaseTransactionVolume).not.toHaveBeenCalled();
+    expect(volume.settleVolumeAfterRevert).not.toHaveBeenCalled();
   });
 
   it('an RPC error leaves the row for the next tick', async () => {

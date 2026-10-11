@@ -49,6 +49,10 @@ const h = vi.hoisted(() => {
     queued: [] as Array<{ name: string; data: Record<string, unknown> }>,
     /** Simulator verdict for the next calls (true = success). */
     simulationSucceeds: true,
+    /** false: the ETH price oracle is down (`weiToUsd` returns "0", as the real one does). */
+    ethPriced: true,
+    /** true: the next `transactionQueue.add` throws (Redis down). */
+    enqueueFails: false,
   };
 });
 
@@ -71,6 +75,7 @@ vi.mock('bullmq', () => ({
 vi.mock('../queues/transaction.queue.js', () => ({
   transactionQueue: {
     add: async (name: string, data: Record<string, unknown>) => {
+      if (h.enqueueFails) throw new Error('Connection is closed.');
       h.queued.push({ name, data });
       return { id: `job-${h.queued.length}` };
     },
@@ -78,7 +83,7 @@ vi.mock('../queues/transaction.queue.js', () => ({
 }));
 vi.mock('../services/transaction/price.service.js', () => ({
   // 1 ETH = 2000 USD; token amounts are priced at 1 USD per whole unit (USDC).
-  weiToUsd: async (wei: bigint) => ((Number(wei) / 1e18) * 2000).toFixed(6),
+  weiToUsd: async (wei: bigint) => (h.ethPriced ? ((Number(wei) / 1e18) * 2000).toFixed(6) : '0'),
   tokenAmountToUsd: async (units: bigint, _token: string, decimals: number) => (Number(units) / 10 ** decimals).toFixed(6),
 }));
 vi.mock('../services/transaction/simulator.service.js', () => ({
@@ -310,6 +315,10 @@ async function txStatus(id: string): Promise<string | undefined> {
   return (await m.db.transaction.findUnique({ where: { id }, select: { status: true } }))?.status;
 }
 
+async function volumeStateOf(id: string): Promise<string | null | undefined> {
+  return (await m.db.transaction.findUnique({ where: { id }, select: { volumeState: true } }))?.volumeState;
+}
+
 // ── Suite ──────────────────────────────────────────────────────────────────
 
 describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
@@ -345,6 +354,8 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
   beforeEach(() => {
     h.queued.length = 0;
     h.simulationSucceeds = true;
+    h.ethPriced = true;
+    h.enqueueFails = false;
   });
 
   // ── Counted once ─────────────────────────────────────────────────────────
@@ -506,6 +517,7 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     const res = await transfer(a, '0.01');
     await runJob(jobOf(res.json().transactionId), { broadcast: 'fail-after-broadcast', attempts: 3 });
     expect(await txStatus(res.json().transactionId)).toBe('FAILED');
+    expect(await volumeStateOf(res.json().transactionId)).toBe('HELD');
     expect(await volume(agent.id)).toBeCloseTo(20, 6);
   });
 
@@ -524,6 +536,7 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
       },
     });
     expect(await txStatus(data.transactionId)).toBe('FAILED');
+    expect(await volumeStateOf(data.transactionId)).toBe('HELD');
     expect(await volume(agent.id)).toBeCloseTo(20, 6);
   });
 
@@ -546,6 +559,7 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     );
     expect(summary.dropped).toBeGreaterThanOrEqual(1);
     expect(await txStatus(res.json().transactionId)).toBe('FAILED');
+    expect(await volumeStateOf(res.json().transactionId)).toBe('HELD');
     expect(await volume(agent.id)).toBeCloseTo(20, 6);
   });
 
@@ -671,17 +685,173 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     const a = await app(agent.id);
     const res = await transfer(a, '0.01');
     const id = res.json().transactionId as string;
-    const { commitTransactionVolume, releaseTransactionVolume, settleVolumeAfterFailure } = await import('../services/policy/daily-volume.js');
-    const outcomes = await Promise.all([
+    const { commitTransactionVolume, settleVolumeAfterRevert, settleVolumeAfterFailure } = await import('../services/policy/daily-volume.js');
+    const outcomes: Array<boolean | string> = await Promise.all([
       commitTransactionVolume(m.db, id),
-      releaseTransactionVolume(m.db, id),
-      releaseTransactionVolume(m.db, id),
+      settleVolumeAfterRevert(m.db, id),
+      settleVolumeAfterRevert(m.db, id),
       settleVolumeAfterFailure(m.db, id),
     ]);
     const settled = outcomes.filter((o) => o === true || o === 'released' || o === 'held');
     expect(settled).toHaveLength(1);
     const state = (await m.db.transaction.findUnique({ where: { id }, select: { volumeState: true } }))?.volumeState;
     expect(await volume(agent.id)).toBeCloseTo(state === 'RELEASED' ? 0 : 20, 6);
+  });
+
+  // ── Second review (2026-10-11): gaps between writes, retries, oracle ───────
+
+  it('an enqueue failure after the row was created fails the row and gives the reservation back (no zombie QUEUED row)', async () => {
+    const agent = await mkAgent();
+    const a = await app(agent.id);
+    h.enqueueFails = true;
+    const res = await transfer(a, '0.01');
+    expect(res.statusCode).toBe(500);
+    const rows = await m.db.transaction.findMany({ where: { agentId: agent.id }, select: { id: true, status: true, error: true, volumeState: true } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: 'FAILED', volumeState: 'RELEASED', error: expect.stringMatching(/^enqueue failed/) });
+    expect(await volume(agent.id)).toBeCloseTo(0, 6);
+  });
+
+  it('the recovery sweep settles reservations a crash left RESERVED on terminal rows, as their first observer would have', async () => {
+    const agent = await mkAgent();
+    const a = await app(agent.id);
+    const ids = await Promise.all(['0.01', '0.01', '0.01', '0.01'].map(async (amt) => (await transfer(a, amt)).json().transactionId as string));
+    const [confirmed, reverted, failedStamped, failedUnstamped] = ids as [string, string, string, string];
+    expect(await volume(agent.id)).toBeCloseTo(80, 6);
+    // The status writes landed; the process died before each settlement.
+    await m.db.transaction.update({ where: { id: confirmed }, data: { status: 'CONFIRMED', txHash: keccak256(toHex(`c-${confirmed}`)) } });
+    await m.db.transaction.update({ where: { id: reverted }, data: { status: 'REVERTED', txHash: keccak256(toHex(`r-${reverted}`)), broadcastAttempts: 1, broadcastAttemptedAt: new Date() } });
+    await m.db.transaction.update({ where: { id: failedStamped }, data: { status: 'FAILED', broadcastAttempts: 1, broadcastAttemptedAt: new Date() } });
+    await m.db.transaction.update({ where: { id: failedUnstamped }, data: { status: 'FAILED' } });
+    await m.db.$executeRaw`UPDATE "Transaction" SET "updatedAt" = NOW() - INTERVAL '1 hour' WHERE "id" IN (${confirmed}, ${reverted}, ${failedStamped}, ${failedUnstamped})`;
+
+    const { sweepUnsettledVolume } = await import('../services/policy/daily-volume.js');
+    const summary = await sweepUnsettledVolume(m.db, { olderThan: new Date(Date.now() - 10 * 60_000), limit: 500 });
+    expect(summary.committed).toBeGreaterThanOrEqual(1);
+    expect(await volumeStateOf(confirmed)).toBe('COMMITTED');
+    expect(await volumeStateOf(reverted)).toBe('RELEASED');
+    expect(await volumeStateOf(failedStamped)).toBe('HELD');
+    expect(await volumeStateOf(failedUnstamped)).toBe('RELEASED');
+    expect(await volume(agent.id)).toBeCloseTo(40, 6); // committed 20 + held 20
+    // A second sweep finds nothing left to settle on these rows.
+    await sweepUnsettledVolume(m.db, { olderThan: new Date(Date.now() - 10 * 60_000), limit: 500 });
+    expect(await volume(agent.id)).toBeCloseTo(40, 6);
+  });
+
+  it('native value the oracle cannot price is refused while a daily limit applies (fail closed), and reserves nothing without one', async () => {
+    const limited = await mkAgent({ maxDailyVolumeUsd: '1000' });
+    const unlimited = await mkAgent({ maxDailyVolumeUsd: '0' });
+    h.ethPriced = false;
+    const refused = await transfer(await app(limited.id), '0.01');
+    expect(refused.statusCode).toBe(503);
+    expect(refused.json().error).toMatch(/price/i);
+    expect(await m.db.transaction.count({ where: { agentId: limited.id } })).toBe(0);
+    expect(await volume(limited.id)).toBeCloseTo(0, 6);
+
+    const allowed = await transfer(await app(unlimited.id), '0.01');
+    expect(allowed.statusCode).toBe(202);
+    expect(await volumeStateOf(allowed.json().transactionId)).toBeNull();
+  });
+
+  it('a REVERTED receipt after more than one signed broadcast holds the reservation (an earlier one may have been mined)', async () => {
+    const agent = await mkAgent();
+    const a = await app(agent.id);
+    const res = await transfer(a, '0.01');
+    await runJob(jobOf(res.json().transactionId), { broadcast: ['fail-after-broadcast', 'ok'], attempts: 3, receipt: 'reverted' });
+    expect(await txStatus(res.json().transactionId)).toBe('REVERTED');
+    const row = await m.db.transaction.findUnique({ where: { id: res.json().transactionId }, select: { broadcastAttempts: true, volumeState: true } });
+    expect(row).toEqual({ broadcastAttempts: 2, volumeState: 'HELD' });
+    expect(await volume(agent.id)).toBeCloseTo(20, 6);
+  });
+
+  it('two deliveries of one job: the guard fails and releases the row, the slow worker is then refused at the broadcast stamp', async () => {
+    const agent = await mkAgent();
+    const a = await app(agent.id);
+    const res = await transfer(a, '0.01');
+    const data = jobOf(res.json().transactionId);
+
+    let releaseSlowWorker!: () => void;
+    const slowWorkerMayContinue = new Promise<void>((resolve) => (releaseSlowWorker = resolve));
+    let broadcasts = 0;
+    const slowSubmitter = {
+      async submit(params: { onBeforeBroadcast?: (hash: Hex) => Promise<void> }) {
+        await slowWorkerMayContinue; // signing / estimateGas / lane wait
+        const hash = keccak256(toHex(`slow-${data.transactionId}`));
+        await params.onBeforeBroadcast?.(hash);
+        broadcasts++;
+        return { txHash: hash, nonce: 1 };
+      },
+    };
+    const depsFor = (submitter: unknown) => ({
+      db: m.db,
+      submitter: submitter as never,
+      monitor: { waitForConfirmation: async () => ({ status: 'TIMEOUT' as const, recorded: false as const }) },
+      feeService: { incrementTxUsage: async () => undefined, recordFeeEvent: async () => undefined } as never,
+      logger: quietLogger,
+    });
+
+    // Worker 1 passes the guard (agent active) and stalls before broadcasting.
+    const slow = m.processor.processTransactionJob({ data }, depsFor(slowSubmitter));
+    await new Promise((r) => setTimeout(r, 100));
+    // The operator pauses the agent; a redelivery's guard fails the row.
+    await m.db.agent.update({ where: { id: agent.id }, data: { active: false } });
+    const fast = await m.processor.processTransactionJob({ data }, depsFor({ submit: async () => { throw new Error('must not submit'); } }));
+    expect(fast).toMatchObject({ outcome: 'blocked' });
+    expect(await volumeStateOf(data.transactionId)).toBe('RELEASED');
+
+    releaseSlowWorker();
+    await expect(slow).rejects.toThrow(/no longer QUEUED/);
+    expect(broadcasts).toBe(0);
+    expect(await txStatus(data.transactionId)).toBe('FAILED');
+    expect(await volume(agent.id)).toBeCloseTo(0, 6);
+  });
+
+  it('the failed handler of a stalled redelivery does not overwrite a row another delivery already broadcast', async () => {
+    const agent = await mkAgent();
+    const a = await app(agent.id);
+    const res = await transfer(a, '0.01');
+    const data = jobOf(res.json().transactionId);
+    await runJob(data, { receipt: 'none' }); // broadcast, SUBMITTED, no receipt yet
+    await m.processor.handleFailedTransactionJob({ data, attemptsMade: 3, opts: { attempts: 3 } }, new Error('stalled'), {
+      db: m.db,
+      deadLetterQueue: { add: async () => undefined } as never,
+      logger: quietLogger,
+    });
+    expect(await txStatus(data.transactionId)).toBe('SUBMITTED');
+    expect(await volumeStateOf(data.transactionId)).toBe('RESERVED');
+    expect(await volume(agent.id)).toBeCloseTo(20, 6);
+  });
+
+  it('two concurrent creations with one idempotencyKey: one row, one reservation, the other is a replay (checked under the agent lock)', async () => {
+    const agent = await mkAgent();
+    const { createTransactionWithVolume } = await import('../services/policy/daily-volume.js');
+    const key = `lock-${RUN}-${seq}`;
+    const make = () =>
+      createTransactionWithVolume(m.db, {
+        agentId: agent.id,
+        valueUsd: '20',
+        data: { agentId: agent.id, chainId: CHAIN_ID, status: 'QUEUED', type: 'TRANSFER', idempotencyKey: key },
+      });
+    const results = await Promise.all([make(), make(), make()]);
+    expect(results.every((r) => r.ok)).toBe(true);
+    expect(results.filter((r) => r.ok && r.replayed)).toHaveLength(2);
+    expect(await m.db.transaction.count({ where: { agentId: agent.id } })).toBe(1);
+    expect(await volume(agent.id)).toBeCloseTo(20, 6);
+  });
+
+  it('agents never see the reservation bookkeeping in transaction responses', async () => {
+    const agent = await mkAgent();
+    const a = await app(agent.id);
+    const res = await transfer(a, '0.01', { idempotencyKey: `view-${RUN}` });
+    const view = await a.inject({ method: 'GET', url: `/v1/transactions/${res.json().transactionId}` });
+    const replay = await transfer(a, '0.01', { idempotencyKey: `view-${RUN}` });
+    const list = await a.inject({ method: 'GET', url: '/v1/transactions' });
+    for (const body of [view.json(), replay.json(), list.json().transactions[0]]) {
+      expect(body.id).toBe(res.json().transactionId);
+      for (const field of ['volumeReservedUsd', 'volumeReservedDate', 'volumeState', 'broadcastAttemptedAt', 'broadcastAttempts']) {
+        expect(body).not.toHaveProperty(field);
+      }
+    }
   });
 
   it('an ERC-20 transfer reserves its USD value and releases it on revert', async () => {

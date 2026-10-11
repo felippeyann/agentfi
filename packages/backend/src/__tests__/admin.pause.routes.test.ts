@@ -45,7 +45,7 @@ const { mockDb, finalizeMock } = vi.hoisted(() => ({
   mockDb: {
     agent: { findUnique: vi.fn(), update: vi.fn() },
     agentPolicy: { findUnique: vi.fn(), updateMany: vi.fn() },
-    transaction: { findUnique: vi.fn(), update: vi.fn() },
+    transaction: { findUnique: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
   } as any,
   finalizeMock: vi.fn(),
 }));
@@ -205,6 +205,8 @@ beforeEach(() => {
     },
   }));
   mockDb.transaction.update.mockResolvedValue({});
+  // The guard's FAILED write is conditional on QUEUED + no hash (A6).
+  mockDb.transaction.updateMany.mockResolvedValue({ count: 1 });
   finalizeMock.mockResolvedValue(undefined);
 });
 
@@ -287,6 +289,7 @@ describe('resume after an operator pause', () => {
 
     await expect(workerDecision()).resolves.toEqual({ action: 'proceed' });
     expect(mockDb.transaction.update).not.toHaveBeenCalled();
+    expect(mockDb.transaction.updateMany).not.toHaveBeenCalled();
     await app.close();
   });
 

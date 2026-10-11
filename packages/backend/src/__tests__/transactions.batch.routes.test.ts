@@ -82,6 +82,17 @@ vi.mock('../services/transaction/price.service.js', () => ({
   weiToUsd: vi.fn().mockResolvedValue('0'),
   tokenAmountToUsd: vi.fn().mockResolvedValue('0'),
 }));
+// The DailyVolume reservation (A6) runs on Postgres in daily-volume.db.test.ts
+// (including the batch's native value and an unpriced value); here the row is
+// created through the mocked client and nothing is reserved.
+vi.mock('../services/policy/daily-volume.js', () => ({
+  createTransactionWithVolume: async (_db: unknown, p: { data: unknown }) => ({
+    ok: true,
+    replayed: false,
+    transaction: await mockDb.transaction.create({ data: p.data }),
+  }),
+  settleVolumeAfterFailure: vi.fn(),
+}));
 
 const USDC = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
 const WETH = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';

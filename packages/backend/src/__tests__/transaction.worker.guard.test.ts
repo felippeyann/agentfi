@@ -78,8 +78,10 @@ function snapshot(overrides: Partial<TxSnapshot> = {}): TxSnapshot {
 function makeMockDb(tx: TxSnapshot | null) {
   const findUnique = vi.fn().mockResolvedValue(tx);
   const update = vi.fn().mockResolvedValue({});
-  const db = { transaction: { findUnique, update } } as unknown as PrismaClient;
-  return { db, findUnique, update };
+  // The guard's FAILED write is conditional (A6): QUEUED and no hash yet.
+  const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+  const db = { transaction: { findUnique, update, updateMany } } as unknown as PrismaClient;
+  return { db, findUnique, update, updateMany };
 }
 
 function makeSubmitter() {
@@ -173,7 +175,7 @@ describe('preSubmitGuard — proceeds', () => {
 
 describe('preSubmitGuard — blocks and marks FAILED', () => {
   it('agent inactive → FAILED with "paused" error, submitter not called', async () => {
-    const { db, update } = makeMockDb(
+    const { db, update, updateMany } = makeMockDb(
       snapshot({ agent: { active: false, policy: { active: true, expiresAt: null } } }),
     );
     const submitter = makeSubmitter();
@@ -182,9 +184,9 @@ describe('preSubmitGuard — blocks and marks FAILED', () => {
 
     expect(decision).toEqual({ action: 'fail', reason: PAUSED_BEFORE_SUBMISSION });
     expect(submitter.submit).not.toHaveBeenCalled();
-    expect(update).toHaveBeenCalledTimes(1);
-    expect(update).toHaveBeenCalledWith({
-      where: { id: TX_ID },
+    expect(updateMany).toHaveBeenCalledTimes(1);
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: TX_ID, status: 'QUEUED', txHash: null },
       data: { status: 'FAILED', error: PAUSED_BEFORE_SUBMISSION },
     });
     expect(finalizeMock).not.toHaveBeenCalled();
@@ -194,7 +196,7 @@ describe('preSubmitGuard — blocks and marks FAILED', () => {
   });
 
   it('policy inactive (agent still active) → FAILED, submitter not called', async () => {
-    const { db, update } = makeMockDb(
+    const { db, update, updateMany } = makeMockDb(
       snapshot({ agent: { active: true, policy: { active: false, expiresAt: null } } }),
     );
     const submitter = makeSubmitter();
@@ -203,15 +205,15 @@ describe('preSubmitGuard — blocks and marks FAILED', () => {
 
     expect(decision).toEqual({ action: 'fail', reason: PAUSED_BEFORE_SUBMISSION });
     expect(submitter.submit).not.toHaveBeenCalled();
-    expect(update).toHaveBeenCalledWith({
-      where: { id: TX_ID },
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: TX_ID, status: 'QUEUED', txHash: null },
       data: { status: 'FAILED', error: PAUSED_BEFORE_SUBMISSION },
     });
   });
 
   it('policy expired → FAILED with "expired" error, submitter not called', async () => {
     const past = new Date(Date.now() - 1000);
-    const { db, update } = makeMockDb(
+    const { db, update, updateMany } = makeMockDb(
       snapshot({ agent: { active: true, policy: { active: true, expiresAt: past } } }),
     );
     const submitter = makeSubmitter();
@@ -220,10 +222,23 @@ describe('preSubmitGuard — blocks and marks FAILED', () => {
 
     expect(decision).toEqual({ action: 'fail', reason: POLICY_EXPIRED_BEFORE_SUBMISSION });
     expect(submitter.submit).not.toHaveBeenCalled();
-    expect(update).toHaveBeenCalledWith({
-      where: { id: TX_ID },
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: TX_ID, status: 'QUEUED', txHash: null },
       data: { status: 'FAILED', error: POLICY_EXPIRED_BEFORE_SUBMISSION },
     });
+  });
+
+  it('A6: the conditional FAILED write matches nothing (a concurrent delivery broadcast the row) → skip, no settlement, no finalizer', async () => {
+    const { db, updateMany } = makeMockDb(
+      snapshot({ metadata: { a2aPayment: true, jobId: 'job-1' }, agent: { active: false, policy: null } }),
+    );
+    updateMany.mockResolvedValueOnce({ count: 0 });
+
+    const decision = await preSubmitGuard(db, TX_ID);
+
+    expect(decision).toEqual({ action: 'skip', reason: 'Transaction left QUEUED while it was being checked' });
+    expect(settleVolumeMock).not.toHaveBeenCalled();
+    expect(finalizeMock).not.toHaveBeenCalled();
   });
 
   it('never throws on a block, so BullMQ does not retry a paused tx', async () => {
@@ -239,7 +254,7 @@ describe('preSubmitGuard — skips already-processed transactions', () => {
   it('status SUBMITTED (always written with its txHash) → skipped, no DB write, submitter not called', async () => {
     // The processor writes SUBMITTED and txHash in one update after the
     // broadcast resolved, so a SUBMITTED row always carries a hash.
-    const { db, update } = makeMockDb(snapshot({ status: 'SUBMITTED', txHash: TX_HASH }));
+    const { db, update, updateMany } = makeMockDb(snapshot({ status: 'SUBMITTED', txHash: TX_HASH }));
     const submitter = makeSubmitter();
 
     const decision = await runWorkerStep(db, submitter);
@@ -254,7 +269,7 @@ describe('preSubmitGuard — skips already-processed transactions', () => {
   });
 
   it('QUEUED but already has a txHash → skipped, submitter not called', async () => {
-    const { db, update } = makeMockDb(snapshot({ status: 'QUEUED', txHash: TX_HASH }));
+    const { db, update, updateMany } = makeMockDb(snapshot({ status: 'QUEUED', txHash: TX_HASH }));
     const submitter = makeSubmitter();
 
     const decision = await runWorkerStep(db, submitter);
@@ -266,7 +281,7 @@ describe('preSubmitGuard — skips already-processed transactions', () => {
   });
 
   it('status CONFIRMED → skipped even if the agent is now paused (no FAILED overwrite)', async () => {
-    const { db, update } = makeMockDb(
+    const { db, update, updateMany } = makeMockDb(
       snapshot({
         status: 'CONFIRMED',
         txHash: TX_HASH,
@@ -283,7 +298,7 @@ describe('preSubmitGuard — skips already-processed transactions', () => {
   });
 
   it('transaction row missing → skipped, submitter not called', async () => {
-    const { db, update } = makeMockDb(null);
+    const { db, update, updateMany } = makeMockDb(null);
     const submitter = makeSubmitter();
 
     const decision = await runWorkerStep(db, submitter);
@@ -332,7 +347,7 @@ describe('preSubmitGuard — A2A payment jobs', () => {
 
   it('finalizer failure is reported, not thrown (tx stays FAILED, no retry)', async () => {
     finalizeMock.mockRejectedValueOnce(new Error('job table unavailable'));
-    const { db, update } = makeMockDb(
+    const { db, update, updateMany } = makeMockDb(
       snapshot({
         metadata: { a2aPayment: true, jobId: 'job-42' },
         agent: { active: false, policy: null },
@@ -346,8 +361,8 @@ describe('preSubmitGuard — A2A payment jobs', () => {
       reason: PAUSED_BEFORE_SUBMISSION,
       finalizerError: 'job table unavailable',
     });
-    expect(update).toHaveBeenCalledWith({
-      where: { id: TX_ID },
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: TX_ID, status: 'QUEUED', txHash: null },
       data: { status: 'FAILED', error: PAUSED_BEFORE_SUBMISSION },
     });
   });
@@ -380,7 +395,7 @@ describe('preSubmitGuard — ERC-8183 escrow steps', () => {
 
   it('orchestrator failure is reported as finalizerError, not thrown (tx already FAILED)', async () => {
     escrowOutcomeMock.mockRejectedValueOnce(new Error('job table unavailable'));
-    const { db, update } = makeMockDb(
+    const { db, update, updateMany } = makeMockDb(
       snapshot({
         metadata: { erc8183: true, jobId: 'job-7', escrowStep: 'fund' },
         agent: { active: false, policy: { active: true, expiresAt: null } },
@@ -394,8 +409,8 @@ describe('preSubmitGuard — ERC-8183 escrow steps', () => {
       reason: PAUSED_BEFORE_SUBMISSION,
       finalizerError: 'job table unavailable',
     });
-    expect(update).toHaveBeenCalledWith({
-      where: { id: TX_ID },
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: TX_ID, status: 'QUEUED', txHash: null },
       data: { status: 'FAILED', error: PAUSED_BEFORE_SUBMISSION },
     });
   });
