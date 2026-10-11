@@ -229,6 +229,7 @@ requester wallet  fund(jobId, budget) ─► FUNDED  (C3)
 | `register` receipt cannot be read (RPC) | stays `REGISTERING` (the NFT exists — never mint twice) | waiting | recovery re-reads it |
 | minted id is `0` (fresh local registry) | `REGISTERED` | `SKIPPED` (`agent-id-zero`) | continues |
 | `setProviderAgentId` reverts / blocked / retries exhausted | unchanged | `FAILED` + error | continues; deferred submit released |
+| C3d (H14 dry-run): the job is no longer `BINDING`, live and `FUNDED` (or no longer Funded on-chain) when its queued `setProviderAgentId` is picked up — typically cancelled and refunded meanwhile | unchanged | `SKIPPED` (`… checked before broadcast`); the transaction is `FAILED` and **never broadcast** (it used to revert at the provider's expense) | continues |
 
 In every non-`BOUND` case settlement is unchanged; the hook rates the provider's canonical id if an earlier job already bound one, and otherwise emits `FeedbackSkipped(jobId, "no-agent-id")` (§4).
 
@@ -245,3 +246,18 @@ The payment-recovery scan (stale `PAYMENT_PENDING`) hands a `FUNDED` job with `d
 - Env: `IDENTITY_REGISTRY_ADDRESS_<chainId>` (blank = default), `MCP_PUBLIC_URL` (optional).
 
 Out of R2: reading `getSummary` into the trust report (R4), `setAgentWallet`, MCP tool changes, the testnet run (C5).
+
+### 7.7 What the hook did, surfaced (C3d)
+
+The settlement worker decodes every ReputationHook event of the settlement receipt (and of a settlement whose receipt it never saw, once the reconciliation finds the job terminal) into the job's `escrow` object:
+
+| Hook events | `escrow.feedbackStatus` | `escrow.ratedAgentId` |
+|---|---|---|
+| `FeedbackWritten(jobId, agentId, value)` | `written` | `agentId` |
+| `FeedbackSkipped(jobId, reason)` | `skipped:<reason>` — `no-params` (refund / cancellation / payout-blocked without params), `not-verdict`, `payout-blocked`, `not-submitted`, `no-agent-id`, `budget-too-small`, `agent-not-provider`, `penalized`, `untrusted-evaluator`, `bad-params` | `canonicalAgentId(provider)` for `penalized`, else unchanged |
+| `FeedbackFailed` + `AgentPenalized(agentId, jobId, penalties)` | `failed:penalized` — a verdict the registry did not record; no positive entry for the id until `clearPenalties` | `agentId` |
+| `FeedbackFailed` alone | `failed` | unchanged |
+
+`ratedAgentId` is the id the hook **actually** rates: its `canonicalAgentId[provider]` (first verified bind of the provider address, §4), which can differ from the job's `providerAgentId` when a provider address ever bound another identity. The provider's `submit` receipt is read too: `CanonicalAgentIdSet` sets `ratedAgentId` (a difference with `providerAgentId` is logged) and `AgentIdNotVerified` is recorded in `providerAgentIdError` (that job's feedback will be skipped with `agent-not-provider`).
+
+Only an operator decision writes a negative rating (decision D9): `refund` + `verdict: quality-rejected` sends `reject(REASON_QUALITY_REJECTED, feedback params)`; contests, cancellations, payout-blocked unwinds and expiries never rate ([erc-8183-mapping.md §6.8](erc-8183-mapping.md)). The public trust report (`GET /v1/agents/:id/trust-report`) adds `erc8004: [{ chainId, hook, agentId, canonicalAgentId, penalties }]` per minted identity on a chain with a hook — two view calls (`canonicalAgentId(agent wallet)`, `penalties(agentId)`), cached for a minute; `null` fields could not be read. Consumers of the registry summary should read `penalties` next to it (§4).

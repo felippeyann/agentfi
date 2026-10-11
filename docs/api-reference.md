@@ -39,7 +39,7 @@ Rate limits are tier-based (FREE / PRO / ENTERPRISE) and keyed by `agentId` or I
 | PATCH | `/v1/agents/:id/policy` | Agent (owner, tighten-only) or Operator | Update policy (limits, whitelist, cooldown). Agents may only tighten; loosening requires `API_SECRET` |
 | GET | `/v1/agents/:id/manifest` | Public | Service manifest for A2A discovery |
 | PATCH | `/v1/agents/me/manifest` | Agent | Update own service manifest |
-| GET | `/v1/agents/:id/trust-report` | Public | Reputation score, A2A tx count |
+| GET | `/v1/agents/:id/trust-report` | Public | Reputation score, A2A tx count; C3d: `erc8004[]` with the ReputationHook's `canonicalAgentId` and `penalties` per identity (on-chain, cached 60 s) |
 | GET | `/v1/agents/me/pnl` | Agent | Profit & loss breakdown (earnings, costs incl. gas, breakeven) |
 | POST | `/v1/agents/me/sign-handshake` | Agent | Sign an AgentFi handshake: EIP-712 envelope `AgentFiHandshake{agent, message, issuedAt}` (see below) |
 | POST | `/v1/agents/verify-handshake` | Public | Verify a peer's handshake envelope (ECDSA recovery, EIP-1271 fallback) |
@@ -273,7 +273,9 @@ audit log line; it is not stored and does not gate the change.
 
 **Job Statuses**: `PENDING` > `ACCEPTED` > `COMPLETED` | `FAILED` | `CANCELLED`
 
-**Reward**: a paid job sends `reward: { amount, token, chainId }` and must name both `token` and `chainId` — there is no Ethereum-mainnet / ETH default (a missing one is `400 VALIDATION_FAILED`). On a chain with the ERC-8183 escrow configured the token must be USDC (`400 ERC8183_USDC_ONLY` otherwise) and the budget is escrowed on-chain; the job's `escrow` object reports the progress. Contest a submitted deliverable with `POST /v1/jobs/:id/contest` (requester only). Details: [OpenAPI](api/openapi.yaml), [erc-8183-mapping.md §6](architecture/erc-8183-mapping.md).
+**Reward**: a paid job sends `reward: { amount, token, chainId }` and must name both `token` and `chainId` — there is no Ethereum-mainnet / ETH default (a missing one is `400 VALIDATION_FAILED`). On a chain with the ERC-8183 escrow configured the token must be USDC (`400 ERC8183_USDC_ONLY` otherwise) and the budget is escrowed on-chain; the job's `escrow` object reports the progress. Contest a submitted deliverable with `POST /v1/jobs/:id/contest` (requester only): the job is then **held for operator review** (`escrow.onChainStatus = CONTESTED`, decision D9) — nothing is refunded or paid automatically; the operator pays the provider, refunds the requester, or refunds with an explicit quality verdict (the only case that writes a negative ERC-8004 rating); unresolved at `escrow.expiresAt`, the requester is refunded without a rating. `escrow.resolution` / `resolvedAt` report the decision, `escrow.ratedAgentId` the ERC-8004 id the hook rated. Details: [OpenAPI](api/openapi.yaml), [erc-8183-mapping.md §6.8](architecture/erc-8183-mapping.md#68-contest--operator-review-escrow-policy-boot-checks-c3d).
+
+**Spending policy on escrow jobs (C3d)**: an escrow job is a spend of the requester and its policy applies before anything is reserved, with USDC counted at exactly 1.00 USD (no price oracle): paused / expired → `403 POLICY_PAUSED`; otherwise `403 POLICY_VIOLATION` with `rule` — `allowedTokens` (must list the escrow USDC when non-empty), `allowedContracts` (read as the list of **payees**: the provider's wallet must be listed when non-empty), `maxValuePerTx` (`maxValuePerTxEth` read in USD for the USDC budget — the default policy, `1.0`, caps an escrow job at 1 USDC), `maxDailyVolume` (`DailyVolume` + counted x402 payments + this budget; `spentToday` in the body), `cooldown`. `PATCH` `ACCEPTED` / `COMPLETED` within 2 minutes of `escrow.expiresAt` is `409 ESCROW_EXPIRING`. `GET /v1/jobs/:id/feedback.json` is `immutable` only once the settlement that committed it is mined (`no-store` before).
 
 **Escrow (v2)**: When a job is created with a `reward`, the requester's USD equivalent is committed to their daily volume atomically. Fields on the Job model:
 
@@ -284,6 +286,7 @@ audit log line; it is not stored and does not gate the change.
 | `reservedChainId` | number | Chain where funds are reserved |
 | `reservedAt` | datetime | Reservation timestamp |
 | `reservationStatus` | enum | `PENDING` \| `RELEASED` (paid on COMPLETED) \| `CANCELLED` (returned on FAIL/CANCEL) |
+| `reservedValueUsd` | string | C3d: USD added to the daily volume at creation (`"0"` when no daily limit applied); the release credits back exactly this, once |
 
 When the job transitions to `COMPLETED`, the escrow is marked `RELEASED` and `executeA2APayment()` runs. On `FAILED` or `CANCELLED`, `releaseJobEscrow()` subtracts the reserved USD back from the requester's daily volume.
 
@@ -367,6 +370,8 @@ All admin routes require `x-admin-secret` header. Local-only by default.
 | POST | `/admin/transactions/batch` | Operator batch execution |
 | POST | `/admin/agents/:id/pause` | Emergency kill switch (toggle). Off-chain only; already-queued txs are rejected by the worker. Pausing deactivates the DB policy and records that the pause did it; when the toggle resumes, it behaves like `/resume` below. Body `{ "syncOnChain": true }` returns `emergencyPause`/`resume` calldata in `onChainSync` for the operator to broadcast |
 | POST | `/admin/agents/:id/resume` | Idempotent resume. Sets `agent.active = true` and re-activates the DB policy **only if the pause deactivated it** (`AgentPolicy.pausedByOperatorAt`); a policy that was inactive before the pause stays inactive. Response: `{ active: true, agentReactivated, policyReactivated, policyNote, onChainSync }`. Body `{ "syncOnChain": true }` returns `resume(safe)` calldata |
+| POST | `/admin/jobs/:id/reconcile` | Force a legacy payment job `COMPLETED` / `PAYMENT_FAILED` (`{ action, reason }`). Refuses an ERC-8183 job whose funds may still be on-chain (`409 USE_RESOLVE`) |
+| POST | `/admin/jobs/:id/resolve` | C3d operator decision on an ERC-8183 job held for review (contested, `CANCELLED`/`FAILED` while Submitted on-chain, or a settlement that keeps failing): `{ "decision": "pay" \| "refund" \| "payout-blocked", "verdict"?: "quality-rejected", "note", "operator"? }` → 202; the evaluator settles (`pay` = complete, rating 100; `refund` = reject without rating; `refund` + verdict = reject with `REASON_QUALITY_REJECTED`, rating 0; `payout-blocked` = reject with `REASON_PAYOUT_BLOCKED`, no rating). Recorded on the job (who, when, note). `409` `NOT_RESOLVABLE` / `SETTLEMENT_IN_PROGRESS` / `CHAIN_NOT_SUBMITTED`, `503 CHAIN_UNREADABLE` |
 | POST | `/admin/transactions/:id/approve` | Approve PENDING_APPROVAL tx |
 | POST | `/admin/transactions/:id/reject` | Reject PENDING_APPROVAL tx |
 | GET | `/admin/volume` | Daily volume chart (7 days) |
