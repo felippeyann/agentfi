@@ -253,6 +253,12 @@ async function onlyRow(agentId: string) {
   return all[0]!;
 }
 
+/** The queued job's call, addresses checksummed and calldata lowercased (case carries no meaning). */
+function queuedCall(index: number) {
+  const data = h.queued[index]!.data as { from: string; to: string; value: string; data: string };
+  return { from: getAddress(data.from), to: getAddress(data.to), value: data.value, data: data.data.toLowerCase() };
+}
+
 const aaveMaxWithdrawData = (to: string) =>
   encodeFunctionData({ abi: AAVE_WITHDRAW_ABI, functionName: 'withdraw', args: [getAddress(USDC), maxUint256, getAddress(to)] });
 
@@ -302,11 +308,11 @@ describeDb('§5-7 — "max" withdrawals under a daily limit, on Postgres', () =>
     expect(await volume(agent.id)).toBe(0);
     // What is queued is exactly what was proven: the pool, the agent as sender and recipient, no value.
     expect(h.queued).toHaveLength(1);
-    expect(h.queued[0]!.data).toMatchObject({
+    expect(queuedCall(0)).toEqual({
       from: getAddress(agent.safeAddress),
       to: getAddress(POOL),
       value: '0',
-      data: aaveMaxWithdrawData(agent.safeAddress),
+      data: aaveMaxWithdrawData(agent.safeAddress).toLowerCase(),
     });
   });
 
@@ -325,7 +331,8 @@ describeDb('§5-7 — "max" withdrawals under a daily limit, on Postgres', () =>
       recipient: getAddress(agent.safeAddress),
     });
     expect(await volume(agent.id)).toBe(0);
-    expect(h.queued[0]!.data).toMatchObject({ from: getAddress(agent.safeAddress), to: getAddress(COMET), value: '0' });
+    expect(h.queued).toHaveLength(1);
+    expect(queuedCall(0)).toMatchObject({ from: getAddress(agent.safeAddress), to: getAddress(COMET), value: '0' });
   });
 
   it('a proven max withdrawal does not consume the daily budget: the agent can still spend its full limit after it', async () => {
