@@ -932,8 +932,11 @@ paths:
         applies (the job is refused while the agent's last transaction is
         younger than `cooldownSeconds`). A refusal is `403 POLICY_VIOLATION`
         with `rule`, `limit`, `spentToday` (daily volume), `amount` and
-        `payee`. On a legacy chain a reward the oracle cannot price is refused
-        (400) when a daily limit applies — it used to reserve $0.
+        `payee`. On a legacy chain a reward with no trusted price (Q9: on a
+        mainnet chain the oracle failed or does not know the token; on a
+        testnet no synthetic test price is configured — never the mainnet
+        price) is refused with `503 PRICE_UNAVAILABLE` when a daily limit
+        applies, and no job is created (it used to reserve $0, then 400).
       responses:
         '201':
           description: Job created. If `reward` was specified, funds are reserved atomically.
@@ -964,6 +967,10 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '503':
           description: |
+            Legacy (non-escrow) reward: `{ "error": "Escrow reservation failed",
+            "code": "PRICE_UNAVAILABLE", "reason" }` (Q9) — the reward has no
+            trusted price while the requester has a daily limit; no job was
+            created.
             ERC-8183 chain only. `ESCROW_CONFIG_UNVERIFIED` (Q7) — this process
             has not verified the chain's deployed escrow / hook configuration
             right now (RPC unreachable, verification expired, mismatch); nothing
@@ -1881,7 +1888,16 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     PolicyViolation:
-      description: Action blocked by the agent's operational policy.
+      description: |
+        Action blocked by the agent's operational policy (`{ "error": … }`).
+        On `POST /v1/transactions/batch` while the agent has a daily volume limit
+        (Q9) a refusal can also carry `code: "UNACCOUNTED_CALL"` (`rule:
+        "unaccountedCall"`, `actionIndex`, `selector`): an action's calldata is
+        neither a call to the agent's own AgentPolicyModule nor an exact ERC-20
+        `transfer` / `transferFrom`, and its target is not in `allowedContracts`
+        — list the contract (operator) to authorise it; or `rule:
+        "allowedRecipients"` / `"allowedTokens"` for a recognised ERC-20 transfer
+        whose recipient / token is not allowed.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -1900,11 +1916,17 @@ components:
         (`estimateGas`) dry-run. This response is the defense-in-depth guard for
         the case where only a mock result exists in such an environment.
 
-        The same status is returned when the USD price of the native value the
-        transaction moves could not be resolved while the agent has a daily
-        volume limit: the limit cannot be checked, so the transaction is refused
-        before it is created (`{ "error": "The USD price of the native value could
-        not be resolved, …" }`). Retry shortly.
+        **`PRICE_UNAVAILABLE`** (Q9): the same status, with `code:
+        "PRICE_UNAVAILABLE"`, when the agent's policy has a daily volume limit and
+        a component of the spend has no trusted USD price — on a mainnet chain the
+        price oracle failed or does not know the token; on a testnet (Base Sepolia)
+        no synthetic test price is configured for the asset
+        (`SYNTHETIC_TEST_PRICES_USD`, never the mainnet price); a `max`
+        withdrawal, whose amount is unknown before it executes. The spend would
+        otherwise count as 0, so it is refused before anything is simulated or
+        reserved (`{ "error": "…", "code": "PRICE_UNAVAILABLE" }`, plus
+        `actionIndex` on a batch). Without a daily limit the request proceeds and
+        counts nothing.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -2495,6 +2517,20 @@ components:
         touches, so both the off-chain `allowedTokens` whitelist and the on-chain
         policy module check the declared value. `allowedContracts` (checked against
         `to`) is the binding policy control for raw calldata.
+
+        **While the agent has a daily volume limit (Q9, owner decision "only
+        authorised contracts")** every action with calldata must be: a call to
+        the agent's own `AgentPolicyModule` on that chain (policy sync; allowed,
+        not counted); exactly an ERC-20 `transfer(to, amount)` or
+        `transferFrom(from, to, amount)` (strict ABI encoding) — decoded, the
+        token being the action's `to`, priced and counted with the batch's
+        native value, its recipient checked against `allowedRecipients` and its
+        token against `allowedTokens` (403 with `rule`); or a call to a target
+        the operator listed in `allowedContracts` (allowed, not counted —
+        authorisation replaces accounting). Anything else is `403` with `code:
+        "UNACCOUNTED_CALL"`. A component without a trusted price is `503
+        PRICE_UNAVAILABLE` (with `actionIndex`). Without a daily limit none of
+        this applies.
       properties:
         chainId: { type: integer, default: 1 }
         idempotencyKey: { type: string }

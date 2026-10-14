@@ -140,6 +140,7 @@ function reserve(requesterId: string, providerId: string, payee: string, amount:
           reservedAt: new Date(),
           reservationStatus: 'PENDING',
           reservedValueUsd: r.reservedValueUsd,
+          reservedValueSource: r.reservedValueSource,
         },
       }),
   );
@@ -262,6 +263,13 @@ describeDb('escrow job reservation on Postgres (C3d review P2-3)', () => {
     const ok = await reserve(x.id, p.id, p.safeAddress, '7');
     expect(ok).toMatchObject({ success: true, reservedValueUsd: '7' });
     expect(await committedUsd(x.id)).toBe(7);
+    // Q9: the escrow budget is USDC at exactly 1.00 — recorded as such on the Job.
+    if (ok.success) expect(ok.created).toMatchObject({ reservedValueUsd: '7', reservedValueSource: 'usdc-peg' });
+
+    // Without a daily limit nothing is reserved and no source is recorded.
+    const free = await mkAgent('rollback-free', { maxDailyVolumeUsd: '0', maxValuePerTxUsd: '1000' });
+    const unreserved = await reserve(free.id, p.id, p.safeAddress, '7');
+    if (unreserved.success) expect(unreserved.created).toMatchObject({ reservedValueUsd: '0', reservedValueSource: null });
   });
 
   it('two agents creating jobs for each other at the same time do not deadlock (looped)', async () => {

@@ -35,10 +35,15 @@
  *    `ESCROW_CONFIG_VERIFIED_TTL_SECONDS` (Q7), in every environment: a
  *    verification that is re-checked less often than it expires leaves gaps
  *    where every escrow operation is refused for no reason.
+ * 7. `SYNTHETIC_TEST_PRICES_USD` (Q9): FATAL in production and staging when
+ *    set at all (synthetic prices are test values, never market prices); in
+ *    every other environment a malformed value — or an entry for a chain that
+ *    is not a testnet — is FATAL too (`syntheticPricesProblem`).
  */
 
 import { existsSync } from 'node:fs';
 import { isIP } from 'node:net';
+import { SYNTHETIC_PRICES_ENV, parseSyntheticTestPrices } from './synthetic-prices.js';
 
 export type EnvSource = Readonly<Record<string, string | undefined>>;
 
@@ -138,6 +143,32 @@ export function rpcUrlProblem(url: string, nodeEnv: string): string | null {
   if (!isLoopbackOrPrivateHost(parsed.hostname)) {
     return `uses plain http to a public host (${parsed.hostname}); http is accepted only for loopback / private hosts — use https`;
   }
+  return null;
+}
+
+// ── 7. Synthetic test prices (Q9) ────────────────────────────────────────
+
+/**
+ * Why `SYNTHETIC_TEST_PRICES_USD` (`raw`) cannot boot under `nodeEnv`, or
+ * null. Blank / unset is always fine. Production and staging refuse it when
+ * set at all — not only for mainnet entries — so a test value can never make
+ * a production spend look priced. Elsewhere it must parse, with testnet
+ * chains only (`testnetChainIds` = config/chains.ts `TESTNET_CHAIN_IDS`).
+ */
+export function syntheticPricesProblem(
+  raw: string | undefined,
+  nodeEnv: string,
+  testnetChainIds: readonly number[],
+): string | null {
+  if (raw === undefined || raw.trim() === '') return null;
+  if (PRODUCTION_LIKE.has(nodeEnv)) {
+    return (
+      `${SYNTHETIC_PRICES_ENV} is set, which cannot run with NODE_ENV=${nodeEnv}: synthetic test prices are not ` +
+      'market prices and must never count a production spend. Unset it.'
+    );
+  }
+  const parsed = parseSyntheticTestPrices(raw, testnetChainIds);
+  if (!parsed.ok) return `${SYNTHETIC_PRICES_ENV} is invalid: ${parsed.errors.join('; ')}`;
   return null;
 }
 

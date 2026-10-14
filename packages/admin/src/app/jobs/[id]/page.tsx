@@ -29,6 +29,10 @@ interface Job {
   reservedToken?: string | null;
   reservedChainId?: number | null;
   reservedAt?: string | null;
+  /** C3d: USD the reservation added to the requester's daily volume. */
+  reservedValueUsd?: string | null;
+  /** Q9: "usdc-peg" | "oracle" | "synthetic" (testnet TEST price); null when nothing was priced or before migration 0022. */
+  reservedValueSource?: string | null;
   payload: any;
   reward: any;
   result?: any;
@@ -273,6 +277,21 @@ export default async function JobDetailPage({
         {reservedChain && job.reservedAt && (
           <p className="text-[11px] text-gray-500 mt-3">
             Reserved on {reservedChain} at {new Date(job.reservedAt).toLocaleString()}
+          </p>
+        )}
+        {job.reservedValueUsd && job.reservedValueUsd !== '0' && (
+          <p className="text-[11px] text-gray-500 mt-1">
+            Counted against the daily limit: ${job.reservedValueUsd}
+            {job.reservedValueSource === 'synthetic' ? (
+              <span
+                className="text-amber-400 font-bold"
+                title="Configured testnet TEST price (SYNTHETIC_TEST_PRICES_USD) — not a market price"
+              >
+                {' '}(synthetic test price)
+              </span>
+            ) : (
+              <span> ({job.reservedValueSource ?? 'source n/a'})</span>
+            )}
           </p>
         )}
       </div>

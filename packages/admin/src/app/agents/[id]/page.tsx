@@ -39,6 +39,24 @@ interface Transaction {
   amountIn?: string;
   error?: string;
   createdAt: string;
+  /** A6: USD reserved against the daily limit (null = nothing counted). */
+  volumeReservedUsd?: string | null;
+  volumeState?: string | null;
+  /** Q9: "oracle" | "synthetic" (testnet TEST price) | "usdc-peg"; null for rows from before migration 0022. */
+  volumePriceSource?: string | null;
+}
+
+/** Q9: where a counted USD value came from; "synthetic" is a configured testnet TEST price, never a market price. */
+function PriceSourceBadge({ source }: { source: string | null }) {
+  if (!source) return <span className="text-gray-500">(source n/a)</span>;
+  if (source === 'synthetic') {
+    return (
+      <span className="text-amber-400 font-bold" title="Configured testnet TEST price (SYNTHETIC_TEST_PRICES_USD) — not a market price">
+        synthetic
+      </span>
+    );
+  }
+  return <span className="text-gray-400">{source}</span>;
 }
 
 async function getAgent(id: string): Promise<AgentDetail | null> {
@@ -174,6 +192,9 @@ export default async function AgentDetailPage({ params }: { params: { id: string
               <th className="text-left px-4 py-2">Type</th>
               <th className="text-left px-4 py-2">Status</th>
               <th className="text-left px-4 py-2">Amount</th>
+              <th className="text-left px-4 py-2" title="USD reserved against the daily limit, and where its price came from">
+                Counted USD
+              </th>
               <th className="text-left px-4 py-2">Tx Hash</th>
               <th className="text-left px-4 py-2">Error</th>
               <th className="text-left px-4 py-2">Time</th>
@@ -187,6 +208,19 @@ export default async function AgentDetailPage({ params }: { params: { id: string
                   <span className={STATUS_COLORS[tx.status] ?? 'text-gray-400'}>{tx.status}</span>
                 </td>
                 <td className="px-4 py-2 text-gray-300">{tx.amountIn ?? '—'}</td>
+                <td className="px-4 py-2 text-gray-300 text-xs">
+                  {tx.volumeReservedUsd ? (
+                    <>
+                      ${tx.volumeReservedUsd}{' '}
+                      <PriceSourceBadge source={tx.volumePriceSource ?? null} />
+                      {tx.volumeState && tx.volumeState !== 'RESERVED' && (
+                        <span className="text-gray-500"> · {tx.volumeState.toLowerCase()}</span>
+                      )}
+                    </>
+                  ) : (
+                    '—'
+                  )}
+                </td>
                 <td className="px-4 py-2">
                   {tx.txHash ? (
                     <code className="text-xs text-blue-400">

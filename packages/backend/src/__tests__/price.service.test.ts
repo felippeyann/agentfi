@@ -77,6 +77,22 @@ describe('weiToUsd', () => {
     }
   });
 
+  it('Q9: a chain it does not map (Base Sepolia 84532) is "0" — never the mainnet ETH price — and nothing is fetched', async () => {
+    mockCoinGeckoPrice(2000);
+    expect(await weiToUsd(1_000_000_000_000_000_000n, 84532)).toBe('0');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('Q9: never reads synthetic test prices (fees / P&L / revenue)', async () => {
+    process.env['SYNTHETIC_TEST_PRICES_USD'] = '84532:native=2500';
+    try {
+      mockCoinGeckoPrice(2000);
+      expect(await weiToUsd(1_000_000_000_000_000_000n, 84532)).toBe('0');
+    } finally {
+      delete process.env['SYNTHETIC_TEST_PRICES_USD'];
+    }
+  });
+
   it('caches price within TTL — only one fetch call for two conversions', async () => {
     mockCoinGeckoPrice(2500);
     await weiToUsd(1_000_000_000_000_000_000n, 1);

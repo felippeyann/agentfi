@@ -1861,8 +1861,11 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       };
       await policy(requester.id, { maxDailyVolumeUsd: '100' });
       const refused = await legacy();
-      expect(refused.statusCode).toBe(400);
+      // Q9: a reward with no trusted price is 503 PRICE_UNAVAILABLE (was 400), and no job is created.
+      expect(refused.statusCode).toBe(503);
+      expect(refused.json()).toMatchObject({ code: 'PRICE_UNAVAILABLE' });
       expect(refused.json().reason).toMatch(/could not be priced/);
+      expect(await m.db.job.count({ where: { requesterId: requester.id } })).toBe(0);
 
       await m.db.agentPolicy.update({ where: { agentId: requester.id }, data: { maxDailyVolumeUsd: '0' } });
       const allowed = await legacy();
