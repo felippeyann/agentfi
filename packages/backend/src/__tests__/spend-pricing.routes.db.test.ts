@@ -97,7 +97,18 @@ vi.mock('../services/transaction/simulation-cache.js', () => ({
 vi.mock('../services/notification.service.js', () => ({
   notificationService: { notify: async () => undefined },
 }));
-vi.mock('../services/wallet/index.js', () => ({ getWalletService: () => ({}) }));
+// #180 review: a max withdrawal is proven against the address that signs it;
+// here the wallet signs as the agent's own address (EOA mode).
+vi.mock('../services/wallet/index.js', () => ({
+  getWalletService: () => ({
+    getWalletAddress: async (walletId: string) => {
+      const { db } = await import('../db/client.js');
+      const agent = await db.agent.findFirst({ where: { walletId }, select: { safeAddress: true } });
+      if (!agent) throw new Error(`wallet ${walletId} not found`);
+      return agent.safeAddress;
+    },
+  }),
+}));
 vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({
   onEscrowTxOutcome: async () => undefined,
   isErc8183Enabled: () => false,

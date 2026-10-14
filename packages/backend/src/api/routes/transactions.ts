@@ -27,6 +27,7 @@ import {
 } from '../../services/policy/spend-pricing.js';
 import { classifyBatchCalldata } from '../../services/policy/batch-calldata.js';
 import { MAX_AMOUNT_UNPRICED, maxWithdrawalPricing } from '../../services/policy/max-withdrawal-proof.js';
+import { getWalletService } from '../../services/wallet/index.js';
 import { parsePolicyDecimal } from '../../services/policy/policy-numbers.js';
 import { getKnownTokenDecimals } from '../../services/transaction/token-registry.js';
 import { cacheSimulation, getSimulation } from '../../services/transaction/simulation-cache.js';
@@ -774,7 +775,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     // pool (`max-withdrawal-proof.ts`); otherwise unpriced (refused while a
     // daily limit applies).
     const maxWithdrawal = amountWei === maxUint256
-      ? await maxWithdrawalPricing({ chainId: body.chainId, from: getAddress(agent.safeAddress), tx: withdrawTx })
+      ? await maxWithdrawalPricing({ chainId: body.chainId, agentWallet: getAddress(agent.safeAddress), signer: await signingAddressOf(agent.walletId), tx: withdrawTx })
       : null;
     const pricing = maxWithdrawal
       ? maxWithdrawal.pricing
@@ -1020,7 +1021,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     // §5-7: outside the outflow count only on proof (see the Aave route).
     const maxWithdrawal =
       body.amount === 'max'
-        ? await maxWithdrawalPricing({ chainId: body.chainId, from: getAddress(agent.safeAddress), tx: withdrawTx })
+        ? await maxWithdrawalPricing({ chainId: body.chainId, agentWallet: getAddress(agent.safeAddress), signer: await signingAddressOf(agent.walletId), tx: withdrawTx })
         : null;
     const pricing = maxWithdrawal
       ? maxWithdrawal.pricing
@@ -2190,6 +2191,21 @@ function withoutVolumeBookkeeping<T>(tx: T): T {
   const copy = { ...(tx as Record<string, unknown>) };
   for (const field of VOLUME_BOOKKEEPING_FIELDS) delete copy[field];
   return copy as T;
+}
+
+/**
+ * #180 review: the address that signs the agent's transactions — the wallet
+ * provider's address for `walletId`, the EVM `msg.sender` (in Safe mode the
+ * Safe's owner EOA, not `safeAddress`). Null when it cannot be resolved (the
+ * caller then grants nothing that depends on it).
+ */
+async function signingAddressOf(walletId: string): Promise<string | null> {
+  try {
+    return await getWalletService().getWalletAddress(walletId);
+  } catch (err) {
+    logger.warn({ walletId, err: (err as Error)?.message ?? String(err) }, 'Could not resolve the signing address of a wallet');
+    return null;
+  }
 }
 
 async function getAgent(agentId: string) {
