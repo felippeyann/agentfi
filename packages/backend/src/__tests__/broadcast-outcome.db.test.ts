@@ -772,4 +772,41 @@ describeDb('A6b — outcomes after a broadcast attempt, on Postgres', () => {
     expect(await txRow(id)).toMatchObject({ status: 'SUBMITTED', txHash: hash });
     expect(await volume(agent.id)).toBeCloseTo(20, 6);
   });
+
+  // ── 4. Approved on a later UTC day ─────────────────────────────────────────
+
+  it('item 4: a PENDING_APPROVAL transaction approved on a later UTC day counts on the day it is approved (and executed), not on its creation day', async () => {
+    const agent = await mkAgent({ maxValueForAutoApprovalEth: '0.001' });
+    const a = await app(agent.id);
+    const id = (await transfer(a, '0.01')).json().transactionId as string;
+    // As if the request came in yesterday: the reservation sits on yesterday's row.
+    const yesterday = utcDay(new Date(Date.now() - 86_400_000));
+    await m.db.transaction.update({ where: { id }, data: { volumeReservedDate: yesterday } });
+    await m.db.dailyVolume.update({ where: { agentId_date: { agentId: agent.id, date: utcDay() } }, data: { volumeUsd: '0' } });
+    await m.db.dailyVolume.create({ data: { agentId: agent.id, date: yesterday, volumeUsd: '20' } });
+
+    const approved = await a.inject({ method: 'POST', url: `/admin/transactions/${id}/approve`, headers: ADMIN });
+    expect(approved.statusCode).toBe(200);
+
+    expect(await volume(agent.id)).toBeCloseTo(20, 6); // today's limit sees it
+    expect(await volume(agent.id, yesterday)).toBeCloseTo(0, 6);
+    expect((await m.db.transaction.findUnique({ where: { id }, select: { volumeReservedDate: true } }))?.volumeReservedDate).toBe(utcDay());
+
+    // Its settlement follows it: a revert releases it from today.
+    await runJob(jobOf(id), { receipt: 'reverted' });
+    expect(await volume(agent.id)).toBeCloseTo(0, 6);
+    expect(await volume(agent.id, yesterday)).toBeCloseTo(0, 6);
+  });
+
+  it('item 4: an approval on the creation day leaves the reservation where it is', async () => {
+    const agent = await mkAgent({ maxValueForAutoApprovalEth: '0.001' });
+    const a = await app(agent.id);
+    const id = (await transfer(a, '0.01')).json().transactionId as string;
+    expect((await a.inject({ method: 'POST', url: `/admin/transactions/${id}/approve`, headers: ADMIN })).statusCode).toBe(200);
+    expect(await volume(agent.id)).toBeCloseTo(20, 6);
+    expect((await m.db.transaction.findUnique({ where: { id }, select: { volumeReservedDate: true, volumeState: true } }))).toEqual({
+      volumeReservedDate: utcDay(),
+      volumeState: 'RESERVED',
+    });
+  });
 });
