@@ -22,7 +22,7 @@ import {
   type OperatorResumeOutcome,
 } from '../../services/policy/policy.service.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
-import { settleVolumeAfterFailure } from '../../services/policy/daily-volume.js';
+import { moveReservationToDay, settleVolumeAfterFailure } from '../../services/policy/daily-volume.js';
 import { PnLService } from '../../services/billing/pnl.service.js';
 import { OperatorService } from '../../services/billing/operator.service.js';
 
@@ -775,6 +775,13 @@ export async function adminRoutes(fastify: FastifyInstance) {
       if (approved.count === 0) {
         return reply.code(409).send({ error: 'Transaction is no longer PENDING_APPROVAL.' });
       }
+
+      // A6b: it executes today, so its reservation counts today — not on the
+      // (earlier) day it was requested. Not refused by today's limit: the
+      // operator approved it. A failure keeps the creation day (as before).
+      await moveReservationToDay(db, tx.id).catch((err: unknown) =>
+        logger.error({ transactionId: tx.id, err: (err as Error)?.message ?? String(err) }, 'Approved transaction: reservation left on its creation day'),
+      );
 
       // A6b: the row's own job id — a crash between the QUEUED write above and
       // this add leaves a QUEUED row the stranded-QUEUED sweep re-enqueues

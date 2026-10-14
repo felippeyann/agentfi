@@ -200,6 +200,54 @@ export async function createTransactionWithVolume(
     });
 }
 
+/**
+ * A6b: moves a still-RESERVED reservation to the UTC day of `now` when it was
+ * made on an earlier day — called when the operator approves a
+ * PENDING_APPROVAL transaction, which executes on the approval day. Without it
+ * the spend counted against the creation day only, and the approval day's
+ * limit gave the agent a full fresh budget on top of the approved amount.
+ *
+ * The move is not refused by today's limit: the operator approved this
+ * transaction explicitly; counting it today limits what the agent can spend on
+ * its own for the rest of the day. One database transaction under the agent
+ * lock (the reservation paths' lock order: Agent, then Transaction /
+ * DailyVolume); conditional on the row still RESERVED on an earlier day, so a
+ * repeated or concurrent call moves it once. Returns whether it moved.
+ */
+export async function moveReservationToDay(db: VolumeDb, transactionId: string, now: Date = new Date()): Promise<boolean> {
+  const today = utcDay(now);
+  return db.$transaction(async (tx) => {
+    const row = await tx.transaction.findUnique({
+      where: { id: transactionId },
+      select: { agentId: true, volumeState: true, volumeReservedUsd: true, volumeReservedDate: true },
+    });
+    if (row?.volumeState !== 'RESERVED' || !row.volumeReservedUsd || !row.volumeReservedDate || row.volumeReservedDate >= today) {
+      return false;
+    }
+    await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${row.agentId} FOR NO KEY UPDATE`;
+    const { count } = await tx.transaction.updateMany({
+      where: { id: transactionId, volumeState: 'RESERVED', volumeReservedDate: row.volumeReservedDate },
+      data: { volumeReservedDate: today },
+    });
+    if (count === 0) return false;
+    await tx.$executeRaw`
+      UPDATE "DailyVolume"
+      SET "volumeUsd" = GREATEST(0, (("volumeUsd"::numeric) - (${row.volumeReservedUsd}::numeric)))::text,
+          "updatedAt" = NOW()
+      WHERE "agentId" = ${row.agentId} AND "date" = ${row.volumeReservedDate}
+    `;
+    await tx.$executeRaw`
+      INSERT INTO "DailyVolume" ("id", "agentId", "date", "volumeUsd", "updatedAt")
+      VALUES (gen_random_uuid()::text, ${row.agentId}, ${today}, ${row.volumeReservedUsd}, NOW())
+      ON CONFLICT ("agentId", "date")
+      DO UPDATE SET
+        "volumeUsd" = (("DailyVolume"."volumeUsd"::numeric) + (${row.volumeReservedUsd}::numeric))::text,
+        "updatedAt" = NOW()
+    `;
+    return true;
+  }, RESERVATION_TX_OPTIONS);
+}
+
 /** RESERVED → COMMITTED (the transaction confirmed). Returns whether this call settled it. */
 export async function commitTransactionVolume(db: VolumeDb, transactionId: string): Promise<boolean> {
   const { count } = await db.transaction.updateMany({
