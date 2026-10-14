@@ -26,6 +26,7 @@ import {
   type SpendPricing,
 } from '../../services/policy/spend-pricing.js';
 import { classifyBatchCalldata } from '../../services/policy/batch-calldata.js';
+import { MAX_AMOUNT_UNPRICED, maxWithdrawalPricing } from '../../services/policy/max-withdrawal-proof.js';
 import { parsePolicyDecimal } from '../../services/policy/policy-numbers.js';
 import { getKnownTokenDecimals } from '../../services/transaction/token-registry.js';
 import { cacheSimulation, getSimulation } from '../../services/transaction/simulation-cache.js';
@@ -767,10 +768,16 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     });
 
     const withdrawLastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
-    // Q9: a max-withdraw's amount is unknown until it executes — it is no
-    // longer counted as 0 (refused while a daily limit applies).
-    const pricing = amountWei === maxUint256
-      ? unknownAmountSpend(MAX_AMOUNT_UNPRICED)
+    // Q9: a max-withdraw's amount is unknown until it executes — it is never
+    // counted as 0. §5-7: it is outside the outflow count only when the built
+    // calldata PROVES it returns everything to the sender from the trusted
+    // pool (`max-withdrawal-proof.ts`); otherwise unpriced (refused while a
+    // daily limit applies).
+    const maxWithdrawal = amountWei === maxUint256
+      ? await maxWithdrawalPricing({ chainId: body.chainId, from: getAddress(agent.safeAddress), tx: withdrawTx })
+      : null;
+    const pricing = maxWithdrawal
+      ? maxWithdrawal.pricing
       : await priceTokenSpend(amountWei, getAddress(body.asset), decimals, body.chainId);
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
@@ -811,6 +818,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         amountIn: body.amount,
         simulation: sim as any,
         metadata: {
+          ...(maxWithdrawal?.exemption ? { volumeExemption: { ...maxWithdrawal.exemption } } : {}),
           queuePayload: {
             to: withdrawTx.to,
             data: withdrawTx.data,
@@ -1009,10 +1017,14 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     });
 
     const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
-    const pricing =
+    // §5-7: outside the outflow count only on proof (see the Aave route).
+    const maxWithdrawal =
       body.amount === 'max'
-        ? unknownAmountSpend(MAX_AMOUNT_UNPRICED)
-        : await priceTokenSpend(amountWei, getAddress(body.asset), decimals, body.chainId);
+        ? await maxWithdrawalPricing({ chainId: body.chainId, from: getAddress(agent.safeAddress), tx: withdrawTx })
+        : null;
+    const pricing = maxWithdrawal
+      ? maxWithdrawal.pricing
+      : await priceTokenSpend(amountWei, getAddress(body.asset), decimals, body.chainId);
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: withdrawTx.to,
@@ -1055,6 +1067,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         simulation: sim as any,
         metadata: {
           protocol: 'compound-v3',
+          ...(maxWithdrawal?.exemption ? { volumeExemption: { ...maxWithdrawal.exemption } } : {}),
           queuePayload: {
             to: withdrawTx.to,
             data: withdrawTx.data,
@@ -1249,9 +1262,12 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     });
 
     const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    // §5-7: never exempt. The vault is chosen by the agent, not a trusted
+    // protocol contract: its code, called by the agent's wallet, could pull
+    // any allowance the wallet ever gave it — no calldata proves otherwise.
     const pricing =
       body.amount === 'max'
-        ? unknownAmountSpend(MAX_AMOUNT_UNPRICED)
+        ? unknownAmountSpend(`${MAX_AMOUNT_UNPRICED} (an ERC-4626 vault chosen by the agent is not a trusted protocol contract)`)
         : await priceTokenSpend(amountWei, getAddress(body.asset), decimals, body.chainId);
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
@@ -2323,11 +2339,6 @@ function sendPolicyRefusal(reply: FastifyReply, result: PolicyValidationResult) 
   }
   return reply.code(403).send({ error: result.reason });
 }
-
-/** Q9: a `max` withdraw moves an amount known only once it executes. */
-const MAX_AMOUNT_UNPRICED =
-  'A "max" withdrawal moves an amount that is only known once it executes, so it cannot be priced in advance; ' +
-  'pass an explicit amount';
 
 function inList(list: readonly string[], address: string): boolean {
   const target = address.toLowerCase();

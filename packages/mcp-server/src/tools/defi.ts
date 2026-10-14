@@ -211,7 +211,9 @@ export const defiTools = [
     name: 'withdraw_erc4626',
     description:
       'Withdraws assets from any ERC-4626 compliant vault. ' +
-      'Use "max" to attempt a full withdrawal (vault may still limit to available liquidity).',
+      'Use "max" to attempt a full withdrawal (vault may still limit to available liquidity). ' +
+      'While your policy has a daily volume limit, "max" is refused (503 PRICE_UNAVAILABLE): a vault you choose cannot be ' +
+      'proven to return the funds only to your wallet, so pass an explicit amount.',
     inputSchema: z.object({
       vault: z.string().describe('ERC-4626 vault contract address to withdraw from.'),
       asset: z.string().describe('Underlying ERC-20 token address.'),
