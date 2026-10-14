@@ -172,14 +172,26 @@ an ENS identity. See `.env.example` for configuration details.
 
 | Field | Meaning | Enforced on |
 |-------|---------|-------------|
-| `maxValuePerTxEth` | native ETH per transaction | `/v1/transactions/*` (and on-chain via `syncOnChain`) |
+| `maxValuePerTxEth` | native ETH per transaction | `/v1/transactions/*` (and on-chain once the operator syncs it, see below) |
 | `maxValuePerTxUsd` | USD per spend denominated in USD (USDC at 1.00) | x402 `pay-resource` payments and ERC-8183 escrow budgets (`POST /v1/jobs`). **Not** `/v1/transactions/*` — extending it there is an open plan item. Off-chain only |
-| `allowedContracts` | call targets (`tx.to`) of ordinary transactions | `/v1/transactions/*` (and on-chain via `syncOnChain`); a native transfer's call target is its recipient |
+| `allowedContracts` | call targets (`tx.to`) of ordinary transactions | `/v1/transactions/*` (and on-chain once the operator syncs it); a native transfer's call target is its recipient |
 | `allowedRecipients` | addresses that may **receive** value from the agent | a transfer's `to` (native **and ERC-20**), the x402 `payTo`, the escrow job's provider wallet, the legacy A2A payee, the `to` of a batch action with native `value`. DeFi operations (swap, deposits, GMX…) pay the agent's own position and are not recipient-checked. Off-chain only |
 
-Empty lists are unrestricted. `syncOnChain` never carries the two off-chain
+Empty lists are unrestricted. The on-chain sync never carries the two off-chain
 fields (`AgentPolicyModule` has no slot for them); the answer lists them in
-`onChainSync.offChainOnlyFields`. Before Q8 the ETH field was read as USD for
+`onChainSync.offChainOnlyFields`.
+
+**On-chain sync (S8).** This route never changes the on-chain
+`AgentPolicyModule`. `syncOnChain: true` now answers
+`onChainSync: { status: "operator-sync-required", to, chainId, offChainOnlyFields, notice }`
+and **no calldata**: the old `actions` were meant for `execute_batch`, i.e.
+`AgentExecutor`, where the executor is `msg.sender` and the module answers
+`Unauthorized` — they could never succeed. The operator pushes the **stored**
+policy with `POST /admin/agents/:id/policy/sync` (admin credential, no body)
+and compares both sides with `GET /admin/agents/:id/policy/onchain`; see the
+admin table below.
+
+Before Q8 the ETH field was read as USD for
 USDC spends and `allowedContracts` was their payee list; migration 0021 copied
 both into the new fields for every existing policy (exact text, including a
 non-decimal value that means "no limit"), so those verdicts did not change. The
@@ -276,9 +288,8 @@ legacy paid job is not created). Without a daily limit nothing changes: the
 request proceeds and only its priced part is counted.
 
 **Batch calldata while a daily limit applies (owner decision "only authorised
-contracts").** Each action with calldata must be one of: a call to the agent's
-own `AgentPolicyModule` on that chain (on-chain policy sync — allowed, counted
-0); exactly an ERC-20 `transfer(to, amount)` / `transferFrom(from, to,
+contracts").** Each action with calldata must be one of: exactly an ERC-20
+`transfer(to, amount)` / `transferFrom(from, to,
 amount)` (strict ABI encoding; the token is the action's target) — priced and
 counted like any spend, its `to` checked against `allowedRecipients` and the
 token against `allowedTokens`; anything else (including `approve` and unknown
@@ -291,7 +302,12 @@ encoding (trailing bytes, dirty padding, truncated) is never "anything else":
 `403 { "code": "NON_CANONICAL_ERC20_CALL", "rule": "nonCanonicalErc20Call",
 "actionIndex", "selector" }` whatever `allowedContracts` lists (G1 review
 P3-4 — a token decodes it leniently and moves the amount).
-Without a daily limit the batch behaves as before.
+Without a daily limit the batch behaves as before. Whatever the policy, an
+action may not target the chain's `AgentPolicyModule`:
+`403 { "code": "POLICY_MODULE_TARGET", "actionIndex" }` (S8 — through the
+executor its admin calls always revert, and its unauthenticated
+`validateTransaction` would only restart a wallet's on-chain cooldown; until
+S8 such actions were exempt from the rules above as a "policy sync").
 
 **Once a signed transaction may have left the backend, the chain decides
 (A6b).** The hash of every signed attempt is recorded before it is sent. A
@@ -476,9 +492,11 @@ All admin routes require `x-admin-secret` header. Local-only by default.
 | GET | `/admin/agents/:id` | Agent detail |
 | GET | `/admin/agents/:id/transactions` | Agent transaction history |
 | GET | `/admin/transactions` | Global transaction log |
-| POST | `/admin/transactions/batch` | Operator batch execution, signed by the named agent's wallet and executed from its Safe. Body `{ agentId, chainId, actions: [{ to, value, data }] }`; `agentId` is required (`400` without it, `404` when unknown) — there is no fallback agent |
-| POST | `/admin/agents/:id/pause` | Emergency kill switch (toggle). Off-chain only; already-queued txs are rejected by the worker. Pausing deactivates the DB policy and records that the pause did it; when the toggle resumes, it behaves like `/resume` below. Body `{ "syncOnChain": true }` returns `emergencyPause`/`resume` calldata in `onChainSync` for the operator to broadcast |
-| POST | `/admin/agents/:id/resume` | Idempotent resume. Sets `agent.active = true` and re-activates the DB policy **only if the pause deactivated it** (`AgentPolicy.pausedByOperatorAt`); a policy that was inactive before the pause stays inactive. Response: `{ active: true, agentReactivated, policyReactivated, policyNote, onChainSync }`. Body `{ "syncOnChain": true }` returns `resume(safe)` calldata |
+| POST | `/admin/transactions/batch` | Operator batch execution, signed by the named agent's wallet and run through the AgentExecutor. Body `{ agentId, chainId, actions: [{ to, value, data }] }`; `agentId` is required (`400` without it, `404` when unknown) — there is no fallback agent. Not for the on-chain policy: an action targeting the chain's `AgentPolicyModule` is `403 POLICY_MODULE_TARGET` (the executor is `msg.sender` there and the module answers `Unauthorized`) |
+| GET | `/admin/agents/:id/policy/onchain` | S8: the stored policy and what the agent chain's `AgentPolicyModule` holds, side by side — `status` (`in-sync`, `pending`, `failed`, `out-of-sync`, `not-configured`, `no-db-policy`, `not-representable`, `unreadable`, `mismatch`), `db`, `onChain`, `differences`, `pending` / `lastFailure` sync transactions, `walletMode`, `warnings` |
+| POST | `/admin/agents/:id/policy/sync` | S8: push the **stored** policy on-chain. No body. The calls (`setPolicy`, or only `emergencyPause` / `resume`; whitelist updates adding **and** removing entries) are derived from the DB and the module's state, signed by the agent's own wallet and sent straight to the module (`msg.sender == safe` for an EOA agent) — never through the executor. The worker re-derives each call from the policy stored when it signs and fails a superseded one. `202 { status: "pending", transactions }`, `200` in sync, `409` `POLICY_SYNC_WALLET_MODE` (Safe mode) / `POLICY_MODULE_NOT_CONFIGURED` / `NO_DB_POLICY` / `POLICY_MODULE_MISMATCH` / `POLICY_SYNC_UNKNOWN_ENTRIES`, `422 POLICY_NOT_REPRESENTABLE` (e.g. `maxValuePerTxEth` "0"), `503 ONCHAIN_POLICY_UNREADABLE` |
+| POST | `/admin/agents/:id/pause` | Emergency kill switch (toggle). Already-queued txs are rejected by the worker. Pausing deactivates the DB policy and records that the pause did it; when the toggle resumes, it behaves like `/resume` below. Body `{ "syncOnChain": true }` then syncs the stored policy on-chain exactly like `/policy/sync` (the worker signs it although the agent is paused); `onChainSync` reports the outcome (`pending` / `in-sync` / `refused`), null when the chain has no module. A refusal never undoes the DB pause |
+| POST | `/admin/agents/:id/resume` | Idempotent resume. Sets `agent.active = true` and re-activates the DB policy **only if the pause deactivated it** (`AgentPolicy.pausedByOperatorAt`); a policy that was inactive before the pause stays inactive. Response: `{ active: true, agentReactivated, policyReactivated, policyNote, onChainSync }`. Body `{ "syncOnChain": true }` syncs the stored policy on-chain afterwards (also on a no-op) |
 | POST | `/admin/jobs/:id/reconcile` | Force a legacy payment job `COMPLETED` / `PAYMENT_FAILED` (`{ action, reason }`). Refuses an ERC-8183 job whose funds may still be on-chain (`409 USE_RESOLVE`) |
 | POST | `/admin/jobs/:id/resolve` | C3d operator decision on an ERC-8183 job held for review (contested, `CANCELLED`/`FAILED` while Submitted on-chain, or a settlement that keeps failing): `{ "decision": "pay" \| "refund" \| "payout-blocked", "verdict"?: "quality-rejected", "note", "operator"? }` → 202; the evaluator settles (`pay` = complete, rating 100; `refund` = reject without rating; `refund` + verdict = reject with `REASON_QUALITY_REJECTED`, rating 0; `payout-blocked` = reject with `REASON_PAYOUT_BLOCKED`, no rating). Recorded on the job (who, when, note). `409` `NOT_RESOLVABLE` / `SETTLEMENT_IN_PROGRESS` / `CHAIN_NOT_SUBMITTED`, `503 CHAIN_UNREADABLE` |
 | POST | `/admin/transactions/:id/approve` | Approve PENDING_APPROVAL tx (`409` when a concurrent approve/reject already moved it) |

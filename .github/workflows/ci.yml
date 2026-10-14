@@ -119,6 +119,54 @@ jobs:
       - working-directory: packages/contracts
         run: forge coverage --report summary
 
+  # Authorization guarantees on REAL local contracts (S8): each `*.anvil.ts`
+  # suite starts its own Anvil and deploys the Foundry artifacts; the ones that
+  # also need Postgres use DATABASE_URL (fail, not skip, on CI).
+  backend-anvil-test:
+    name: Backend Anvil Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: agentfi
+          POSTGRES_PASSWORD: agentfi
+          POSTGRES_DB: agentfi_anvil
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+      - working-directory: packages/contracts
+        run: forge build
+      - run: npm ci
+      - run: npx prisma generate --schema=packages/backend/src/db/schema.prisma
+      - name: Apply database migrations
+        working-directory: packages/backend
+        env:
+          DATABASE_URL: postgresql://agentfi:agentfi@localhost:5432/agentfi_anvil
+        run: npx prisma migrate deploy
+      - working-directory: packages/backend
+        env:
+          DATABASE_URL: postgresql://agentfi:agentfi@localhost:5432/agentfi_anvil
+          REDIS_URL: redis://localhost:6379
+          API_SECRET: test-secret-min-32-chars-long-here
+          ADMIN_SECRET: test-admin-secret-min-32-chars-long
+          OPERATOR_FEE_WALLET: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
+          ALCHEMY_API_KEY: test
+          TURNKEY_API_PUBLIC_KEY: test
+          TURNKEY_API_PRIVATE_KEY: test
+          TURNKEY_ORGANIZATION_ID: test
+        run: npm run test:anvil
+
   e2e-test:
     name: E2E Tests
     continue-on-error: true
