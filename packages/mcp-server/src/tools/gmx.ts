@@ -12,7 +12,8 @@ export const gmxTools = [
       return {
         markets: [
           { label: 'ETH/USD', marketToken: '0x70d95587d40A2caf56bd97485aB3Eec10Bee6336' },
-          { label: 'BTC/USD', marketToken: '0x47c031236e19d024b42f8AE6DA7A02043640408D' },
+          // S7: the official BTC/USD [WBTC.e-USDC] market (the old value had no code).
+          { label: 'BTC/USD', marketToken: '0x47c031236e19d024b42f8AE6780E44A573170703' },
           { label: 'ARB/USD', marketToken: '0xC25cEf6061Cf5dE5eb761b50E4743c1F5D7E5407' },
           { label: 'SOL/USD', marketToken: '0x09400D9DB990D5ed3f35D7be61DfAEB900Af03C9' },
           { label: 'LINK/USD', marketToken: '0x7f1fa204bb700853D36994DA19F830b6Ad18455C' },

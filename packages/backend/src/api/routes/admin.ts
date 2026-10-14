@@ -22,7 +22,7 @@ import {
   type OperatorResumeOutcome,
 } from '../../services/policy/policy.service.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
-import { moveReservationToDay, settleVolumeAfterFailure } from '../../services/policy/daily-volume.js';
+import { approvePendingTransaction, settleVolumeAfterFailure } from '../../services/policy/daily-volume.js';
 import { PnLService } from '../../services/billing/pnl.service.js';
 import { OperatorService } from '../../services/billing/operator.service.js';
 import { PolicySyncService, type PolicySyncOutcome } from '../../services/policy/policy-sync.service.js';
@@ -880,22 +880,32 @@ export async function adminRoutes(fastify: FastifyInstance) {
       const feeAmountWei = BigInt(queuePayload.feeAmountWei || '0');
       const feeBps = queuePayload.feeBps ?? 30;
 
-      // Conditional (A6): of two concurrent approvals only one moves the row
-      // out of PENDING_APPROVAL and enqueues it.
-      const approved = await db.transaction.updateMany({
-        where: { id: tx.id, status: 'PENDING_APPROVAL' },
-        data: { status: 'QUEUED' },
-      });
-      if (approved.count === 0) {
-        return reply.code(409).send({ error: 'Transaction is no longer PENDING_APPROVAL.' });
+      // A6c: one database transaction under the agent lock — still
+      // PENDING_APPROVAL (of two concurrent approvals only one moves the row
+      // out of it), agent and policy active and unexpired, the reservation
+      // moved to the approval day (it executes today) and that day's daily
+      // limit respected. Any refusal leaves the row PENDING_APPROVAL with its
+      // reservation untouched on its creation day.
+      let approval: Awaited<ReturnType<typeof approvePendingTransaction>>;
+      try {
+        approval = await approvePendingTransaction(db, tx.id);
+      } catch (err) {
+        logger.error({ transactionId: tx.id, err: (err as Error)?.message ?? String(err) }, 'Admin approval could not be recorded');
+        return reply.code(503).send({
+          error: 'The approval could not be recorded; the transaction is still PENDING_APPROVAL. Retry the approval.',
+          code: 'APPROVAL_UNAVAILABLE',
+        });
       }
-
-      // A6b: it executes today, so its reservation counts today — not on the
-      // (earlier) day it was requested. Not refused by today's limit: the
-      // operator approved it. A failure keeps the creation day (as before).
-      await moveReservationToDay(db, tx.id).catch((err: unknown) =>
-        logger.error({ transactionId: tx.id, err: (err as Error)?.message ?? String(err) }, 'Approved transaction: reservation left on its creation day'),
-      );
+      if (!approval.ok) {
+        // An ordinary approval never exceeds the daily limit; there is no
+        // override (it would need a separate, explicit, audited operator act).
+        logger.warn({ transactionId: tx.id, code: approval.code, details: approval.details }, 'Admin approval refused');
+        return reply.code(409).send({
+          error: approval.reason,
+          code: approval.code,
+          ...(approval.details ? { details: approval.details } : {}),
+        });
+      }
 
       // A6b: the row's own job id — a crash between the QUEUED write above and
       // this add leaves a QUEUED row the stranded-QUEUED sweep re-enqueues
@@ -926,6 +936,8 @@ export async function adminRoutes(fastify: FastifyInstance) {
         // row no worker will ever run (A6 review). A6b: unless the add did
         // reach Redis (a timeout after the write) and a worker already stamped
         // a broadcast attempt — that row is in flight and stays QUEUED.
+        // A6c: the reservation stays on the approval day it was checked
+        // against (counted once); a later approval revalidates it again.
         const reverted = await db.transaction.updateMany({
           where: { id: tx.id, status: 'QUEUED', txHash: null, broadcastAttemptedAt: null },
           data: { status: 'PENDING_APPROVAL' },
@@ -938,7 +950,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
         return reply.code(503).send({ error: 'Could not enqueue the transaction; it is still PENDING_APPROVAL. Retry the approval.' });
       }
 
-      logger.info({ transactionId: tx.id }, 'Admin approved transaction');
+      logger.info({ transactionId: tx.id, volumeDay: approval.day, reservationMoved: approval.moved }, 'Admin approved transaction');
       return { status: 'QUEUED' };
     },
   );

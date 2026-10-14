@@ -127,7 +127,12 @@ async function listen(server: Server): Promise<string> {
 
 beforeAll(async () => {
   h.urls.push(await listen(primary.server), await listen(secondary.server));
-});
+  // Load the queue module (a large graph) here, outside the test's 5 s budget:
+  // under a loaded full local run the cold import alone exceeded it (item 7,
+  // 2026-10-14: 5 of 5 full runs, on main too; the file passes alone) — the
+  // pattern 51ce9df fixed in payment-recovery.erc8183.test.ts.
+  await import('../queues/transaction.queue.js');
+}, 60_000);
 
 afterAll(async () => {
   await Promise.all([primary.server, secondary.server].map((s) => new Promise((resolve) => s.close(resolve))));

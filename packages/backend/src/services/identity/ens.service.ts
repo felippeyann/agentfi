@@ -36,8 +36,12 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { getChain, getPrimaryRpcUrl } from '../../config/chains.js';
 import { logger } from '../../api/middleware/logger.js';
 
-// ENS Registry (same address on every supported network).
-const ENS_REGISTRY: Address = '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1E';
+// ENS Registry (same address on every supported network). Source:
+// docs.ens.domains/learn/deployments ("Registry"); on-chain (2026-10-14)
+// owner(root node) = the ENS Root 0xaB528d626EC275E3faD363fF1393A41F581c5897.
+// S7: the last character was mis-cased ("…2e1E", invalid EIP-55), so viem
+// refused every write and the best-effort subdomain registration never ran.
+const ENS_REGISTRY: Address = '0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e';
 
 // Public Resolver — per-network, but mainnet's is the canonical default.
 // Operators on other chains should set ENS_PUBLIC_RESOLVER explicitly.

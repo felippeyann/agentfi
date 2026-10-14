@@ -113,8 +113,8 @@ vi.mock('../config/contracts.js', async () => {
   const actual = await vi.importActual<typeof import('../config/contracts.js')>('../config/contracts.js');
   return {
     ...actual,
-    // Placeholder addresses: nothing is broadcast. (The configured Arbitrum GMX
-    // OrderVault / Router fail viem's EIP-55 check — see the PR's findings.)
+    // Placeholder addresses: nothing is broadcast. (The real ones are covered
+    // by contracts.addresses.routes.db.test.ts since S7.)
     getContracts: (chainId: number) => ({
       ...actual.getContracts(chainId),
       executor: '0x00000000000000000000000000000000000E8ec0',
@@ -389,7 +389,13 @@ describeDb('Q9 — trusted prices on the real routes (Postgres)', () => {
 
   // ── Every operation that counts against the daily limit ───────────────────
 
-  type Op = { name: string; url: string; body: Record<string, unknown>; usd: number; priceable: boolean };
+  /**
+   * `exempt` (§5-7): a max withdrawal from the trusted Aave pool / Comet back
+   * to the agent's own wallet, proven from its calldata — outside the outflow
+   * count (accepted, nothing reserved, marked). `max-withdrawal.routes.db.test.ts`
+   * covers the proof on the routes.
+   */
+  type Op = { name: string; url: string; body: Record<string, unknown>; usd: number; priceable: boolean; exempt?: boolean };
   const t = { chainId: TESTNET };
   const OPS: Op[] = [
     { name: 'transfer native', url: '/v1/transactions/transfer', body: { ...t, token: 'ETH', to: RECIPIENT, amount: '0.01' }, usd: 20, priceable: true },
@@ -417,10 +423,10 @@ describeDb('Q9 — trusted prices on the real routes (Postgres)', () => {
     },
     { name: 'Aave deposit', url: '/v1/transactions/deposit', body: { ...t, asset: USDC_84532, amount: '25' }, usd: 25, priceable: true },
     { name: 'Aave withdraw', url: '/v1/transactions/withdraw', body: { ...t, asset: USDC_84532, amount: '25' }, usd: 25, priceable: true },
-    { name: 'Aave withdraw max', url: '/v1/transactions/withdraw', body: { ...t, asset: USDC_84532, amount: 'max' }, usd: 0, priceable: false },
+    { name: 'Aave withdraw max', url: '/v1/transactions/withdraw', body: { ...t, asset: USDC_84532, amount: 'max' }, usd: 0, priceable: false, exempt: true },
     { name: 'Compound supply', url: '/v1/transactions/supply-compound', body: { ...t, asset: USDC_84532, amount: '25' }, usd: 25, priceable: true },
     { name: 'Compound withdraw', url: '/v1/transactions/withdraw-compound', body: { ...t, asset: USDC_84532, amount: '25' }, usd: 25, priceable: true },
-    { name: 'Compound withdraw max', url: '/v1/transactions/withdraw-compound', body: { ...t, asset: USDC_84532, amount: 'max' }, usd: 0, priceable: false },
+    { name: 'Compound withdraw max', url: '/v1/transactions/withdraw-compound', body: { ...t, asset: USDC_84532, amount: 'max' }, usd: 0, priceable: false, exempt: true },
     { name: 'ERC-4626 deposit', url: '/v1/transactions/deposit-erc4626', body: { ...t, vault: RECIPIENT, asset: USDC_84532, amount: '25' }, usd: 25, priceable: true },
     { name: 'ERC-4626 withdraw', url: '/v1/transactions/withdraw-erc4626', body: { ...t, vault: RECIPIENT, asset: USDC_84532, amount: '25' }, usd: 25, priceable: true },
     { name: 'ERC-4626 withdraw max', url: '/v1/transactions/withdraw-erc4626', body: { ...t, vault: RECIPIENT, asset: USDC_84532, amount: 'max' }, usd: 0, priceable: false },
@@ -434,10 +440,20 @@ describeDb('Q9 — trusted prices on the real routes (Postgres)', () => {
     { name: 'batch native value', url: '/v1/transactions/batch', body: { ...t, actions: [{ to: RECIPIENT, value: '10000000000000000' }] }, usd: 20, priceable: true },
   ];
 
+  /** §5-7: a proven self-returning max withdrawal — accepted, nothing reserved, marked. */
+  async function expectExempt(agentId: string, res: { statusCode: number; body: string }) {
+    expect(res.statusCode, res.body).toBe(202);
+    expect(await onlyRow(agentId)).toMatchObject({ volumeState: null, volumeReservedUsd: null, volumePriceSource: null });
+    const row = await m.db.transaction.findFirst({ where: { agentId }, select: { metadata: true } });
+    expect((row?.metadata as Record<string, unknown>)['volumeExemption']).toMatchObject({ rule: 'max-withdrawal-to-own-wallet' });
+    expect(await volume(agentId)).toBe(0);
+  }
+
   describe('every counted operation on 84532', () => {
-    it.each(OPS)('$name — unpriced with a daily limit: 503 PRICE_UNAVAILABLE before anything is simulated or reserved', async (op) => {
+    it.each(OPS)('$name — unpriced with a daily limit: 503 PRICE_UNAVAILABLE before anything is simulated or reserved (a proven max withdrawal: exempt)', async (op) => {
       const agent = await mkAgent([TESTNET]);
       const res = await post(await app(agent.id), op.url, op.body);
+      if (op.exempt) return expectExempt(agent.id, res);
       expect(res.statusCode, res.body).toBe(503);
       expect(res.json()).toMatchObject({ code: 'PRICE_UNAVAILABLE' });
       expect(await rows(agent.id)).toHaveLength(0);
@@ -454,10 +470,11 @@ describeDb('Q9 — trusted prices on the real routes (Postgres)', () => {
       expect(await volume(agent.id)).toBe(0);
     });
 
-    it.each(OPS)('$name — with synthetic test prices: reserved with source "synthetic" (a max withdrawal stays unpriced)', async (op) => {
+    it.each(OPS)('$name — with synthetic test prices: reserved with source "synthetic" (an unproven max withdrawal stays unpriced, a proven one exempt)', async (op) => {
       process.env['SYNTHETIC_TEST_PRICES_USD'] = SYNTHETIC_ALL;
       const agent = await mkAgent([TESTNET]);
       const res = await post(await app(agent.id), op.url, op.body);
+      if (op.exempt) return expectExempt(agent.id, res);
       if (!op.priceable) {
         expect(res.statusCode, res.body).toBe(503);
         expect(res.json().error).toMatch(/"max" withdrawal/);
