@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (S7 — hard-coded third-party addresses; no migration)
+
+- **Four contract addresses were wrong, not mis-cased.** Base `aavePoolAddressProvider` and `uniswapV3Quoter`, Arbitrum `gmxRouter` and `gmxOrderVault` (`config/contracts.ts`) failed EIP-55 and had **no code** on their chains. Replaced by the official deployments (Aave address book, docs.uniswap.org, gmx-synthetics deployments — each pinned to a commit in a comment), checked on-chain with a view that binds each one to its protocol. Aave supply / withdraw on Base and GMX open / close on Arbitrum answered `500` before.
+- **Base swaps had no slippage floor.** The swap route's own QuoterV2 table held a second wrong Base address; viem refused it, the quote failed silently and every Base swap was built with `amountOutMinimum = 0`. The table moved to `config/contracts.ts` (`UNISWAP_V3_QUOTER_V2`) with the official Base QuoterV2.
+- **GMX `BTC/USD` market** (backend and MCP `list_gmx_markets`) was an address unknown to GMX's DataStore (`500`); now the BTC/USD [WBTC.e-USDC] market. **ENS registry** was mis-cased: every subdomain write was refused (registration is best-effort, so it silently never happened).
+- **Known limitation (not fixed):** the configured GMX ExchangeRouter is a superseded 2023 deployment that no longer holds GMX's `ROUTER_PLUGIN` / `CONTROLLER` roles, and the builder encodes an older `CreateOrderParams`: GMX orders still cannot execute (they fail at simulation). Updating the integration is an open question in the S7 PR.
+- Tests: every hard-coded address in backend / MCP source must be EIP-55 (`contracts.addresses.test.ts`); the affected routes on real Postgres (`contracts.addresses.routes.db.test.ts`); on-chain identity on Base and Arbitrum forks (`contracts.addresses.fork.test.ts`, opt-in with `S7_FORK_RPC_8453` / `S7_FORK_RPC_42161`).
+
 ### Fixed (X5 — MCP `pay_agent`; no migration)
 
 - **`pay_agent` can pay.** The tool posted `{ recipient, amount, token: <symbol>, chainId, reason }` to `POST /v1/transactions/transfer`, which takes `{ to, token: "ETH" | <ERC-20 address>, amount, chainId, idempotencyKey? }`: every call was refused `400 VALIDATION_FAILED` (`to` required). It now sends the generated `TransferRequest` type: `to` = `recipient_address`, `token_symbol` resolved through the MCP token registry (`ETH` = native; an unknown symbol, a symbol of another chain or an address is refused `INVALID_INPUT` before any request), optional `idempotency_key` → `idempotencyKey`. `reason` is no longer sent (the route has no such field and dropped it silently); it is echoed in the result.
