@@ -452,13 +452,9 @@ export class PolicySyncService {
     }
     const desired = derived.desired;
     const warnings: string[] = [];
-    if (desired.cooldownSeconds > 0n) {
-      warnings.push(
-        `cooldown ${desired.cooldownSeconds} s: AgentPolicyModule applies the cooldown to every ACTION, so once synced any executor ` +
-          'batch with more than one action reverts CooldownActive, and anyone can restart the cooldown through the unauthenticated ' +
-          'validateTransaction (contract findings in the S8 PR)',
-      );
-    }
+    // (The S8 contract findings — cooldown per action, unauthenticated
+    // validateTransaction — are fixed in AgentPolicyModule: one cooldown per
+    // execution, validations by the bound executor only.)
     if (walletMode === 'safe') {
       warnings.push('Safe mode: the sync cannot be signed by the agent wallet (msg.sender would not be the safe); use the operator key');
     }

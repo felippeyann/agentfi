@@ -36,6 +36,7 @@ function chain(overrides: Partial<Chain> = {}): Chain {
       [`${EXECUTOR.toLowerCase()}.feeWallet`]: FEE_WALLET,
       [`${EXECUTOR.toLowerCase()}.feeBps`]: 30n,
       [`${MODULE.toLowerCase()}.operator`]: OPERATOR,
+      [`${MODULE.toLowerCase()}.executor`]: EXECUTOR,
       ...(overrides.views ?? {}),
     },
     ...(overrides.down ? { down: true } : {}),
@@ -106,6 +107,13 @@ describe('checkPolicyStacks', () => {
     const noOperator = await check(chain(), { ...expected, operator: null });
     expect(noOperator.problems).toEqual([]);
     expect(noOperator.notes).toEqual([expect.stringMatching(/no POLICY_OPERATOR_ADDRESS_84532/)]);
+  });
+
+  it('module.executor() must be the configured executor (bindExecutor): unbound or another executor → mismatch', async () => {
+    const unbound = await check(chain({ views: { [`${MODULE.toLowerCase()}.executor`]: '0x0000000000000000000000000000000000000000' } }));
+    expect(unbound.problems).toEqual([expect.stringMatching(/not bound to any executor \(bindExecutor was never called\)/)]);
+    const other = await check(chain({ views: { [`${MODULE.toLowerCase()}.executor`]: OTHER } }));
+    expect(other.problems).toEqual([expect.stringMatching(/validates only executor 0x1111.*not EXECUTOR_ADDRESS_84532/)]);
   });
 
   it('module only (no executor): its code and operator are verified', async () => {

@@ -284,6 +284,15 @@ export async function setup(): Promise<void> {
     hash: executorHash,
   });
   const executorAddress = executorReceipt.contractAddress!;
+  // The module validates only the executor bound to it (bindExecutor, once —
+  // script/Deploy.s.sol does it in the same broadcast).
+  const bindHash = await walletClient.writeContract({
+    address: policyAddress,
+    abi: policyAbi,
+    functionName: 'bindExecutor',
+    args: [executorAddress],
+  });
+  await publicClient.waitForTransactionReceipt({ hash: bindHash });
   console.log('[e2e] AgentExecutor deployed at', executorAddress);
 
   // 4 ─ Propagate addresses to test worker via process.env

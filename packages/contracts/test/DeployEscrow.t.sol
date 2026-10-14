@@ -294,6 +294,20 @@ contract DeployEscrowScriptTest is Test {
         assertEq(executor.feeWallet(), feeWallet);
         assertEq(executor.feeBps(), 25);
         assertEq(address(legacy), address(0), "the legacy EscrowModule is not deployed by default");
+        // S9 / owner decision 2026-10-14: the executor is bound to the module in the same broadcast,
+        // once; the module then validates only that executor.
+        assertEq(policy.executor(), address(executor), "the executor is bound in the deploy broadcast");
+        vm.prank(operator);
+        vm.expectRevert(AgentPolicyModule.ExecutorAlreadyBound.selector);
+        policy.bindExecutor(address(0xBEEF));
+
+        // PRIVATE_KEY set: the key is the deployer of the module, so the binding (deployer-only
+        // besides the operator) still happens inside the broadcast.
+        vm.setEnv("PRIVATE_KEY", vm.toString(uint256(0xB0B)));
+        (policy, executor,) = coreScript.run();
+        assertEq(policy.deployer(), vm.addr(0xB0B));
+        assertEq(policy.executor(), address(executor));
+        vm.setEnv("PRIVATE_KEY", "0");
 
         vm.setEnv("DEPLOY_LEGACY_ESCROW_MODULE", "true");
         (,, legacy) = coreScript.run();

@@ -49,6 +49,7 @@ import {
   BaseError,
   decodeErrorResult,
   encodeFunctionData,
+  getAddress,
   zeroAddress,
   type Abi,
   type Address,
@@ -211,48 +212,54 @@ describe('S8 — the authority the module already defines', () => {
   });
 });
 
-describe('S8 findings on the contracts (no fix here — reported)', () => {
-  it('the on-chain cooldown applies per ACTION: with a cooldown set, any executor batch of two actions reverts CooldownActive', async () => {
-    const safe = stranger; // a fresh EOA-mode agent for this case
-    expect(await send(safe, policyModule, await setPolicyCalldata(safe.address, '1', 60, true))).toBe('success');
-    const twoActions = encodeFunctionData({
+/**
+ * The two contract findings of S8 were fixed in AgentPolicyModule before C4
+ * (owner decision 2026-10-14): before, a 2-action batch reverted CooldownActive
+ * once a cooldown was set, and a stranger's validateTransaction(victim, …)
+ * restarted the victim's cooldown. These run against the fixed build.
+ */
+describe('S8 contract findings — fixed (cooldown once per execution; validations by the bound executor only)', () => {
+  const batchOf = (n: number) =>
+    encodeFunctionData({
       abi: AGENT_EXECUTOR_ABI,
       functionName: 'executeBatch',
-      args: [[
-        { target: deployer.address, value: 0n, token: zeroAddress, data: '0x' },
-        { target: deployer.address, value: 0n, token: zeroAddress, data: '0x' },
-      ]],
+      args: [Array.from({ length: n }, () => ({ target: deployer.address, value: 0n, token: zeroAddress, data: '0x' as Hex }))],
     });
-    // The module's error bubbles up raw (validateTransaction is not wrapped in ActionFailed):
-    // the second action sees the timestamp the first one just wrote (elapsed 0 < 60).
-    const reverted = await revertOf(safe.address, executor, twoActions, MODULE_ABI);
-    expect(reverted.errorName).toBe('CooldownActive');
-    expect(reverted.args).toEqual([60n]);
-    // One action alone passes.
-    const oneAction = encodeFunctionData({
-      abi: AGENT_EXECUTOR_ABI,
-      functionName: 'executeBatch',
-      args: [[{ target: deployer.address, value: 0n, token: zeroAddress, data: '0x' }]],
-    });
-    await expect(chain.publicClient.call({ account: safe.address, to: executor, data: oneAction })).resolves.toBeDefined();
+  const lastTx = (safe: Address) =>
+    chain.publicClient.readContract({ address: policyModule, abi: MODULE_ABI, functionName: 'getLastTxTimestamp', args: [safe] }) as Promise<bigint>;
+
+  it('the module is bound to this executor (bindExecutor in the deployment)', async () => {
+    expect(await chain.publicClient.readContract({ address: policyModule, abi: MODULE_ABI, functionName: 'executor' })).toBe(getAddress(executor));
   });
 
-  it('validateTransaction has no caller check: anyone can restart an agent’s on-chain cooldown and block its executor transactions', async () => {
+  it('a 2-action batch under a 60 s cooldown passes and stamps the cooldown once; a second batch inside it reverts', async () => {
+    const safe = stranger; // a fresh EOA-mode agent for this case
+    expect(await send(safe, policyModule, await setPolicyCalldata(safe.address, '1', 60, true))).toBe('success');
+    expect(await send(safe, executor, batchOf(2))).toBe('success');
+    const stamped = await lastTx(safe.address);
+    expect(stamped).toBeGreaterThan(0n);
+    const reverted = await revertOf(safe.address, executor, batchOf(2), MODULE_ABI);
+    expect(reverted.errorName).toBe('CooldownActive');
+    await chain.rpc('evm_increaseTime', [61]);
+    await chain.rpc('evm_mine', []);
+    expect(await send(safe, executor, batchOf(3))).toBe('success');
+    expect(await lastTx(safe.address)).toBeGreaterThan(stamped);
+  });
+
+  it('a stranger can no longer restart an agent’s cooldown: validateTransaction / recordExecution answer Unauthorized', async () => {
     const victim = otherAgent;
-    // The victim has a policy with a 60 s cooldown and waits it out.
     expect(await send(operator, policyModule, await setPolicyCalldata(victim.address, '1', 60, true))).toBe('success');
     await chain.rpc('evm_increaseTime', [3600]);
     await chain.rpc('evm_mine', []);
-    const oneAction = encodeFunctionData({
-      abi: AGENT_EXECUTOR_ABI,
-      functionName: 'executeBatch',
-      args: [[{ target: deployer.address, value: 0n, token: zeroAddress, data: '0x' }]],
-    });
-    await expect(chain.publicClient.call({ account: victim.address, to: executor, data: oneAction })).resolves.toBeDefined();
+    const before = await lastTx(victim.address);
 
-    // A stranger calls validateTransaction(victim, …) directly: no Unauthorized.
     const grief = encodeFunctionData({ abi: MODULE_ABI, functionName: 'validateTransaction', args: [victim.address, deployer.address, 0n, zeroAddress] });
-    expect(await send(stranger, policyModule, grief)).toBe('success');
-    expect((await revertOf(victim.address, executor, oneAction, MODULE_ABI)).errorName).toBe('CooldownActive');
+    expect((await revertOf(stranger.address, policyModule, grief, MODULE_ABI)).errorName).toBe('Unauthorized');
+    const stamp = encodeFunctionData({ abi: MODULE_ABI, functionName: 'recordExecution', args: [victim.address] });
+    expect((await revertOf(stranger.address, policyModule, stamp, MODULE_ABI)).errorName).toBe('Unauthorized');
+    expect(await send(stranger, policyModule, stamp)).toBe('reverted');
+
+    expect(await lastTx(victim.address)).toBe(before);
+    await expect(chain.publicClient.call({ account: victim.address, to: executor, data: batchOf(1) })).resolves.toBeDefined();
   });
 });

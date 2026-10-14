@@ -17,8 +17,10 @@
  *      when configured (otherwise the policy the backend syncs would never be
  *      enforced — reproduced on Anvil);
  *   4. the module (the configured one, else the executor's) runs this build's
- *      AgentPolicyModule, and `operator()` = POLICY_OPERATOR_ADDRESS_<id>
- *      (required in production / staging when a module is configured).
+ *      AgentPolicyModule, `executor()` = EXECUTOR_ADDRESS_<id> (the one-time
+ *      `bindExecutor` of the deployment; the module validates only that
+ *      executor) and `operator()` = POLICY_OPERATOR_ADDRESS_<id> (required in
+ *      production / staging when a module is configured).
  * A code or view that answers "not me" is a MISMATCH (FATAL in production /
  * staging); only a transport error or a timeout is UNREADABLE (operations
  * wait, nothing fails).
@@ -67,6 +69,8 @@ class StackMismatchError extends Error {
     super(problems.join('; '));
   }
 }
+
+const ZERO = '0x0000000000000000000000000000000000000000';
 
 function same(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
@@ -139,7 +143,26 @@ async function readOnce(
     const moduleLabel = expected.policyModule ? `POLICY_MODULE_ADDRESS_${expected.chainId}` : 'executor.policyModule()';
     const identity = await codeIdentityProblems(readCode, [{ name: 'AgentPolicyModule', address: module, label: `${label}: ${moduleLabel}` }]);
     if (identity.length > 0) throw new StackMismatchError(identity);
-    const operator = await view(read, module, AGENT_POLICY_MODULE_ABI_FULL as unknown as Abi, 'operator', 'policyModule');
+    const moduleAbi = AGENT_POLICY_MODULE_ABI_FULL as unknown as Abi;
+    // Owner decision 2026-10-14: the module validates only the executor bound once with bindExecutor.
+    const boundExecutor = getAddress(String(await view(read, module, moduleAbi, 'executor', 'policyModule')));
+    if (expected.executor) {
+      if (boundExecutor === ZERO) {
+        throw new StackMismatchError([
+          `${label}: the policy module is not bound to any executor (bindExecutor was never called) — every executor call of an ` +
+            'agent with an on-chain policy would revert ExecutorNotBound',
+        ]);
+      }
+      if (!same(boundExecutor, expected.executor)) {
+        throw new StackMismatchError([
+          `${label}: the policy module validates only executor ${boundExecutor} (bindExecutor), not EXECUTOR_ADDRESS_${expected.chainId}=${expected.executor} ` +
+            '(every executor call of an agent with an on-chain policy would revert Unauthorized)',
+        ]);
+      }
+    } else {
+      notes.push(`${label}: no EXECUTOR_ADDRESS_${expected.chainId} — the module is bound to executor ${boundExecutor === ZERO ? 'none' : boundExecutor}`);
+    }
+    const operator = await view(read, module, moduleAbi, 'operator', 'policyModule');
     if (expected.operator === null) {
       notes.push(`${label}: no POLICY_OPERATOR_ADDRESS_${expected.chainId} — the module's operator() (${String(operator)}) is not compared`);
     } else if (!same(String(operator), expected.operator)) {

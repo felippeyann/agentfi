@@ -19,6 +19,7 @@ contract AgentExecutorInvariants is StdInvariant, Test {
     function setUp() public {
         policyModule = new AgentPolicyModule(operator);
         executor = new AgentExecutor(address(policyModule), feeWallet, FEE_BPS);
+        policyModule.bindExecutor(address(executor));
         handler = new AgentExecutorHandler(executor, policyModule, FEE_BPS);
         
         // Target the handler for stateful fuzzing
