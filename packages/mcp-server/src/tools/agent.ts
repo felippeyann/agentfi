@@ -193,13 +193,16 @@ export const agentTools = [
       'TIGHTENS the agent\'s own operational policy (lower per-transaction caps, narrower token/contract/recipient whitelists). ' +
       'The change applies IMMEDIATELY — there is no operator approval step. ' +
       'Units: max_value_per_tx_eth caps native ETH on ordinary transactions; max_value_per_tx_usd caps each USDC ' +
-      'payment (pay_for_resource) and each escrowed job budget (post_job). Lists: allowed_contracts are the contracts ' +
+      'payment (pay_for_resource) and each escrowed job budget (post_job); max_outflow_per_tx_usd caps, in USD, each ' +
+      'ordinary outflow (transfer, swap input, deposit, GMX collateral, batch, A2A payment). While your ' +
+      'max_outflow_per_tx_usd is not configured (null), those outflows are refused with USD_CAP_NOT_CONFIGURED: only ' +
+      'the operator can configure it. Lists: allowed_contracts are the contracts ' +
       'your transactions may call; allowed_recipients are the addresses that may RECEIVE value from you (transfer ' +
-      'recipient, x402 payee, escrow provider). The USD cap and the recipient list are enforced by the backend only ' +
+      'recipient, x402 payee, escrow provider). The USD caps and the recipient list are enforced by the backend only ' +
       '(not synced on-chain). ' +
       'This tool can ONLY tighten: the backend rejects any change that loosens the policy with 403 ' +
-      '(raising max_value_per_tx_eth or max_value_per_tx_usd; adding an address that is not already whitelisted, or ' +
-      'clearing a whitelist). ' +
+      '(raising max_value_per_tx_eth, max_value_per_tx_usd or max_outflow_per_tx_usd, or setting max_outflow_per_tx_usd ' +
+      'while it is not configured; adding an address that is not already whitelisted, or clearing a whitelist). ' +
       'Loosening requires the operator credential (API_SECRET) — if you need higher limits or new whitelisted ' +
       'tokens/contracts/recipients to complete a mission, ask the operator instead of retrying. ' +
       'Provide a `reason` for audit — the backend writes it to its policy audit log line (it is not stored ' +
@@ -218,6 +221,16 @@ export const agentTools = [
         .optional()
         .describe(
           'New max USD per USDC payment / escrowed job budget as a plain decimal string (e.g. "5"). Must be <= the current limit.',
+        ),
+      max_outflow_per_tx_usd: z
+        .string()
+        .regex(/^\d+(\.\d+)?$/, 'must be a plain decimal string such as "100"')
+        .nullable()
+        .optional()
+        .describe(
+          'New max USD per ordinary outflow (transfer, swap input, deposit, GMX collateral, batch, A2A payment) as a plain ' +
+            'decimal string (e.g. "100"), or null to block those outflows. Must be <= the current limit; it cannot be set ' +
+            'while not configured (the operator configures it).',
         ),
       allowed_tokens: z
         .array(z.string())
@@ -245,6 +258,7 @@ export const agentTools = [
     handler: async (input: {
       max_value_per_tx_eth?: string;
       max_value_per_tx_usd?: string;
+      max_outflow_per_tx_usd?: string | null;
       allowed_tokens?: string[];
       allowed_contracts?: string[];
       allowed_recipients?: string[];
@@ -256,6 +270,8 @@ export const agentTools = [
       const result = await api.patch(`/v1/agents/${me.id}/policy`, {
         maxValuePerTxEth: input.max_value_per_tx_eth,
         maxValuePerTxUsd: input.max_value_per_tx_usd,
+        // null is sent as null (block outflows); undefined is dropped by JSON (unchanged).
+        maxOutflowPerTxUsd: input.max_outflow_per_tx_usd,
         allowedTokens: input.allowed_tokens,
         allowedContracts: input.allowed_contracts,
         allowedRecipients: input.allowed_recipients,

@@ -64,14 +64,17 @@ export const statusTools = [
       'Returns the current operational limits and restrictions for this agent. ' +
       'Check this to understand what transactions are allowed before attempting them. ' +
       'maxValuePerTxEth caps native ETH per ordinary transaction; maxValuePerTxUsd caps each USDC payment and escrowed ' +
-      'job budget; allowedContracts are the contracts you may call; allowedRecipients are the addresses that may receive ' +
-      'value from you (empty list = unrestricted).',
+      'job budget; maxOutflowPerTxUsd caps each ordinary outflow (transfer, swap input, deposit, GMX collateral, batch, ' +
+      'A2A payment) in USD — null means not configured, and those outflows are refused (USD_CAP_NOT_CONFIGURED) until ' +
+      'the operator sets it; allowedContracts are the contracts you may call; allowedRecipients are the addresses that ' +
+      'may receive value from you (empty list = unrestricted).',
     inputSchema: z.object({}),
     handler: async (_input: Record<string, never>) => {
       const agentInfo = await api.get<{
         policy: {
           maxValuePerTxEth: string;
           maxValuePerTxUsd: string;
+          maxOutflowPerTxUsd: string | null;
           maxDailyVolumeUsd: string;
           allowedContracts: string[];
           allowedRecipients: string[];
@@ -91,6 +94,7 @@ export const statusTools = [
         policy: agentInfo.policy ?? {
           maxValuePerTxEth: 'unlimited (no policy set)',
           maxValuePerTxUsd: 'unlimited (no policy set)',
+          maxOutflowPerTxUsd: 'unlimited (no policy set)',
           allowedContracts: [],
           allowedRecipients: [],
           allowedTokens: [],
