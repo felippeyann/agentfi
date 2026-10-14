@@ -21,6 +21,7 @@ import {
   checkEscrowDeployments,
   escrowBootVerdict,
   type ChainIdReader,
+  type CodeReader,
   type ContractReader,
   type EscrowBootVerdict,
 } from './escrow-boot-check.js';
@@ -48,6 +49,12 @@ function reader(chainId: number): ContractReader {
 function chainIdReader(chainId: number): ChainIdReader {
   const client = createChainPublicClient(chainId);
   return () => client.getChainId();
+}
+
+/** S9: `eth_getCode` — the escrow and hook must run this build's code. */
+export function codeReader(chainId: number): CodeReader {
+  const client = createChainPublicClient(chainId);
+  return (address) => client.getCode({ address });
 }
 
 function applyVerdict(role: ProcessRole, verdict: EscrowBootVerdict, opts: { quietUnreadable?: boolean } = {}): void {
@@ -125,6 +132,7 @@ function startRecheckLoop(role: ProcessRole): void {
         chains,
         reader,
         chainIdReader,
+        codeReader,
         attempts: 1,
         timeoutMs: Math.min(10_000, intervalMs),
       });
@@ -158,7 +166,7 @@ export async function runEscrowBootCheck(role: ProcessRole): Promise<EscrowBootV
   if (chains.length === 0) return null;
   let verdict: EscrowBootVerdict;
   try {
-    const checks = await checkEscrowDeployments({ chains, reader, chainIdReader });
+    const checks = await checkEscrowDeployments({ chains, reader, chainIdReader, codeReader });
     verdict = escrowBootVerdict(env.NODE_ENV, checks);
     const transitions = recordEscrowChecks(checks, chains);
     applyVerdict(role, verdict);

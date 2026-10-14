@@ -33,6 +33,7 @@ import { cacheSimulation, getSimulation } from '../../services/transaction/simul
 import { getContracts, UNISWAP_V3_QUOTER_V2 } from '../../config/contracts.js';
 import { createChainPublicClient } from '../../config/chains.js';
 import { logger } from '../middleware/logger.js';
+import { refuseUnverifiedContracts } from '../contracts-gate.js';
 import { sanitizeContextFromEnv, sanitizeErrorFields, type SanitizeContext } from '../errors/sanitize.js';
 import { notificationService } from '../../services/notification.service.js';
 import type { Address } from 'viem';
@@ -351,6 +352,8 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       routedViaExecutor: wrapped.routedViaExecutor,
       feeWei: wrapped.feeWei.toString(),
     }, 'Executor wrap');
+    // S9: the executor receives this transaction's value — only once it is verified.
+    if (wrapped.routedViaExecutor && refuseUnverifiedContracts(reply, body.chainId, 'a swap routed through the AgentExecutor')) return;
 
     // Simulate before submitting
     const sim = await simulator.simulate({
@@ -1878,6 +1881,8 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         actionIndex: moduleIndex,
       });
     }
+    // S9: the batch runs through (and sends its value to) the executor.
+    if (refuseUnverifiedContracts(reply, body.chainId, 'a batch routed through the AgentExecutor')) return;
 
     // The off-chain token whitelist can only be applied to what the caller
     // declares (the backend does not decode raw calldata), so an agent that

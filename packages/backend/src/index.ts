@@ -32,6 +32,7 @@ import {
 import { erc8183Deps } from './services/job/escrow-erc8183.runtime.js';
 import { configuredEscrowChainIds, escrowEvaluatorAddress } from './config/env.js';
 import { announceProcessCapabilities, processCapabilities, runEscrowBootCheck } from './config/escrow-boot.runtime.js';
+import { runPolicyStackBootCheck } from './config/policy-stack-boot.runtime.js';
 
 // Fastify v5 expects a logger CONFIG object (not a pino instance). We pass
 // the same options that middleware/logger.ts uses for its standalone export,
@@ -80,6 +81,10 @@ async function start() {
   // (hook.acp, trustedEvaluator, registries, escrow.token). A mismatch exits
   // here in production / staging, before anything is served or started.
   await runEscrowBootCheck('api');
+  // S9: the executor / policy module must run this build's code and match the
+  // configured bindings before anything is routed through them (FATAL on a
+  // mismatch in production / staging).
+  await runPolicyStackBootCheck('api');
 
   // Security middleware
   // CORS_ORIGIN: comma-separated list of allowed origins in production.

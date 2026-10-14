@@ -10,10 +10,13 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
 import { decodeFunctionData, getAddress, isAddress, type Address } from 'viem';
 
-const { settleVolumeMock, stopStampedMock } = vi.hoisted(() => ({
+const { settleVolumeMock, stopStampedMock, contractsGate } = vi.hoisted(() => ({
   settleVolumeMock: vi.fn(),
   stopStampedMock: vi.fn(),
+  contractsGate: vi.fn(),
 }));
+// S9: the executor / module verification the guard consults for sync rows.
+vi.mock('../config/policy-stack-verification.runtime.js', () => ({ policyStackGate: contractsGate }));
 vi.mock('../services/policy/daily-volume.js', () => ({
   settleVolumeAfterFailure: settleVolumeMock,
   stopStampedTransaction: stopStampedMock,
@@ -279,6 +282,7 @@ describe('pre-submit guard — policy-sync rows (S8)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     settleVolumeMock.mockResolvedValue('none');
+    contractsGate.mockImplementation((chainId: number) => ({ allowed: true, chainId, verifiedAt: new Date(), validUntil: new Date(Date.now() + 600_000) }));
     agent = { safeAddress: SAFE, active: true, policy: policy() };
   });
 
@@ -314,5 +318,30 @@ describe('pre-submit guard — policy-sync rows (S8)', () => {
     agent.policy = policy({ expiresAt: new Date(Date.now() - 60_000) });
     const queued = encodeSetPolicy(desired({ expiresAt: agent.policy.expiresAt })).params;
     await expect(preSubmitGuard(db(syncMeta('setPolicy', queued)).client, 'tx-1')).resolves.toEqual({ action: 'proceed' });
+  });
+
+  it('S9: a consistent sync call WAITS (defer, nothing written) while the executor / module is not verified', async () => {
+    contractsGate.mockReturnValue({ allowed: false, chainId: 84532, block: 'unverified', reason: 'rpc down', retryAfterSeconds: 120 });
+    const { client, updateMany } = db(syncMeta('setPolicy', encodeSetPolicy(desired()).params));
+    await expect(preSubmitGuard(client, 'tx-1')).resolves.toEqual({ action: 'defer', reason: 'rpc down', delayMs: 120_000 });
+    expect(contractsGate).toHaveBeenCalledWith(84532);
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it('S9: a superseded sync call is still FAILED (the DB decides first; the gate only delays what would be signed)', async () => {
+    contractsGate.mockReturnValue({ allowed: false, chainId: 84532, block: 'unverified', reason: 'rpc down', retryAfterSeconds: 120 });
+    agent = { safeAddress: SAFE, active: false, policy: policy({ active: false }) };
+    const decision = await preSubmitGuard(db(syncMeta('resume', {})).client, 'tx-1');
+    expect(decision).toMatchObject({ action: 'fail' });
+  });
+
+  it('S9: an ordinary executor-routed row (queuePayload.routedViaExecutor) waits too; a direct one does not ask', async () => {
+    contractsGate.mockReturnValue({ allowed: false, chainId: 84532, block: 'mismatch', reason: 'not this build', retryAfterSeconds: 120 });
+    const routed = db({ queuePayload: { routedViaExecutor: true } });
+    await expect(preSubmitGuard(routed.client, 'tx-1')).resolves.toEqual({ action: 'defer', reason: 'not this build', delayMs: 120_000 });
+    contractsGate.mockClear();
+    const direct = db({ queuePayload: { routedViaExecutor: false } });
+    await expect(preSubmitGuard(direct.client, 'tx-1')).resolves.toEqual({ action: 'proceed' });
+    expect(contractsGate).not.toHaveBeenCalled();
   });
 });

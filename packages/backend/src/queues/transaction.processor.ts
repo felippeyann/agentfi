@@ -202,7 +202,7 @@ export async function processTransactionJob(
     // Q7: nothing was written; the row stays QUEUED and the job comes back later.
     logger.warn(
       { transactionId: data.transactionId, chainId: data.chainId, delayMs: guard.delayMs, reason: guard.reason },
-      'Escrow transaction deferred — on-chain configuration not verified (no attempt consumed)',
+      'Transaction deferred — on-chain configuration not verified (escrow: Q7; executor / policy module: S9; no attempt consumed)',
     );
     await deps.deferJob?.(guard.delayMs);
     return { txHash: null, outcome: 'deferred', reason: guard.reason };

@@ -44,11 +44,22 @@ vi.mock('../config/contracts.js', () => ({
   resolveIdentityRegistry: () => '0x8004A818BFB912233c491871b3d84c89A494BD9e',
   resolveReputationRegistry: () => '0x8004B663056A597Dffe9eCcC1965A193B7388713',
 }));
-vi.mock('../config/chains.js', () => ({
+vi.mock('../config/chains.js', async () => {
+  const { EXPECTED_CONTRACT_CODE } = await import('../abi/contract-code.generated.js');
+  return {
   createChainPublicClient: () => ({
     getChainId: async () => {
       if (state.readFails) throw new Error('rpc down');
       return state.servedChainId;
+    },
+    // S9: the escrow and the hook run this build's code (no code at the hook when `hookHasCode` is false).
+    getCode: async ({ address }: { address: string }) => {
+      if (state.readFails) throw new Error('rpc down');
+      if (address.toLowerCase() === '0x00000000000000000000000000000000000e5c20') return EXPECTED_CONTRACT_CODE.AgentJobEscrow.runtime;
+      if (address.toLowerCase() === '0x000000000000000000000000000000000000400c') {
+        return state.hookHasCode ? EXPECTED_CONTRACT_CODE.ReputationHook.runtime : undefined;
+      }
+      return undefined;
     },
     readContract: async ({ functionName }: { functionName: string }) => {
       if (state.readFails) throw new Error('rpc down');
@@ -68,7 +79,8 @@ vi.mock('../config/chains.js', () => ({
       }[functionName];
     },
   }),
-}));
+  };
+});
 vi.mock('../api/middleware/logger.js', () => ({
   logger: {
     info: (_o: unknown, m?: string) => logged.info.push(String(m ?? _o)),
@@ -161,7 +173,10 @@ describe('runEscrowBootCheck', () => {
     const verdict = await runEscrowBootCheck('api');
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(verdict).toMatchObject({ unreadable: [] });
-    expect(String(consoleSpy.mock.calls[0]?.[0])).toMatch(/^FATAL: .*no ReputationHook at REPUTATION_HOOK_ADDRESS_84532=/);
+    // S9: the code identity answers first.
+    expect(String(consoleSpy.mock.calls[0]?.[0])).toMatch(
+      /^FATAL: .*REPUTATION_HOOK_ADDRESS_84532=0x[0-9a-fA-F]+ is not this build's ReputationHook: no code at the address/,
+    );
   });
 
   it('NODE_ENV=development: no code at the hook address is a loud error and the process boots', async () => {
@@ -169,7 +184,9 @@ describe('runEscrowBootCheck', () => {
     state.hookHasCode = false;
     await runEscrowBootCheck('worker');
     expect(exitSpy).not.toHaveBeenCalled();
-    expect(logged.error.join('\n')).toMatch(/would be FATAL in production\/staging\): chain 84532: no ReputationHook at/);
+    expect(logged.error.join('\n')).toMatch(
+      /would be FATAL in production\/staging\): chain 84532: REPUTATION_HOOK_ADDRESS_84532=0x[0-9a-fA-F]+ is not this build's ReputationHook: no code/,
+    );
   });
 
   it('a chain with an escrow but no hook is still checked (escrow.token())', async () => {

@@ -19,6 +19,7 @@ import { finalizeA2APaymentJob } from '../job/payment-finalizer.service.js';
 import { onEscrowTxOutcome, vetBindBeforeBroadcast } from '../job/escrow-erc8183.runtime.js';
 import { settleVolumeAfterFailure, stopStampedTransaction } from '../policy/daily-volume.js';
 import { escrowConfigGate } from '../../config/escrow-verification.runtime.js';
+import { policyStackGate } from '../../config/policy-stack-verification.runtime.js';
 import { getContracts } from '../../config/contracts.js';
 import {
   desiredOnChainPolicy,
@@ -75,6 +76,22 @@ interface AgentSnapshot {
 function escrowConfigDeferral(tx: { chainId: number; metadata: unknown }): PreSubmitDecision | null {
   if ((tx.metadata as { erc8183?: unknown } | null)?.erc8183 !== true) return null;
   const gate = escrowConfigGate(tx.chainId);
+  if (gate.allowed) return null;
+  return { action: 'defer', reason: gate.reason, delayMs: gate.retryAfterSeconds * 1000 };
+}
+
+/**
+ * S9 — a transaction that gives the chain's AgentExecutor / AgentPolicyModule
+ * value or authority (routed through the executor: `queuePayload.routedViaExecutor`;
+ * or an on-chain policy sync) waits while this process has not verified them
+ * against this build (`policyStackGate`). Nothing is written: the row stays
+ * QUEUED and the job comes back after the re-check interval, no attempt
+ * consumed. Returns the `defer` decision, or null to go on.
+ */
+function contractsDeferral(tx: { chainId: number; metadata: unknown }, isPolicySync: boolean): PreSubmitDecision | null {
+  const routed = (tx.metadata as { queuePayload?: { routedViaExecutor?: unknown } } | null)?.queuePayload?.routedViaExecutor === true;
+  if (!routed && !isPolicySync) return null;
+  const gate = policyStackGate(tx.chainId);
   if (gate.allowed) return null;
   return { action: 'defer', reason: gate.reason, delayMs: gate.retryAfterSeconds * 1000 };
 }
@@ -198,10 +215,10 @@ export async function preSubmitGuard(
   const reason = sync
     ? await policySyncBlockReason(db, transactionId, tx.chainId, sync)
     : resolveBlockReason(tx.agent, new Date());
-  if (!reason && sync) return { action: 'proceed' };
+  if (!reason && sync) return contractsDeferral(tx, true) ?? { action: 'proceed' };
   if (!reason) {
     // Q7: an escrow-dependent step waits while its chain is unverified.
-    const deferred = escrowConfigDeferral(tx);
+    const deferred = escrowConfigDeferral(tx) ?? contractsDeferral(tx, false);
     if (deferred) return deferred;
     // C3d (H14 dry-run): the provider's ERC-8004 bind is only valid while the
     // job is live and Funded. It was enqueued at FUNDED; a cancellation (and

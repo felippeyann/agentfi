@@ -39,6 +39,7 @@ import {
 import { erc8183Deps } from './services/job/escrow-erc8183.runtime.js';
 import { closeWalletLanes } from './services/transaction/wallet-lane.runtime.js';
 import { announceProcessCapabilities, processCapabilities, runEscrowBootCheck } from './config/escrow-boot.runtime.js';
+import { runPolicyStackBootCheck } from './config/policy-stack-boot.runtime.js';
 
 /** How long a shutdown waits for in-flight confirmation monitors before exiting. */
 export const SHUTDOWN_MONITOR_GRACE_MS = 10_000;
@@ -70,6 +71,8 @@ export async function startWorkerProcess(): Promise<WorkerProcess | null> {
   // C3d: same deployment check as the API (FATAL on a mismatch in production /
   // staging) — the worker is the process that signs settlements.
   await runEscrowBootCheck('worker');
+  // S9: same executor / policy module verification as the API (the worker signs).
+  await runPolicyStackBootCheck('worker');
 
   const worker = startTransactionWorker();
   worker.on('failed', (job, err) => {

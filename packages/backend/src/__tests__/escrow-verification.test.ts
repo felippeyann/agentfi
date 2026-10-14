@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Address } from 'viem';
 import { checkEscrowDeployments, type EscrowChainExpectation } from '../config/escrow-boot-check.js';
+import { EXPECTED_CONTRACT_CODE } from '../abi/contract-code.generated.js';
 import {
   escrowGateVerdict,
   expectationFingerprint,
@@ -27,6 +28,13 @@ const EXPECTATION: EscrowChainExpectation = {
   reputationRegistry: '0x8004B663056A597Dffe9eCcC1965A193B7388713' as Address,
   usdc: '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as Address,
 };
+/** S9: the escrow and the hook run this build's code. */
+const ourCode = () => async (address: Address) =>
+  address.toLowerCase() === EXPECTATION.escrow.toLowerCase()
+    ? EXPECTED_CONTRACT_CODE.AgentJobEscrow.runtime
+    : address.toLowerCase() === EXPECTATION.hook?.toLowerCase()
+      ? EXPECTED_CONTRACT_CODE.ReputationHook.runtime
+      : undefined;
 const OK = { problems: [], unreadable: null };
 const DOWN = { problems: [], unreadable: 'timed out after 10000 ms' };
 const WRONG = { problems: ['chain 84532: hook.acp() is 0x1111…, not AGENT_JOB_ESCROW_ADDRESS_84532'], unreadable: null };
@@ -131,18 +139,19 @@ describe('checkEscrowDeployments — eth_chainId (Q7)', () => {
   const reader = () => async ({ functionName }: { functionName: string }) => values[functionName];
 
   it('the RPC serving the configured chain verifies', async () => {
-    const [check] = await checkEscrowDeployments({ chains: [EXPECTATION], reader, chainIdReader: () => async () => 84532 });
+    const [check] = await checkEscrowDeployments({ codeReader: ourCode, chains: [EXPECTATION], reader, chainIdReader: () => async () => 84532 });
     expect(check).toMatchObject({ problems: [], unreadable: null });
   });
 
   it('an RPC serving another network is a mismatch (never "unreadable")', async () => {
-    const [check] = await checkEscrowDeployments({ chains: [EXPECTATION], reader, chainIdReader: () => async () => 8453 });
+    const [check] = await checkEscrowDeployments({ codeReader: ourCode, chains: [EXPECTATION], reader, chainIdReader: () => async () => 8453 });
     expect(check!.unreadable).toBeNull();
     expect(check!.problems).toEqual([expect.stringMatching(/chain 84532: the RPC answers eth_chainId 8453, not 84532/)]);
   });
 
   it('eth_chainId failing to answer is a transport error: unreadable', async () => {
     const [check] = await checkEscrowDeployments({
+      codeReader: ourCode,
       chains: [EXPECTATION],
       reader,
       chainIdReader: () => async () => {

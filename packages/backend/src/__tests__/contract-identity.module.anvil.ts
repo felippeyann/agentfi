@@ -65,7 +65,7 @@ import {
   readOnChainPolicy,
   type PolicyModuleReader,
 } from '../services/policy/policy-sync.js';
-import { checkEscrowDeployments, isDefinitiveContractError } from '../config/escrow-boot-check.js';
+import { checkEscrowDeployments, compareEscrowDeployment, isDefinitiveContractError } from '../config/escrow-boot-check.js';
 
 const CHAIN_ID = 84532;
 const MODULE_ARTIFACT = readArtifact('AgentPolicyModule');
@@ -165,7 +165,7 @@ describe('S9 — POLICY_MODULE_ADDRESS is not bound to the executor (current beh
   });
 });
 
-describe('S9 — the escrow / hook boot check reads views, so lookalikes are "verified" (current behaviour)', () => {
+describe('S9 — lookalike escrow / hook: they answer every view, the code identity refuses them', () => {
   let usdc: Address;
   let lookalikeEscrow: Address;
   let lookalikeHook: Address;
@@ -179,16 +179,32 @@ describe('S9 — the escrow / hook boot check reads views, so lookalikes are "ve
     lookalikeHook = await chain.deploy(deployer, readArtifact('LookalikeHook', 'Impostors.sol'), [lookalikeEscrow, evaluator, IDENTITY, REPUTATION]);
   });
 
-  it('checkEscrowDeployments (the Q7 / C3d check, real code) reports the lookalike escrow + hook as matching', async () => {
+  it('checkEscrowDeployments (Q7 / C3d + S9, real code): the views all match, the code does not — mismatch (escrow signatures blocked)', async () => {
+    const chains = [{ chainId: CHAIN_ID, escrow: lookalikeEscrow, hook: lookalikeHook, evaluator, identityRegistry: IDENTITY, reputationRegistry: REPUTATION, usdc }];
+    const reader = () => (params: { address: Address; abi: Abi; functionName: string }) => chain.publicClient.readContract(params as never);
+    // The four hook views and escrow.token() answer exactly what the configuration expects…
+    expect(compareEscrowDeployment(chains[0]!, {
+      token: (await reader()({ address: lookalikeEscrow, abi: readArtifact('LookalikeEscrow', 'Impostors.sol').abi, functionName: 'token' })) as Address,
+      acp: lookalikeEscrow,
+      trustedEvaluator: evaluator,
+      identityRegistry: IDENTITY,
+      reputationRegistry: REPUTATION,
+    }).problems).toEqual([]);
+    // …and the check refuses them on their code.
     const [check] = await checkEscrowDeployments({
-      chains: [{ chainId: CHAIN_ID, escrow: lookalikeEscrow, hook: lookalikeHook, evaluator, identityRegistry: IDENTITY, reputationRegistry: REPUTATION, usdc }],
-      reader: () => (params) => chain.publicClient.readContract(params as never),
+      chains,
+      reader,
       chainIdReader: () => () => chain.publicClient.getChainId(),
+      codeReader: () => (address) => chain.publicClient.getCode({ address }),
     });
-    expect(check).toMatchObject({ problems: [], unreadable: null });
+    expect(check!.unreadable).toBeNull();
+    expect(check!.problems).toEqual([
+      expect.stringMatching(/AGENT_JOB_ESCROW_ADDRESS_84532=.* is not this build's AgentJobEscrow/),
+      expect.stringMatching(/REPUTATION_HOOK_ADDRESS_84532=.* is not this build's ReputationHook/),
+    ]);
   });
 
-  it('…and the lookalike escrow takes the budget the requester approved for `fund`', async () => {
+  it('what that refusal prevents: the lookalike escrow takes the budget a requester approves for `fund`', async () => {
     const budget = 25_000_000n; // 25 USDC
     const mockUsdcAbi = readArtifact('MockERC20').abi as Abi;
     expect(await send(deployer, usdc, encodeFunctionData({ abi: mockUsdcAbi, functionName: 'mint', args: [agent.address, budget] }))).toBe('success');

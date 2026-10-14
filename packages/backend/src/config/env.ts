@@ -6,6 +6,7 @@ import { describeLegacyContract, findLegacyContractConfig } from './contracts.js
 import {
   PRODUCTION_LIKE,
   escrowVerificationIntervalProblem,
+  policyOperatorMissingProblem,
   evaluationDelayUnsetProblem,
   nodeEnvUnsetVerdict,
   placeholderKeys,
@@ -39,6 +40,15 @@ const escrowAddressFields = Object.fromEntries(
   `AGENT_JOB_ESCROW_ADDRESS_${(typeof ESCROW_CHAIN_IDS)[number]}` | `REPUTATION_HOOK_ADDRESS_${(typeof ESCROW_CHAIN_IDS)[number]}`,
   ReturnType<typeof optionalAddress>
 >;
+
+// ── S9: expected AgentPolicyModule operator per chain ────────────────────
+// `POLICY_OPERATOR_ADDRESS_<chainId>`: the `operator()` the configured module
+// must answer (the OPERATOR_ADDRESS Deploy.s.sol ran with). Required in
+// production / staging when POLICY_MODULE_ADDRESS_<chainId> is set
+// (env-guards `policyOperatorMissingProblem`).
+const policyOperatorFields = Object.fromEntries(
+  ESCROW_CHAIN_IDS.map((chainId) => [`POLICY_OPERATOR_ADDRESS_${chainId}`, optionalAddress(`POLICY_OPERATOR_ADDRESS_${chainId}`)]),
+) as Record<`POLICY_OPERATOR_ADDRESS_${(typeof ESCROW_CHAIN_IDS)[number]}`, ReturnType<typeof optionalAddress>>;
 
 // ── ERC-8004 identity (R2) ────────────────────────────────────────────────
 // `IDENTITY_REGISTRY_ADDRESS_<chainId>` overrides the ERC-8004 Identity
@@ -167,6 +177,9 @@ const envSchema = z.object({
   POLICY_MODULE_ADDRESS_84532: z.string().optional(),
   EXECUTOR_ADDRESS_84532: z.string().optional(),
   ESCROW_MODULE_ADDRESS_84532: z.string().optional(),
+  // S9: the expected `operator()` of each chain's AgentPolicyModule (required
+  // in production / staging when POLICY_MODULE_ADDRESS_<id> is set).
+  ...policyOperatorFields,
 
   // ERC-8183 escrow (C3) — `AgentJobEscrow` / `ReputationHook` per chain, as
   // printed by `script/DeployEscrow.s.sol`. Setting an escrow address enables
@@ -475,6 +488,13 @@ const verificationIntervalProblem = escrowVerificationIntervalProblem(
 );
 if (verificationIntervalProblem) {
   console.error(verificationIntervalProblem);
+  process.exit(1);
+}
+
+// S9: a configured policy module's expected operator must be explicit in production / staging.
+const policyOperatorProblem = policyOperatorMissingProblem(process.env, parsed.data.NODE_ENV, ESCROW_CHAIN_IDS);
+if (policyOperatorProblem) {
+  console.error(policyOperatorProblem);
   process.exit(1);
 }
 

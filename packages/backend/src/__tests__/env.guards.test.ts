@@ -30,6 +30,7 @@ import {
   PLACEHOLDER_CHECKED_KEYS,
   detectContainer,
   escrowVerificationIntervalProblem,
+  policyOperatorMissingProblem,
   evaluationDelayUnsetProblem,
   isLoopbackOrPrivateHost,
   isPlaceholderValue,
@@ -445,6 +446,20 @@ describe('env-guards rules (unit)', () => {
   it('nodeEnvUnsetVerdict is null when NODE_ENV is set, even to an invalid value', () => {
     expect(nodeEnvUnsetVerdict({ NODE_ENV: 'production' }, () => true)).toBeNull();
     expect(nodeEnvUnsetVerdict({ NODE_ENV: '' }, () => true)).toBeNull();
+  });
+
+  it('S9: policyOperatorMissingProblem — production / staging need POLICY_OPERATOR_ADDRESS_<id> for every configured module', () => {
+    const module = { POLICY_MODULE_ADDRESS_84532: '0x00000000000000000000000000000000000A0D01' };
+    const chains = [1, 8453, 42161, 137, 84532];
+    for (const nodeEnv of ['production', 'staging']) {
+      expect(policyOperatorMissingProblem(module, nodeEnv, chains)).toMatch(/^FATAL: .*POLICY_MODULE_ADDRESS_84532 without POLICY_OPERATOR_ADDRESS_84532/);
+      expect(policyOperatorMissingProblem({ ...module, POLICY_OPERATOR_ADDRESS_84532: '   ' }, nodeEnv, chains)).toMatch(/^FATAL/);
+      expect(policyOperatorMissingProblem({ ...module, POLICY_OPERATOR_ADDRESS_84532: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' }, nodeEnv, chains)).toBeNull();
+      expect(policyOperatorMissingProblem({}, nodeEnv, chains)).toBeNull();
+      expect(policyOperatorMissingProblem({ POLICY_MODULE_ADDRESS_84532: '' }, nodeEnv, chains)).toBeNull();
+    }
+    expect(policyOperatorMissingProblem(module, 'development', chains)).toBeNull();
+    expect(policyOperatorMissingProblem(module, 'test', chains)).toBeNull();
   });
 
   it('parseTrustProxy', () => {
