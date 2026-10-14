@@ -106,6 +106,19 @@ describe('desiredOnChainPolicy — DB → module, never rounded', () => {
     expect(problems({ cooldownSeconds: 1.5 })).toHaveLength(1);
   });
 
+  it('#179 review P2-1: a plain decimal larger than uint256 is not representable (it used to pass, then encodeFunctionData threw → 500)', () => {
+    const maxWei = 2n ** 256n - 1n;
+    const tooBig = `${(maxWei / 10n ** 18n + 1n).toString()}`; // whole ETH just above the uint256 range
+    const r = desiredOnChainPolicy({ safeAddress: SAFE, agentActive: true, policy: policy({ maxValuePerTxEth: tooBig }) });
+    expect(r.ok).toBe(false);
+    expect(r.ok ? [] : r.problems.join()).toMatch(/uint256/);
+    // The largest representable value is accepted and encodes.
+    const atMax = `${maxWei / 10n ** 18n}.${(maxWei % 10n ** 18n).toString().padStart(18, '0')}`;
+    const ok = desiredOnChainPolicy({ safeAddress: SAFE, agentActive: true, policy: policy({ maxValuePerTxEth: atMax }) });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(() => encodeSetPolicy(ok.desired)).not.toThrow();
+  });
+
   it('a stored entry with a broken EIP-55 checksum still names the same 20 bytes', () => {
     // Flip the case of the first letter of a mixed-case checksummed address: same bytes, invalid EIP-55.
     const good = getAddress('0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266');
