@@ -35,13 +35,19 @@ const TOKENS_BY_CHAIN: Readonly<Record<number, Readonly<ChainTokenMap>>> = {
     USDC: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
     USDT: '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9',
     DAI: '0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1',
-    WBTC: '0x2f2a2543B76A4166549F7aAB2e75Bef0aefC5B0f',
+    // Was mis-cased (…7aAB2e…, invalid EIP-55: viem refused it). Same address as
+    // aave-dao/aave-address-book@6463b76 src/AaveV3Arbitrum.sol WBTC_UNDERLYING;
+    // on-chain (2026-10-14): symbol WBTC, 8 decimals.
+    WBTC: '0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f',
   },
   137: {
     ETH: '0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619',
     WETH: '0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619',
     USDC: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
-    USDT: '0xc2132D05D31c914a87C6611C10748AaCbA3E5E91',
+    // Was 0xc2132D05…10748AaCbA3E5E91 — a wrong tail (invalid EIP-55, no code on
+    // Polygon). aave-dao/aave-address-book@6463b76 src/AaveV3Polygon.sol
+    // USDT0_UNDERLYING; on-chain (2026-10-14): symbol USDT0, 6 decimals.
+    USDT: '0xc2132D05D31c914a87C6611C10748AEb04B58e8F',
     DAI: '0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063',
     WBTC: '0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6',
   },
