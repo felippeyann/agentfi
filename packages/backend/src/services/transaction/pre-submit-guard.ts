@@ -97,7 +97,8 @@ function resolveBlockReason(agent: AgentSnapshot, now: Date): string | null {
  * failed send, or a redelivery racing the delivery that sent it) is not
  * FAILED: it is handed to the chain — SUBMITTED with the stamped hash, the
  * decision is `skip` — and nothing is settled or finalized here; the receipt
- * (or the re-poll's drop) decides. ERC-8183 steps keep the FAILED path above.
+ * (or the re-poll's drop) decides. 6d (C3e): ERC-8183 / ERC-8004 steps are
+ * handed to the chain the same way (they used to keep the FAILED path).
  */
 export async function preSubmitGuard(
   db: PrismaClient,
@@ -144,7 +145,25 @@ export async function preSubmitGuard(
       const skipped = await vetBindBeforeBroadcast(step.jobId);
       if (skipped) {
         const error = `${BIND_SKIPPED_BEFORE_SUBMISSION}: ${skipped}`;
-        await db.transaction.update({ where: { id: transactionId }, data: { status: 'FAILED', error } });
+        // C3e item 4: conditional like every other stop of a row (A6 / A6b).
+        // The vet reads the job and the chain; a concurrent delivery of the
+        // same job may have broadcast the bind meanwhile (SUBMITTED + hash —
+        // left to its own outcome), or an earlier attempt of this row was
+        // stamped (handed to the chain, never FAILED while it may mine).
+        const stopped = await db.transaction.updateMany({
+          where: { id: transactionId, status: 'QUEUED', txHash: null, broadcastAttemptedAt: null },
+          data: { status: 'FAILED', error },
+        });
+        if (stopped.count === 0) {
+          const stop = await stopStampedTransaction(db, transactionId, error, { handToChain: true });
+          if (stop.outcome === 'not-queued') {
+            return { action: 'skip', reason: 'Transaction left QUEUED while it was being checked' };
+          }
+          if (stop.outcome === 'handed-to-chain') {
+            return { action: 'skip', reason: `${error}: ${OUTCOME_LEFT_TO_CHAIN} (${stop.txHash})` };
+          }
+          // Stamped before migration 0024 (no hash to hand over): FAILED as before.
+        }
         // The binding is already SKIPPED; the outcome only moves the
         // provider's identity lane and releases a submit deferred behind it.
         try {
@@ -162,25 +181,24 @@ export async function preSubmitGuard(
     | { jobId?: string; a2aPayment?: boolean; erc8183?: boolean }
     | null;
   // A6b: once a signed attempt was stamped for broadcast, the chain decides
-  // its outcome, not this guard (ERC-8183 steps keep their own path: the
-  // orchestrator reads the chain before unwinding anything).
-  const handToChain = meta?.erc8183 !== true;
+  // its outcome, not this guard. 6d (C3e): ERC-8183 / ERC-8004 steps too — the
+  // orchestrator's chain read cannot see a step that is still in a mempool
+  // (a pending `fund` reads as Open, a pending `submit` as Funded), so FAILED
+  // there unwound a job whose budget then locked (reservation released) or
+  // handed a delivered job back to ACCEPTED (cancellable, refunded).
 
   // Conditional (A6): a concurrent delivery may have stamped and broadcast the
   // row since it was read above; then it is not ours to fail.
   const failed = await db.transaction.updateMany({
-    where: { id: transactionId, status: 'QUEUED', txHash: null, ...(handToChain ? { broadcastAttemptedAt: null } : {}) },
+    where: { id: transactionId, status: 'QUEUED', txHash: null, broadcastAttemptedAt: null },
     data: { status: 'FAILED', error: reason },
   });
   let broadcastAttempted = false;
   if (failed.count === 0) {
     // Not a never-stamped QUEUED row: stamped (an earlier attempt threw after
     // its stamp, or another delivery is between its send and its SUBMITTED
-    // write), or no longer QUEUED. Nothing is signed again either way. (For an
-    // ERC-8183 step the write above did not look at the stamp: no longer QUEUED.)
-    const stop = handToChain
-      ? await stopStampedTransaction(db, transactionId, reason, { handToChain: true })
-      : ({ outcome: 'not-queued' } as const);
+    // write), or no longer QUEUED. Nothing is signed again either way.
+    const stop = await stopStampedTransaction(db, transactionId, reason, { handToChain: true });
     if (stop.outcome === 'not-queued') {
       return { action: 'skip', reason: 'Transaction left QUEUED while it was being checked' };
     }

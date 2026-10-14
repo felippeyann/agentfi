@@ -572,8 +572,10 @@ export async function handleFailedTransactionJob(
  *    HELD, and an A2A payment is NOT refunded (left PAYMENT_PENDING);
  *  - no longer QUEUED (a stalled-job redelivery while another delivery
  *    recorded its broadcast): left to its own outcome.
- * ERC-8183 steps keep the FAILED path whatever the stamp (the orchestrator
- * reads the chain before unwinding).
+ * 6d (C3e): ERC-8183 / ERC-8004 steps follow the same rule (they used to be
+ * FAILED whatever the stamp, and the orchestrator's chain read cannot see a
+ * step still in a mempool: a pending `fund` unwound the job and released its
+ * reservation, a pending `submit` handed a delivered job back to ACCEPTED).
  */
 export async function settlePermanentFailure(
   db: PrismaClient,
@@ -590,21 +592,20 @@ export async function settlePermanentFailure(
       select: { metadata: true },
     });
     meta = (tx?.metadata ?? null) as RowMeta;
-    const handToChain = meta?.erc8183 !== true;
 
     // Conditional on QUEUED: a stalled-job redelivery can reach this handler
     // while another delivery of the same job already broadcast it (SUBMITTED, or
     // later). That row is in flight — its own observer settles it and finalizes
     // its job — so it is neither overwritten nor finalized as FAILED here.
-    // A6b: and on no attempt having been stamped for broadcast.
+    // A6b: and on no attempt having been stamped for broadcast. 6d (C3e): for
+    // ERC-8183 / ERC-8004 steps too — a stamped step may still be in a mempool,
+    // where the orchestrator's chain read cannot see it.
     const { count } = await db.transaction.updateMany({
-      where: { id: transactionId, status: 'QUEUED', ...(handToChain ? { broadcastAttemptedAt: null } : {}) },
+      where: { id: transactionId, status: 'QUEUED', broadcastAttemptedAt: null },
       data: { status: 'FAILED', error },
     });
     if (count === 0) {
-      const stop = handToChain
-        ? await stopStampedTransaction(db, transactionId, error, { handToChain: true })
-        : ({ outcome: 'not-queued' } as const);
+      const stop = await stopStampedTransaction(db, transactionId, error, { handToChain: true });
       if (stop.outcome === 'not-queued') {
         logger.warn(
           { transactionId },
