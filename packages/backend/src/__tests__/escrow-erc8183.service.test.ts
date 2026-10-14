@@ -1070,7 +1070,8 @@ describe('processSettlementJob — Q7: no evaluator signature on an unverified c
     expect(err).toMatchObject({ chainId: CHAIN_ID, retryAfterMs: 120_000 });
     expect(signer.writeContract).toHaveBeenCalledTimes(1); // the pre-checks passed
     expect(sent).toEqual([]);
-    expect(jobs.get('job-1')).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', settleTxHash: null, settleAttemptAt: null, escrowError: null });
+    expect(jobs.get('job-1')).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', settleTxHash: null, escrowError: null });
+    expect(jobs.get('job-1')!['settleAttemptAt'] ?? null).toBeNull(); // never stamped
     expect(finalize).not.toHaveBeenCalled();
     expect(alert).not.toHaveBeenCalled();
 

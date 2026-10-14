@@ -96,20 +96,36 @@ function contractsDeferral(tx: { chainId: number; metadata: unknown }, isPolicyS
   return { action: 'defer', reason: gate.reason, delayMs: gate.retryAfterSeconds * 1000 };
 }
 
+/** What `recheckBeforeBroadcast` found: the send must not happen now. */
+export type BroadcastRecheck =
+  /** A policy-sync call the stored policy has moved past: the processor FAILs the row. */
+  | { kind: 'superseded'; reason: string }
+  /** The row's on-chain configuration is no longer verified: the processor DEFERS the job. */
+  | { kind: 'defer'; reason: string; delayMs: number };
+
 /**
- * #179 review P2-2: the guard runs before the submitter takes the wallet lane
- * and signs; a policy change landing in between (a pause after a queued
- * `resume`…) would otherwise let a stale module call reach the chain. The
- * processor calls this from `onBeforeBroadcast` — inside the lane, after
- * signing, before anything is stamped or sent. Null when the row is not a
- * policy sync or still matches the stored policy; otherwise the superseded
- * reason (the processor then fails the row and sends nothing).
+ * The guard runs before the submitter takes the wallet lane, reads the chain
+ * and signs. What it checked can change in that window, so the processor
+ * calls this from `onBeforeBroadcast` — inside the lane, after signing,
+ * before anything is stamped or sent — and acts on it:
+ *  - #179 review P2-2: a policy change landing in between (a pause after a
+ *    queued `resume`…) supersedes a policy-sync call → `superseded`;
+ *  - #182 review: the verification the guard relied on expired or was
+ *    revoked (a failed re-check) → `defer`, with the guard's scope: Q7 for
+ *    escrow / ERC-8004 steps, S9 for executor-routed transactions and
+ *    policy syncs. Ordinary transactions never wait on either.
+ * Null: the send may go ahead. The order is the guard's: superseded first.
  */
-export async function policySyncSupersededNow(db: PrismaClient, transactionId: string): Promise<string | null> {
+export async function recheckBeforeBroadcast(db: PrismaClient, transactionId: string): Promise<BroadcastRecheck | null> {
   const row = await db.transaction.findUnique({ where: { id: transactionId }, select: { chainId: true, metadata: true } });
-  const sync = row ? policySyncMetadataOf(row.metadata) : null;
-  if (!row || !sync) return null;
-  return policySyncBlockReason(db, transactionId, row.chainId, sync);
+  if (!row) return null;
+  const sync = policySyncMetadataOf(row.metadata);
+  if (sync) {
+    const superseded = await policySyncBlockReason(db, transactionId, row.chainId, sync);
+    if (superseded) return { kind: 'superseded', reason: superseded };
+  }
+  const deferred = sync ? contractsDeferral(row, true) : (escrowConfigDeferral(row) ?? contractsDeferral(row, false));
+  return deferred?.action === 'defer' ? { kind: 'defer', reason: deferred.reason, delayMs: deferred.delayMs } : null;
 }
 
 function resolveBlockReason(agent: AgentSnapshot, now: Date): string | null {

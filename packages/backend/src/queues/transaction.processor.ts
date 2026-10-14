@@ -58,7 +58,7 @@
 import type { Job, Queue } from 'bullmq';
 import type { PrismaClient } from '@prisma/client';
 import type { Address, Hex, TransactionReceipt } from 'viem';
-import { policySyncSupersededNow, preSubmitGuard } from '../services/transaction/pre-submit-guard.js';
+import { preSubmitGuard, recheckBeforeBroadcast } from '../services/transaction/pre-submit-guard.js';
 import { finalizeA2APaymentJob } from '../services/job/payment-finalizer.service.js';
 import { onEscrowTxOutcome } from '../services/job/escrow-erc8183.runtime.js';
 import { weiToUsd } from '../services/transaction/price.service.js';
@@ -143,6 +143,22 @@ export class EarlierBroadcastLiveError extends Error {
  * is stamped or sent; the processor fails the row.
  */
 export class PolicySyncSupersededError extends Error {}
+
+/**
+ * #182 review: thrown from the broadcast hook when the verification the guard
+ * relied on (Q7 escrow, S9 executor / policy module) expired or was revoked
+ * while the job waited for the lane, the RPC reads and the signature. Nothing
+ * is stamped or sent; the processor defers the job (no attempt consumed).
+ */
+export class ContractsUnverifiedAtBroadcastError extends Error {
+  constructor(
+    reason: string,
+    readonly delayMs: number,
+  ) {
+    super(reason);
+    this.name = 'ContractsUnverifiedAtBroadcastError';
+  }
+}
 
 /** What the post-confirmation accounting needs — from the queue payload, or from `metadata.queuePayload` on a replay. */
 export interface PostConfirmationInput {
@@ -231,15 +247,27 @@ export async function processTransactionJob(
       value: BigInt(data.value),
       onBeforeBroadcast: async (signedTxHash) => {
         await refuseIfEarlierBroadcastLive(deps, data, signedTxHash);
-        // #179 review P2-2: re-check a policy-sync call against the policy
-        // stored NOW, inside the wallet lane, after signing and before
-        // anything is stamped or sent (the guard ran before the lane).
-        const superseded = await policySyncSupersededNow(db, data.transactionId);
-        if (superseded) throw new PolicySyncSupersededError(superseded);
+        // Inside the wallet lane, after signing, before anything is stamped
+        // or sent (the guard ran before the lane): a policy-sync call is
+        // re-derived from the policy stored NOW (#179 review P2-2), and the
+        // Q7 / S9 gate is asked again (#182 review).
+        const recheck = await recheckBeforeBroadcast(db, data.transactionId);
+        if (recheck?.kind === 'superseded') throw new PolicySyncSupersededError(recheck.reason);
+        if (recheck?.kind === 'defer') throw new ContractsUnverifiedAtBroadcastError(recheck.reason, recheck.delayMs);
         await markBroadcastAttempt(db, data.transactionId, signedTxHash);
       },
     }));
   } catch (err) {
+    if (err instanceof ContractsUnverifiedAtBroadcastError) {
+      // Like the guard's deferral: nothing was stamped, sent or written; the
+      // row stays QUEUED and the job comes back without consuming an attempt.
+      logger.warn(
+        { transactionId: data.transactionId, chainId: data.chainId, delayMs: err.delayMs, reason: err.message },
+        'Transaction deferred inside the wallet lane — on-chain configuration no longer verified (nothing stamped or sent; no attempt consumed)',
+      );
+      await deps.deferJob?.(err.delayMs);
+      return { txHash: null, outcome: 'deferred', reason: err.message };
+    }
     if (err instanceof PolicySyncSupersededError) {
       // Nothing was stamped or sent for this attempt. Conditional like every
       // other stop (A6 / A6b): a row an EARLIER attempt was stamped for is
