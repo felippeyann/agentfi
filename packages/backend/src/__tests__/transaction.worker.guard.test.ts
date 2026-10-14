@@ -19,17 +19,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
 
-const { finalizeMock, escrowOutcomeMock, vetBindMock, settleVolumeMock } = vi.hoisted(() => ({
+const { finalizeMock, escrowOutcomeMock, vetBindMock, settleVolumeMock, stopStampedMock } = vi.hoisted(() => ({
   finalizeMock: vi.fn(),
   escrowOutcomeMock: vi.fn(),
   vetBindMock: vi.fn(),
   settleVolumeMock: vi.fn(),
+  stopStampedMock: vi.fn(),
 }));
 
-// The DailyVolume settlement (A6) runs on Postgres in daily-volume.db.test.ts;
-// here only the call is checked.
+// The DailyVolume settlement (A6) and the A6b hand-over of a stamped row to the
+// chain run on Postgres in daily-volume.db.test.ts / broadcast-outcome.db.test.ts;
+// here only the calls are checked.
 vi.mock('../services/policy/daily-volume.js', () => ({
   settleVolumeAfterFailure: settleVolumeMock,
+  stopStampedTransaction: stopStampedMock,
 }));
 
 // The finalizer pulls in the real `db` singleton, the logger/env chain and the
@@ -46,7 +49,9 @@ vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({
 import {
   preSubmitGuard,
   BIND_SKIPPED_BEFORE_SUBMISSION,
+  OUTCOME_LEFT_TO_CHAIN,
   PAUSED_BEFORE_SUBMISSION,
+  PAYMENT_OUTCOME_UNKNOWN,
   POLICY_EXPIRED_BEFORE_SUBMISSION,
 } from '../services/transaction/pre-submit-guard.js';
 
@@ -108,6 +113,7 @@ beforeEach(() => {
   escrowOutcomeMock.mockReset().mockResolvedValue(undefined);
   vetBindMock.mockReset().mockResolvedValue(null);
   settleVolumeMock.mockReset().mockResolvedValue('released');
+  stopStampedMock.mockReset().mockResolvedValue({ outcome: 'not-queued' });
 });
 
 // ── Happy path ─────────────────────────────────────────────────────────────
@@ -185,10 +191,12 @@ describe('preSubmitGuard — blocks and marks FAILED', () => {
     expect(decision).toEqual({ action: 'fail', reason: PAUSED_BEFORE_SUBMISSION });
     expect(submitter.submit).not.toHaveBeenCalled();
     expect(updateMany).toHaveBeenCalledTimes(1);
+    // A6b: only a row no attempt was stamped for is FAILED by the guard.
     expect(updateMany).toHaveBeenCalledWith({
-      where: { id: TX_ID, status: 'QUEUED', txHash: null },
+      where: { id: TX_ID, status: 'QUEUED', txHash: null, broadcastAttemptedAt: null },
       data: { status: 'FAILED', error: PAUSED_BEFORE_SUBMISSION },
     });
+    expect(stopStampedMock).not.toHaveBeenCalled();
     expect(finalizeMock).not.toHaveBeenCalled();
     // A6: the blocked transaction's DailyVolume reservation is settled
     // (released, or held when an earlier attempt reached the broadcast).
@@ -206,7 +214,7 @@ describe('preSubmitGuard — blocks and marks FAILED', () => {
     expect(decision).toEqual({ action: 'fail', reason: PAUSED_BEFORE_SUBMISSION });
     expect(submitter.submit).not.toHaveBeenCalled();
     expect(updateMany).toHaveBeenCalledWith({
-      where: { id: TX_ID, status: 'QUEUED', txHash: null },
+      where: { id: TX_ID, status: 'QUEUED', txHash: null, broadcastAttemptedAt: null },
       data: { status: 'FAILED', error: PAUSED_BEFORE_SUBMISSION },
     });
   });
@@ -223,7 +231,7 @@ describe('preSubmitGuard — blocks and marks FAILED', () => {
     expect(decision).toEqual({ action: 'fail', reason: POLICY_EXPIRED_BEFORE_SUBMISSION });
     expect(submitter.submit).not.toHaveBeenCalled();
     expect(updateMany).toHaveBeenCalledWith({
-      where: { id: TX_ID, status: 'QUEUED', txHash: null },
+      where: { id: TX_ID, status: 'QUEUED', txHash: null, broadcastAttemptedAt: null },
       data: { status: 'FAILED', error: POLICY_EXPIRED_BEFORE_SUBMISSION },
     });
   });
@@ -237,7 +245,38 @@ describe('preSubmitGuard — blocks and marks FAILED', () => {
     const decision = await preSubmitGuard(db, TX_ID);
 
     expect(decision).toEqual({ action: 'skip', reason: 'Transaction left QUEUED while it was being checked' });
+    // A6b: the guard asked whether the row was a stamped one it should hand to the chain.
+    expect(stopStampedMock).toHaveBeenCalledWith(db, TX_ID, PAUSED_BEFORE_SUBMISSION, { handToChain: true });
     expect(settleVolumeMock).not.toHaveBeenCalled();
+    expect(finalizeMock).not.toHaveBeenCalled();
+  });
+
+  it('A6b: a blocked row an earlier attempt was stamped for is handed to the chain, not FAILED — nothing settled, no refund of the A2A payment', async () => {
+    const { db, updateMany } = makeMockDb(
+      snapshot({ metadata: { a2aPayment: true, jobId: 'job-1' }, agent: { active: false, policy: null } }),
+    );
+    updateMany.mockResolvedValueOnce({ count: 0 }); // stamped: the never-stamped FAILED write matches nothing
+    stopStampedMock.mockResolvedValueOnce({ outcome: 'handed-to-chain', txHash: TX_HASH });
+
+    const decision = await preSubmitGuard(db, TX_ID);
+
+    expect(decision).toEqual({ action: 'skip', reason: `${PAUSED_BEFORE_SUBMISSION}: ${OUTCOME_LEFT_TO_CHAIN} (${TX_HASH})` });
+    expect(settleVolumeMock).not.toHaveBeenCalled();
+    expect(finalizeMock).not.toHaveBeenCalled();
+  });
+
+  it('A6b: a blocked A2A payment stamped before migration 0024 (no hash) is FAILED and held, but the job is NOT refunded', async () => {
+    const { db, updateMany } = makeMockDb(
+      snapshot({ metadata: { a2aPayment: true, jobId: 'job-1' }, agent: { active: false, policy: null } }),
+    );
+    updateMany.mockResolvedValueOnce({ count: 0 });
+    stopStampedMock.mockResolvedValueOnce({ outcome: 'failed', broadcastAttempted: true });
+    settleVolumeMock.mockResolvedValueOnce('none');
+
+    const decision = await preSubmitGuard(db, TX_ID);
+
+    expect(decision).toEqual({ action: 'fail', reason: `${PAUSED_BEFORE_SUBMISSION}; ${PAYMENT_OUTCOME_UNKNOWN}` });
+    expect(settleVolumeMock).toHaveBeenCalledWith(db, TX_ID);
     expect(finalizeMock).not.toHaveBeenCalled();
   });
 
@@ -362,7 +401,7 @@ describe('preSubmitGuard — A2A payment jobs', () => {
       finalizerError: 'job table unavailable',
     });
     expect(updateMany).toHaveBeenCalledWith({
-      where: { id: TX_ID, status: 'QUEUED', txHash: null },
+      where: { id: TX_ID, status: 'QUEUED', txHash: null, broadcastAttemptedAt: null },
       data: { status: 'FAILED', error: PAUSED_BEFORE_SUBMISSION },
     });
   });
@@ -409,10 +448,12 @@ describe('preSubmitGuard — ERC-8183 escrow steps', () => {
       reason: PAUSED_BEFORE_SUBMISSION,
       finalizerError: 'job table unavailable',
     });
+    // ERC-8183 steps keep their FAILED path whatever the stamp (the orchestrator reads the chain).
     expect(updateMany).toHaveBeenCalledWith({
       where: { id: TX_ID, status: 'QUEUED', txHash: null },
       data: { status: 'FAILED', error: PAUSED_BEFORE_SUBMISSION },
     });
+    expect(stopStampedMock).not.toHaveBeenCalled();
   });
 });
 
