@@ -44,6 +44,14 @@ const h = vi.hoisted(() => {
   for (const [k, v] of required) {
     if (!process.env[k]) process.env[k] = v;
   }
+  // Q9: the suite runs on Base Sepolia (84532), a testnet, where a spend is
+  // priced only with a configured synthetic test price: 1 ETH = 2000 USD,
+  // 1 USDC = 1 USD (the values the A6 suite always assumed).
+  const syntheticPrices = {
+    all: '84532:native=2000,84532:0x036CbD53842c5426634e7929541eC2318f3dCF7e=1',
+    tokensOnly: '84532:0x036CbD53842c5426634e7929541eC2318f3dCF7e=1',
+  };
+  process.env['SYNTHETIC_TEST_PRICES_USD'] = syntheticPrices.all;
   return {
     /** Jobs the routes enqueued, in order. */
     queued: [] as Array<{ name: string; data: Record<string, unknown> }>,
@@ -53,6 +61,7 @@ const h = vi.hoisted(() => {
     ethPriced: true,
     /** true: the next `transactionQueue.add` throws (Redis down). */
     enqueueFails: false,
+    syntheticPrices,
   };
 });
 
@@ -82,7 +91,8 @@ vi.mock('../queues/transaction.queue.js', () => ({
   },
 }));
 vi.mock('../services/transaction/price.service.js', () => ({
-  // 1 ETH = 2000 USD; token amounts are priced at 1 USD per whole unit (USDC).
+  // Fees / revenue only (Q9: policy accounting on 84532 uses the synthetic
+  // prices above, never this). 1 ETH = 2000 USD; tokens 1 USD per whole unit.
   weiToUsd: async (wei: bigint) => (h.ethPriced ? ((Number(wei) / 1e18) * 2000).toFixed(6) : '0'),
   tokenAmountToUsd: async (units: bigint, _token: string, decimals: number) => (Number(units) / 10 ** decimals).toFixed(6),
 }));
@@ -356,6 +366,7 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     h.simulationSucceeds = true;
     h.ethPriced = true;
     h.enqueueFails = false;
+    process.env['SYNTHETIC_TEST_PRICES_USD'] = h.syntheticPrices.all;
   });
 
   // ── Counted once ─────────────────────────────────────────────────────────
@@ -757,11 +768,13 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     expect(await volume(agent.id)).toBeCloseTo(20, 6);
   });
 
-  it('a priced dust amount of native value is not mistaken for an unpriced one', async () => {
+  it('a priced dust amount of native value is not mistaken for an unpriced one (Q9: rounded UP to one micro-dollar)', async () => {
     const agent = await mkAgent({ maxDailyVolumeUsd: '1000' });
-    const res = await transfer(await app(agent.id), '0.000000000000000001'); // 1 wei ≈ 2e-15 USD → "0.000000"
+    const res = await transfer(await app(agent.id), '0.000000000000000001'); // 1 wei ≈ 2e-15 USD
     expect(res.statusCode).toBe(202);
-    expect(await volumeStateOf(res.json().transactionId)).toBeNull(); // nothing to reserve
+    const row = await m.db.transaction.findUnique({ where: { id: res.json().transactionId } });
+    // A synthetic value is never under-counted: 2e-15 USD counts 0.000001.
+    expect(row).toMatchObject({ volumeState: 'RESERVED', volumeReservedUsd: '0.000001', volumePriceSource: 'synthetic' });
   });
 
   it('the recovery sweep settles reservations a crash left RESERVED on terminal rows, as their first observer would have', async () => {
@@ -791,12 +804,14 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     expect(await volume(agent.id)).toBeCloseTo(40, 6);
   });
 
-  it('native value the oracle cannot price is refused while a daily limit applies (fail closed), and reserves nothing without one', async () => {
+  it('native value without a trusted price is refused while a daily limit applies (fail closed), and reserves nothing without one', async () => {
     const limited = await mkAgent({ maxDailyVolumeUsd: '1000' });
     const unlimited = await mkAgent({ maxDailyVolumeUsd: '0' });
-    h.ethPriced = false;
+    // Q9: on 84532 native value is priced only by a configured synthetic price.
+    process.env['SYNTHETIC_TEST_PRICES_USD'] = h.syntheticPrices.tokensOnly;
     const refused = await transfer(await app(limited.id), '0.01');
     expect(refused.statusCode).toBe(503);
+    expect(refused.json()).toMatchObject({ code: 'PRICE_UNAVAILABLE' });
     expect(refused.json().error).toMatch(/price/i);
     expect(await m.db.transaction.count({ where: { agentId: limited.id } })).toBe(0);
     expect(await volume(limited.id)).toBeCloseTo(0, 6);
@@ -952,7 +967,8 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     });
 
     it('batch: an action carrying native value pays its `to` (checked); a zero-value calldata action is not a recipient', async () => {
-      const agent = await mkAgent({ allowedRecipients: [LISTED] });
+      // RECIPIENT is an allowed contract: its unrecognised calldata is operator-authorised (Q9 batch rule).
+      const agent = await mkAgent({ allowedRecipients: [LISTED], allowedContracts: [LISTED, RECIPIENT] });
       const a = await app(agent.id);
       const batch = (actions: unknown[]) => a.inject({ method: 'POST', url: '/v1/transactions/batch', payload: { chainId: CHAIN_ID, actions } });
 
