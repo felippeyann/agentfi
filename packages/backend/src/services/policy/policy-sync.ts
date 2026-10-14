@@ -42,6 +42,7 @@ export const POLICY_MODULE_ABI = AGENT_POLICY_MODULE_ABI_FULL;
 /** Fields of the DB policy that have no slot in `AgentPolicyModule` (enforced by the backend only). */
 export const OFF_CHAIN_ONLY_POLICY_FIELDS = [
   'maxValuePerTxUsd',
+  'maxOutflowPerTxUsd',
   'allowedRecipients',
   'maxDailyVolumeUsd',
   'maxValueForAutoApprovalEth',
