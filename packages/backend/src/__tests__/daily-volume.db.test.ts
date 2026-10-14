@@ -53,6 +53,8 @@ const h = vi.hoisted(() => {
   };
   process.env['SYNTHETIC_TEST_PRICES_USD'] = syntheticPrices.all;
   return {
+    /** S9: whether this process verified the executor (the gate's verdict). */
+    contractsVerified: true,
     /** Jobs the routes enqueued, in order. */
     queued: [] as Array<{ name: string; data: Record<string, unknown> }>,
     /** Simulator verdict for the next calls (true = success). */
@@ -107,6 +109,15 @@ vi.mock('../services/transaction/simulator.service.js', () => ({
 }));
 vi.mock('../services/notification.service.js', () => ({
   notificationService: { notify: async () => undefined },
+}));
+// S9: the executor this suite routes batches through counts as verified unless a
+// test says otherwise (the identity check against real deployments runs on Anvil,
+// contract-identity.*.anvil.ts).
+vi.mock('../config/policy-stack-verification.runtime.js', () => ({
+  policyStackGate: (chainId: number) =>
+    h.contractsVerified
+      ? { allowed: true, chainId, verifiedAt: new Date(), validUntil: new Date(Date.now() + 600_000) }
+      : { allowed: false, chainId, block: 'unverified', reason: 'the chain could not be read: rpc down', retryAfterSeconds: 120 },
 }));
 vi.mock('../services/wallet/index.js', () => ({ getWalletService: () => ({}) }));
 vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({
@@ -662,6 +673,26 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     expect(await volume(agent.id)).toBeCloseTo(60, 6);
     await runJob(jobOf(fits.json().transactionId), { receipt: 'success' });
     expect(await volume(agent.id)).toBeCloseTo(60, 6);
+  });
+
+  it('S9: an unverified executor → 503 CONTRACTS_UNVERIFIED; nothing is reserved, written or queued', async () => {
+    const agent = await mkAgent({ maxDailyVolumeUsd: '100' });
+    const a = await app(agent.id);
+    h.contractsVerified = false;
+    try {
+      const res = await a.inject({
+        method: 'POST',
+        url: '/v1/transactions/batch',
+        payload: { chainId: CHAIN_ID, actions: [{ to: RECIPIENT, value: '10000000000000000' }] }, // 20 USD
+      });
+      expect(res.statusCode).toBe(503);
+      expect(res.json()).toMatchObject({ code: 'CONTRACTS_UNVERIFIED', state: 'unverified' });
+    } finally {
+      h.contractsVerified = true;
+    }
+    expect(await volume(agent.id)).toBeCloseTo(0, 6);
+    expect(await m.db.transaction.count({ where: { agentId: agent.id } })).toBe(0);
+    expect(h.queued.filter((j) => j.data['agentId'] === agent.id)).toEqual([]);
   });
 
   // ── Settlement bookkeeping (columns added by migration 0020) ───────────────

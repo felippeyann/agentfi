@@ -1881,9 +1881,6 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         actionIndex: moduleIndex,
       });
     }
-    // S9: the batch runs through (and sends its value to) the executor.
-    if (refuseUnverifiedContracts(reply, body.chainId, 'a batch routed through the AgentExecutor')) return;
-
     // The off-chain token whitelist can only be applied to what the caller
     // declares (the backend does not decode raw calldata), so an agent that
     // HAS a whitelist must declare a token on every action carrying calldata.
@@ -2004,6 +2001,13 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         ...(culprit?.actionIndex !== undefined ? { actionIndex: culprit.actionIndex } : {}),
       });
     }
+
+    // S9: the batch runs through (and sends its value to) the executor. Order
+    // (same as the swap route): the cheap deterministic refusals above —
+    // validation, policy 403, UNACCOUNTED_CALL, PRICE_UNAVAILABLE — answer
+    // first; then the identity gate; nothing is simulated, reserved or
+    // signed before it.
+    if (refuseUnverifiedContracts(reply, body.chainId, 'a batch routed through the AgentExecutor')) return;
 
     const { encodeFunctionData } = await import('viem');
 
