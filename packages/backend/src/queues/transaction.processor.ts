@@ -58,7 +58,7 @@
 import type { Job, Queue } from 'bullmq';
 import type { PrismaClient } from '@prisma/client';
 import type { Address, Hex, TransactionReceipt } from 'viem';
-import { preSubmitGuard } from '../services/transaction/pre-submit-guard.js';
+import { policySyncSupersededNow, preSubmitGuard } from '../services/transaction/pre-submit-guard.js';
 import { finalizeA2APaymentJob } from '../services/job/payment-finalizer.service.js';
 import { onEscrowTxOutcome } from '../services/job/escrow-erc8183.runtime.js';
 import { weiToUsd } from '../services/transaction/price.service.js';
@@ -136,6 +136,13 @@ export class EarlierBroadcastLiveError extends Error {
     super(`An earlier signed attempt (${txHash}) is known to the chain — adopted, not signing again`);
   }
 }
+
+/**
+ * #179 review P2-2: thrown from the broadcast hook when a policy-sync call no
+ * longer matches the stored policy (a change landed after the guard). Nothing
+ * is stamped or sent; the processor fails the row.
+ */
+export class PolicySyncSupersededError extends Error {}
 
 /** What the post-confirmation accounting needs — from the queue payload, or from `metadata.queuePayload` on a replay. */
 export interface PostConfirmationInput {
@@ -224,10 +231,27 @@ export async function processTransactionJob(
       value: BigInt(data.value),
       onBeforeBroadcast: async (signedTxHash) => {
         await refuseIfEarlierBroadcastLive(deps, data, signedTxHash);
+        // #179 review P2-2: re-check a policy-sync call against the policy
+        // stored NOW, inside the wallet lane, after signing and before
+        // anything is stamped or sent (the guard ran before the lane).
+        const superseded = await policySyncSupersededNow(db, data.transactionId);
+        if (superseded) throw new PolicySyncSupersededError(superseded);
         await markBroadcastAttempt(db, data.transactionId, signedTxHash);
       },
     }));
   } catch (err) {
+    if (err instanceof PolicySyncSupersededError) {
+      // Nothing was stamped or sent for this attempt. Conditional like every
+      // other stop (A6 / A6b): a row an EARLIER attempt was stamped for is
+      // handed to the chain, never failed while it may still be mined.
+      const failed = await db.transaction.updateMany({
+        where: { id: data.transactionId, status: 'QUEUED', txHash: null, broadcastAttemptedAt: null },
+        data: { status: 'FAILED', error: err.message },
+      });
+      if (failed.count === 0) await stopStampedTransaction(db, data.transactionId, err.message, { handToChain: true });
+      logger.warn({ transactionId: data.transactionId, reason: err.message }, 'Policy-sync call superseded inside the wallet lane — not broadcast');
+      return { txHash: null, outcome: 'blocked', reason: err.message };
+    }
     if (!(err instanceof EarlierBroadcastLiveError)) throw err;
     // A6b: a previous attempt reached the chain (its SUBMITTED write was lost,
     // or its send "failed" after the node took it). Record that one.

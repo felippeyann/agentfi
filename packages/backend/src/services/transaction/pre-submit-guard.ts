@@ -96,6 +96,22 @@ function contractsDeferral(tx: { chainId: number; metadata: unknown }, isPolicyS
   return { action: 'defer', reason: gate.reason, delayMs: gate.retryAfterSeconds * 1000 };
 }
 
+/**
+ * #179 review P2-2: the guard runs before the submitter takes the wallet lane
+ * and signs; a policy change landing in between (a pause after a queued
+ * `resume`…) would otherwise let a stale module call reach the chain. The
+ * processor calls this from `onBeforeBroadcast` — inside the lane, after
+ * signing, before anything is stamped or sent. Null when the row is not a
+ * policy sync or still matches the stored policy; otherwise the superseded
+ * reason (the processor then fails the row and sends nothing).
+ */
+export async function policySyncSupersededNow(db: PrismaClient, transactionId: string): Promise<string | null> {
+  const row = await db.transaction.findUnique({ where: { id: transactionId }, select: { chainId: true, metadata: true } });
+  const sync = row ? policySyncMetadataOf(row.metadata) : null;
+  if (!row || !sync) return null;
+  return policySyncBlockReason(db, transactionId, row.chainId, sync);
+}
+
 function resolveBlockReason(agent: AgentSnapshot, now: Date): string | null {
   if (!agent.active) return PAUSED_BEFORE_SUBMISSION;
   if (agent.policy && !agent.policy.active) return PAUSED_BEFORE_SUBMISSION;
