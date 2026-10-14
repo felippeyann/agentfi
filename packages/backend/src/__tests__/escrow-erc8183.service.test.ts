@@ -53,6 +53,7 @@ import {
   contestEscrowJob,
   deliverableHashOf,
   EscrowConfigUnverifiedError,
+  SettlementStillPendingError,
   enqueueSubmit,
   expiryMarginMs,
   escrowIntentId,
@@ -900,6 +901,49 @@ describe('processSettlementJob — reject (cancellation) and claimRefund (expiry
     const { deps, finalize } = makeDeps([SUBMITTED_JOB()], { chainStatus: CHAIN_JOB_STATUS.Submitted, settleLogs: [makeLog(AGENT_JOB_ESCROW_ABI, 'JobExpired', { jobId: 7n }, ESCROW)] });
     await processSettlementJob(deps, { data: { jobId: 'job-1', action: 'claimRefund' } });
     expect(finalize).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'job-1', outcome: 'FAILED', reason: expect.stringContaining('Expired') }));
+  });
+});
+
+// ── C3e item 1: no second evaluator broadcast while the previous one may mine ──
+
+describe('processSettlementJob — C3e item 1: a retry never signs over a pending settlement', () => {
+  const PREV = '0xabab000000000000000000000000000000000000000000000000000000000001' as Hex;
+  const notFound = (name: string) => Object.assign(new Error(name), { name });
+
+  function withPrevious(getTransaction: () => Promise<unknown>) {
+    const ctx = makeDeps([SUBMITTED_JOB({ settleTxHash: PREV, onChainStatus: 'SETTLING' })], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    ctx.getTransactionReceipt.mockImplementation(async ({ hash }: { hash: Hex }) => {
+      if (hash === PREV) throw notFound('TransactionReceiptNotFoundError');
+      return { status: 'success', logs: [] };
+    });
+    const base = ctx.deps.publicClient;
+    ctx.deps.publicClient = (chainId: number) => ({ ...base(chainId), getTransaction: getTransaction as never });
+    return ctx;
+  }
+
+  it('previous complete still pending (node knows it, no receipt) → SettlementStillPendingError, nothing signed, hash kept', async () => {
+    const { deps, signer, jobs } = withPrevious(async () => ({ hash: PREV, blockNumber: null }));
+    const err = await processSettlementJob(deps, settleJob(2)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SettlementStillPendingError);
+    expect(signer.writeContract).not.toHaveBeenCalled();
+    expect(jobs.get('job-1')!['settleTxHash']).toBe(PREV);
+  });
+
+  it('previous complete dropped (unknown to the node) → a new one is signed and replaces the hash', async () => {
+    const { deps, signer, jobs } = withPrevious(async () => {
+      throw notFound('TransactionNotFoundError');
+    });
+    expect(await processSettlementJob(deps, settleJob(2))).toMatchObject({ outcome: 'settled', txHash: SETTLE_HASH });
+    expect(signer.writeContract).toHaveBeenCalledTimes(1);
+    expect(jobs.get('job-1')!['settleTxHash']).toBe(SETTLE_HASH);
+  });
+
+  it('the node cannot be asked (RPC error) → refused too (retried later), nothing signed', async () => {
+    const { deps, signer } = withPrevious(async () => {
+      throw new Error('HTTP request failed');
+    });
+    await expect(processSettlementJob(deps, settleJob(2))).rejects.toBeInstanceOf(SettlementStillPendingError);
+    expect(signer.writeContract).not.toHaveBeenCalled();
   });
 });
 
