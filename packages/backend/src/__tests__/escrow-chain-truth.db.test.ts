@@ -1873,4 +1873,196 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(await job(allowed.json().id)).toMatchObject({ reservedValueUsd: '0', reservationStatus: 'PENDING' });
     });
   });
+
+  // ── C3e (C3d review leftovers) + 6d (A6b review): evaluator settlements in flight, ERC-8183 steps stamped for broadcast ──
+
+  describe('C3e — settlements in flight, lost hashes, dropped settlements; 6d — escrow steps stamped for broadcast', () => {
+    const FEE = (BUDGET * 30n) / 10_000n;
+
+    /** A job whose deliverable is Submitted on-chain; its settle is queued but not run yet. */
+    async function delivered() {
+      const { requester, provider, jobId } = await fundedJob();
+      expect((await patchJob(provider.id, jobId, { status: 'ACCEPTED' })).statusCode).toBe(200);
+      expect((await patchJob(provider.id, jobId, { status: 'COMPLETED', result: { answer: 42 } })).statusCode).toBe(200);
+      await sim.drive(1);
+      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED' });
+      return { requester, provider, jobId };
+    }
+    const contestAs = async (requesterId: string, jobId: string) =>
+      (await sim.app(requesterId)).inject({ method: 'POST', url: `/v1/jobs/${jobId}/contest`, payload: { reason: 'c3e' } });
+    const decide = (jobId: string, decision: 'pay' | 'refund' | 'quality-rejected' | 'payout-blocked') =>
+      m.svc.resolveEscrowJob(sim.deps, { jobId, decision, note: `c3e ${decision}`, operator: 'ops@test' });
+
+    /** `sim.deps.db` whose job.update throws ONCE when it writes `settleTxHash` (connection lost after the broadcast). */
+    function loseNextSettleHashWrite(): () => void {
+      const real = m.db;
+      let armed = true;
+      const job = new Proxy(real.job, {
+        get(target, prop, receiver) {
+          if (prop === 'update') {
+            return async (args: { data?: Record<string, unknown> }) => {
+              if (armed && args?.data && 'settleTxHash' in args.data) {
+                armed = false;
+                throw new Error('Connection terminated unexpectedly (after the broadcast)');
+              }
+              return target.update(args as never);
+            };
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+      sim.deps.db = new Proxy(real, { get: (target, prop, receiver) => (prop === 'job' ? job : Reflect.get(target, prop, receiver)) }) as never;
+      return () => {
+        sim.deps.db = real;
+      };
+    }
+
+    it('item 1: a settlement retried while its first complete is still pending sends no second evaluator transaction; the job then follows the chain with THAT transaction\'s hook outcome', async () => {
+      const { provider, jobId } = await delivered();
+      sim.chain.evaluatorHold = () => true; // the complete is broadcast but stays pending
+      await sim.drive(); // attempt 1 times out waiting; BullMQ retries; the last attempt hands the job back
+      const pendingBroadcasts = sim.chain.evaluatorBroadcasts.filter((b) => b.functionName === 'complete');
+      expect(pendingBroadcasts).toHaveLength(1); // no second complete while the first can still mine
+
+      sim.chain.evaluatorHold = null;
+      sim.chain.releaseEvaluator();
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      const done = await job(jobId);
+      expect(done).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', reservationStatus: 'RELEASED' });
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+      // The recorded settlement is the one that mined: its hook outcome and fee are kept.
+      expect(done.settleTxHash).toBe(pendingBroadcasts[0]!.hash);
+      expect(done).toMatchObject({ feedbackStatus: 'written', platformFeeAmount: FEE.toString() });
+      expect(sim.chain.evaluatorBroadcasts.filter((b) => b.outcome === 'reverted')).toHaveLength(0);
+    });
+
+    it('item 2: a complete broadcast whose hash write is lost — a contest is refused while it may still mine (never accepted, then overridden)', async () => {
+      const { requester, provider, jobId } = await delivered();
+      sim.chain.evaluatorHold = () => true;
+      const restore = loseNextSettleHashWrite();
+      await sim.drive(1); // attempt 1: complete broadcast (pending), the hash write fails
+      restore();
+      sim.settlements.clear(); // ... and that was the last attempt
+      await m.svc.handleFailedSettlementJob(sim.deps, { data: { jobId, action: 'settle' }, attemptsMade: 3, opts: { attempts: 3 } }, new Error('Connection terminated unexpectedly'));
+      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', settleTxHash: null });
+
+      const res = await contestAs(requester.id, jobId);
+      expect(res.statusCode).toBe(409);
+      expect((await job(jobId)).contestedAt).toBeNull();
+
+      // The lost complete mines: the provider is paid, nothing contradicts a contest.
+      sim.chain.evaluatorHold = null;
+      sim.chain.releaseEvaluator();
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', contestedAt: null });
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+      expect(sim.alerts.map((a) => a.kind)).not.toContain('review-overridden');
+    });
+
+    it('item 2: same with an operator decision — "refund" is refused while the lost complete may still mine (no decision the chain then overrides)', async () => {
+      const { jobId } = await delivered();
+      sim.chain.evaluatorHold = () => true;
+      const restore = loseNextSettleHashWrite();
+      await sim.drive(1);
+      restore();
+      sim.settlements.clear();
+      await m.svc.handleFailedSettlementJob(sim.deps, { data: { jobId, action: 'settle' }, attemptsMade: 3, opts: { attempts: 3 } }, new Error('Connection terminated unexpectedly'));
+
+      expect(await decide(jobId, 'refund')).toMatchObject({ outcome: 'refused', code: 'SETTLEMENT_IN_PROGRESS' });
+      expect((await job(jobId)).resolution).toBeNull();
+
+      sim.chain.evaluatorHold = null;
+      sim.chain.releaseEvaluator();
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', resolution: null });
+      expect(sim.alerts.map((a) => a.kind)).not.toContain('review-overridden');
+    });
+
+    it('item 3: a decision whose complete was dropped (no receipt, unknown to the node) is still executed by the recovery — never left to the expiry refund', async () => {
+      const { requester, provider, jobId } = await delivered();
+      expect((await contestAs(requester.id, jobId)).statusCode).toBe(200);
+      sim.settlements.clear();
+      sim.chain.evaluatorHold = () => true;
+      expect(await decide(jobId, 'pay')).toMatchObject({ outcome: 'scheduled' });
+      await sim.drive(); // every attempt times out; the decision goes back to its hold
+      expect(await job(jobId)).toMatchObject({ onChainStatus: 'CONTESTED', resolution: 'pay' });
+      for (const b of sim.chain.evaluatorBroadcasts.filter((x) => x.outcome === 'pending')) sim.chain.dropEvaluator(b.hash);
+      sim.chain.evaluatorHold = null;
+
+      // While the dropped hash is the recorded one, a new decision is refused (it might still be re-broadcast) ...
+      expect(await decide(jobId, 'refund')).toMatchObject({ outcome: 'refused', code: 'SETTLEMENT_IN_PROGRESS' });
+      // ... and the recovery tick re-runs the recorded decision, which pays.
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', resolution: 'pay' });
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+      expect(onChain((await job(jobId)).onChainJobId).status).toBe(JobStatus.Completed);
+    });
+
+    it('6d: a fund stamped for broadcast that fails for good while still in the mempool is not unwound — no reservation release, the job follows the chain when it mines', async () => {
+      const requester = await sim.agent('requester');
+      const provider = await sim.agent('provider');
+      // Every fund broadcast reaches the node, stays pending, and its answer is lost (hash hidden too).
+      sim.chain.hold = ({ functionName }) => functionName === 'fund';
+      sim.chain.dropResponse = ({ functionName }) => functionName === 'fund';
+      sim.chain.dropResponseSticky = true;
+      sim.chain.dropResponseHide = true;
+      const jobId = await postJob(requester.id, provider.id);
+      await sim.drive(); // create → setBudget → approve mine; fund: 3 attempts, each stamped and lost; then the failed handler
+
+      const [fundRow] = await stepRows(jobId, 'fund');
+      expect(fundRow!.broadcastAttemptedAt).not.toBeNull();
+      const afterFailure = await job(jobId);
+      expect(afterFailure.status).toBe('PENDING'); // not unwound to FAILED
+      expect(afterFailure.reservationStatus).toBe('PENDING'); // the daily volume is still counted
+      expect(afterFailure.onChainStatus).not.toBe('FAILED');
+
+      // The fund mines (the first one; the later ones revert): the job follows the chain.
+      sim.chain.dropResponse = null;
+      sim.chain.dropResponseSticky = false;
+      sim.chain.hold = null;
+      for (const b of sim.chain.broadcasts.filter((x) => x.functionName === 'fund')) {
+        sim.chain.unhide(b.hash);
+        sim.chain.release(b.hash);
+      }
+      expect(onChain(afterFailure.onChainJobId).status).toBe(JobStatus.Funded);
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'PENDING', onChainStatus: 'FUNDED', reservationStatus: 'PENDING' });
+      expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC - BUDGET);
+    });
+
+    it('6d: a provider submit stamped for broadcast that fails for good while pending is not handed back — the requester cannot cancel and get the deliverable refunded; the provider is paid when it mines', async () => {
+      const { requester, provider, jobId } = await fundedJob();
+      expect((await patchJob(provider.id, jobId, { status: 'ACCEPTED' })).statusCode).toBe(200);
+      sim.chain.hold = ({ functionName }) => functionName === 'submit';
+      sim.chain.dropResponse = ({ functionName }) => functionName === 'submit';
+      sim.chain.dropResponseSticky = true;
+      sim.chain.dropResponseHide = true;
+      expect((await patchJob(provider.id, jobId, { status: 'COMPLETED', result: { answer: 42 } })).statusCode).toBe(200);
+      await sim.drive(); // 3 stamped submit attempts, each lost; then the failed handler
+
+      expect((await job(jobId)).status).toBe('PAYMENT_PENDING'); // not handed back to ACCEPTED
+      const cancel = await patchJob(requester.id, jobId, { status: 'CANCELLED' });
+      expect(cancel.statusCode).toBe(400); // no transition from PAYMENT_PENDING
+      await sim.drive();
+      expect(sim.chain.evaluatorCalls.filter((c) => c.functionName === 'reject')).toHaveLength(0);
+
+      sim.chain.dropResponse = null;
+      sim.chain.dropResponseSticky = false;
+      sim.chain.hold = null;
+      for (const b of sim.chain.broadcasts.filter((x) => x.functionName === 'submit')) {
+        sim.chain.unhide(b.hash);
+        sim.chain.release(b.hash);
+      }
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED' });
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+      expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC - BUDGET);
+    });
+  });
 });

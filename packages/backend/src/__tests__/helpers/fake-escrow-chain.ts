@@ -180,6 +180,8 @@ export class FakeEscrowChain {
    */
   dropResponse: ((tx: { from: Address; functionName: string }) => boolean) | null = null;
   dropResponseHide = false;
+  /** C3e / 6d: keep dropping the answer of every matching broadcast (not only the first). */
+  dropResponseSticky = false;
   /** Broadcasts the node refused (nonce collisions and the like). */
   readonly rejectedBroadcasts: string[] = [];
   /** Transactions that stay in the mempool (not mined) until `release`d — a stuck or slow transaction. */
@@ -247,7 +249,7 @@ export class FakeEscrowChain {
     if (this.hold?.({ from, functionName })) this.held.add(hash);
     if (this.autoMine) this.mine();
     if (this.dropResponse?.({ from, functionName })) {
-      this.dropResponse = null;
+      if (!this.dropResponseSticky) this.dropResponse = null;
       if (this.dropResponseHide) this.hidden.add(hash);
       throw new Error('socket hang up (the node took the transaction, the answer was lost)');
     }
