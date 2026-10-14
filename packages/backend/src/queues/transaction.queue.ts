@@ -25,6 +25,7 @@ import {
   type RepollSummary,
   type TransactionJobData,
 } from './transaction.processor.js';
+import { deferBullJob } from './defer-job.js';
 
 export type { TransactionJobData } from './transaction.processor.js';
 
@@ -166,7 +167,10 @@ export function startTransactionWorker(): Worker<TransactionJobData> {
 
   const worker = new Worker<TransactionJobData>(
     'transactions',
-    (job: Job<TransactionJobData>) => processTransactionJob(job, processorDeps),
+    // Q7: an escrow step deferred by the pre-submit guard goes back to the
+    // delayed set without consuming an attempt (defer-job.ts).
+    (job: Job<TransactionJobData>, token?: string) =>
+      processTransactionJob(job, { ...processorDeps, deferJob: (delayMs) => deferBullJob(job, token, delayMs) }),
     {
       connection,
       concurrency: workerConcurrency,

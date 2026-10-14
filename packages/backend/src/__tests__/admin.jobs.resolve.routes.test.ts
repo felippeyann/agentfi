@@ -42,6 +42,13 @@ vi.mock('../services/billing/operator.service.js', () => ({ OperatorService: vi.
 vi.mock('../services/job/payment-finalizer.service.js', () => ({ finalizeA2APaymentJob: vi.fn() }));
 vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({ resolveJob: resolveJobMock }));
 vi.mock('../services/policy/escrow.service.js', () => ({ releaseJobEscrow: vi.fn() }));
+// Q7: this API process's verification state (GET /admin/escrow/verification).
+vi.mock('../config/escrow-verification.runtime.js', () => ({
+  escrowVerificationSettings: () => ({ ttlSeconds: 600, recheckSeconds: 120 }),
+  escrowVerificationSnapshot: (opts: { withReason: boolean }) => [
+    { chainId: 84532, state: 'unverified', allowed: false, verifiedAt: null, validUntil: null, since: '2026-10-14T10:00:00.000Z', ...(opts.withReason ? { reason: 'the chain could not be read: timed out' } : {}) },
+  ],
+}));
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -185,5 +192,25 @@ describe('POST /admin/jobs/:id/reconcile on ERC-8183 jobs', () => {
       mockDb.job.findUnique.mockResolvedValueOnce(row);
       expect((await reconcile(app)).statusCode).toBe(200);
     }
+  });
+});
+
+describe('GET /admin/escrow/verification (Q7)', () => {
+  it('requires the admin secret', async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: 'GET', url: '/admin/escrow/verification', headers: { 'x-admin-secret': 'wrong-secret-wrong-secret-wrong-secret!!' } });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('returns the API process state of each escrow chain WITH the reason, and the TTL / re-check settings', async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: 'GET', url: '/admin/escrow/verification', headers: { 'x-admin-secret': ADMIN_SECRET } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      process: 'api',
+      ttlSeconds: 600,
+      recheckSeconds: 120,
+      chains: [expect.objectContaining({ chainId: 84532, state: 'unverified', allowed: false, reason: expect.stringContaining('could not be read') })],
+    });
   });
 });

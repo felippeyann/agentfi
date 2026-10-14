@@ -191,6 +191,28 @@ describe('post_job (X3a: a paid job names its chain, USDC by default)', () => {
     }));
   });
 
+  it('Q7: passes ESCROW_CONFIG_UNVERIFIED (503) through with the chain, state and retryAfterSeconds', async () => {
+    const body = {
+      error: 'ESCROW_CONFIG_UNVERIFIED',
+      message: `The ERC-8183 escrow configuration of chain ${CHAIN_ID} is not verified right now (unverified); new escrow operations wait until it is. Nothing was reserved or changed — retry after the indicated delay.`,
+      chainId: CHAIN_ID,
+      state: 'unverified',
+      retryAfterSeconds: 120,
+    };
+    apiMock.post.mockRejectedValue(new ApiError(503, body));
+
+    const payload = payloadOf(
+      await callTool('post_job', { provider_id: PROVIDER_ID, payload: {}, reward_amount: '1', chain_id: CHAIN_ID }, { log }),
+    );
+    expect(payload).toMatchObject({
+      error: 'AgentFi API error 503: ESCROW_CONFIG_UNVERIFIED',
+      code: 'ESCROW_CONFIG_UNVERIFIED',
+      status: 503,
+      details: { chainId: CHAIN_ID, state: 'unverified', retryAfterSeconds: 120 },
+      tool: 'post_job',
+    });
+  });
+
   it('keeps the backend VALIDATION_FAILED details (e.g. an older client without chainId)', async () => {
     const details = [{ code: 'invalid_type', path: ['reward', 'chainId'], message: 'reward.chainId is required for a paid job' }];
     apiMock.post.mockRejectedValue(new ApiError(400, { error: 'Validation failed', code: 'VALIDATION_FAILED', details }));

@@ -51,6 +51,12 @@ if (!['happy', 'cancel'].includes(FLOW)) {
 const POLL_MS = Number(env.AGENTFI_POLL_INTERVAL_MS ?? 3000);
 const FUNDING_TIMEOUT_MS = Number(env.AGENTFI_FUNDING_TIMEOUT_SEC ?? 900) * 1000;
 const STEP_TIMEOUT_MS = Number(env.AGENTFI_STEP_TIMEOUT_SEC ?? 600) * 1000;
+// The backend's contest window (ESCROW_EVALUATION_DELAY_SECONDS): the evaluator
+// settles that long after `submit` confirms. 3600 is the Base Sepolia
+// validation (C5) value; the wait for the settlement is this window + one step
+// timeout. A backend with a shorter window simply settles sooner.
+const CONTEST_WINDOW_MS = Number(env.AGENTFI_CONTEST_WINDOW_SEC ?? 3600) * 1000;
+const HEARTBEAT_MS = 5 * 60_000;
 
 const CHAINS = {
   84532: { name: 'Base Sepolia', rpc: 'https://sepolia.base.org', usdc: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', explorer: 'https://sepolia.basescan.org' },
@@ -129,15 +135,21 @@ async function loadAgent(apiKey) {
 
 const getJob = (apiKey, id) => api(`/v1/jobs/${id}`, { apiKey });
 
-async function waitForJob(apiKey, id, what, done, { failOn = defaultFailure } = {}) {
-  const deadline = Date.now() + STEP_TIMEOUT_MS;
+async function waitForJob(apiKey, id, what, done, { failOn = defaultFailure, timeoutMs = STEP_TIMEOUT_MS } = {}) {
+  const started = Date.now();
+  const deadline = started + timeoutMs;
   let lastLine = '';
+  let lastPrint = started;
   for (;;) {
     const job = await getJob(apiKey, id);
     const line = `status=${job.status} onChain=${job.escrow?.onChainStatus} binding=${job.escrow?.providerAgentIdStatus ?? '-'}`;
     if (line !== lastLine) {
       console.log(`       ${line}`);
       lastLine = line;
+      lastPrint = Date.now();
+    } else if (Date.now() - lastPrint >= HEARTBEAT_MS) {
+      console.log(`       … still waiting for ${what} (${Math.round((Date.now() - started) / 60_000)} min, ${line})`);
+      lastPrint = Date.now();
     }
     if (done(job)) return job;
     const failure = failOn(job);
@@ -308,13 +320,29 @@ async function main() {
     log('5', color('33', `binding ${bound.escrow.providerAgentIdStatus} (${bound.escrow.providerAgentIdError}) — payment proceeds, the hook will skip feedback`));
   }
 
-  log('6', 'Provider delivers → submit → evaluator complete');
+  log('6', 'Provider delivers → submit → (contest window) → evaluator complete');
   await api(`/v1/jobs/${created.id}`, {
     method: 'PATCH',
     apiKey: provider.apiKey,
     body: { status: 'COMPLETED', result: { summary: 'Activity was steady; nothing unusual.', confidence: 0.7 } },
   });
-  const done = await waitForJob(requester.apiKey, created.id, 'settlement', (job) => job.status === 'COMPLETED');
+  const submitted = await waitForJob(
+    requester.apiKey,
+    created.id,
+    'submit',
+    (job) => job.status === 'COMPLETED' || ['SUBMITTED', 'SETTLING', 'COMPLETED'].includes(job.escrow?.onChainStatus),
+  );
+  if (submitted.status !== 'COMPLETED') {
+    const windowMin = Math.round(CONTEST_WINDOW_MS / 60_000);
+    log(
+      '6',
+      `deliverable Submitted on-chain — waiting for the contest window: the evaluator completes up to ${windowMin} min from now ` +
+        `(backend ESCROW_EVALUATION_DELAY_SECONDS; until then the requester may POST /v1/jobs/${created.id}/contest)`,
+    );
+  }
+  const done = await waitForJob(requester.apiKey, created.id, 'settlement', (job) => job.status === 'COMPLETED', {
+    timeoutMs: CONTEST_WINDOW_MS + STEP_TIMEOUT_MS,
+  });
 
   const e = done.escrow;
   const received = (await usdcBalance(provider.address)) - providerUsdcBefore;

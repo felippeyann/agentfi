@@ -99,6 +99,7 @@ import { REPUTATION_HOOK_ABI } from '../../abi/ReputationHook.abi.js';
 import { getKnownTokenBySymbol } from '../transaction/token-registry.js';
 import { publicErrorMessage, sanitizeContextFromEnv, sanitizeStoredError, sanitizeText, sanitizeValue } from '../../api/errors/sanitize.js';
 import type { EvaluatorSigner, EvaluatorWriteParams } from '../escrow/evaluator-signer.js';
+import type { EscrowGateVerdict } from '../../config/escrow-verification.js';
 import type { FinalizeA2APaymentJobParams } from './payment-finalizer.service.js';
 import type { ProcessorLogger, TransactionJobData } from '../../queues/transaction.processor.js';
 import { NO_LANE, fundingLaneKey, type LaneLock } from '../transaction/wallet-lane.js';
@@ -307,6 +308,14 @@ export interface Erc8183Deps {
   lanes?: LaneLock;
   /** C3c: operator alert channel (notifications). Alerts are also logged. */
   alert?(alert: EscrowAlert): Promise<void> | void;
+  /**
+   * Q7: is the on-chain configuration of `chainId` verified in this process
+   * (config/escrow-verification.runtime.ts)? Consulted before every
+   * evaluator signature; a refusal defers the settlement
+   * (`EscrowConfigUnverifiedError`). Absent → allowed (unit tests only: the
+   * runtime always wires it).
+   */
+  configGate?(chainId: number): EscrowGateVerdict;
 }
 
 /** The slice of a BullMQ job the settlement processor reads — a plain object satisfies it in tests. */
@@ -1847,8 +1856,34 @@ async function checkEvaluatorBalance(deps: Erc8183Deps, chainId: number): Promis
   });
 }
 
-/** Every evaluator transaction goes through here: balance check, then sign + broadcast. */
+/**
+ * Q7: an evaluator settlement refused because the on-chain configuration of
+ * its chain is not verified in this process. Not a settlement failure: the
+ * settlement worker reschedules the job after `retryAfterMs` without
+ * consuming an attempt (`escrow-settlement.queue.ts`), nothing is alerted per
+ * job (the verification runtime alerts once per chain and state change).
+ */
+export class EscrowConfigUnverifiedError extends Error {
+  constructor(
+    public readonly chainId: number,
+    public readonly reason: string,
+    public readonly retryAfterMs: number,
+  ) {
+    super(`ERC-8183 settlement deferred: ${reason}`);
+    this.name = 'EscrowConfigUnverifiedError';
+  }
+}
+
+/** Q7: throws `EscrowConfigUnverifiedError` unless the chain's configuration is verified now. */
+function assertEscrowConfigVerified(deps: Erc8183Deps, chainId: number): void {
+  const verdict = deps.configGate?.(chainId);
+  if (!verdict || verdict.allowed) return;
+  throw new EscrowConfigUnverifiedError(chainId, verdict.reason, verdict.retryAfterSeconds * 1000);
+}
+
+/** Every evaluator transaction goes through here: Q7 gate, balance check, then sign + broadcast. */
 async function sendEvaluatorTx(deps: Erc8183Deps, chainId: number, params: EvaluatorWriteParams): Promise<{ signer: EvaluatorSigner; txHash: Hex }> {
+  assertEscrowConfigVerified(deps, chainId);
   await checkEvaluatorBalance(deps, chainId);
   const signer = deps.evaluatorSigner(chainId);
   const txHash = await signer.writeContract(params);
@@ -1929,6 +1964,11 @@ async function settle(deps: Erc8183Deps, job: EscrowJobRow, chainStatus: number)
       }
     }
   }
+
+  // Q7: checked BEFORE the claim too, so a settlement deferred for an
+  // unverified configuration leaves the job SUBMITTED / CONTESTED (still
+  // contestable, still resolvable) instead of parking it in SETTLING.
+  assertEscrowConfigVerified(deps, job.escrowChainId!);
 
   // Claim the settlement (→ SETTLING). The automatic branch only takes an
   // uncontested PAYMENT_PENDING job without a decision: a contest claims the

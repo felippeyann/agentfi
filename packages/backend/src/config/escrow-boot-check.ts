@@ -143,6 +143,9 @@ export function compareEscrowDeployment(
 /** `readContract` of one chain (a viem public client satisfies it). */
 export type ContractReader = (params: { address: Address; abi: Abi; functionName: string }) => Promise<unknown>;
 
+/** `eth_chainId` of one chain's RPC (viem `getChainId`). Q7. */
+export type ChainIdReader = () => Promise<number>;
+
 /**
  * viem errors that are an ANSWER from the chain, not a failure to reach it:
  * the call executed and reverted, or returned no / undecodable data (no code
@@ -184,7 +187,20 @@ function firstLine(err: unknown): string {
   return sanitizeText((e?.shortMessage ?? e?.message ?? String(err)).split('\n')[0] ?? '') || 'unknown error';
 }
 
-async function readOnce(read: ContractReader, expected: EscrowChainExpectation): Promise<EscrowChainReading> {
+async function readOnce(read: ContractReader, expected: EscrowChainExpectation, readChainId?: ChainIdReader): Promise<EscrowChainReading> {
+  // Q7: the RPC must serve the configured chain — every read below and every
+  // signature would otherwise go to another network. A different answer is a
+  // mismatch (RPC_URL_<id> / the provider points elsewhere); a failure to ask
+  // is a transport error like any other.
+  if (readChainId) {
+    const served = await readChainId();
+    if (Number(served) !== expected.chainId) {
+      throw new DeploymentMismatchError([
+        `chain ${expected.chainId}: the RPC answers eth_chainId ${String(served)}, not ${expected.chainId} ` +
+          `(RPC_URL_${expected.chainId} or the provider serves another network; every read and signature would go there)`,
+      ]);
+    }
+  }
   const calls: Array<{ contract: 'escrow' | 'hook'; address: Address; abi: Abi; functionName: string }> = [
     { contract: 'escrow', address: expected.escrow, abi: AGENT_JOB_ESCROW_ABI as unknown as Abi, functionName: 'token' },
     ...(expected.hook
@@ -268,6 +284,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 export async function checkEscrowDeployments(params: {
   chains: readonly EscrowChainExpectation[];
   reader: (chainId: number) => ContractReader;
+  /** Q7: `eth_chainId` of each chain's RPC; checked first when given. */
+  chainIdReader?: (chainId: number) => ChainIdReader;
   timeoutMs?: number;
   attempts?: number;
 }): Promise<EscrowChainCheck[]> {
@@ -279,7 +297,10 @@ export async function checkEscrowDeployments(params: {
       let lastError = 'unknown error';
       for (let attempt = 1; attempt <= attempts; attempt++) {
         try {
-          const reading = await withTimeout(readOnce(params.reader(expected.chainId), expected), timeoutMs);
+          const reading = await withTimeout(
+            readOnce(params.reader(expected.chainId), expected, params.chainIdReader?.(expected.chainId)),
+            timeoutMs,
+          );
           return { ...base, ...compareEscrowDeployment(expected, reading), unreadable: null };
         } catch (err) {
           if (err instanceof DeploymentMismatchError) return { ...base, problems: err.problems, notes: [], unreadable: null };

@@ -4,6 +4,8 @@ import { Redis } from 'ioredis';
 import { getWalletService } from '../../services/wallet/index.js';
 import { env } from '../../config/env.js';
 import { createChainPublicClient } from '../../config/chains.js';
+import { escrowVerificationSnapshot } from '../../config/escrow-verification.runtime.js';
+import type { EscrowVerificationView } from '../../config/escrow-verification.js';
 const redis = new Redis(env.REDIS_URL, {
   lazyConnect: true,
   maxRetriesPerRequest: 1,
@@ -53,6 +55,13 @@ export interface ReadinessChecks {
 export interface HealthRoutesOptions {
   /** Dependency probes (tests inject fakes). */
   checks?: ReadinessChecks;
+  /**
+   * Q7: this process's verification state of each escrow chain (public view:
+   * no reasons). Diagnostic only — it never changes the readiness status:
+   * reads, diagnostics and the reconciliation of broadcast transactions keep
+   * working while a chain is unverified.
+   */
+  escrowConfig?: () => EscrowVerificationView[];
   /** How long one readiness result is reused (default 5 s). */
   readyCacheMs?: number;
   /** `/health/ready` requests per client IP per minute (default 30). */
@@ -101,6 +110,7 @@ export async function healthRoutes(fastify: FastifyInstance, opts: HealthRoutesO
     rpc: checkRpc,
     turnkey: checkTurnkey,
   };
+  const escrowConfigView = opts.escrowConfig ?? (() => escrowVerificationSnapshot({ withReason: false }));
   const now = opts.now ?? Date.now;
   const readyCacheMs = opts.readyCacheMs ?? 5_000;
   const limiter = new InProcessWindowLimiter(opts.readyMaxPerMinute ?? 30, 60_000, now);
@@ -163,6 +173,12 @@ export async function healthRoutes(fastify: FastifyInstance, opts: HealthRoutesO
         .send({ error: `Rate limit exceeded. Retry after ${retryAfter} seconds.` });
     }
     const result = await readiness();
-    return reply.code(result.statusCode).send(result.body);
+    let escrowConfig: EscrowVerificationView[] = [];
+    try {
+      escrowConfig = escrowConfigView();
+    } catch {
+      // diagnostics must never break readiness
+    }
+    return reply.code(result.statusCode).send({ ...result.body, escrowConfig });
   });
 }

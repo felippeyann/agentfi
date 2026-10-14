@@ -41,11 +41,13 @@ The automated version of the same run (plus the contest, cancellation and expiry
 
 ## Run it against Base Sepolia (task C5, after C4)
 
-Set up the backend exactly as in [docs/project/testnet-log.md §5.4](../../docs/project/testnet-log.md#54-c5-runbook--base-sepolia-owner-runs-it-after-c4): `packages/backend/.env` with `WALLET_PROVIDER=turnkey` and the Turnkey credentials, the C4 addresses (`AGENT_JOB_ESCROW_ADDRESS_84532`, `REPUTATION_HOOK_ADDRESS_84532`), `ESCROW_EVALUATOR_PRIVATE_KEY`, `ALCHEMY_API_KEY` (always required; `RPC_URL_84532` optional), `BACKEND_PUBLIC_URL=http://localhost:3000` (D10); migrations applied; the API and the worker process both running. Then, from the repository root:
+Set up the backend exactly as in [docs/project/testnet-log.md §5.4](../../docs/project/testnet-log.md#54-c5-runbook--base-sepolia-owner-runs-it-after-c4): `packages/backend/.env` with `WALLET_PROVIDER=turnkey` and the Turnkey credentials, the C4 addresses (`AGENT_JOB_ESCROW_ADDRESS_84532`, `REPUTATION_HOOK_ADDRESS_84532`), `ESCROW_EVALUATOR_PRIVATE_KEY`, `ALCHEMY_API_KEY` (always required; `RPC_URL_84532` optional), `BACKEND_PUBLIC_URL=http://localhost:3000` (D10), `ESCROW_EVALUATION_DELAY_SECONDS=3600` (the contest window is on for the whole validation run, owner decision Q6); migrations applied; the API and the worker process both running. Then, from the repository root:
 
 ```bash
 AGENTFI_API_URL=http://localhost:3000 AGENTFI_OPERATOR_SECRET=<that backend's API_SECRET> node examples/escrow-erc8183/index.mjs
 ```
+
+With the one-hour window the evaluator completes the job about an hour after `submit`: the script says so (`waiting for the contest window`), prints a line every 5 minutes while it waits, and allows the window plus one step timeout (`AGENTFI_CONTEST_WINDOW_SEC`, default 3600, + `AGENTFI_STEP_TIMEOUT_SEC`). The job's own TTL is the backend's `ESCROW_JOB_TTL_SECONDS` (default 7 days); keep it at the default — a TTL shorter than about 62 minutes would clamp the window (the settlement is always scheduled 2 minutes before `expiresAt`).
 
 On a first run the script registers two new agents, prints their wallet addresses and API keys, and waits (up to `AGENTFI_FUNDING_TIMEOUT_SEC`, default 900 s) until you fund them from faucets: at least `AGENTFI_REWARD_USDC` testnet USDC (Circle faucet, <https://faucet.circle.com>) and about 0.0005 ETH on the requester, about 0.0005 ETH on the provider (Coinbase Developer Platform or Alchemy Base Sepolia faucet). The next run can reuse the two agents and their funded Turnkey wallets with the printed keys:
 
@@ -70,6 +72,7 @@ For C5's failure path, run it again with `AGENTFI_FLOW=cancel` and the same keys
 | `AGENTFI_FORK_FUNDING` | `false` | fund the wallets with Anvil cheat codes (localhost RPC only) |
 | `AGENTFI_POLL_INTERVAL_MS` | `3000` | job polling interval (stay under the FREE tier's 30 requests/min) |
 | `AGENTFI_FUNDING_TIMEOUT_SEC` / `AGENTFI_STEP_TIMEOUT_SEC` | `900` / `600` | how long to wait for faucet funding / each on-chain step |
+| `AGENTFI_CONTEST_WINDOW_SEC` | `3600` | the backend's contest window (`ESCROW_EVALUATION_DELAY_SECONDS`, 3600 in the Base Sepolia validation config): after `submit` the script logs that it waits for the window and allows window + step timeout for the settlement. A backend with a shorter window just settles sooner; the cancel flow is unaffected |
 
 ## Files
 

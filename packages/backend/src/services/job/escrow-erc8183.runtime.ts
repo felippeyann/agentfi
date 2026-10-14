@@ -13,6 +13,7 @@ import { db } from '../../db/client.js';
 import { env, escrowEvaluatorAddress } from '../../config/env.js';
 import { getContracts } from '../../config/contracts.js';
 import { createChainPublicClient } from '../../config/chains.js';
+import { escrowConfigGate } from '../../config/escrow-verification.runtime.js';
 import { logger } from '../../api/middleware/logger.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
 import { addSettlementJob } from '../../queues/escrow-settlement.queue.js';
@@ -111,6 +112,8 @@ export function erc8183Deps(): Erc8183Deps {
     logger,
     lanes: walletLaneLock,
     alert: sendEscrowAlert,
+    // Q7: no evaluator signature while the chain's on-chain configuration is unverified in this process.
+    configGate: (chainId) => escrowConfigGate(chainId),
   };
 }
 

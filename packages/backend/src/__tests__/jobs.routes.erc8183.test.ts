@@ -66,6 +66,14 @@ const { mockDb, escrowMock, runtimeMock, reputationMock, paymentMock } = vi.hois
   paymentMock: { executeA2APayment: vi.fn() },
 }));
 
+// Q7: the escrow chain's on-chain configuration — verified unless a test says otherwise.
+const gateState = vi.hoisted(() => ({ verified: true }));
+vi.mock('../config/escrow-verification.runtime.js', () => ({
+  escrowConfigGate: (chainId: number) =>
+    gateState.verified
+      ? { allowed: true, chainId, verifiedAt: new Date(), validUntil: new Date(Date.now() + 600_000) }
+      : { allowed: false, chainId, block: 'unverified', reason: `chain ${chainId}: the chain could not be read`, retryAfterSeconds: 120 },
+}));
 vi.mock('../db/client.js', () => ({ db: mockDb }));
 vi.mock('../services/policy/escrow.service.js', () => escrowMock);
 vi.mock('../services/job/escrow-erc8183.runtime.js', () => runtimeMock);
@@ -146,6 +154,7 @@ function escrowJob(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  gateState.verified = true;
   runtimeMock.isErc8183Enabled.mockImplementation((chainId: number) => chainId === CHAIN_ID);
   runtimeMock.getEscrowToken.mockResolvedValue(USDC);
   runtimeMock.startEscrow.mockResolvedValue(undefined);
@@ -779,6 +788,81 @@ describe('S5: chain errors in job responses are sanitized', () => {
 });
 
 // ── X3a: a paid job names its chain and token (no mainnet/ETH default) ─────
+
+describe('Q7: 503 ESCROW_CONFIG_UNVERIFIED while the escrow chain is unverified (before anything is written)', () => {
+  const patch = (app: Awaited<ReturnType<typeof buildApp>>, payload: Record<string, unknown>) =>
+    app.inject({ method: 'PATCH', url: '/v1/jobs/job-1', payload });
+
+  function expect503(res: { statusCode: number; headers: Record<string, unknown>; json(): unknown }) {
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['retry-after']).toBe('120');
+    expect(res.json()).toMatchObject({ error: 'ESCROW_CONFIG_UNVERIFIED', chainId: CHAIN_ID, state: 'unverified', retryAfterSeconds: 120 });
+  }
+
+  it('POST /v1/jobs for an escrow job: 503 + Retry-After; nothing reserved, created or started', async () => {
+    gateState.verified = false;
+    mockDb.agent.findUnique.mockResolvedValueOnce(PROVIDER).mockResolvedValueOnce(REQUESTER);
+    const app = await buildApp();
+    const res = await app.inject({ method: 'POST', url: '/v1/jobs', payload: { providerId: PROVIDER.id, payload: { task: 'x' }, reward: { amount: '1', token: 'USDC', chainId: CHAIN_ID } } });
+    expect503(res);
+    expect(escrowMock.reserveEscrowJobSpend).not.toHaveBeenCalled();
+    expect(escrowMock.reserveJobEscrow).not.toHaveBeenCalled();
+    expect(mockDb.job.create).not.toHaveBeenCalled();
+    expect(runtimeMock.startEscrow).not.toHaveBeenCalled();
+    expect(runtimeMock.getEscrowToken).not.toHaveBeenCalled();
+  });
+
+  it('scope: a free job and a paid job on a chain without the escrow are not gated', async () => {
+    gateState.verified = false;
+    const app = await buildApp();
+    mockDb.agent.findUnique.mockResolvedValueOnce(PROVIDER);
+    const free = await app.inject({ method: 'POST', url: '/v1/jobs', payload: { providerId: PROVIDER.id, payload: { task: 'x' } } });
+    expect(free.statusCode).toBe(201);
+    mockDb.agent.findUnique.mockResolvedValueOnce(PROVIDER);
+    const legacy = await app.inject({ method: 'POST', url: '/v1/jobs', payload: { providerId: PROVIDER.id, payload: { task: 'x' }, reward: { amount: '0.01', token: 'ETH', chainId: 1 } } });
+    expect(legacy.statusCode).toBe(201);
+    expect(escrowMock.reserveJobEscrow).toHaveBeenCalledTimes(1);
+  });
+
+  it('PATCH COMPLETED (→ submit → settlement): 503, no transition, no submit', async () => {
+    gateState.verified = false;
+    mockDb.job.findUnique.mockResolvedValue(escrowJob({ status: 'ACCEPTED' }));
+    const res = await patch(await buildApp(PROVIDER.id), { status: 'COMPLETED', result: { ok: true } });
+    expect503(res);
+    expect(mockDb.job.updateMany).not.toHaveBeenCalled();
+    expect(runtimeMock.enqueueSubmit).not.toHaveBeenCalled();
+  });
+
+  it.each(['CANCELLED', 'FAILED'])('PATCH %s of a funded job (→ evaluator refund): 503, no transition, no release, no reject', async (status) => {
+    gateState.verified = false;
+    mockDb.job.findUnique.mockResolvedValue(escrowJob({ status: 'ACCEPTED', onChainStatus: 'FUNDED' }));
+    const res = await patch(await buildApp(status === 'FAILED' ? PROVIDER.id : REQUESTER.id), { status });
+    expect503(res);
+    expect(mockDb.job.updateMany).not.toHaveBeenCalled();
+    expect(escrowMock.releaseJobEscrow).not.toHaveBeenCalled();
+    expect(runtimeMock.requestCancellationReject).not.toHaveBeenCalled();
+    expect(reputationMock.recordJobOutcome).not.toHaveBeenCalled();
+  });
+
+  it('PATCH ACCEPTED (DB only) and a contest (a DB decision; its settlement is deferred by the gate) stay allowed', async () => {
+    gateState.verified = false;
+    mockDb.job.findUnique.mockResolvedValue(escrowJob({ status: 'PENDING', onChainStatus: 'FUNDED' }));
+    expect((await patch(await buildApp(PROVIDER.id), { status: 'ACCEPTED' })).statusCode).toBe(200);
+
+    mockDb.job.findUnique.mockResolvedValue(escrowJob({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED' }));
+    const app = await buildApp();
+    const res = await app.inject({ method: 'POST', url: '/v1/jobs/job-1/contest', payload: { reason: 'wrong' } });
+    expect(res.statusCode).toBe(200);
+    expect(runtimeMock.contestJob).toHaveBeenCalledWith({ jobId: 'job-1', reason: 'wrong' });
+  });
+
+  it('a job already final on-chain is not gated (nothing left to move)', async () => {
+    gateState.verified = false;
+    mockDb.job.findUnique.mockResolvedValue(escrowJob({ status: 'ACCEPTED', onChainStatus: 'EXPIRED' }));
+    const res = await patch(await buildApp(REQUESTER.id), { status: 'CANCELLED' });
+    expect(res.statusCode).toBe(200);
+  });
+});
 
 describe('POST /v1/jobs: a reward must name chainId and token (X3a)', () => {
   let REWARD_CHAIN_ID_REQUIRED: string;

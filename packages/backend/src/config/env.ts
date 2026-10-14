@@ -5,6 +5,8 @@ import type { Address, Hex } from 'viem';
 import { describeLegacyContract, findLegacyContractConfig } from './contracts.js';
 import {
   PRODUCTION_LIKE,
+  escrowVerificationIntervalProblem,
+  evaluationDelayUnsetProblem,
   nodeEnvUnsetVerdict,
   placeholderKeys,
   rpcUrlProblem,
@@ -179,7 +181,15 @@ const envSchema = z.object({
   // Grace period between the provider's `submit` confirming and the evaluator
   // sending `complete`, during which the requester may `POST /v1/jobs/:id/contest`.
   // C3d: clamped per job so the settlement is scheduled before `expiresAt`.
+  // Q6: the code default stays 0, but production / staging with an escrow
+  // configured must set it explicitly (`evaluationDelayUnsetProblem`); the
+  // Base Sepolia validation (C5) uses 3600, mainnet's value is an owner decision.
   ESCROW_EVALUATION_DELAY_SECONDS: z.coerce.number().int().min(0).default(0),
+  // Q7: how long a successful verification of the deployed escrow / hook
+  // configuration (config/escrow-verification.ts) authorises new escrow
+  // signatures, and how often it is re-read. Re-check < TTL (validated below).
+  ESCROW_CONFIG_VERIFIED_TTL_SECONDS: z.preprocess(blankToUndefined, z.coerce.number().int().positive().default(600)),
+  ESCROW_CONFIG_RECHECK_SECONDS: z.preprocess(blankToUndefined, z.coerce.number().int().positive().default(120)),
   // C3d: how long before `expiresAt` the operator is alerted (once) about a
   // job still waiting for a review decision (contested, or CANCELLED/FAILED
   // while Submitted on-chain). After `expiresAt` `claimRefund` is
@@ -421,6 +431,25 @@ if (
       'but no ESCROW_EVALUATOR_PRIVATE_KEY. The backend is the evaluator of every ERC-8183 job ' +
       '(decision D5) and cannot settle or refund escrowed USDC without it.',
   );
+  process.exit(1);
+}
+
+// Q6: production / staging with an escrow must choose the contest window
+// explicitly (0 included); the code default is not a decision.
+const evaluationDelayProblem = evaluationDelayUnsetProblem(process.env, parsed.data.NODE_ENV, configuredEscrowChains);
+if (evaluationDelayProblem) {
+  console.error(evaluationDelayProblem);
+  process.exit(1);
+}
+
+// Q7: the verification of the on-chain configuration must be re-checked
+// before it expires (every environment).
+const verificationIntervalProblem = escrowVerificationIntervalProblem(
+  parsed.data.ESCROW_CONFIG_VERIFIED_TTL_SECONDS,
+  parsed.data.ESCROW_CONFIG_RECHECK_SECONDS,
+);
+if (verificationIntervalProblem) {
+  console.error(verificationIntervalProblem);
   process.exit(1);
 }
 

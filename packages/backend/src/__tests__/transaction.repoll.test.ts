@@ -38,6 +38,8 @@ vi.mock('../services/transaction/price.service.js', () => ({ weiToUsd: weiToUsdM
 vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({ onEscrowTxOutcome: escrowOutcomeMock, vetBindBeforeBroadcast: async () => null }));
 vi.mock('../api/middleware/logger.js', () => ({ logger: { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined } }));
 vi.mock('../config/chains.js', () => ({ getChain: () => ({}), withFallbackRpc: vi.fn() }));
+// Q7: the pre-submit guard's gate (verified here; the re-poll of SUBMITTED rows never consults it).
+vi.mock('../config/escrow-verification.runtime.js', () => ({ escrowConfigGate: (chainId: number) => ({ allowed: true, chainId, verifiedAt: new Date(), validUntil: new Date(Date.now() + 600_000) }) }));
 
 import { processTransactionJob, repollSubmittedTransactions, type TransactionJobData } from '../queues/transaction.processor.js';
 import { MonitorService, recordReceiptOnce } from '../services/transaction/monitor.service.js';

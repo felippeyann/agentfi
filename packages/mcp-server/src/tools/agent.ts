@@ -322,7 +322,8 @@ export const agentTools = [
       'and ERC-8004 reputation is written on-chain, unless you contest_job the deliverable first (it is then held for an ' +
       'operator decision: pay the provider or refund you). Your operator policy applies to the budget (USDC counted at ' +
       '1 USD: per-transaction cap, daily volume, token allowlist, the provider as an allowed payee, cooldown); a refusal ' +
-      'is POLICY_VIOLATION with `rule`. ' +
+      'is POLICY_VIOLATION with `rule`. ESCROW_CONFIG_UNVERIFIED (503) means the backend cannot verify the escrow ' +
+      'contracts on that chain right now (e.g. its RPC is down): nothing was reserved; retry after retryAfterSeconds. ' +
       'Optionally sign the payload with sign_handshake first.',
     inputSchema: z.object({
       provider_id: agentIdSchema('The ID of the agent you are hiring.'),
@@ -431,7 +432,9 @@ export const agentTools = [
       'or FAILED; requester or provider: CANCELLED. On an escrowed job ACCEPTED is refused (409 ESCROW_NOT_FUNDED) ' +
       'until escrow.onChainStatus is FUNDED; COMPLETED moves the job to PAYMENT_PENDING and your wallet submits a hash ' +
       'of `result` on-chain (sent automatically later if your ERC-8004 identity is still being bound, ' +
-      'escrow.deferredSubmitAt); payment arrives when the evaluator settles. CANCELLED / FAILED refund the requester.',
+      'escrow.deferredSubmitAt); payment arrives when the evaluator settles. CANCELLED / FAILED refund the requester. ' +
+      'On an escrowed job COMPLETED / CANCELLED / FAILED answer ESCROW_CONFIG_UNVERIFIED (503) while the backend cannot ' +
+      'verify the escrow contracts (nothing changed; retry after retryAfterSeconds).',
     inputSchema: z.object({
       job_id: jobIdSchema('The ID of the job to update.'),
       status: z.enum(['ACCEPTED', 'COMPLETED', 'FAILED', 'CANCELLED']).describe('The new status.'),

@@ -26,6 +26,15 @@
  *    process runs in a container or on a hosting platform
  *    (`detectContainer`) AND the configuration looks like production
  *    (`productionSignals`). Set `NODE_ENV` explicitly to boot.
+ * 5. `ESCROW_EVALUATION_DELAY_SECONDS` (owner decision Q6, 2026-10-14): in
+ *    production and staging, with any `AGENT_JOB_ESCROW_ADDRESS_<chainId>`
+ *    set, the contest window must be set explicitly (any value, 0 included).
+ *    The code default stays 0 and no mainnet value is chosen here: the guard
+ *    forces the operator to make the choice instead of inheriting it.
+ * 6. `ESCROW_CONFIG_RECHECK_SECONDS` must be shorter than
+ *    `ESCROW_CONFIG_VERIFIED_TTL_SECONDS` (Q7), in every environment: a
+ *    verification that is re-checked less often than it expires leaves gaps
+ *    where every escrow operation is refused for no reason.
  */
 
 import { existsSync } from 'node:fs';
@@ -239,4 +248,43 @@ export function nodeEnvUnsetVerdict(
         'development container.'
       : null;
   return { warning, fatal };
+}
+
+// ── 5. Contest window (Q6) ───────────────────────────────────────────────
+
+/**
+ * FATAL message when production / staging runs an ERC-8183 escrow
+ * (`escrowChainIds` non-empty) without `ESCROW_EVALUATION_DELAY_SECONDS` set
+ * explicitly; null otherwise. A blank `KEY=` line (dotenv delivers "") is not
+ * a value. Any number, 0 included, satisfies it: the guard forces the choice,
+ * it does not make it.
+ */
+export function evaluationDelayUnsetProblem(
+  source: EnvSource,
+  nodeEnv: string,
+  escrowChainIds: readonly number[],
+): string | null {
+  if (!PRODUCTION_LIKE.has(nodeEnv) || escrowChainIds.length === 0) return null;
+  const raw = source['ESCROW_EVALUATION_DELAY_SECONDS'];
+  if (raw !== undefined && raw.trim() !== '') return null;
+  return (
+    `FATAL: ESCROW_EVALUATION_DELAY_SECONDS is not set with NODE_ENV=${nodeEnv} and an ERC-8183 escrow configured ` +
+    `(AGENT_JOB_ESCROW_ADDRESS_${escrowChainIds[0]}). It is the requester's contest window: the evaluator settles a ` +
+    'delivered job that many seconds after its submit confirms (0 = immediately, no time to contest). Set it explicitly ' +
+    '(0 included). The mainnet value is an owner decision (docs/project/execution-plan-2026-10.md §5, question 6); ' +
+    'the Base Sepolia validation (C5) runs with 3600.'
+  );
+}
+
+// ── 6. On-chain configuration verification intervals (Q7) ───────────────
+
+/** FATAL message when the re-check interval is not shorter than the verification TTL; null otherwise. */
+export function escrowVerificationIntervalProblem(ttlSeconds: number, recheckSeconds: number): string | null {
+  if (recheckSeconds < ttlSeconds) return null;
+  return (
+    `FATAL: ESCROW_CONFIG_RECHECK_SECONDS (${recheckSeconds}) must be shorter than ESCROW_CONFIG_VERIFIED_TTL_SECONDS ` +
+    `(${ttlSeconds}). A verification of the deployed escrow / hook is valid for the TTL and re-checked every ` +
+    'RECHECK seconds; a re-check slower than the TTL would let it lapse between checks and refuse every escrow ' +
+    'operation in the gap.'
+  );
 }
