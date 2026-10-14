@@ -339,6 +339,23 @@ describe('PATCH /v1/agents/:id/policy — maxOutflowPerTxUsd (§5-6)', () => {
     await app.close();
   });
 
+  it('USD limits take at most 6 decimals (micro-USD, what every enforcer reads): 7 decimals is 400 for every caller, 6 is accepted', async () => {
+    const app = await buildApp({ isOperator: true });
+    for (const field of ['maxValuePerTxUsd', 'maxOutflowPerTxUsd', 'maxDailyVolumeUsd'] as const) {
+      const res = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { [field]: '100.0000001' } });
+      expect(res.statusCode, field).toBe(400);
+      expect(JSON.stringify(res.json()), field).toMatch(/6 decimals/);
+    }
+    // A daily limit below one micro-dollar read as "no limit" by x402 / escrow: unwritable.
+    expect((await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxDailyVolumeUsd: '0.0000001' } })).statusCode).toBe(400);
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
+    const ok = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxOutflowPerTxUsd: '0.000001', maxDailyVolumeUsd: '1000.000001' } });
+    expect(ok.statusCode).toBe(200);
+    // The ETH cap keeps its own precision (wei): more than 6 decimals is fine there.
+    expect((await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxValuePerTxEth: '0.0000001' } })).statusCode).toBe(200);
+    await app.close();
+  });
+
   it('a non-decimal value is 400 (never stored)', async () => {
     const app = await buildApp({ isOperator: true });
     for (const payload of [{ maxOutflowPerTxUsd: 'unlimited' }, { maxOutflowPerTxUsd: '' }, { maxOutflowPerTxUsd: 25 }]) {

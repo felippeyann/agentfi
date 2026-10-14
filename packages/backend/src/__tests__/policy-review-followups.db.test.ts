@@ -179,6 +179,7 @@ type Modules = {
   transactionRoutes: typeof import('../api/routes/transactions.js')['transactionRoutes'];
   adminRoutes: typeof import('../api/routes/admin.js')['adminRoutes'];
   registerErrorHandler: typeof import('../api/errors/handler.js')['registerErrorHandler'];
+  createTransactionWithVolume: typeof import('../services/policy/daily-volume.js')['createTransactionWithVolume'];
 };
 let m: Modules;
 
@@ -296,13 +297,20 @@ const gmxClose = { market: 'ETH/USD', collateralToken: USDC, sizeDeltaUsd: '1', 
 
 describeDb('#178 / #180 review follow-ups, on Postgres', () => {
   beforeAll(async () => {
-    const [db, routes, admin, handler] = await Promise.all([
+    const [db, routes, admin, handler, volume] = await Promise.all([
       import('../db/client.js'),
       import('../api/routes/transactions.js'),
       import('../api/routes/admin.js'),
       import('../api/errors/handler.js'),
+      import('../services/policy/daily-volume.js'),
     ]);
-    m = { db: db.db, transactionRoutes: routes.transactionRoutes, adminRoutes: admin.adminRoutes, registerErrorHandler: handler.registerErrorHandler };
+    m = {
+      db: db.db,
+      transactionRoutes: routes.transactionRoutes,
+      adminRoutes: admin.adminRoutes,
+      registerErrorHandler: handler.registerErrorHandler,
+      createTransactionWithVolume: volume.createTransactionWithVolume,
+    };
     await wipe();
   });
 
@@ -448,6 +456,38 @@ describeDb('#178 / #180 review follow-ups, on Postgres', () => {
         protocol: 'compound-v3',
         recipient: getAddress(agent.safeAddress),
       });
+    });
+  });
+
+  // ── 4. The creation-time daily checks are exact too (#185 follow-up) ───────
+
+  describe('4 — a new spend is judged against the daily limit exactly (micro-USD), at the pre-check and the binding check', () => {
+    it('reproduction (route): 0.2 USD on a day with 0.1 USD of x402 fills a 0.3 USD limit exactly — accepted and reserved', async () => {
+      const agent = await mkAgent({ maxDailyVolumeUsd: '0.3', maxValueForAutoApprovalEth: '10' });
+      await x402Payment(agent.id, 100_000n, at(D1, '08:00:00.000'));
+      const res = await post(await app(agent.id), '/v1/transactions/transfer', { token: 'ETH', to: RECIPIENT, amount: '0.0001' });
+      expect(res.statusCode, res.body).toBe(202);
+      expect(await volume(agent.id, D1)).toBeCloseTo(0.2, 6);
+    });
+
+    it('reproduction (binding check alone): createTransactionWithVolume at the exact limit reserves; one micro-dollar more is refused', async () => {
+      const agent = await mkAgent({ maxDailyVolumeUsd: '0.3' });
+      await x402Payment(agent.id, 100_000n, at(D1, '08:00:00.000'));
+      const data = { agentId: agent.id, chainId: CHAIN_ID, type: 'TRANSFER' as const, status: 'QUEUED' as const };
+      const fits = await m.createTransactionWithVolume(m.db, { agentId: agent.id, valueUsd: '0.2', priceSource: 'synthetic', data, now: at(D1) });
+      expect(fits).toMatchObject({ ok: true });
+      const over = await m.createTransactionWithVolume(m.db, { agentId: agent.id, valueUsd: '0.000001', priceSource: 'synthetic', data, now: at(D1) });
+      expect(over).toMatchObject({ ok: false, code: 'DAILY_LIMIT' });
+      expect(await volume(agent.id, D1)).toBeCloseTo(0.2, 6);
+    });
+
+    it('one micro-dollar over at the route is still refused (403, nothing reserved)', async () => {
+      const agent = await mkAgent({ maxDailyVolumeUsd: '0.299999', maxValueForAutoApprovalEth: '10' });
+      await x402Payment(agent.id, 100_000n, at(D1, '08:00:00.000'));
+      const res = await post(await app(agent.id), '/v1/transactions/transfer', { token: 'ETH', to: RECIPIENT, amount: '0.0001' });
+      expect(res.statusCode, res.body).toBe(403);
+      expect(res.json().error).toMatch(/Daily volume limit/);
+      expect(await volume(agent.id, D1)).toBe(0);
     });
   });
 });

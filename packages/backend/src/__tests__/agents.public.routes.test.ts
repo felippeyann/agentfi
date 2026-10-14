@@ -260,6 +260,18 @@ describe('POST /v1/agents — operator path keeps accepting an explicit (valid) 
     await app.close();
   });
 
+  it('USD limits take at most 6 decimals at registration (micro-USD): 7 decimals is 400 before provisioning', async () => {
+    const app = await buildApp();
+    for (const field of ['maxValuePerTxUsd', 'maxOutflowPerTxUsd', 'maxDailyVolumeUsd'] as const) {
+      const res = await app.inject({ method: 'POST', url: '/v1/agents', payload: { name: `seven-${field}`, policy: { [field]: '1.0000001' } } });
+      expect(res.statusCode, field).toBe(400);
+    }
+    expect(createWalletMock).not.toHaveBeenCalled();
+    const ok = await app.inject({ method: 'POST', url: '/v1/agents', payload: { name: 'six', policy: { maxDailyVolumeUsd: '0.000001' } } });
+    expect(ok.statusCode).toBe(201);
+    await app.close();
+  });
+
   it('Q8: a non-empty allowedContracts without allowedRecipients is 400 before provisioning (no silent widening)', async () => {
     const app = await buildApp();
 
