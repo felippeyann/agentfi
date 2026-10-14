@@ -2963,7 +2963,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Operator batch execution */
+        /**
+         * Operator batch execution
+         * @description Queues an operator batch (policy sync, kill-switch calldata, maintenance) signed by the named agent's wallet and executed from its Safe through the AgentExecutor. `agentId` is required: there is no fallback agent.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -2971,10 +2974,40 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description The agent whose wallet signs and whose Safe executes the batch. */
+                        agentId: string;
+                        /** @default 1 */
+                        chainId?: number;
+                        actions: {
+                            to: string;
+                            /** @default 0 */
+                            value?: string;
+                            /** @default 0x */
+                            data?: string;
+                        }[];
+                    };
+                };
+            };
             responses: {
                 /** @description Batch queued. */
                 202: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Invalid body — including a missing or empty `agentId`. */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description No agent with that `agentId`. */
+                404: {
                     headers: {
                         [name: string]: unknown;
                     };

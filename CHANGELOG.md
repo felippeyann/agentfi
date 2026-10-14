@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (G1 review — admin batch signer)
+
+- **`POST /admin/transactions/batch` requires `agentId`.** Without it the batch fell back to `db.agent.findFirst()` and was signed by whatever agent the database returned first, executed from that agent's Safe. The admin "Sync policy" button never sent `agentId`, so every on-chain policy sync ran from an arbitrary agent. A missing or empty `agentId` is now `400`, an unknown one `404`; the button sends the agent it belongs to, and the kill-switch `onChainSync.notice` names the `agentId` to use.
+
 ### Changed (Q9 — trusted prices for daily limits, no spend counted as zero; migration `0022`)
 
 - **No spend counted as 0.** A spend that cannot be priced used to count 0 against `maxDailyVolumeUsd`: ERC-20 amounts on Base Sepolia (the oracle has no testnet prices), any token the oracle does not know, an ERC-20 swap input and GMX collateral (passed as `0`), and native value on Base Sepolia was priced with the **mainnet** ETH price. Now every policy / accounting path prices through `services/policy/spend-pricing.ts` (priced with a source `oracle` / `synthetic` / `usdc-peg`, zero, or unpriced) and, **while the agent has a daily limit, a spend with an unpriced component is refused with `503 PRICE_UNAVAILABLE` before anything is simulated or reserved**: transfer (native and ERC-20), Uniswap swap (WETH input as native, any other input as its token), Curve swap, Aave / Compound / ERC-4626 deposit and withdraw (a `"max"` withdrawal's amount is unknown, so it is refused — send an explicit amount), GMX open (the collateral; close unchanged, counts nothing), batch native value, and the legacy A2A reward (`POST /v1/jobs` answers `503 PRICE_UNAVAILABLE` and creates no job; was `400`). Without a daily limit nothing changes. Escrow budgets and x402 payments keep USDC at exactly 1.00 (`usdc-peg`).

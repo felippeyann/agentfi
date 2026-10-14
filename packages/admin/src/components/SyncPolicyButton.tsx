@@ -44,8 +44,8 @@ export function SyncPolicyButton({ agentId }: SyncPolicyButtonProps) {
         body: JSON.stringify({
           chainId: onChainSync.chainId,
           actions: onChainSync.actions,
-          // Use an internal API key or operator secret if this were a direct backend call,
-          // but we are proxying through admin API.
+          // Required: the batch is signed by THIS agent's wallet and runs from its Safe.
+          agentId,
         }),
       });
 
