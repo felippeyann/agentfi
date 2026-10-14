@@ -3,9 +3,9 @@
  * FORKS (Anvil `--fork-url`, read-only: nothing is sent). Opt-in: skipped
  * unless the fork RPCs are given —
  *
- *   anvil --fork-url https://mainnet.base.org --port 8546
- *   anvil --fork-url https://arb1.arbitrum.io/rpc --port 8547
- *   S7_FORK_RPC_8453=http://127.0.0.1:8546 S7_FORK_RPC_42161=http://127.0.0.1:8547 \
+ *   anvil --fork-url https://mainnet.base.org --port 8556   # any free ports (8546 is the escrow rehearsal default)
+ *   anvil --fork-url https://arb1.arbitrum.io/rpc --port 8557
+ *   S7_FORK_RPC_8453=http://127.0.0.1:8556 S7_FORK_RPC_42161=http://127.0.0.1:8557 \
  *     npx vitest run src/__tests__/contracts.addresses.fork.test.ts
  *
  * It reads the addresses the backend actually uses (`getContracts`,
