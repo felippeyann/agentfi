@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import { api, ApiError } from '../api-client.js';
 import type { components } from '../api.generated.js';
+import { invalidInput } from '../input-error.js';
 import { pathIdSchema } from '../path-ids.js';
-import { paymentTokenSymbols, resolvePaymentToken } from './token-map.js';
+import { isNativeEthLiteral, nativeEthRefusal, paymentTokenSymbols, resolvePaymentToken } from './token-map.js';
 
 type Agent = components['schemas']['Agent'];
 type TransferRequest = components['schemas']['TransferRequest'];
@@ -20,15 +21,6 @@ const jobIdSchema = (description: string) => pathIdSchema('job', description);
 
 /** An agent id as it goes into a URL path (S6; same rule as job ids). */
 const agentIdSchema = (description: string) => pathIdSchema('agent', description);
-
-/**
- * An input error found by a handler (a rule across fields), reported exactly
- * like a schema error: `code: INVALID_INPUT` with the issue path, before
- * anything reaches the backend.
- */
-function invalidInput(path: string, message: string): z.ZodError {
-  return new z.ZodError([{ code: z.ZodIssueCode.custom, path: [path], message }]);
-}
 
 /**
  * Backend refusals of `pay_for_resource` that carry structured data an agent
@@ -100,9 +92,11 @@ export const agentTools = [
     description:
       'Pays another agent directly from your wallet (outside the job queue): a transfer of native ETH or of a known ' +
       'ERC-20 to the recipient\'s address (its safeAddress from search_agents), sent as POST /v1/transactions/transfer. ' +
-      'Name the chain and the token: there is no default for either. token_symbol is "ETH" (native) or a symbol from ' +
-      'the token registry of that chain (e.g. USDC on Base 8453 or Base Sepolia 84532); an unknown symbol is refused ' +
-      'before anything is sent — to pay in any other ERC-20 use transfer_token with its contract address. Your ' +
+      'Name the chain and the token: there is no default for either. token_symbol is "ETH" (native ETH, only on ' +
+      'chains whose native asset is ETH: Ethereum 1, Base 8453, Base Sepolia 84532, Arbitrum 42161 — on Polygon 137 ' +
+      'it is refused, pay in WETH there) or a symbol from the token registry of that chain (e.g. USDC on Base 8453 or ' +
+      'Base Sepolia 84532); an unknown symbol is refused before anything is sent — to pay in any other ERC-20 use ' +
+      'transfer_token with its contract address. Your ' +
       'operator policy applies like any transfer: the recipient must be in allowed_recipients and the call target ' +
       '(the recipient for ETH, the token contract for an ERC-20) in allowed_contracts when those lists are set, the ' +
       'token in allowed_tokens, native ETH under max_value_per_tx_eth, plus the daily volume limit and the cooldown; ' +
@@ -123,7 +117,8 @@ export const agentTools = [
         .string()
         .min(1)
         .describe(
-          '"ETH" for native ETH, or a token symbol known on chain_id (e.g. "USDC"). Symbols only — not an address.',
+          '"ETH" for native ETH (not on Polygon 137, whose native asset is POL), or a token symbol known on chain_id ' +
+            '(e.g. "USDC", "WETH"). Symbols only — not an address.',
         ),
       chain_id: z
         .number()
@@ -152,6 +147,9 @@ export const agentTools = [
       reason: string;
       idempotency_key?: string;
     }) => {
+      // The route reads "ETH" as the chain's native asset: POL on Polygon.
+      const nativeRefusal = isNativeEthLiteral(input.token_symbol) ? nativeEthRefusal(input.chain_id) : undefined;
+      if (nativeRefusal !== undefined) throw invalidInput('token_symbol', nativeRefusal);
       // X5: the route takes `to` and a token ADDRESS (or "ETH"); a symbol is
       // resolved here, from the registry only, never guessed.
       const token = resolvePaymentToken(input.token_symbol, input.chain_id);
