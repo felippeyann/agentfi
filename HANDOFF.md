@@ -2,7 +2,7 @@
 
 > Live pending tasks, credentials inventory, and working conventions. For _what the project is_, read [STATE.md](STATE.md). For _why_, read [VISION.md](VISION.md). This file is the shortest path from "resuming work" → "executing something useful."
 
-**Last updated**: 2026-10-14 · **main baseline verified** `03a429d` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0, **reactivated in exploratory mode on 2026-10-06** after being archived 2026-05-17) · **Release**: [mcp-server-v0.5.0](https://github.com/felippeyann/agentfi/releases/tag/mcp-server-v0.5.0) · **npm**: [`@agent_fi/mcp-server@0.5.0`](https://www.npmjs.com/package/@agent_fi/mcp-server) (published 2026-05-15)
+**Last updated**: 2026-10-14 · **main baseline verified** `162cb06` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0, **reactivated in exploratory mode on 2026-10-06** after being archived 2026-05-17) · **Release**: [mcp-server-v0.5.0](https://github.com/felippeyann/agentfi/releases/tag/mcp-server-v0.5.0) · **npm**: [`@agent_fi/mcp-server@0.5.0`](https://www.npmjs.com/package/@agent_fi/mcp-server) (published 2026-05-15)
 
 > **Resuming work?** Read, in order: [VISION.md](VISION.md) → [STATE.md](STATE.md) → [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md) (the live plan with task status) → this file. The review that led to reactivation is [docs/project/reactivation-2026-10.md](docs/project/reactivation-2026-10.md) and the market evidence is [docs/project/market-signals-2026-10.md](docs/project/market-signals-2026-10.md) (both in Portuguese).
 
@@ -25,10 +25,10 @@
 | Item                   | Value                                                              |
 | ---------------------- | ------------------------------------------------------------------ |
 | Default branch         | `main` (protected; required checks: Lint, Admin, Backend, Foundry) |
-| Active branches        | `main`, `develop` (mirrors main post-merge); task branches `<type>/<task-id>-<slug>` per the execution plan |
+| Active branches        | `main`, `develop` (meant to mirror main post-merge, but **behind since 2026-10-07**: the sync step in §5 has not been run since; owner's call to resume or retire it); task branches `<type>/<task-id>-<slug>` per the execution plan |
 | Open PRs               | Dependabot bumps (see execution plan WS8) + task PRs in flight     |
 | Open issues            | 0                                                                  |
-| CI                     | green on `main` (`ci.yml`, 7 jobs: 4 required + MCP Tests, OpenAPI Spec, E2E Tests) |
+| CI                     | green on `main` (`ci.yml`, 8 jobs: 4 required + MCP Tests, OpenAPI Spec, Backend Anvil Tests, E2E Tests — the E2E job is `continue-on-error`) |
 | npm vulnerabilities    | 0 critical, 0 high                                                 |
 | Secrets in git history | None                                                               |
 | Live infrastructure    | **None.** Fly.io backend and Upstash Redis were decommissioned on 2026-05-17. No hosted instance is planned for the 90-day validation. |
@@ -74,11 +74,11 @@
 | Directory listings | WS6 X3 | mcp.so listing returns 404; the awesome-mcp-servers entry (PR #5091, merged 2026-05-27) was pruned after the archive and must be resubmitted. |
 | Dependabot PRs left open | WS0 H4, WS8 | #109, #123, #124 are green and wait for an owner merge; #115 (Turnkey 6), #111 (bullmq 6), #125 (TypeScript 7), #127 (Prisma 7) need their own code tasks. |
 | Confirm P6's two policy readings | WS4 P6 | Per-transaction cap read in USD for USDC, daily volume counting x402 payments ([#158](https://github.com/felippeyann/agentfi/pull/158), "Decisions"). |
-| Answer the open questions | Plan §5 | Mainnet redeploy and its addresses, Brazil "software only" assumption, fee bps / tiers, revenue model (per job vs bps), hosting of the on-chain URIs before mainnet (from D10). |
+| Answer the open questions | Plan §5 | Mainnet redeploy and its addresses, Brazil "software only" assumption, fee bps / tiers, revenue model (per job vs bps), hosting of the on-chain URIs before mainnet (from D10), the mainnet contest window, and the 2026-10-14 follow-ups (questions 10–13: `"ETH"` on Polygon at the API, GMX, Uniswap routers, ERC-4626 max withdrawals). |
 
 ### 3.2 Defects fixed and in flight
 
-The Week-0 defects A1, A2, A3 and S1 are merged (#132, #129, #130, #131) and were hardened by the first adversarial review (#139 backend, #140 contracts, #137 x402). The second adversarial review (2026-10-08) found 5 P1 and about 20 P2, none losing escrowed funds in the contracts; its fixes C2b (#159), C3c (#160), S6 (#157) and P6 (#158) are merged, and so are C3d (#162, contest → operator review, escrow policy, hook boot check), H14 (#161, runbooks and docs) and A6 (#163, daily volume counted once); every fix wave was reviewed line by line before merge, and C3d and A6 were each re-reviewed independently (no P1 found). The G1 closing round (2026-10-14, #170–#176) implemented the owner decisions D12–D15, fixed the C3e / A6b leftovers with a financial effect and the findings of an independent adversarial review of the round (no P1): **G1 met on `03a429d`**. The other open follow-ups are the `todo` rows of the plan (A4, A5, A6c, C3f, S3, S7, S8, S9, X5, T1, C3b, R2b, R4, P4, W1–W3). Real funds still wait for the Base Sepolia deploy (C4) and the testnet E2E (C5).
+The Week-0 defects A1, A2, A3 and S1 are merged (#132, #129, #130, #131) and were hardened by the first adversarial review (#139 backend, #140 contracts, #137 x402). The second adversarial review (2026-10-08) found 5 P1 and about 20 P2, none losing escrowed funds in the contracts; its fixes C2b (#159), C3c (#160), S6 (#157) and P6 (#158) are merged, and so are C3d (#162, contest → operator review, escrow policy, hook boot check), H14 (#161, runbooks and docs) and A6 (#163, daily volume counted once); every fix wave was reviewed line by line before merge, and C3d and A6 were each re-reviewed independently (no P1 found). The G1 closing round (2026-10-14, #170–#176) implemented the owner decisions D12–D15, fixed the C3e / A6b leftovers with a financial effect and the findings of an independent adversarial review of the round (no P1): **G1 met on `03a429d`** (within its threshold; not a general security claim). The C4/C5 preparation round (2026-10-14, [#178](https://github.com/felippeyann/agentfi/pull/178)–[#187](https://github.com/felippeyann/agentfi/pull/187), plan row C45) closed S7, S8, S9 and X5, added the USD cap on ordinary outflows (migration 0025), the proven max withdrawals and the approval-day budget, and fixed the Windows DB-suite crash; every item was reproduced before the fix, and the automated reviews' P1 / P2 findings were fixed in the same round. The other open follow-ups are the `todo` rows of the plan (A4, A5, A6c, A6d, C3f, S3, S10–S12, X6, X7, T1, T2, C3b, R2b, R4, P4, W1–W3). Real funds still wait for the Base Sepolia deploy (C4) and the testnet E2E (C5).
 
 ### 3.3 Blocked externally
 
@@ -217,7 +217,7 @@ Large features that were in the roadmap but had no external demand (GMX adapter,
 
 - Migrations are **never auto-generated** — write them manually in `packages/backend/src/db/migrations/NNNN_name/migration.sql`.
 - After editing `schema.prisma`, run `npx prisma generate --schema=packages/backend/src/db/schema.prisma`.
-- Latest migration (2026-10-14): `0024_a6b_broadcast_tx_hash` (A6b). The reactivation added 0014 (ERC-8183 job fields), 0015 (ERC-8004 identities), 0016 (ResourcePayment), 0017 (policy pause marker), 0018 (P6), 0019 (C3d contest review), 0020 (A6), 0021 (Q8 policy units), 0022 (Q9 price source), 0023 (C3e settle attempt) and 0024. Deploy the API and every worker from the same release, after stopping the old processes.
+- Latest migration (2026-10-14): `0025_q6_outflow_usd_cap` (`AgentPolicy.maxOutflowPerTxUsd`, NULL on every row: ordinary outflows are blocked until the operator sets it). The reactivation added 0014 (ERC-8183 job fields), 0015 (ERC-8004 identities), 0016 (ResourcePayment), 0017 (policy pause marker), 0018 (P6), 0019 (C3d contest review), 0020 (A6), 0021 (Q8 policy units), 0022 (Q9 price source), 0023 (C3e settle attempt), 0024 (A6b broadcast hash) and 0025. Deploy the API and every worker from the same release, after stopping the old processes.
 
 ### Dependency quirks
 

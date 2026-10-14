@@ -10,6 +10,18 @@ Gate: **G2** = ERC-8004 feedback written on Base Sepolia by a settled job,
 with the transaction hashes recorded in `testnet-log.md` §3–4. The fork
 rehearsals (§5.2, §5.5, the C3d fork run) do not count as G2 evidence.
 
+## Authorisation (owner, before anything is executed)
+
+This checklist separates the decision to run C4 / C5 from running it. Nothing below §1 is executed until the owner has authorised, explicitly and in writing (the round note or a PR comment):
+
+- **The commit to deploy:** the merged `main` commit (this file's revision; the round's evidence is on `162cb06`). `npm run contracts:code:check` must report that the embedded code matches the artifacts (0.12) — S9 accepts only contracts deployed from this build (D16).
+- **The addresses:** `OPERATOR_ADDRESS` / `POLICY_OPERATOR_ADDRESS_84532`, `FEE_WALLET`, `TRUSTED_EVALUATOR`.
+- **The funding:** faucet ETH for the deployer and the evaluator (about 0.01 each), and faucet USDC / ETH for the two C5 agents (step 2.7).
+- **The real-network transactions:** the C4 deploy (two scripts) and the C5 runs (happy, cancel, optional D9).
+- **The C5 agents' policies:** the example registers them with a USD cap covering the budget (`maxValuePerTxUsd`) and no cooldown; agents created by hand need `maxValuePerTxUsd` for escrow and `maxOutflowPerTxUsd` for any ordinary outflow (D17).
+
+Mainnet stays out of scope: no mainnet value is chosen here (the mainnet contest window is still open, plan §5-9).
+
 ## 0. Before you start
 
 | # | Prerequisite | Check |
@@ -24,6 +36,8 @@ rehearsals (§5.2, §5.5, the C3d fork run) do not count as G2 evidence.
 | 0.8 | No `PRIVATE_KEY` anywhere: `unset PRIVATE_KEY`; `grep -s PRIVATE_KEY packages/contracts/.env` | prints nothing |
 | 0.9 | Turnkey (D11): organization id, API public key (66 hex chars, starts `02`/`03`), private key (64 hex chars) | values at hand, not pasted anywhere else |
 | 0.10 | Optional: Etherscan API V2 key | only needed for `--verify` |
+| 0.11 | `SAFE_DEPLOYER_PRIVATE_KEY` unset or empty. D19: Safe mode does not work (the module enablement is signed by the deployer, who is not a Safe owner) and is FATAL in production / staging; with C5's `NODE_ENV=development` a set key only warns, and every new agent would get an orphaned Safe paid by the deployer before falling back to its EOA | `grep -s '^SAFE_DEPLOYER_PRIVATE_KEY=.' packages/backend/.env` prints nothing |
+| 0.12 | The authorised commit is checked out and the embedded contract code matches its build: `cd packages/contracts && forge build && cd ../.. && npm run contracts:code:check` | `[contracts:code] … matches the artifacts (version …)`, exit 0 |
 
 ## 1. C4 — deploy (testnet-log.md §2)
 
@@ -45,7 +59,7 @@ Failure stops: `WrongChain` / missing `EXPECTED_CHAIN_ID` / `SignerConflict` mea
 |---|---|---|---|
 | 2.1 | `docker compose -f docker-compose.dev.yml up -d postgres redis`; `… stop api`; `… exec -T postgres psql -U agentfi -d postgres -c "CREATE DATABASE agentfi_c5"` | `CREATE DATABASE` | — |
 | 2.2 | Write `packages/backend/.env` from §5.4 step 3: `NODE_ENV=development`, `WALLET_PROVIDER=turnkey`, the three `TURNKEY_*`, the C4 copy blocks, `ESCROW_EVALUATOR_PRIVATE_KEY`, `REDIS_URL=redis://localhost:6379/5`, **`ESCROW_EVALUATION_DELAY_SECONDS=3600`** (contest window on for the whole run, owner decision Q6/D12), **`SYNTHETIC_TEST_PRICES_USD=84532:native=2500,84532:0x036CbD53842c5426634e7929541eC2318f3dCF7e=1`** (testnet-only synthetic prices so the daily limit can count ordinary spends, Q9/D15 — never in production; the boot refuses it there) | file exists, git-ignored (`git status` does not list it) | — |
-| 2.3 | `cd packages/backend && npx prisma generate && npx prisma migrate deploy` | every migration applied, **0001 to 0024** | output |
+| 2.3 | `cd packages/backend && npx prisma generate && npx prisma migrate deploy` | every migration applied, **0001 to 0025** | output |
 | 2.4 | Terminal A: `TRANSACTION_WORKER_ENABLED=false npx tsx src/index.ts` | `ERC-8183 escrow enabled — evaluator signer configured` with `escrowEvaluatorAddress` = `TRUSTED_EVALUATOR`; **`ERC-8183 boot check: escrow (+ ReputationHook where configured) match the configuration`** with `chainIds: [84532]` and **`ERC-8183 configuration verified — escrow signatures allowed on this chain`** with `chainId: 84532` (Q7/D13); **`AgentExecutor / AgentPolicyModule verified against this build — executor-routed transactions and policy syncs allowed`** with `chainId: 84532` (S9: this build's bytecode, bound executor, `POLICY_OPERATOR_ADDRESS_84532`; a mismatch would only log in `development` — check for `would be FATAL`); `AgentFi API running on port 3000` | the log lines |
 | 2.5 | Terminal B: `TRANSACTION_WORKER_ENABLED=true npx tsx src/worker.ts` | `Transaction worker started`, `Payment recovery worker started`, `Escrow settlement worker started`, `Escrow expiry sweep scheduled`, the same boot-check lines (escrow and S9), **no `CONFIG DRIFT`** | the log lines |
 | 2.6 | `curl http://localhost:3000/health/ready` | `"turnkey":true` and `escrowConfig` with `{"chainId":84532,"state":"verified","allowed":true,…}` | output |
