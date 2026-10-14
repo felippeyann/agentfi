@@ -238,6 +238,28 @@ describe('POST /v1/agents — operator path keeps accepting an explicit (valid) 
     await app.close();
   });
 
+  it('§5-6 (#185 review): maxOutflowPerTxUsd at creation — a value is stored; null ("not configured", the OpenAPI Policy is nullable) is accepted and stores exactly what omitting it stores (NULL)', async () => {
+    const app = await buildApp();
+
+    const withCap = await app.inject({ method: 'POST', url: '/v1/agents', payload: { name: 'capped', policy: { maxOutflowPerTxUsd: '250' } } });
+    expect(withCap.statusCode).toBe(201);
+    expect(mockDb.agent.create.mock.calls[0][0].data.policy.create).toMatchObject({ maxOutflowPerTxUsd: '250' });
+
+    const explicitNull = await app.inject({ method: 'POST', url: '/v1/agents', payload: { name: 'null-cap', policy: { maxOutflowPerTxUsd: null } } });
+    expect(explicitNull.statusCode, explicitNull.body).toBe(201);
+    const omitted = await app.inject({ method: 'POST', url: '/v1/agents', payload: { name: 'no-cap', policy: {} } });
+    expect(omitted.statusCode).toBe(201);
+    const nullCreate = mockDb.agent.create.mock.calls[1][0].data.policy.create;
+    const omittedCreate = mockDb.agent.create.mock.calls[2][0].data.policy.create;
+    expect(nullCreate).not.toHaveProperty('maxOutflowPerTxUsd'); // the column stays NULL
+    expect(nullCreate).toEqual(omittedCreate);
+
+    const bad = await app.inject({ method: 'POST', url: '/v1/agents', payload: { name: 'bad-cap', policy: { maxOutflowPerTxUsd: 'unlimited' } } });
+    expect(bad.statusCode).toBe(400);
+
+    await app.close();
+  });
+
   it('Q8: a non-empty allowedContracts without allowedRecipients is 400 before provisioning (no silent widening)', async () => {
     const app = await buildApp();
 
