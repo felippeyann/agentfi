@@ -28,7 +28,7 @@ vi.hoisted(() => {
   }
 });
 
-const { mockDb, finalizeMock, recoverMock, reconcileMock, repollMock, reviewAlertsMock, sweepMock, captured } = vi.hoisted(() => ({
+const { mockDb, finalizeMock, recoverMock, reconcileMock, repollMock, reviewAlertsMock, sweepMock, strandedMock, captured } = vi.hoisted(() => ({
   mockDb: {
     job: { findMany: vi.fn() },
     transaction: { findUnique: vi.fn() },
@@ -39,6 +39,7 @@ const { mockDb, finalizeMock, recoverMock, reconcileMock, repollMock, reviewAler
   repollMock: vi.fn(),
   reviewAlertsMock: vi.fn(),
   sweepMock: vi.fn(),
+  strandedMock: vi.fn(),
   captured: { processor: null as null | (() => Promise<unknown>) },
 }));
 // A6 volume sweep: exercised on Postgres in daily-volume.db.test.ts; here only its place in the tick.
@@ -58,7 +59,9 @@ vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({
   reconcileEscrowJobs: reconcileMock,
   alertExpiringReviews: reviewAlertsMock,
 }));
-vi.mock('../queues/transaction.queue.js', () => ({ repollSubmittedTransactionsNow: repollMock }));
+vi.mock('../queues/transaction.queue.js', () => ({ repollSubmittedTransactionsNow: repollMock, transactionQueue: {} }));
+// A6b stranded-QUEUED sweep: exercised on Postgres in broadcast-outcome.db.test.ts; here only its place in the tick.
+vi.mock('../services/transaction/stranded-queued.js', () => ({ recoverStrandedQueuedTransactions: strandedMock }));
 
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -72,6 +75,7 @@ beforeEach(() => {
   reconcileMock.mockResolvedValue({ stalledFunding: 0, lostRejects: 0, unsubmittedDeliverables: 0, stalledBindings: 0, outcomes: {} });
   reviewAlertsMock.mockResolvedValue(0);
   sweepMock.mockResolvedValue({ scanned: 0, committed: 0, released: 0, held: 0, errors: 0 });
+  strandedMock.mockResolvedValue({ scanned: 0, live: 0, requeued: 0, settled: 0, leftAlone: 0, errors: 0 });
 });
 
 async function runScan() {
@@ -139,11 +143,19 @@ describe('payment recovery tick — C3c passes', () => {
       order.push('volumeSweep');
       return { scanned: 1, committed: 1, released: 0, held: 0, errors: 0 };
     });
+    strandedMock.mockImplementation(async () => {
+      order.push('strandedQueued');
+      return { scanned: 1, live: 0, requeued: 1, settled: 0, leftAlone: 0, errors: 0 };
+    });
 
     const summary = await runScan();
 
-    // C3d: the review expiry alerts, then the A6 volume sweep, run last.
-    expect(order).toEqual(['repoll', 'paymentPending', 'reconcile', 'reviewAlerts', 'volumeSweep']);
+    // C3d: the review expiry alerts, then the A6 volume sweep, then the A6b stranded-QUEUED sweep run last.
+    expect(order).toEqual(['repoll', 'paymentPending', 'reconcile', 'reviewAlerts', 'volumeSweep', 'strandedQueued']);
+    const [strandedDeps, strandedOpts] = strandedMock.mock.calls[0] as [{ queue: unknown }, { olderThan: Date; limit: number }];
+    expect(strandedDeps.queue).toBeDefined();
+    expect(strandedOpts.olderThan.getTime()).toBeLessThan(Date.now());
+    expect(summary).toMatchObject({ strandedQueued: { requeued: 1 } });
     const [, sweepOpts] = sweepMock.mock.calls[0] as [unknown, { olderThan: Date; limit: number }];
     expect(sweepOpts.olderThan.getTime()).toBeLessThan(Date.now());
     expect(reviewAlertsMock).toHaveBeenCalledWith({ limit: expect.any(Number) });
@@ -182,7 +194,34 @@ describe('payment recovery tick — C3c passes', () => {
     expect(summary).toMatchObject({ scanned: 0, volumeSweep: { committed: 0 } });
 
     sweepMock.mockRejectedValue(new Error('db hiccup'));
+    strandedMock.mockRejectedValue(new Error('redis down'));
     mockDb.job.findMany.mockResolvedValue([]);
-    expect(await runScan()).toMatchObject({ volumeSweep: null });
+    expect(await runScan()).toMatchObject({ volumeSweep: null, strandedQueued: null });
+  });
+});
+
+describe('payment recovery scan — A2A payment FAILED after a broadcast attempt (A6b)', () => {
+  it('a FAILED payment stamped for broadcast without a recorded hash is not refunded; a dropped one (with its hash) and a never-broadcast one are', async () => {
+    mockDb.job.findMany.mockResolvedValue([
+      { id: 'stamped-no-hash', updatedAt: OLD, escrowKind: null, onChainStatus: null },
+      { id: 'dropped', updatedAt: OLD, escrowKind: null, onChainStatus: null },
+      { id: 'never-broadcast', updatedAt: OLD, escrowKind: null, onChainStatus: null },
+    ]);
+    mockDb.transaction.findUnique.mockImplementation(async ({ where }: { where: { intentId: string } }) => {
+      if (where.intentId === 'a2a-payment:stamped-no-hash') {
+        return { id: 'tx-1', status: 'FAILED', error: 'both RPCs timed out', txHash: null, broadcastAttemptedAt: OLD };
+      }
+      if (where.intentId === 'a2a-payment:dropped') {
+        return { id: 'tx-2', status: 'FAILED', error: 'Dropped', txHash: '0xabc', broadcastAttemptedAt: OLD };
+      }
+      return { id: 'tx-3', status: 'FAILED', error: 'estimateGas reverted', txHash: null, broadcastAttemptedAt: null };
+    });
+
+    const summary = await runScan();
+
+    expect(finalizeMock).not.toHaveBeenCalledWith(expect.objectContaining({ jobId: 'stamped-no-hash' }));
+    expect(finalizeMock).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'dropped', outcome: 'FAILED' }));
+    expect(finalizeMock).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'never-broadcast', outcome: 'FAILED' }));
+    expect(summary).toMatchObject({ uncertain: 1, finalizedFailed: 2 });
   });
 });

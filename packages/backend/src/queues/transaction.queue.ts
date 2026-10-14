@@ -79,6 +79,22 @@ function receiptClient(chainId: number) {
   return client;
 }
 
+/**
+ * Whether any RPC node knows the transaction (pending or mined); throws on RPC
+ * errors. Used by the re-poll (drop detection) and, A6b, by the processor
+ * before a retry signs again (an earlier signed attempt known to the chain is
+ * adopted instead of sending a second transaction).
+ */
+async function isKnownTransaction(chainId: number, txHash: Hex): Promise<boolean> {
+  try {
+    await receiptClient(chainId).getTransaction({ hash: txHash });
+    return true;
+  } catch (err) {
+    if (err instanceof TransactionNotFoundError) return false;
+    throw err;
+  }
+}
+
 /** Default re-poll knobs (seconds, env-overridable like the other recovery knobs). */
 export const TX_REPOLL_STALE_MS = parseInt(process.env['TX_REPOLL_STALE_SEC'] ?? '600', 10) * 1000;
 export const TX_DROP_AFTER_MS = parseInt(process.env['TX_DROP_AFTER_SEC'] ?? '1800', 10) * 1000;
@@ -103,15 +119,7 @@ export async function repollSubmittedTransactionsNow(opts: Partial<RepollOptions
           throw err;
         }
       },
-      async isKnownTransaction(chainId, txHash) {
-        try {
-          await receiptClient(chainId).getTransaction({ hash: txHash as Hex });
-          return true;
-        } catch (err) {
-          if (err instanceof TransactionNotFoundError) return false;
-          throw err;
-        }
-      },
+      isKnownTransaction,
     },
     {
       olderThanMs: opts.olderThanMs ?? TX_REPOLL_STALE_MS,
@@ -154,7 +162,7 @@ export function startTransactionWorker(): Worker<TransactionJobData> {
   const workerStalledIntervalMs = env.TRANSACTION_WORKER_STALLED_INTERVAL_MS;
   const stopOnRedisQuota = env.TRANSACTION_WORKER_STOP_ON_REDIS_QUOTA === 'true';
 
-  const processorDeps = { db, submitter, monitor, feeService, logger, trackMonitor };
+  const processorDeps = { db, submitter, monitor, feeService, logger, trackMonitor, isKnownTransaction };
 
   const worker = new Worker<TransactionJobData>(
     'transactions',

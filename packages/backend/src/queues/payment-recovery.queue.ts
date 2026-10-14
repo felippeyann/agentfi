@@ -45,7 +45,17 @@
  *      on a CONFIRMED / REVERTED / FAILED transaction older than
  *      VOLUME_SWEEP_STALE_SEC (default 600 s) are settled as their first
  *      observer would have (committed, released, or held).
+ *   5. `recoverStrandedQueuedTransactions` (A6b) — QUEUED rows untouched for
+ *      TX_STRANDED_STALE_SEC (default 600 s) whose BullMQ job is not live: a
+ *      crash between the row and its enqueue (route, operator approval, A2A
+ *      payment) is re-enqueued under the row's job id (never twice); a row
+ *      stamped for broadcast, or whose job failed without its handler, is
+ *      settled as the failed handler does (a stamped one goes to the chain).
  * Every pass is independent: one failing never skips the others.
+ *
+ * A6b: in the PAYMENT_PENDING scan, an A2A payment FAILED after a broadcast
+ * attempt without a recorded hash (stamped before migration 0024) is not
+ * refunded — the payment may still be mined; it is logged for the operator.
  *
  * Topology: this worker runs in `worker.ts` (the documented API + worker
  * deployment) and in `index.ts` when that process runs the transaction worker
@@ -60,8 +70,12 @@ import { env } from '../config/env.js';
 import { logger } from '../api/middleware/logger.js';
 import { finalizeA2APaymentJob } from '../services/job/payment-finalizer.service.js';
 import { alertExpiringReviews, reconcileEscrowJobs, recoverErc8183Job } from '../services/job/escrow-erc8183.runtime.js';
-import { repollSubmittedTransactionsNow } from './transaction.queue.js';
+import { repollSubmittedTransactionsNow, transactionQueue } from './transaction.queue.js';
 import { sweepUnsettledVolume, type VolumeSweepSummary } from '../services/policy/daily-volume.js';
+import {
+  recoverStrandedQueuedTransactions,
+  type StrandedSweepSummary,
+} from '../services/transaction/stranded-queued.js';
 
 /** ERC-8183 jobs whose state has not moved for this long are reconciled from the chain (C3c). */
 const ESCROW_RECONCILE_STALE_MS =
@@ -74,6 +88,13 @@ const ESCROW_RECONCILE_STALE_MS =
  */
 const VOLUME_SWEEP_STALE_MS =
   parseInt(process.env['VOLUME_SWEEP_STALE_SEC'] ?? '600', 10) * 1000;
+
+/**
+ * A6b: a QUEUED transaction untouched for this long whose BullMQ job is not
+ * live (crash between the row and its enqueue) is recovered by the sweep.
+ */
+const TX_STRANDED_STALE_MS =
+  parseInt(process.env['TX_STRANDED_STALE_SEC'] ?? '600', 10) * 1000;
 
 const RECOVERY_QUEUE_NAME = 'payment-recovery';
 
@@ -153,6 +174,10 @@ interface RecoverySummary {
   reviewAlerts?: number | null;
   /** A6: DailyVolume reservations left RESERVED on a terminal row (null when the pass failed). */
   volumeSweep?: VolumeSweepSummary | null;
+  /** A6b: QUEUED rows without a live BullMQ job (null when the pass failed). */
+  strandedQueued?: StrandedSweepSummary | null;
+  /** A6b: A2A payments FAILED after a broadcast attempt with no recorded hash — not refunded. */
+  uncertain?: number;
 }
 
 /** One recovery tick: re-poll SUBMITTED rows, the PAYMENT_PENDING scan, then the escrow reconciliation. */
@@ -207,6 +232,19 @@ export async function runPaymentRecoveryTick(): Promise<RecoverySummary> {
   } catch (err) {
     summary.volumeSweep = null;
     logger.error({ err: (err as Error)?.message ?? String(err) }, 'Payment recovery: DailyVolume sweep failed');
+  }
+
+  try {
+    summary.strandedQueued = await recoverStrandedQueuedTransactions(
+      { db, queue: transactionQueue, logger },
+      { olderThan: new Date(Date.now() - TX_STRANDED_STALE_MS), limit: PER_TICK_LIMIT },
+    );
+    if (summary.strandedQueued.requeued + summary.strandedQueued.settled > 0) {
+      logger.warn(summary.strandedQueued, 'Payment recovery: recovered QUEUED transactions that had no live BullMQ job');
+    }
+  } catch (err) {
+    summary.strandedQueued = null;
+    logger.error({ err: (err as Error)?.message ?? String(err) }, 'Payment recovery: stranded QUEUED sweep failed');
   }
   return summary;
 }
@@ -279,7 +317,7 @@ async function scanStalePaymentPending(): Promise<RecoverySummary> {
     const intentId = `a2a-payment:${job.id}`;
     const tx = await db.transaction.findUnique({
       where: { intentId },
-      select: { id: true, status: true, error: true },
+      select: { id: true, status: true, error: true, txHash: true, broadcastAttemptedAt: true },
     });
 
     if (!tx) {
@@ -314,6 +352,20 @@ async function scanStalePaymentPending(): Promise<RecoverySummary> {
         outcome: 'CONFIRMED',
       });
       summary.finalizedConfirmed++;
+      continue;
+    }
+
+    if (tx.status === 'FAILED' && tx.broadcastAttemptedAt && !tx.txHash) {
+      // A6b: FAILED after a signed attempt was stamped for broadcast, with no
+      // hash the chain could be asked about (stamped before migration 0024):
+      // the payment may still be mined, so the reservation is not refunded.
+      // (Rows stamped since are handed to the chain instead of FAILED, and a
+      // dropped one carries its hash: the re-poll already decided it.)
+      logger.error(
+        { jobId: job.id, transactionId: tx.id },
+        'Payment recovery: A2A payment FAILED after a broadcast attempt with no recorded hash — outcome unknown, not refunded; reconcile manually',
+      );
+      summary.uncertain = (summary.uncertain ?? 0) + 1;
       continue;
     }
 

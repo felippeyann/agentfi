@@ -33,6 +33,13 @@
  * status write and its settlement are separate writes: a crash between them
  * is repaired by `sweepUnsettledVolume` on the payment-recovery tick.
  *
+ * A6b: the stamp also records the signed hash (`broadcastTxHash`). A stamped
+ * row is never FAILED by the guard, the failed handler or the stranded-QUEUED
+ * sweep: `stopStampedTransaction` hands it to the chain (SUBMITTED with that
+ * hash) and the receipt — or the re-poll's drop — settles it as above. An
+ * operator approval on a later UTC day moves the reservation to that day
+ * (`moveReservationToDay`).
+ *
  * Rows that reserve nothing keep `volumeState` NULL and every settlement is a
  * no-op for them: zero-value transactions, the legacy A2A payment (its spend
  * is the Job's reservation, `reserveJobEscrow` / `releaseJobEscrow`) and the
@@ -200,6 +207,54 @@ export async function createTransactionWithVolume(
     });
 }
 
+/**
+ * A6b: moves a still-RESERVED reservation to the UTC day of `now` when it was
+ * made on an earlier day — called when the operator approves a
+ * PENDING_APPROVAL transaction, which executes on the approval day. Without it
+ * the spend counted against the creation day only, and the approval day's
+ * limit gave the agent a full fresh budget on top of the approved amount.
+ *
+ * The move is not refused by today's limit: the operator approved this
+ * transaction explicitly; counting it today limits what the agent can spend on
+ * its own for the rest of the day. One database transaction under the agent
+ * lock (the reservation paths' lock order: Agent, then Transaction /
+ * DailyVolume); conditional on the row still RESERVED on an earlier day, so a
+ * repeated or concurrent call moves it once. Returns whether it moved.
+ */
+export async function moveReservationToDay(db: VolumeDb, transactionId: string, now: Date = new Date()): Promise<boolean> {
+  const today = utcDay(now);
+  return db.$transaction(async (tx) => {
+    const row = await tx.transaction.findUnique({
+      where: { id: transactionId },
+      select: { agentId: true, volumeState: true, volumeReservedUsd: true, volumeReservedDate: true },
+    });
+    if (row?.volumeState !== 'RESERVED' || !row.volumeReservedUsd || !row.volumeReservedDate || row.volumeReservedDate >= today) {
+      return false;
+    }
+    await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${row.agentId} FOR NO KEY UPDATE`;
+    const { count } = await tx.transaction.updateMany({
+      where: { id: transactionId, volumeState: 'RESERVED', volumeReservedDate: row.volumeReservedDate },
+      data: { volumeReservedDate: today },
+    });
+    if (count === 0) return false;
+    await tx.$executeRaw`
+      UPDATE "DailyVolume"
+      SET "volumeUsd" = GREATEST(0, (("volumeUsd"::numeric) - (${row.volumeReservedUsd}::numeric)))::text,
+          "updatedAt" = NOW()
+      WHERE "agentId" = ${row.agentId} AND "date" = ${row.volumeReservedDate}
+    `;
+    await tx.$executeRaw`
+      INSERT INTO "DailyVolume" ("id", "agentId", "date", "volumeUsd", "updatedAt")
+      VALUES (gen_random_uuid()::text, ${row.agentId}, ${today}, ${row.volumeReservedUsd}, NOW())
+      ON CONFLICT ("agentId", "date")
+      DO UPDATE SET
+        "volumeUsd" = (("DailyVolume"."volumeUsd"::numeric) + (${row.volumeReservedUsd}::numeric))::text,
+        "updatedAt" = NOW()
+    `;
+    return true;
+  }, RESERVATION_TX_OPTIONS);
+}
+
 /** RESERVED → COMMITTED (the transaction confirmed). Returns whether this call settled it. */
 export async function commitTransactionVolume(db: VolumeDb, transactionId: string): Promise<boolean> {
   const { count } = await db.transaction.updateMany({
@@ -277,21 +332,91 @@ async function releaseWhere(
 /**
  * Stamps a broadcast attempt, after signing and before the signed transaction
  * is sent: the first one sets `broadcastAttemptedAt`, every one increments
- * `broadcastAttempts`. Conditional on the row still being QUEUED without a
- * hash; otherwise throws `BroadcastNotAllowedError` and the submitter sends
- * nothing (a stalled-job redelivery whose row the guard already failed and
- * released). Any other error also aborts the submit before broadcasting.
+ * `broadcastAttempts`, and `broadcastTxHash` records the hash of the signed
+ * transaction about to be sent (A6b: the chain can then decide the outcome of
+ * a row whose attempt failed or whose SUBMITTED write was lost). Conditional
+ * on the row still being QUEUED without a hash; otherwise throws
+ * `BroadcastNotAllowedError` and the submitter sends nothing (a stalled-job
+ * redelivery whose row the guard already failed and released). Any other
+ * error also aborts the submit before broadcasting.
  */
-export async function markBroadcastAttempt(db: Pick<PrismaClient, '$executeRaw'>, transactionId: string): Promise<void> {
+export async function markBroadcastAttempt(
+  db: Pick<PrismaClient, '$executeRaw'>,
+  transactionId: string,
+  signedTxHash: string | null = null,
+): Promise<void> {
   const updated = await db.$executeRaw`
     UPDATE "Transaction"
     SET "broadcastAttemptedAt" = COALESCE("broadcastAttemptedAt", NOW()),
-        "broadcastAttempts" = "broadcastAttempts" + 1
+        "broadcastAttempts" = "broadcastAttempts" + 1,
+        "broadcastTxHash" = COALESCE(${signedTxHash}::text, "broadcastTxHash")
     WHERE "id" = ${transactionId} AND "status" = 'QUEUED' AND "txHash" IS NULL
   `;
   if (updated === 0) {
     throw new BroadcastNotAllowedError(`Transaction ${transactionId} is no longer QUEUED without a hash — not broadcasting`);
   }
+}
+
+/** What `stopStampedTransaction` did to the row. */
+export type StampedStop =
+  /** SUBMITTED with the stamped hash: the re-poll (or the delivery that sent it) records the receipt, or drops it after the grace. */
+  | { outcome: 'handed-to-chain'; txHash: string }
+  /**
+   * FAILED with the error. `broadcastAttempted`: a signed attempt was stamped
+   * but cannot be handed to the chain (stamped before migration 0024, so no
+   * hash; or `handToChain: false`) — its outcome is unknown.
+   */
+  | { outcome: 'failed'; broadcastAttempted: boolean }
+  /** The row was no longer QUEUED without a hash (another delivery recorded its broadcast): untouched. */
+  | { outcome: 'not-queued' };
+
+/**
+ * Stops a row that is still QUEUED without a hash, when an earlier attempt
+ * may have been stamped for broadcast (A6b). The pre-submit guard (agent
+ * paused, policy expired), the permanent-failure handler and the
+ * stranded-QUEUED sweep call it once their plain "never stamped → FAILED"
+ * write matched nothing.
+ *
+ * A stamped row is never FAILED when its signed hash is known and
+ * `handToChain` is set: that transaction may be in a mempool or a block (the
+ * delivery that sent it may even be about to write SUBMITTED), and FAILED
+ * would let the A2A finalizer refund a payment that is then mined. It becomes
+ * SUBMITTED with `broadcastTxHash`, exactly the state of a recorded broadcast,
+ * and the chain decides: the re-poll records its receipt (CONFIRMED commits,
+ * REVERTED settles) or, after the drop grace with no node knowing it, FAILS it
+ * — with the reservation HELD for an ordinary transaction and the A2A
+ * finalizer run then.
+ *
+ * One conditional UPDATE (Postgres re-evaluates it against a concurrent stamp
+ * or SUBMITTED write), so no stamp can slip between a check and the write.
+ * The hash is not handed over when another row already carries it (two rows
+ * that signed byte-identical transactions — the unique `txHash`).
+ */
+export async function stopStampedTransaction(
+  db: Pick<PrismaClient, '$queryRaw'>,
+  transactionId: string,
+  error: string,
+  opts: { handToChain: boolean },
+): Promise<StampedStop> {
+  const rows = await db.$queryRaw<Array<{ status: string; txHash: string | null; broadcastAttempted: boolean }>>`
+    UPDATE "Transaction" AS t
+    SET "status" = (CASE WHEN ${opts.handToChain}::boolean AND t."broadcastTxHash" IS NOT NULL
+                           AND NOT EXISTS (SELECT 1 FROM "Transaction" o WHERE o."txHash" = t."broadcastTxHash")
+                         THEN 'SUBMITTED' ELSE 'FAILED' END)::"TxStatus",
+        "txHash" = (CASE WHEN ${opts.handToChain}::boolean AND t."broadcastTxHash" IS NOT NULL
+                           AND NOT EXISTS (SELECT 1 FROM "Transaction" o WHERE o."txHash" = t."broadcastTxHash")
+                         THEN t."broadcastTxHash" ELSE NULL END),
+        "error" = (CASE WHEN ${opts.handToChain}::boolean AND t."broadcastTxHash" IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM "Transaction" o WHERE o."txHash" = t."broadcastTxHash")
+                        THEN NULL ELSE ${error}::text END),
+        "updatedAt" = NOW()
+    WHERE t."id" = ${transactionId} AND t."status" = 'QUEUED' AND t."txHash" IS NULL
+    RETURNING t."status"::text AS "status", t."txHash", (t."broadcastAttemptedAt" IS NOT NULL) AS "broadcastAttempted"
+  `;
+  const row = rows[0];
+  if (!row) return { outcome: 'not-queued' };
+  if (row.status === 'SUBMITTED' && row.txHash) return { outcome: 'handed-to-chain', txHash: row.txHash };
+  return { outcome: 'failed', broadcastAttempted: row.broadcastAttempted };
 }
 
 export interface VolumeSweepSummary {

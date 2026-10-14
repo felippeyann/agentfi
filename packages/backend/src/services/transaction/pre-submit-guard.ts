@@ -17,10 +17,15 @@
 import type { PrismaClient } from '@prisma/client';
 import { finalizeA2APaymentJob } from '../job/payment-finalizer.service.js';
 import { onEscrowTxOutcome, vetBindBeforeBroadcast } from '../job/escrow-erc8183.runtime.js';
-import { settleVolumeAfterFailure } from '../policy/daily-volume.js';
+import { settleVolumeAfterFailure, stopStampedTransaction } from '../policy/daily-volume.js';
 
 export const PAUSED_BEFORE_SUBMISSION = 'Agent paused before submission';
 export const POLICY_EXPIRED_BEFORE_SUBMISSION = 'Agent policy expired before submission';
+/** A6b: suffix of a block on a row an earlier attempt was stamped for: handed to the chain, not FAILED. */
+export const OUTCOME_LEFT_TO_CHAIN = 'not signed again; an earlier signed attempt was stamped for broadcast, its outcome is left to the chain';
+/** A6b: an A2A payment stamped without a recorded hash (before migration 0024) is not refunded. */
+export const PAYMENT_OUTCOME_UNKNOWN =
+  'an earlier attempt was stamped for broadcast without a recorded hash: the payment may still be mined, so the job is left PAYMENT_PENDING (not refunded) for reconciliation';
 /** C3d: prefix of the error of a `setProviderAgentId` the guard did not broadcast. */
 export const BIND_SKIPPED_BEFORE_SUBMISSION = 'setProviderAgentId skipped before submission';
 
@@ -63,6 +68,12 @@ function resolveBlockReason(agent: AgentSnapshot, now: Date): string | null {
  * An ordinary transaction's DailyVolume reservation (A6) is given back when
  * no earlier attempt reached the broadcast step, and kept (HELD) when one did:
  * that signed transaction may still be mined.
+ *
+ * A6b: a blocked row an earlier attempt was stamped for (a retry after a
+ * failed send, or a redelivery racing the delivery that sent it) is not
+ * FAILED: it is handed to the chain — SUBMITTED with the stamped hash, the
+ * decision is `skip` — and nothing is settled or finalized here; the receipt
+ * (or the re-poll's drop) decides. ERC-8183 steps keep the FAILED path above.
  */
 export async function preSubmitGuard(
   db: PrismaClient,
@@ -119,22 +130,47 @@ export async function preSubmitGuard(
     return { action: 'proceed' };
   }
 
+  const meta = (tx.metadata ?? null) as
+    | { jobId?: string; a2aPayment?: boolean; erc8183?: boolean }
+    | null;
+  // A6b: once a signed attempt was stamped for broadcast, the chain decides
+  // its outcome, not this guard (ERC-8183 steps keep their own path: the
+  // orchestrator reads the chain before unwinding anything).
+  const handToChain = meta?.erc8183 !== true;
+
   // Conditional (A6): a concurrent delivery may have stamped and broadcast the
   // row since it was read above; then it is not ours to fail.
   const failed = await db.transaction.updateMany({
-    where: { id: transactionId, status: 'QUEUED', txHash: null },
+    where: { id: transactionId, status: 'QUEUED', txHash: null, ...(handToChain ? { broadcastAttemptedAt: null } : {}) },
     data: { status: 'FAILED', error: reason },
   });
+  let broadcastAttempted = false;
   if (failed.count === 0) {
-    return { action: 'skip', reason: 'Transaction left QUEUED while it was being checked' };
+    // Not a never-stamped QUEUED row: stamped (an earlier attempt threw after
+    // its stamp, or another delivery is between its send and its SUBMITTED
+    // write), or no longer QUEUED. Nothing is signed again either way. (For an
+    // ERC-8183 step the write above did not look at the stamp: no longer QUEUED.)
+    const stop = handToChain
+      ? await stopStampedTransaction(db, transactionId, reason, { handToChain: true })
+      : ({ outcome: 'not-queued' } as const);
+    if (stop.outcome === 'not-queued') {
+      return { action: 'skip', reason: 'Transaction left QUEUED while it was being checked' };
+    }
+    if (stop.outcome === 'handed-to-chain') {
+      return { action: 'skip', reason: `${reason}: ${OUTCOME_LEFT_TO_CHAIN} (${stop.txHash})` };
+    }
+    // Stamped before migration 0024 (no hash to hand over): FAILED, held below.
+    broadcastAttempted = stop.broadcastAttempted;
   }
   // Released when no attempt reached the broadcast, held otherwise. A failure
   // here must not skip the finalizers below; the recovery sweep settles it.
   await settleVolumeAfterFailure(db, transactionId).catch(() => undefined);
 
-  const meta = (tx.metadata ?? null) as
-    | { jobId?: string; a2aPayment?: boolean; erc8183?: boolean }
-    | null;
+  if (meta?.a2aPayment === true && typeof meta.jobId === 'string' && broadcastAttempted) {
+    // The payment may still be mined: no refund, the job stays PAYMENT_PENDING
+    // (the recovery scan leaves a stamped FAILED payment alone too).
+    return { action: 'fail', reason: `${reason}; ${PAYMENT_OUTCOME_UNKNOWN}` };
+  }
   if (meta?.a2aPayment === true && typeof meta.jobId === 'string') {
     try {
       await finalizeA2APaymentJob({

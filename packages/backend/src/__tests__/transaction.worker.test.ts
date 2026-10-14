@@ -30,6 +30,7 @@ const { finalizeMock, weiToUsdMock, escrowOutcomeMock, volume } = vi.hoisted(() 
     settleVolumeAfterRevert: vi.fn(),
     settleVolumeAfterFailure: vi.fn(),
     markBroadcastAttempt: vi.fn(),
+    stopStampedTransaction: vi.fn(),
   },
 }));
 
@@ -53,6 +54,7 @@ vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({
 }));
 
 import {
+  EarlierBroadcastLiveError,
   handleFailedTransactionJob,
   isLastAttempt,
   processTransactionJob,
@@ -89,6 +91,8 @@ type TxRow = {
   error: string | null;
   metadata: Record<string, unknown> | null;
   agent: { active: boolean; policy: { active: boolean; expiresAt: Date | null } | null };
+  /** A6b: the hash the last broadcast stamp recorded. */
+  broadcastTxHash?: string | null;
 };
 
 function txRow(overrides: Partial<TxRow> = {}): TxRow {
@@ -160,13 +164,15 @@ beforeEach(() => {
   escrowOutcomeMock.mockReset().mockResolvedValue(undefined);
   for (const fn of Object.values(volume)) fn.mockReset().mockResolvedValue(true);
   volume.settleVolumeAfterFailure.mockResolvedValue('released');
+  // A6b: by default no row in these tests was stamped for broadcast.
+  volume.stopStampedTransaction.mockResolvedValue({ outcome: 'not-queued' });
 });
 
 // ── Happy path ─────────────────────────────────────────────────────────────
 
 describe('processTransactionJob — successful broadcast', () => {
-  it('submits, then writes SUBMITTED + txHash in ONE update and starts the monitor', async () => {
-    const { deps, submitter, monitor, update, row } = makeDeps(txRow());
+  it('submits, then writes SUBMITTED + txHash in ONE conditional update and starts the monitor', async () => {
+    const { deps, submitter, monitor, update, updateMany, row } = makeDeps(txRow());
 
     const result = await processTransactionJob(job(), deps);
 
@@ -184,10 +190,13 @@ describe('processTransactionJob — successful broadcast', () => {
     // A6: the hook the submitter awaits before broadcasting stamps the row.
     const [{ onBeforeBroadcast }] = submitter.submit.mock.calls[0] as unknown as [{ onBeforeBroadcast: (h: Hex) => Promise<void> }];
     await onBeforeBroadcast(TX_HASH);
-    expect(volume.markBroadcastAttempt).toHaveBeenCalledWith(deps.db, TX_ID);
-    expect(update).toHaveBeenCalledTimes(1);
-    expect(update).toHaveBeenCalledWith({
-      where: { id: TX_ID },
+    // A6b: the stamp records the hash of the signed transaction about to be sent.
+    expect(volume.markBroadcastAttempt).toHaveBeenCalledWith(deps.db, TX_ID, TX_HASH);
+    expect(update).not.toHaveBeenCalled();
+    expect(updateMany).toHaveBeenCalledTimes(1);
+    // A6b: conditional — never over a row somebody else settled.
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: TX_ID, status: 'QUEUED', txHash: null },
       data: { status: 'SUBMITTED', txHash: TX_HASH },
     });
     expect(row).toMatchObject({ status: 'SUBMITTED', txHash: TX_HASH });
@@ -199,7 +208,7 @@ describe('processTransactionJob — successful broadcast', () => {
   });
 
   it('submit happens BEFORE any status write (the tx is QUEUED while broadcasting)', async () => {
-    const { deps, submitter, update, row } = makeDeps(txRow());
+    const { deps, submitter, updateMany, row } = makeDeps(txRow());
     let statusDuringBroadcast: TxRow['status'] | undefined;
     submitter.submit.mockImplementation(async () => {
       statusDuringBroadcast = row.status;
@@ -209,7 +218,7 @@ describe('processTransactionJob — successful broadcast', () => {
     await processTransactionJob(job(), deps);
 
     expect(statusDuringBroadcast).toBe('QUEUED');
-    expect(update.mock.invocationCallOrder[0]).toBeGreaterThan(
+    expect(updateMany.mock.invocationCallOrder[0]).toBeGreaterThan(
       submitter.submit.mock.invocationCallOrder[0]!,
     );
   });
@@ -219,18 +228,19 @@ describe('processTransactionJob — successful broadcast', () => {
 
 describe('processTransactionJob — broadcast failure', () => {
   it('propagates the error (so BullMQ retries) and leaves the tx QUEUED with no txHash', async () => {
-    const { deps, submitter, update, row, monitor } = makeDeps(txRow());
+    const { deps, submitter, update, updateMany, row, monitor } = makeDeps(txRow());
     submitter.submit.mockRejectedValue(new Error('rpc down'));
 
     await expect(processTransactionJob(job(), deps)).rejects.toThrow('rpc down');
 
     expect(update).not.toHaveBeenCalled();
+    expect(updateMany).not.toHaveBeenCalled();
     expect(row).toMatchObject({ status: 'QUEUED', txHash: null });
     expect(monitor.waitForConfirmation).not.toHaveBeenCalled();
   });
 
   it('retry after a failure proceeds: broadcasts again and writes SUBMITTED + txHash once', async () => {
-    const { deps, submitter, update, row } = makeDeps(txRow());
+    const { deps, submitter, updateMany, row } = makeDeps(txRow());
     submitter.submit
       .mockRejectedValueOnce(new Error('rpc down'))
       .mockResolvedValueOnce({ txHash: TX_HASH, nonce: 1 });
@@ -240,17 +250,17 @@ describe('processTransactionJob — broadcast failure', () => {
 
     expect(second).toEqual({ txHash: TX_HASH });
     expect(submitter.submit).toHaveBeenCalledTimes(2);
-    expect(update).toHaveBeenCalledTimes(1);
-    expect(update).toHaveBeenCalledWith({
-      where: { id: TX_ID },
+    expect(updateMany).toHaveBeenCalledTimes(1);
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: TX_ID, status: 'QUEUED', txHash: null },
       data: { status: 'SUBMITTED', txHash: TX_HASH },
     });
     expect(row).toMatchObject({ status: 'SUBMITTED', txHash: TX_HASH });
-    expectSubmittedAlwaysWithHash(update);
+    expectSubmittedAlwaysWithHash(updateMany);
   });
 
   it('a third delivery after SUBMITTED is skipped — no second broadcast, no write', async () => {
-    const { deps, submitter, update, logger } = makeDeps(txRow());
+    const { deps, submitter, updateMany, logger } = makeDeps(txRow());
     submitter.submit
       .mockRejectedValueOnce(new Error('rpc down'))
       .mockResolvedValueOnce({ txHash: TX_HASH, nonce: 1 });
@@ -265,7 +275,7 @@ describe('processTransactionJob — broadcast failure', () => {
       reason: expect.stringMatching(new RegExp(`SUBMITTED.*${TX_HASH}`)),
     });
     expect(submitter.submit).toHaveBeenCalledTimes(2);
-    expect(update).toHaveBeenCalledTimes(1);
+    expect(updateMany).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ transactionId: TX_ID }),
       expect.stringContaining('skipped'),
@@ -291,6 +301,117 @@ describe('processTransactionJob — broadcast failure', () => {
   });
 });
 
+// ── A6b: an earlier signed attempt the chain knows is adopted, never re-signed ──
+
+describe('processTransactionJob — a retry after an earlier signed attempt (A6b)', () => {
+  const EARLIER = '0xeee0000000000000000000000000000000000000000000000000000000000001' as Hex;
+  const NEW = '0xfff0000000000000000000000000000000000000000000000000000000000002' as Hex;
+
+  /** A submitter that signs NEW and awaits the hook before "sending" it, like the real one. */
+  function signingSubmitter(submitter: { submit: ReturnType<typeof vi.fn> }, sent: Hex[]) {
+    submitter.submit.mockImplementation(async (params: { onBeforeBroadcast?: (h: Hex) => Promise<void> }) => {
+      await params.onBeforeBroadcast?.(NEW);
+      sent.push(NEW);
+      return { txHash: NEW, nonce: 2 };
+    });
+  }
+
+  it('the chain knows the earlier attempt (its SUBMITTED write was lost) → adopted: nothing new stamped or sent, SUBMITTED with the earlier hash', async () => {
+    const { deps, submitter, updateMany, row, monitor, logger } = makeDeps(txRow({ broadcastTxHash: EARLIER }));
+    const isKnownTransaction = vi.fn().mockResolvedValue(true);
+    const sent: Hex[] = [];
+    signingSubmitter(submitter, sent);
+
+    const result = await processTransactionJob(job({ attemptsMade: 2 }), { ...deps, isKnownTransaction });
+
+    expect(result).toEqual({ txHash: EARLIER });
+    expect(isKnownTransaction).toHaveBeenCalledWith(JOB_DATA.chainId, EARLIER);
+    expect(sent).toEqual([]);
+    expect(volume.markBroadcastAttempt).not.toHaveBeenCalled();
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: TX_ID, status: 'QUEUED', txHash: null },
+      data: { status: 'SUBMITTED', txHash: EARLIER },
+    });
+    expect(row).toMatchObject({ status: 'SUBMITTED', txHash: EARLIER });
+    expect(monitor.waitForConfirmation).toHaveBeenCalledWith(expect.objectContaining({ txHash: EARLIER }));
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ txHash: EARLIER }), expect.stringContaining('adopted'));
+  });
+
+  it('the chain does not know the earlier attempt → a new attempt is stamped (with its own hash) and sent', async () => {
+    const { deps, submitter, row } = makeDeps(txRow({ broadcastTxHash: EARLIER }));
+    const isKnownTransaction = vi.fn().mockResolvedValue(false);
+    const sent: Hex[] = [];
+    signingSubmitter(submitter, sent);
+
+    await processTransactionJob(job({ attemptsMade: 2 }), { ...deps, isKnownTransaction });
+
+    expect(sent).toEqual([NEW]);
+    expect(volume.markBroadcastAttempt).toHaveBeenCalledWith(deps.db, TX_ID, NEW);
+    expect(row).toMatchObject({ status: 'SUBMITTED', txHash: NEW });
+  });
+
+  it('the chain cannot be asked (RPC error) → the attempt aborts before anything is stamped or sent (BullMQ retries)', async () => {
+    const { deps, submitter, row } = makeDeps(txRow({ broadcastTxHash: EARLIER }));
+    const isKnownTransaction = vi.fn().mockRejectedValue(new Error('HTTP request failed'));
+    const sent: Hex[] = [];
+    signingSubmitter(submitter, sent);
+
+    await expect(processTransactionJob(job({ attemptsMade: 2 }), { ...deps, isKnownTransaction })).rejects.toThrow('HTTP request failed');
+
+    expect(sent).toEqual([]);
+    expect(volume.markBroadcastAttempt).not.toHaveBeenCalled();
+    expect(row).toMatchObject({ status: 'QUEUED', txHash: null });
+  });
+
+  it('a first attempt (nothing stamped before) never asks the chain', async () => {
+    const { deps, submitter } = makeDeps(txRow());
+    const isKnownTransaction = vi.fn();
+    signingSubmitter(submitter, []);
+
+    await processTransactionJob(job(), { ...deps, isKnownTransaction });
+
+    expect(isKnownTransaction).not.toHaveBeenCalled();
+    expect(volume.markBroadcastAttempt).toHaveBeenCalledWith(deps.db, TX_ID, NEW);
+  });
+
+  it('EarlierBroadcastLiveError carries the adopted hash', () => {
+    expect(new EarlierBroadcastLiveError(EARLIER).txHash).toBe(EARLIER);
+  });
+});
+
+describe('processTransactionJob — the SUBMITTED write is conditional (A6b)', () => {
+  it('the row was handed to the chain with this very hash meanwhile (a concurrent guard / failed handler) → monitored as ours', async () => {
+    const { deps, submitter, row, monitor } = makeDeps(txRow());
+    submitter.submit.mockImplementation(async () => {
+      Object.assign(row, { status: 'SUBMITTED', txHash: TX_HASH }); // the hand-over landed first
+      return { txHash: TX_HASH, nonce: 1 };
+    });
+
+    const result = await processTransactionJob(job(), deps);
+
+    expect(result).toEqual({ txHash: TX_HASH });
+    expect(monitor.waitForConfirmation).toHaveBeenCalledWith(expect.objectContaining({ txHash: TX_HASH }));
+  });
+
+  it('the row was settled by somebody else (FAILED) → not overwritten, not monitored, logged', async () => {
+    const { deps, submitter, row, monitor, logger } = makeDeps(txRow());
+    submitter.submit.mockImplementation(async () => {
+      Object.assign(row, { status: 'FAILED', error: 'setProviderAgentId skipped before submission' });
+      return { txHash: TX_HASH, nonce: 1 };
+    });
+
+    const result = await processTransactionJob(job(), deps);
+
+    expect(result).toEqual({ txHash: TX_HASH });
+    expect(row.status).toBe('FAILED');
+    expect(monitor.waitForConfirmation).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ transactionId: TX_ID, txHash: TX_HASH, status: 'FAILED' }),
+      expect.stringContaining('not overwritten'),
+    );
+  });
+});
+
 // ── Guard outcomes ─────────────────────────────────────────────────────────
 
 describe('processTransactionJob — pre-submit guard', () => {
@@ -306,7 +427,7 @@ describe('processTransactionJob — pre-submit guard', () => {
     expect(update).not.toHaveBeenCalled();
     expect(updateMany).toHaveBeenCalledTimes(1);
     expect(updateMany).toHaveBeenCalledWith({
-      where: { id: TX_ID, status: 'QUEUED', txHash: null },
+      where: { id: TX_ID, status: 'QUEUED', txHash: null, broadcastAttemptedAt: null },
       data: { status: 'FAILED', error: PAUSED_BEFORE_SUBMISSION },
     });
     expect(row.status).toBe('FAILED');
@@ -359,8 +480,9 @@ describe('handleFailedTransactionJob', () => {
       logger,
     });
 
+    // A6b: FAILED only when no attempt was stamped for broadcast.
     expect(updateMany).toHaveBeenCalledWith({
-      where: { id: TX_ID, status: 'QUEUED' },
+      where: { id: TX_ID, status: 'QUEUED', broadcastAttemptedAt: null },
       data: { status: 'FAILED', error: 'rpc down' },
     });
     expect(row).toMatchObject({ status: 'FAILED', error: 'rpc down' });
@@ -440,6 +562,35 @@ describe('handleFailedTransactionJob', () => {
     expect(row.status).toBe('FAILED');
     expect(finalizeMock).toHaveBeenCalledWith(
       expect.objectContaining({ jobId: 'job-42', outcome: 'FAILED' }),
+    );
+  });
+
+  it('A6b: last attempt after a signed attempt was stamped → handed to the chain: dead-lettered, but nothing settled or refunded', async () => {
+    const { db, updateMany, deadLetterQueue, logger } = makeDeps(txRow({ metadata: { a2aPayment: true, jobId: 'job-42' } }));
+    updateMany.mockResolvedValueOnce({ count: 0 }); // stamped: the never-stamped FAILED write matches nothing
+    volume.stopStampedTransaction.mockResolvedValueOnce({ outcome: 'handed-to-chain', txHash: TX_HASH });
+
+    await handleFailedTransactionJob(job({ attemptsMade: 3, opts: { attempts: 3 } }), err, { db, deadLetterQueue, logger });
+
+    expect(volume.stopStampedTransaction).toHaveBeenCalledWith(db, TX_ID, 'rpc down', { handToChain: true });
+    expect(deadLetterQueue.add).toHaveBeenCalledTimes(1);
+    expect(volume.settleVolumeAfterFailure).not.toHaveBeenCalled();
+    expect(finalizeMock).not.toHaveBeenCalled();
+  });
+
+  it('A6b: last attempt of an A2A payment stamped before migration 0024 (no hash) → FAILED and held, the job NOT refunded', async () => {
+    const { db, updateMany, deadLetterQueue, logger } = makeDeps(txRow({ metadata: { a2aPayment: true, jobId: 'job-42' } }));
+    updateMany.mockResolvedValueOnce({ count: 0 });
+    volume.stopStampedTransaction.mockResolvedValueOnce({ outcome: 'failed', broadcastAttempted: true });
+    volume.settleVolumeAfterFailure.mockResolvedValueOnce('none');
+
+    await handleFailedTransactionJob(job({ attemptsMade: 3, opts: { attempts: 3 } }), err, { db, deadLetterQueue, logger });
+
+    expect(volume.settleVolumeAfterFailure).toHaveBeenCalledWith(db, TX_ID);
+    expect(finalizeMock).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ transactionId: TX_ID, jobId: 'job-42' }),
+      expect.stringContaining('not refunded'),
     );
   });
 

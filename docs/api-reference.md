@@ -243,6 +243,18 @@ native value it moves. When the USD price of the native value cannot be
 resolved and a daily limit is set, the request is refused with `503` (the limit
 cannot be checked); without a daily limit it proceeds and counts nothing.
 
+**Once a signed transaction may have left the backend, the chain decides
+(A6b).** The hash of every signed attempt is recorded before it is sent. A
+transaction stopped after that — the agent paused or its policy expired while a
+retry was pending, or every attempt failed — is not marked `FAILED` and nothing
+is refunded: it stays `SUBMITTED` with that hash until a receipt settles it, or
+until no RPC node has known it for `TX_DROP_AFTER_SEC` (it is then `FAILED`,
+still counted for its day). For a paid job this means the job stays
+`PAYMENT_PENDING` (its reward still reserved) until then. A retry never signs a
+second transaction while the chain knows an earlier one. A transaction the
+operator approves on a later UTC day than it was requested counts on the
+approval day (when it executes), whatever the remaining limit of that day.
+
 ---
 
 ## Transactions

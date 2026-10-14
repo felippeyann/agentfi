@@ -25,11 +25,24 @@
  * forever, every retry was skipped by the guard, the failed handler never ran
  * and an A2A payment stayed PAYMENT_PENDING with its reservation locked.)
  *
- * Accepted trade-off: if the DB write after a successful broadcast fails, the
- * row stays QUEUED without a hash and a retry re-submits. The submitter uses
- * the wallet's next nonce, so the node rejects the duplicate once the first
- * broadcast is pending/mined — the same protection any retrying submitter
- * relies on.
+ * A lost SUBMITTED write (A6b): if the DB write after a successful broadcast
+ * fails, the row stays QUEUED without a hash and BullMQ retries. The retry
+ * must not sign again — since the C3c wallet lane the next signature takes the
+ * NEXT nonce (`max(pending, last used + 1)`), so a second transaction would
+ * be accepted and the value would move twice. The broadcast stamp records the
+ * signed hash (`broadcastTxHash`); inside the wallet lane, before stamping a
+ * new attempt, the processor asks the chain whether the previous signed
+ * attempt is known (pending or mined) and, if it is, adopts that hash instead
+ * of sending anything (`EarlierBroadcastLiveError`). An RPC error in that
+ * check aborts the attempt before the send.
+ *
+ * Who decides the outcome once an attempt was stamped (A6b): only the chain.
+ * The SUBMITTED write is conditional on QUEUED without a hash; the guard and
+ * the failed handler never FAIL a stamped row — they hand it to the chain
+ * (SUBMITTED with the stamped hash, `stopStampedTransaction`) and settle or
+ * finalize nothing, so an A2A payment is never refunded while it may still
+ * be mined. When the delivery that sent the transaction finds its row already
+ * handed over with its own hash, it monitors it as usual.
  *
  * Confirmation (C3c): the monitor is a detached promise, so a worker restart
  * or a slow chain can lose it. The receipt is recorded with a conditional
@@ -55,6 +68,7 @@ import {
   markBroadcastAttempt,
   settleVolumeAfterFailure,
   settleVolumeAfterRevert,
+  stopStampedTransaction,
 } from '../services/policy/daily-volume.js';
 import type { SubmitterService } from '../services/transaction/submitter.service.js';
 import { recordReceiptOnce, type ConfirmationOutcome } from '../services/transaction/monitor.service.js';
@@ -98,6 +112,23 @@ export interface TransactionProcessorDeps {
   logger: ProcessorLogger;
   /** Receives the detached confirmation promise (shutdown bookkeeping; tests await it). */
   trackMonitor?: (monitoring: Promise<void>) => void;
+  /**
+   * A6b: whether any RPC node knows a transaction (pending or mined); throws
+   * on RPC errors. Asked, before a retry signs again, about the hash an earlier
+   * attempt was stamped with. Without it that check is skipped (unit tests).
+   */
+  isKnownTransaction?: (chainId: number, txHash: Hex) => Promise<boolean>;
+}
+
+/**
+ * A6b: thrown from the broadcast hook (inside the wallet lane, before the new
+ * attempt is stamped or sent) when the chain already knows the transaction an
+ * earlier attempt of this row signed: that one is adopted, nothing new is sent.
+ */
+export class EarlierBroadcastLiveError extends Error {
+  constructor(readonly txHash: Hex) {
+    super(`An earlier signed attempt (${txHash}) is known to the chain — adopted, not signing again`);
+  }
 }
 
 /** What the post-confirmation accounting needs — from the queue payload, or from `metadata.queuePayload` on a replay. */
@@ -164,24 +195,59 @@ export async function processTransactionJob(
 
   // The tx stays QUEUED while broadcasting. A throw here propagates so BullMQ
   // retries; the next attempt's guard still sees QUEUED + no txHash and proceeds.
-  // `broadcastAttemptedAt` is stamped before the signed transaction is sent
-  // (A6): a permanent failure after it keeps the DailyVolume reservation.
-  const { txHash } = await submitter.submit({
-    chainId: data.chainId,
-    walletId: data.walletId,
-    from: data.from,
-    to: data.to,
-    data: data.data,
-    value: BigInt(data.value),
-    onBeforeBroadcast: () => markBroadcastAttempt(db, data.transactionId),
-  });
+  // `broadcastAttemptedAt` / `broadcastTxHash` are stamped before the signed
+  // transaction is sent (A6, A6b): a permanent failure after it keeps the
+  // reservation and hands the row to the chain.
+  let txHash: Hex;
+  try {
+    ({ txHash } = await submitter.submit({
+      chainId: data.chainId,
+      walletId: data.walletId,
+      from: data.from,
+      to: data.to,
+      data: data.data,
+      value: BigInt(data.value),
+      onBeforeBroadcast: async (signedTxHash) => {
+        await refuseIfEarlierBroadcastLive(deps, data, signedTxHash);
+        await markBroadcastAttempt(db, data.transactionId, signedTxHash);
+      },
+    }));
+  } catch (err) {
+    if (!(err instanceof EarlierBroadcastLiveError)) throw err;
+    // A6b: a previous attempt reached the chain (its SUBMITTED write was lost,
+    // or its send "failed" after the node took it). Record that one.
+    txHash = err.txHash;
+    logger.warn(
+      { transactionId: data.transactionId, txHash },
+      'An earlier signed attempt is known to the chain — adopted instead of signing a second transaction',
+    );
+  }
 
-  // One write: SUBMITTED always carries its txHash. From here on the guard
-  // skips any redelivery of this job.
-  await db.transaction.update({
-    where: { id: data.transactionId },
+  // One write: SUBMITTED always carries its txHash. Conditional (A6b): only
+  // from QUEUED without a hash — never over a row somebody else settled.
+  // From here on the guard skips any redelivery of this job.
+  const recorded = await db.transaction.updateMany({
+    where: { id: data.transactionId, status: 'QUEUED', txHash: null },
     data: { status: 'SUBMITTED', txHash },
   });
+  if (recorded.count === 0) {
+    const row = await db.transaction.findUnique({
+      where: { id: data.transactionId },
+      select: { status: true, txHash: true },
+    });
+    if (row?.txHash?.toLowerCase() !== txHash.toLowerCase()) {
+      // Settled by somebody else (e.g. an ERC-8183 step the guard failed):
+      // not overwritten, and not monitored here. `broadcastTxHash` keeps the
+      // evidence for reconciliation.
+      logger.error(
+        { transactionId: data.transactionId, txHash, status: row?.status, recordedTxHash: row?.txHash ?? null },
+        'Transaction broadcast, but its row was already settled — not overwritten; reconcile from broadcastTxHash',
+      );
+      return { txHash };
+    }
+    // A concurrent guard / failed handler handed this very hash to the chain
+    // (SUBMITTED): observe it like our own.
+  }
 
   logger.info({ transactionId: data.transactionId, txHash }, 'Transaction submitted');
 
@@ -205,6 +271,30 @@ export async function processTransactionJob(
   deps.trackMonitor?.(monitoring);
 
   return { txHash };
+}
+
+/**
+ * A6b: called inside the wallet lane right before a new attempt is stamped
+ * and sent. When an earlier attempt of the row was stamped with a different
+ * signed hash and the chain knows that one, throws `EarlierBroadcastLiveError`
+ * (the submitter sends nothing). An RPC error propagates and aborts the
+ * attempt before the send, as a failed stamp does.
+ */
+async function refuseIfEarlierBroadcastLive(
+  deps: Pick<TransactionProcessorDeps, 'db' | 'isKnownTransaction'>,
+  data: Pick<TransactionJobData, 'transactionId' | 'chainId'>,
+  signedTxHash: Hex,
+): Promise<void> {
+  if (!deps.isKnownTransaction) return;
+  const row = await deps.db.transaction.findUnique({
+    where: { id: data.transactionId },
+    select: { broadcastTxHash: true },
+  });
+  const earlier = row?.broadcastTxHash;
+  if (!earlier || earlier.toLowerCase() === signedTxHash.toLowerCase()) return;
+  if (await deps.isKnownTransaction(data.chainId, earlier as Hex)) {
+    throw new EarlierBroadcastLiveError(earlier as Hex);
+  }
 }
 
 /**
@@ -419,7 +509,8 @@ export function isLastAttempt(job: TransactionJobLike): boolean {
  * job, mark the transaction FAILED and — for an A2A payment — finalize the
  * Job as PAYMENT_FAILED (refunds the escrow reservation). Reachable for
  * broadcast failures because `processTransactionJob` leaves the tx QUEUED
- * until the broadcast succeeds.
+ * until the broadcast succeeds. A6b: a row an attempt was stamped for is not
+ * FAILED but handed to the chain (`settlePermanentFailure`).
  */
 export async function handleFailedTransactionJob(
   job: TransactionJobLike | undefined,
@@ -449,43 +540,89 @@ export async function handleFailedTransactionJob(
     logger.error({ transactionId, dlqErr }, 'Failed to enqueue to dead-letter queue');
   }
 
-  // Conditional on QUEUED: a stalled-job redelivery can reach this handler
-  // while another delivery of the same job already broadcast it (SUBMITTED, or
-  // later). That row is in flight — its own observer settles it and finalizes
-  // its job — so it is neither overwritten nor finalized as FAILED here.
-  let markedFailed = false;
+  await settlePermanentFailure(db, transactionId, err.message.slice(0, 500), logger);
+}
+
+/**
+ * The transaction side of a permanent failure (shared by the failed handler
+ * and the stranded-QUEUED sweep): stop the row, settle its reservation and
+ * finalize its job — or hand it to the chain when an attempt was stamped.
+ *
+ *  - never stamped (no attempt reached the broadcast): FAILED, reservation
+ *    released, A2A payment finalized PAYMENT_FAILED (refund), ERC-8183 step
+ *    unwound by the orchestrator;
+ *  - stamped with its signed hash (A6b): SUBMITTED with that hash — the
+ *    receipt or the re-poll's drop decides; nothing settled or finalized here;
+ *  - stamped before migration 0024 (no hash): FAILED with the reservation
+ *    HELD, and an A2A payment is NOT refunded (left PAYMENT_PENDING);
+ *  - no longer QUEUED (a stalled-job redelivery while another delivery
+ *    recorded its broadcast): left to its own outcome.
+ * ERC-8183 steps keep the FAILED path whatever the stamp (the orchestrator
+ * reads the chain before unwinding).
+ */
+export async function settlePermanentFailure(
+  db: PrismaClient,
+  transactionId: string,
+  error: string,
+  logger: ProcessorLogger,
+): Promise<void> {
+  type RowMeta = { jobId?: string; a2aPayment?: boolean; erc8183?: boolean } | null;
+  let meta: RowMeta = null;
+  let broadcastAttempted = false;
   try {
+    const tx = await db.transaction.findUnique({
+      where: { id: transactionId },
+      select: { metadata: true },
+    });
+    meta = (tx?.metadata ?? null) as RowMeta;
+    const handToChain = meta?.erc8183 !== true;
+
+    // Conditional on QUEUED: a stalled-job redelivery can reach this handler
+    // while another delivery of the same job already broadcast it (SUBMITTED, or
+    // later). That row is in flight — its own observer settles it and finalizes
+    // its job — so it is neither overwritten nor finalized as FAILED here.
+    // A6b: and on no attempt having been stamped for broadcast.
     const { count } = await db.transaction.updateMany({
-      where: { id: transactionId, status: 'QUEUED' },
-      data: {
-        status: 'FAILED',
-        error: err.message.slice(0, 500),
-      },
+      where: { id: transactionId, status: 'QUEUED', ...(handToChain ? { broadcastAttemptedAt: null } : {}) },
+      data: { status: 'FAILED', error },
     });
     if (count === 0) {
-      logger.warn(
-        { transactionId },
-        'Permanently failed job, but the transaction already left QUEUED — left to its own outcome',
-      );
-      return;
+      const stop = handToChain
+        ? await stopStampedTransaction(db, transactionId, error, { handToChain: true })
+        : ({ outcome: 'not-queued' } as const);
+      if (stop.outcome === 'not-queued') {
+        logger.warn(
+          { transactionId },
+          'Permanently failed job, but the transaction already left QUEUED — left to its own outcome',
+        );
+        return;
+      }
+      if (stop.outcome === 'handed-to-chain') {
+        logger.warn(
+          { transactionId, txHash: stop.txHash, err: error },
+          'Permanently failed after a signed attempt was stamped for broadcast — not FAILED: handed to the chain (re-poll decides), nothing refunded',
+        );
+        return;
+      }
+      broadcastAttempted = stop.broadcastAttempted;
     }
-    markedFailed = true;
   } catch (dbErr) {
+    // Unknown state: nothing is settled or finalized (the stranded-QUEUED
+    // sweep picks the row up again while it is QUEUED with a failed job).
     logger.error({ transactionId, dbErr }, 'Failed to update transaction status to FAILED');
+    return;
   }
 
   // A6: give the DailyVolume reservation back only when no attempt ever
   // reached the broadcast step; after one, the signed transaction may still
   // be mined, so it stays counted (HELD).
-  if (markedFailed) {
-    try {
-      const volume = await settleVolumeAfterFailure(db, transactionId);
-      if (volume === 'held') {
-        logger.warn({ transactionId }, 'Permanently failed after a broadcast attempt — daily volume reservation kept');
-      }
-    } catch (volumeErr) {
-      logger.error({ transactionId, volumeErr }, 'Failed to settle the daily volume reservation of a failed transaction');
+  try {
+    const volume = await settleVolumeAfterFailure(db, transactionId);
+    if (volume === 'held') {
+      logger.warn({ transactionId }, 'Permanently failed after a broadcast attempt — daily volume reservation kept');
     }
+  } catch (volumeErr) {
+    logger.error({ transactionId, volumeErr }, 'Failed to settle the daily volume reservation of a failed transaction');
   }
 
   // Issue #81: if this tx was an A2A payment, finalize the Job too.
@@ -493,19 +630,18 @@ export async function handleFailedTransactionJob(
   // leave the Job stuck in PAYMENT_PENDING forever after BullMQ exhausts
   // retries. monitor.waitForConfirmation never runs in this path.
   try {
-    const tx = await db.transaction.findUnique({
-      where: { id: transactionId },
-      select: { metadata: true },
-    });
-    const meta = (tx?.metadata ?? null) as
-      | { jobId?: string; a2aPayment?: boolean; erc8183?: boolean }
-      | null;
-    if (meta?.a2aPayment === true && typeof meta.jobId === 'string') {
+    if (meta?.a2aPayment === true && typeof meta.jobId === 'string' && broadcastAttempted) {
+      // A6b: stamped without a recorded hash — the payment may still be mined.
+      logger.error(
+        { transactionId, jobId: meta.jobId },
+        'A2A payment failed after a broadcast attempt with no recorded hash — job left PAYMENT_PENDING (not refunded); reconcile manually',
+      );
+    } else if (meta?.a2aPayment === true && typeof meta.jobId === 'string') {
       await finalizeA2APaymentJob({
         jobId: meta.jobId,
         transactionId,
         outcome: 'FAILED',
-        reason: err.message.slice(0, 500),
+        reason: error,
       });
     } else if (meta?.erc8183 === true) {
       // C3: a permanently failed escrow step — FAILED + reservation release
@@ -513,7 +649,7 @@ export async function handleFailedTransactionJob(
       await onEscrowTxOutcome({
         transactionId,
         status: 'FAILED',
-        error: err.message.slice(0, 500),
+        error,
       });
     }
   } catch (finalizeErr) {
