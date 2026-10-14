@@ -190,6 +190,8 @@ async function mkAgent(policy: Record<string, unknown> = {}) {
           maxValueForAutoApprovalEth: '0.001',
           maxDailyVolumeUsd: '1000',
           cooldownSeconds: 0,
+          // §5-6: a configured outflow cap out of the way (this suite tests other rules).
+          maxOutflowPerTxUsd: '1000000',
           ...policy,
         },
       },
@@ -612,7 +614,10 @@ describeDb('A6c — operator approval on a later UTC day, on Postgres', () => {
   });
 
   it('a pending spend that reserved nothing (unpriced while no daily limit applied) is refused once a daily limit applies — APPROVAL_UNCOUNTED_SPEND', async () => {
-    const agent = await mkAgent({ maxDailyVolumeUsd: '0' });
+    // §5-6: a configured outflow cap refuses an unpriced outflow at the
+    // request; a non-decimal stored cap reads as unlimited, which is how a
+    // pre-0025 row (or a hand-edited one) can still carry such a spend.
+    const agent = await mkAgent({ maxDailyVolumeUsd: '0', maxOutflowPerTxUsd: 'unlimited' });
     const a = await app(agent.id);
     process.env['SYNTHETIC_TEST_PRICES_USD'] = h.syntheticPrices.tokensOnly; // native value unpriced
     const id = await pendingTransfer(a, at(D1));

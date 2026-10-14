@@ -212,6 +212,8 @@ async function mkAgent(policy: Record<string, unknown> = {}) {
           maxValueForAutoApprovalEth: '10',
           maxDailyVolumeUsd: '1000',
           cooldownSeconds: 0,
+          // §5-6: a configured outflow cap out of the way (this suite tests other rules).
+          maxOutflowPerTxUsd: '1000000',
           ...policy,
         },
       },
