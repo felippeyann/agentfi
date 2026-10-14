@@ -457,8 +457,9 @@ export const agentTools = [
     name: 'contest_job',
     description:
       'Disputes the deliverable of an escrowed job you posted (requester only) before the evaluator settles it. ' +
-      'Allowed only while the job is PAYMENT_PENDING with escrow.onChainStatus SUBMITTED; once settlement has started ' +
-      'it is refused (409 CONTEST_NOT_ALLOWED). A contest does not refund automatically: the job is held for an operator ' +
+      'Allowed only while the job is PAYMENT_PENDING with escrow.onChainStatus SUBMITTED; once settlement has started, ' +
+      'or from escrow.expiresAt minus the expiry margin (a few minutes) on, it is refused (409 CONTEST_NOT_ALLOWED). ' +
+      'A contest does not refund automatically: the job is held for an operator ' +
       'decision (escrow.onChainStatus CONTESTED), who either pays the provider or refunds your budget in full, and only ' +
       'an explicit operator quality verdict records a negative ERC-8004 rating; unresolved at escrow.expiresAt, the ' +
       'budget is refunded without any rating. Cannot be withdrawn — read the result with get_job first.',
