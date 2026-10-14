@@ -1851,6 +1851,24 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       });
     }
 
+    // S8: an agent never calls its policy module through the executor. The
+    // admin calls (setPolicy, whitelists, pause / resume) revert Unauthorized
+    // there (the executor is msg.sender), and validateTransaction — no caller
+    // check — would only restart a wallet's on-chain cooldown (another
+    // agent's included). The on-chain policy is synced by the operator.
+    const moduleIndex = contracts.policyModule
+      ? body.actions.findIndex((a) => a.to.toLowerCase() === contracts.policyModule!.toLowerCase())
+      : -1;
+    if (moduleIndex >= 0) {
+      return reply.code(403).send({
+        error:
+          `Action at index ${moduleIndex} targets the AgentPolicyModule. Agents cannot call it through the executor; the operator ` +
+          'syncs the on-chain policy from the stored one.',
+        code: 'POLICY_MODULE_TARGET',
+        actionIndex: moduleIndex,
+      });
+    }
+
     // The off-chain token whitelist can only be applied to what the caller
     // declares (the backend does not decode raw calldata), so an agent that
     // HAS a whitelist must declare a token on every action carrying calldata.
@@ -1902,8 +1920,8 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     if (dailyLimited && policy) {
       for (let i = 0; i < body.actions.length; i++) {
         const action = body.actions[i]!;
-        const call = classifyBatchCalldata(action, { policyModule: contracts.policyModule });
-        if (call.kind === 'none' || call.kind === 'policy-sync') continue;
+        const call = classifyBatchCalldata(action);
+        if (call.kind === 'none') continue;
         if (call.kind === 'non-canonical-erc20') {
           // G1 review P3-4: refused whatever allowedContracts says — a token
           // decodes it leniently and moves the amount, so it cannot be "other"

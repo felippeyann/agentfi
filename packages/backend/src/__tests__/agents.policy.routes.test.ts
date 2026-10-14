@@ -381,7 +381,7 @@ describe('PATCH /v1/agents/:id/policy — Q8 fields', () => {
     await app.close();
   });
 
-  it('syncOnChain: the calldata carries no Q8 field and the answer lists them as off-chain only', async () => {
+  it('syncOnChain (S8): no calldata any more — the answer points at the operator sync and lists the off-chain-only fields', async () => {
     // The contract table is built at module load; point the testnet policy module at a dummy address.
     const { CONTRACT_ADDRESSES } = await import('../config/contracts.js');
     const previous = CONTRACT_ADDRESSES[84532]!.policyModule;
@@ -396,10 +396,14 @@ describe('PATCH /v1/agents/:id/policy — Q8 fields', () => {
       });
       expect(res.statusCode).toBe(200);
       const sync = res.json().onChainSync;
+      expect(sync.status).toBe('operator-sync-required');
       expect(sync.offChainOnlyFields).toEqual(['maxValuePerTxUsd', 'allowedRecipients', 'maxDailyVolumeUsd']);
-      expect(sync.notice).toMatch(/Not synced .*maxValuePerTxUsd, allowedRecipients/);
-      // Only the core setPolicy call: no recipient whitelist exists on-chain.
-      expect(sync.actions).toHaveLength(1);
+      expect(sync.notice).toMatch(/enforced off-chain only\): maxValuePerTxUsd, allowedRecipients/);
+      expect(sync.notice).toMatch(/POST \/admin\/agents\/:id\/policy\/sync/);
+      // The old answer's `actions` told the caller to run module calls through
+      // execute_batch, where the executor is msg.sender: they always reverted.
+      expect(sync).not.toHaveProperty('actions');
+      expect(JSON.stringify(sync)).not.toMatch(/0x[0-9a-f]{64,}/i);
       await app.close();
     } finally {
       CONTRACT_ADDRESSES[84532]!.policyModule = previous;

@@ -8,6 +8,7 @@
  *   node scripts/gen-abi.mjs AgentExecutor        # one or more by name
  *   npm run abi            # all
  *   npm run abi:executor   # AgentExecutor only
+ *   npm run abi:policy     # AgentPolicyModule only
  *   npm run abi:escrow     # AgentJobEscrow + ReputationHook
  *
  * Output: packages/backend/src/abi/<Contract>.abi.ts (checked in — commit it
@@ -38,6 +39,14 @@ const CONTRACTS = {
       ' * the pre-October-2026 struct (target, value, data) expose different selectors\n' +
       ' * and must be redeployed before the backend routes through them — see\n' +
       ' * docs/operations/contract-deployment.md ("ABI versioning").',
+  },
+  AgentPolicyModule: {
+    exportName: 'AGENT_POLICY_MODULE_ABI_FULL',
+    note:
+      'The on-chain policy of an agent wallet. The backend reads getPolicy / hasPolicy /\n' +
+      ' * isContractAllowed / isTokenAllowed and has the agent wallet (msg.sender == safe,\n' +
+      ' * EOA mode) send setPolicy / update*Whitelist / emergencyPause / resume directly to\n' +
+      ' * the module — never through AgentExecutor (S8, services/policy/policy-sync.ts).',
   },
   AgentJobEscrow: {
     exportName: 'AGENT_JOB_ESCROW_ABI',

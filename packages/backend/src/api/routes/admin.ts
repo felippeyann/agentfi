@@ -25,11 +25,81 @@ import { ReputationService } from '../../services/policy/reputation.service.js';
 import { moveReservationToDay, settleVolumeAfterFailure } from '../../services/policy/daily-volume.js';
 import { PnLService } from '../../services/billing/pnl.service.js';
 import { OperatorService } from '../../services/billing/operator.service.js';
+import { PolicySyncService, type PolicySyncOutcome } from '../../services/policy/policy-sync.service.js';
+import type { PolicyModuleReader } from '../../services/policy/policy-sync.js';
+import { createChainPublicClient } from '../../config/chains.js';
+import { getWalletService } from '../../services/wallet/index.js';
 
 const policyService = new PolicyService(db);
 const reputationService = new ReputationService();
 const pnlService = new PnLService();
 const operatorService = new OperatorService(db);
+
+/** The configured `AgentPolicyModule` of a chain (undefined: none, or an unknown chain). */
+function configuredPolicyModule(chainId: number): Address | undefined {
+  try {
+    return getContracts(chainId).policyModule;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * S8: the on-chain policy sync. Calls go from the agent's own wallet straight
+ * to the module (msg.sender == safe, EOA mode), derived only from the stored
+ * policy; never through the executor and never with caller calldata.
+ */
+const policySync = new PolicySyncService({
+  db,
+  enqueue: async (transactionId, data) => {
+    await transactionQueue.add('policy-sync', data, { jobId: transactionJobId(transactionId) });
+  },
+  reader: (chainId) => {
+    const client = createChainPublicClient(chainId);
+    return ((params) => client.readContract(params as never)) as PolicyModuleReader;
+  },
+  walletAddress: (walletId) => getWalletService().getWalletAddress(walletId),
+  policyModule: configuredPolicyModule,
+  logger,
+});
+
+/** HTTP body of a sync outcome (`POST /admin/agents/:id/policy/sync`, `onChainSync` of the kill switch). */
+function policySyncBody(outcome: Exclude<PolicySyncOutcome, { kind: 'not-found' }>) {
+  switch (outcome.kind) {
+    case 'queued':
+      return {
+        status: 'pending' as const,
+        transactions: outcome.transactions,
+        differences: outcome.differences,
+        unknownExtras: outcome.unknownExtras,
+        ...(outcome.enqueueError ? { enqueueError: outcome.enqueueError } : {}),
+        notice:
+          "Queued: signed by the agent's own wallet and sent straight to AgentPolicyModule (not via the executor). " +
+          'GET /admin/agents/:id/policy/onchain shows the DB and on-chain policy until the receipts land.',
+      };
+    case 'in-sync':
+      return { status: 'in-sync' as const, transactions: [], differences: [], view: outcome.view };
+    case 'refused':
+      return { status: 'refused' as const, code: outcome.code, error: outcome.error, view: outcome.view };
+  }
+}
+
+/**
+ * The kill switch's on-chain half (`syncOnChain: true`): the same sync, run
+ * after the DB pause / resume. Null when the chain has no module (as before
+ * S8); a refusal is reported in the body and never undoes the DB change.
+ */
+async function killSwitchSync(agentId: string, trigger: 'kill-switch-pause' | 'kill-switch-resume') {
+  try {
+    const outcome = await policySync.sync(agentId, trigger);
+    if (outcome.kind === 'not-found') return null;
+    if (outcome.kind === 'refused' && outcome.code === 'POLICY_MODULE_NOT_CONFIGURED') return null;
+    return policySyncBody(outcome);
+  } catch (err) {
+    logger.error({ agentId, trigger, err: (err as Error)?.message ?? String(err) }, 'Kill switch on-chain sync failed');
+    return { status: 'refused' as const, code: 'POLICY_SYNC_ERROR', error: publicErrorMessage(err) };
+  }
+}
 const ADMIN_SECRET = process.env['ADMIN_SECRET'] ?? '';
 const ADMIN_ALLOW_REMOTE = process.env['ADMIN_ALLOW_REMOTE'] === 'true';
 
@@ -66,20 +136,13 @@ const batchAdminSchema = z.object({
 
 const pauseAgentSchema = z.object({
   /**
-   * When true, the response carries AgentPolicyModule calldata
-   * (`emergencyPause(safe)` when pausing, `resume(safe)` when resuming) for
-   * the operator to broadcast. The backend never broadcasts it itself.
+   * When true, the kill switch also syncs the on-chain AgentPolicyModule (S8):
+   * after the DB pause / resume, the stored policy is pushed by the same path
+   * as POST /admin/agents/:id/policy/sync (the agent's own wallet, straight to
+   * the module) and `onChainSync` reports what was queued or why it was not.
    */
   syncOnChain: z.boolean().default(false),
 });
-
-/** Shape shared with PATCH /v1/agents/:id/policy — calldata the operator broadcasts. */
-interface OnChainSync {
-  to: string;
-  chainId: number;
-  actions: { to: string; value: string; data: string }[];
-  notice: string;
-}
 
 /** The slice of an `Agent` row the kill-switch handlers need. */
 interface KillSwitchAgent {
@@ -115,47 +178,12 @@ function parseKillSwitchBody(request: any, reply: any): { syncOnChain: boolean }
 }
 
 /**
- * Builds the on-chain kill-switch calldata for an agent's primary chain, or
- * null when that chain has no AgentPolicyModule configured. Encode-only.
- */
-async function buildKillSwitchOnChainSync(
-  agent: { id: string; safeAddress: string; chainIds: number[] },
-  pause: boolean,
-): Promise<OnChainSync | null> {
-  const chainId = agent.chainIds[0] ?? 1;
-
-  let policyModule: Address | undefined;
-  try {
-    policyModule = getContracts(chainId).policyModule;
-  } catch (err) {
-    logger.warn(
-      { agentId: agent.id, chainId, err: (err as Error)?.message ?? String(err) },
-      'Cannot build on-chain kill-switch calldata: chain has no contract config',
-    );
-    return null;
-  }
-  if (!policyModule) return null;
-
-  const safeAddress = getAddress(agent.safeAddress);
-  const data = pause
-    ? await policyService.onChain.buildEmergencyPauseCalldata({ safeAddress })
-    : await policyService.onChain.buildResumeCalldata({ safeAddress });
-
-  return {
-    to: policyModule,
-    chainId,
-    actions: [{ to: policyModule, value: '0', data }],
-    notice: `Broadcast via POST /admin/transactions/batch with agentId "${agent.id}" to ${pause ? 'pause' : 'resume'} the on-chain policy. The backend has NOT broadcast this.`,
-  };
-}
-
-/**
  * Shared by POST /admin/agents/:id/resume and the resume half of the pause
  * toggle. Idempotent: an agent that is already active is left alone
  * (`agentReactivated: false`), and the DB policy is re-activated only when the
  * operator pause deactivated it (`PolicyService.resumeByOperator`) — a policy
  * that was inactive for any other reason stays inactive and `policyNote` says
- * so. `onChainSync` (`AgentPolicyModule.resume(safe)` calldata) is built
+ * so. With `syncOnChain`, the stored policy is then synced on-chain (S8) —
  * whenever requested, even on a no-op, so the chain can be re-synced alone.
  */
 async function resumeAgent(agent: KillSwitchAgent, syncOnChain: boolean) {
@@ -165,7 +193,7 @@ async function resumeAgent(agent: KillSwitchAgent, syncOnChain: boolean) {
   }
 
   const policyOutcome = await policyService.resumeByOperator(agent.id);
-  const onChainSync = syncOnChain ? await buildKillSwitchOnChainSync(agent, false) : null;
+  const onChainSync = syncOnChain ? await killSwitchSync(agent.id, 'kill-switch-resume') : null;
 
   logger.info(
     {
@@ -173,7 +201,7 @@ async function resumeAgent(agent: KillSwitchAgent, syncOnChain: boolean) {
       agentReactivated,
       policyOutcome,
       syncOnChain,
-      onChainSyncPrepared: onChainSync !== null,
+      onChainSync: onChainSync?.status ?? null,
     },
     'Admin resumed agent',
   );
@@ -189,8 +217,16 @@ async function resumeAgent(agent: KillSwitchAgent, syncOnChain: boolean) {
 
 export async function adminRoutes(fastify: FastifyInstance) {
   /**
-   * POST /admin/transactions/batch — execute an admin-originated batch.
-   * Used for policy synchronization and other maintenance.
+   * POST /admin/transactions/batch — execute an admin-originated batch,
+   * signed by the named agent's wallet and run through AgentExecutor.
+   *
+   * Not for the on-chain policy (S8): inside `executeBatch` the EXECUTOR is
+   * `msg.sender`, and AgentPolicyModule accepts its admin calls only from its
+   * operator or the safe itself — every module call reverts Unauthorized
+   * (and `validateTransaction`, which has no caller check, would only restart
+   * a wallet's on-chain cooldown). An action targeting the configured module
+   * is refused (403 `POLICY_MODULE_TARGET`); use
+   * POST /admin/agents/:id/policy/sync.
    */
   fastify.post('/admin/transactions/batch', async (request, reply) => {
     if (!requireAdmin(request, reply)) return;
@@ -205,8 +241,19 @@ export async function adminRoutes(fastify: FastifyInstance) {
     const agent = await db.agent.findUnique({ where: { id: body.agentId } });
     if (!agent) return reply.code(404).send({ error: `Agent ${body.agentId} not found.` });
 
-    const { getContracts } = await import('../../config/contracts.js');
     const contracts = getContracts(body.chainId);
+    const moduleIndex = contracts.policyModule
+      ? body.actions.findIndex((a) => a.to.toLowerCase() === contracts.policyModule!.toLowerCase())
+      : -1;
+    if (moduleIndex >= 0) {
+      return reply.code(403).send({
+        error:
+          `Action at index ${moduleIndex} targets the AgentPolicyModule. Through AgentExecutor the executor is msg.sender and the ` +
+          'module answers Unauthorized; sync the stored policy with POST /admin/agents/:id/policy/sync instead.',
+        code: 'POLICY_MODULE_TARGET',
+        actionIndex: moduleIndex,
+      });
+    }
     if (!contracts.executor) {
       return reply.code(400).send({ error: `Executor not deployed on chain ${body.chainId}` });
     }
@@ -665,14 +712,18 @@ export async function adminRoutes(fastify: FastifyInstance) {
    * POST /admin/agents/:id/resume (see `resumeAgent`): the DB policy is
    * re-activated only if the pause deactivated it, and the response says so.
    *
-   * On-chain effect: NONE is performed by the backend. Send
-   * `{ "syncOnChain": true }` to receive `onChainSync` — the
-   * `AgentPolicyModule.emergencyPause(safe)` (or `resume(safe)`) calldata —
-   * to broadcast via POST /admin/transactions/batch, exactly like
-   * PATCH /v1/agents/:id/policy. `onChainSync` is null when the agent's chain
-   * has no policyModule configured or `syncOnChain` was not requested.
+   * On-chain effect (S8): only with `{ "syncOnChain": true }`. After the DB
+   * change the stored policy is synced exactly as by
+   * POST /admin/agents/:id/policy/sync — calls signed by the agent's own
+   * wallet and sent straight to AgentPolicyModule (msg.sender == safe in EOA
+   * mode), never via the executor, where the module answers Unauthorized. The
+   * pre-submit guard signs them although the agent is paused. `onChainSync`
+   * is `{ status: 'pending' | 'in-sync' | 'refused', … }`, or null when the
+   * agent's chain has no policyModule configured or `syncOnChain` was not
+   * requested. A refusal (Safe mode, unreadable chain…) never undoes the DB
+   * pause.
    *
-   * Response: `{ active: false, onChainSync }` when pausing (unchanged);
+   * Response: `{ active: false, onChainSync }` when pausing;
    * the resume response shape when resuming.
    */
   fastify.post<{ Params: { id: string }; Body: { syncOnChain?: boolean } | undefined }>(
@@ -696,12 +747,12 @@ export async function adminRoutes(fastify: FastifyInstance) {
         data: { active: false },
       });
 
-      // Off-chain kill switch only: pause the DB policy so policy checks fail
-      // closed, stamping it so resume can undo exactly this flip. The on-chain
-      // policy is NOT touched here.
+      // Pause the DB policy so policy checks fail closed, stamping it so
+      // resume can undo exactly this flip. The on-chain policy follows only
+      // with syncOnChain (below).
       const policyPaused = await policyService.pauseByOperator(agent.id);
 
-      const onChainSync = syncOnChain ? await buildKillSwitchOnChainSync(agent, true) : null;
+      const onChainSync = syncOnChain ? await killSwitchSync(agent.id, 'kill-switch-pause') : null;
 
       logger.info(
         {
@@ -709,7 +760,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
           nowActive: false,
           policyPaused,
           syncOnChain,
-          onChainSyncPrepared: onChainSync !== null,
+          onChainSync: onChainSync?.status ?? null,
         },
         'Admin toggled agent status',
       );
@@ -723,7 +774,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
    * the DB policy only if the operator pause deactivated it; otherwise the
    * policy is left as is and `policyNote` explains (use
    * PATCH /v1/agents/:id/policy). Same `{ "syncOnChain": true }` contract as
-   * the pause route, returning `AgentPolicyModule.resume(safe)` calldata.
+   * the pause route: the stored policy is synced on-chain afterwards (S8).
    */
   fastify.post<{ Params: { id: string }; Body: { syncOnChain?: boolean } | undefined }>(
     '/admin/agents/:id/resume',
@@ -739,6 +790,53 @@ export async function adminRoutes(fastify: FastifyInstance) {
       return resumeAgent(agent, body.syncOnChain);
     },
   );
+
+  /**
+   * GET /admin/agents/:id/policy/onchain — the stored policy and what the
+   * agent chain's AgentPolicyModule holds, side by side (S8).
+   *
+   * `status`: in-sync | pending (sync transactions queued or awaiting a
+   * receipt) | failed (differs, and the latest sync attempt failed or
+   * reverted) | out-of-sync (differs, never synced or the DB changed since) |
+   * not-configured | no-db-policy | not-representable | unreadable | mismatch.
+   * `db` is the stored policy as the module would hold it, `onChain` what it
+   * holds (null when unreadable), `differences` the human-readable diff,
+   * `pending` / `lastFailure` the sync transactions. Read-only.
+   */
+  fastify.get<{ Params: { id: string } }>('/admin/agents/:id/policy/onchain', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+    const view = await policySync.view(request.params.id);
+    if (!view) return reply.code(404).send({ error: 'Not found' });
+    return view;
+  });
+
+  /**
+   * POST /admin/agents/:id/policy/sync — push the STORED policy to the agent
+   * chain's AgentPolicyModule (S8). No body: nothing caller-supplied is signed.
+   *
+   * The calls (`setPolicy`, or only `emergencyPause` / `resume` when only the
+   * active flag differs; `updateContractWhitelist` / `updateTokenWhitelist`
+   * adding AND removing entries) are derived from the DB policy and the
+   * module's current state, queued as transactions signed by the agent's own
+   * wallet and sent straight to the module — `msg.sender == safe` for an
+   * agent whose `safeAddress` is its EOA. Never through AgentExecutor (the
+   * executor is not the safe or the operator). Identical calls already in
+   * flight are reused.
+   *
+   * 202 `{ status: 'pending', transactions }` · 200 `{ status: 'in-sync' }` ·
+   * 409 POLICY_MODULE_NOT_CONFIGURED / NO_DB_POLICY / POLICY_SYNC_WALLET_MODE
+   * (Safe mode: the agent key is not the safe) / POLICY_MODULE_MISMATCH /
+   * POLICY_SYNC_UNKNOWN_ENTRIES · 422 POLICY_NOT_REPRESENTABLE ·
+   * 503 ONCHAIN_POLICY_UNREADABLE. Each refusal carries the `view`.
+   */
+  fastify.post<{ Params: { id: string } }>('/admin/agents/:id/policy/sync', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+    const outcome = await policySync.sync(request.params.id, 'admin-sync');
+    if (outcome.kind === 'not-found') return reply.code(404).send({ error: 'Not found' });
+    if (outcome.kind === 'refused') return reply.code(outcome.httpStatus).send(policySyncBody(outcome));
+    if (outcome.kind === 'in-sync') return reply.code(200).send(policySyncBody(outcome));
+    return reply.code(outcome.enqueueError ? 503 : 202).send(policySyncBody(outcome));
+  });
 
   /**
    * POST /admin/transactions/:id/approve — manually approve a PENDING_APPROVAL transaction.
