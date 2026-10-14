@@ -200,6 +200,48 @@ describe('classifyPolicyChange', () => {
     });
   });
 
+  describe('maxOutflowPerTxUsd (§5-6: NULL = not configured = most restrictive)', () => {
+    it('setting ANY value from NULL loosens (operator only) — even "0"', () => {
+      for (const value of ['0', '0.01', '25', '1000000']) {
+        expect(classifyPolicyChange(basePolicy({ maxOutflowPerTxUsd: null }), { maxOutflowPerTxUsd: value })).toEqual({
+          tightens: false,
+          loosenedFields: ['maxOutflowPerTxUsd'],
+        });
+      }
+    });
+
+    it('NULL → NULL is neutral; a value → NULL tightens (blocks again)', () => {
+      expect(classifyPolicyChange(basePolicy({ maxOutflowPerTxUsd: null }), { maxOutflowPerTxUsd: null }).tightens).toBe(true);
+      expect(classifyPolicyChange(basePolicy({ maxOutflowPerTxUsd: '25' }), { maxOutflowPerTxUsd: null })).toEqual({ tightens: true, loosenedFields: [] });
+    });
+
+    it('with a value: lowering tightens (the agent may), raising loosens, equal is neutral', () => {
+      const current = basePolicy({ maxOutflowPerTxUsd: '25' });
+      expect(classifyPolicyChange(current, { maxOutflowPerTxUsd: '10' })).toEqual({ tightens: true, loosenedFields: [] });
+      expect(classifyPolicyChange(current, { maxOutflowPerTxUsd: '25.0' }).tightens).toBe(true);
+      expect(classifyPolicyChange(current, { maxOutflowPerTxUsd: '25.01' })).toEqual({ tightens: false, loosenedFields: ['maxOutflowPerTxUsd'] });
+    });
+
+    it.each(UNPARSABLE_LIMITS)('a non-decimal value %j is unlimited, so it always loosens', (raw) => {
+      expect(classifyPolicyChange(basePolicy({ maxOutflowPerTxUsd: '25' }), { maxOutflowPerTxUsd: raw }).loosenedFields).toEqual(['maxOutflowPerTxUsd']);
+      expect(classifyPolicyChange(basePolicy({ maxOutflowPerTxUsd: null }), { maxOutflowPerTxUsd: raw }).loosenedFields).toEqual(['maxOutflowPerTxUsd']);
+    });
+
+    it('with no policy row (no restrictions) any value — NULL included — tightens', () => {
+      expect(classifyPolicyChange(null, { maxOutflowPerTxUsd: '1000000' }).tightens).toBe(true);
+      expect(classifyPolicyChange(null, { maxOutflowPerTxUsd: null }).tightens).toBe(true);
+    });
+
+    it('is independent of maxValuePerTxEth and maxValuePerTxUsd (no unit cross-reading)', () => {
+      const result = classifyPolicyChange(basePolicy({ maxOutflowPerTxUsd: null }), { maxValuePerTxEth: '0.1', maxValuePerTxUsd: '0.5', maxOutflowPerTxUsd: '10' });
+      expect(result.loosenedFields).toEqual(['maxOutflowPerTxUsd']);
+    });
+
+    it('an omitted field never loosens', () => {
+      expect(classifyPolicyChange(basePolicy({ maxOutflowPerTxUsd: null }), { cooldownSeconds: 120 }).tightens).toBe(true);
+    });
+  });
+
   describe('allowedRecipients (Q8)', () => {
     it('loosens when a non-empty list is cleared or gains an address', () => {
       expect(classifyPolicyChange(basePolicy(), { allowedRecipients: [] }).loosenedFields).toEqual(['allowedRecipients']);

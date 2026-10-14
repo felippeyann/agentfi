@@ -231,6 +231,8 @@ async function mkAgent(chainIds: number[], policy: Record<string, unknown> = {})
           maxValueForAutoApprovalEth: '10',
           maxDailyVolumeUsd: '1000',
           cooldownSeconds: 0,
+          // §5-6: a configured outflow cap out of the way (this suite tests pricing).
+          maxOutflowPerTxUsd: '1000000',
           ...policy,
         },
       },
@@ -462,9 +464,16 @@ describeDb('Q9 — trusted prices on the real routes (Postgres)', () => {
       expect(h.simulations).toBe(0);
     });
 
-    it.each(OPS)('$name — unpriced without a daily limit: accepted, nothing reserved', async (op) => {
+    it.each(OPS)('$name — unpriced without a daily limit: accepted, nothing reserved (an ordinary outflow under a configured cap: refused, §5-6)', async (op) => {
       const agent = await mkAgent([TESTNET], { maxDailyVolumeUsd: '0' });
       const res = await post(await app(agent.id), op.url, op.body);
+      if (!op.url.includes('withdraw')) {
+        // §5-6: the outflow cap (configured by mkAgent) cannot be checked without a price.
+        expect(res.statusCode, res.body).toBe(503);
+        expect(res.json()).toMatchObject({ code: 'PRICE_UNAVAILABLE', rule: 'maxOutflowPerTxUsd' });
+        expect(await rows(agent.id)).toHaveLength(0);
+        return;
+      }
       expect(res.statusCode, res.body).toBe(202);
       expect(await onlyRow(agent.id)).toMatchObject({ volumeState: null, volumeReservedUsd: null, volumePriceSource: null });
       expect(await volume(agent.id)).toBe(0);

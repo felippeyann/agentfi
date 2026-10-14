@@ -1868,7 +1868,7 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(second.json()).toMatchObject({ code: 'POLICY_VIOLATION', rule: 'cooldown' });
     });
 
-    it('legacy (non-escrow) reward: the daily limit fails closed when the reward cannot be priced; no limit → allowed', async () => {
+    it('legacy (non-escrow) reward: an unpriced reward fails closed — under the daily limit (Q9) and, since §5-6, under the outflow cap even without a daily limit', async () => {
       const requester = await sim.agent('requester');
       const provider = await sim.agent('provider');
       await m.db.agent.update({ where: { id: requester.id }, data: { chainIds: [CHAIN_ID, 1] } });
@@ -1876,18 +1876,27 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
         const app = await sim.app(requester.id);
         return app.inject({ method: 'POST', url: '/v1/jobs', payload: { providerId: provider.id, payload: {}, reward: { amount: '0.01', token: 'ETH', chainId: 1 } } });
       };
-      await policy(requester.id, { maxDailyVolumeUsd: '100' });
+      await policy(requester.id, { maxDailyVolumeUsd: '100', maxOutflowPerTxUsd: '1000' });
       const refused = await legacy();
       // Q9: a reward with no trusted price is 503 PRICE_UNAVAILABLE (was 400), and no job is created.
       expect(refused.statusCode).toBe(503);
       expect(refused.json()).toMatchObject({ code: 'PRICE_UNAVAILABLE' });
-      expect(refused.json().reason).toMatch(/could not be priced/);
+      expect(refused.json().reason).toMatch(/price/);
       expect(await m.db.job.count({ where: { requesterId: requester.id } })).toBe(0);
 
+      // No daily limit: the reward is still paid as an ordinary outflow, whose
+      // configured cap cannot be checked without a price (was: allowed, 201).
       await m.db.agentPolicy.update({ where: { agentId: requester.id }, data: { maxDailyVolumeUsd: '0' } });
-      const allowed = await legacy();
-      expect(allowed.statusCode).toBe(201);
-      expect(await job(allowed.json().id)).toMatchObject({ reservedValueUsd: '0', reservationStatus: 'PENDING' });
+      const capped = await legacy();
+      expect(capped.statusCode).toBe(503);
+      expect(capped.json()).toMatchObject({ code: 'PRICE_UNAVAILABLE', rule: 'maxOutflowPerTxUsd' });
+
+      // Cap not configured: blocked with the diagnostic.
+      await m.db.agentPolicy.update({ where: { agentId: requester.id }, data: { maxOutflowPerTxUsd: null } });
+      const unset = await legacy();
+      expect(unset.statusCode).toBe(403);
+      expect(unset.json()).toMatchObject({ code: 'USD_CAP_NOT_CONFIGURED' });
+      expect(await m.db.job.count({ where: { requesterId: requester.id } })).toBe(0);
     });
   });
 

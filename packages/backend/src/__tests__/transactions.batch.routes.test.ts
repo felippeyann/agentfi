@@ -186,7 +186,10 @@ describe('POST /v1/transactions/batch — caller-declared token', () => {
   });
 
   it('a pure ETH transfer (empty data, no token) is allowed even with a token whitelist', async () => {
-    getPolicyMock.mockResolvedValue({ allowedTokens: [USDC] });
+    // §5-6: native value is an outflow — the policy carries a USD cap and the value a price.
+    getPolicyMock.mockResolvedValue({ allowedTokens: [USDC], allowedRecipients: [], allowedContracts: [], maxOutflowPerTxUsd: '1000' });
+    const { weiToUsd } = await import('../services/transaction/price.service.js');
+    vi.mocked(weiToUsd).mockResolvedValueOnce('0.000002');
     const app = await buildApp();
 
     const res = await app.inject(batch([{ to: TARGET, value: '1000', data: '0x' }]));
@@ -194,6 +197,21 @@ describe('POST /v1/transactions/batch — caller-declared token', () => {
     expect(res.statusCode).toBe(202);
     expect(validateMock).toHaveBeenCalledTimes(1);
     expect(validateMock.mock.calls[0][0]).not.toHaveProperty('tokenAddress');
+
+    await app.close();
+  });
+
+  it('§5-6: a native-value batch whose policy has no maxOutflowPerTxUsd is refused (403 USD_CAP_NOT_CONFIGURED) before simulating', async () => {
+    getPolicyMock.mockResolvedValue({ allowedTokens: [], allowedRecipients: [], allowedContracts: [], maxOutflowPerTxUsd: null });
+    const { weiToUsd } = await import('../services/transaction/price.service.js');
+    vi.mocked(weiToUsd).mockResolvedValueOnce('0.000002');
+    const app = await buildApp();
+
+    const res = await app.inject(batch([{ to: TARGET, value: '1000', data: '0x' }]));
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ code: 'USD_CAP_NOT_CONFIGURED', rule: 'maxOutflowPerTxUsd' });
+    expect(simulateMock).not.toHaveBeenCalled();
 
     await app.close();
   });

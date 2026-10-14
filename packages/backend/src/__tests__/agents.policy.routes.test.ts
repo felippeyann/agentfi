@@ -303,6 +303,53 @@ describe('PATCH /v1/agents/:id/policy — operator caller', () => {
 
 // ── Q8: maxValuePerTxUsd and allowedRecipients ─────────────────────────────
 
+// ── §5-6: maxOutflowPerTxUsd ────────────────────────────────────────────────
+
+describe('PATCH /v1/agents/:id/policy — maxOutflowPerTxUsd (§5-6)', () => {
+  it('agent: setting it while NULL (not configured) is 403 loosening — the operator configures it', async () => {
+    mockDb.agentPolicy.findUnique.mockResolvedValue(basePolicy({ maxOutflowPerTxUsd: null }));
+    const app = await buildApp({ agentId: 'agent-1' });
+    const res = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxOutflowPerTxUsd: '0.01' } });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ error: LOOSENING_ERROR, loosenedFields: ['maxOutflowPerTxUsd'] });
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('operator: sets it from NULL', async () => {
+    mockDb.agentPolicy.findUnique.mockResolvedValue(basePolicy({ maxOutflowPerTxUsd: null }));
+    const app = await buildApp({ isOperator: true });
+    const res = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxOutflowPerTxUsd: '250' } });
+    expect(res.statusCode).toBe(200);
+    expect(mockDb.agentPolicy.upsert.mock.calls[0][0].update).toEqual({ maxOutflowPerTxUsd: '250' });
+    await app.close();
+  });
+
+  it('agent: may lower an existing value or set it back to null; may not raise it', async () => {
+    mockDb.agentPolicy.findUnique.mockResolvedValue(basePolicy({ maxOutflowPerTxUsd: '250' }));
+    const app = await buildApp({ agentId: 'agent-1' });
+    const lower = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxOutflowPerTxUsd: '100' } });
+    expect(lower.statusCode).toBe(200);
+    const block = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxOutflowPerTxUsd: null } });
+    expect(block.statusCode).toBe(200);
+    expect(mockDb.agentPolicy.upsert.mock.calls.map((c: any[]) => c[0].update)).toEqual([{ maxOutflowPerTxUsd: '100' }, { maxOutflowPerTxUsd: null }]);
+    const raise = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxOutflowPerTxUsd: '251' } });
+    expect(raise.statusCode).toBe(403);
+    expect(raise.json().loosenedFields).toEqual(['maxOutflowPerTxUsd']);
+    await app.close();
+  });
+
+  it('a non-decimal value is 400 (never stored)', async () => {
+    const app = await buildApp({ isOperator: true });
+    for (const payload of [{ maxOutflowPerTxUsd: 'unlimited' }, { maxOutflowPerTxUsd: '' }, { maxOutflowPerTxUsd: 25 }]) {
+      const res = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload });
+      expect(res.statusCode).toBe(400);
+    }
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+});
+
 describe('PATCH /v1/agents/:id/policy — Q8 fields', () => {
   it('agent: raising maxValuePerTxUsd or adding a recipient is 403; lowering / narrowing applies', async () => {
     const app = await buildApp({ agentId: 'agent-1' });
@@ -398,8 +445,8 @@ describe('PATCH /v1/agents/:id/policy — Q8 fields', () => {
       expect(res.statusCode).toBe(200);
       const sync = res.json().onChainSync;
       expect(sync.status).toBe('operator-sync-required');
-      expect(sync.offChainOnlyFields).toEqual(['maxValuePerTxUsd', 'allowedRecipients', 'maxDailyVolumeUsd']);
-      expect(sync.notice).toMatch(/enforced off-chain only\): maxValuePerTxUsd, allowedRecipients/);
+      expect(sync.offChainOnlyFields).toEqual(['maxValuePerTxUsd', 'maxOutflowPerTxUsd', 'allowedRecipients', 'maxDailyVolumeUsd']);
+      expect(sync.notice).toMatch(/enforced off-chain only\): maxValuePerTxUsd, maxOutflowPerTxUsd, allowedRecipients/);
       expect(sync.notice).toMatch(/POST \/admin\/agents\/:id\/policy\/sync/);
       // The old answer's `actions` told the caller to run module calls through
       // execute_batch, where the executor is msg.sender: they always reverted.
