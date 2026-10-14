@@ -912,10 +912,10 @@ describe('processSettlementJob — C3e item 1: a retry never signs over a pendin
 
   function withPrevious(getTransaction: () => Promise<unknown>) {
     const ctx = makeDeps([SUBMITTED_JOB({ settleTxHash: PREV, onChainStatus: 'SETTLING' })], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
-    ctx.getTransactionReceipt.mockImplementation(async ({ hash }: { hash: Hex }) => {
+    ctx.getTransactionReceipt.mockImplementation((async ({ hash }: { hash: Hex }) => {
       if (hash === PREV) throw notFound('TransactionReceiptNotFoundError');
       return { status: 'success', logs: [] };
-    });
+    }) as never);
     const base = ctx.deps.publicClient;
     ctx.deps.publicClient = (chainId: number) => ({ ...base(chainId), getTransaction: getTransaction as never });
     return ctx;

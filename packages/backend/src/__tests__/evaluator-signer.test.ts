@@ -92,4 +92,39 @@ describe('evaluator signer gas limit (C5a regression)', () => {
     ).rejects.toThrow(/InvalidStatus/);
     expect(walletClient.writeContract).not.toHaveBeenCalled();
   });
+
+  it('C3e: onBeforeBroadcast runs after the simulation and before the send; a simulation revert never reaches it; its throw aborts the send', async () => {
+    const order: string[] = [];
+    publicClient.simulateContract.mockImplementationOnce(async (call: Record<string, unknown>) => {
+      order.push('simulate');
+      return { request: { ...call } };
+    });
+    walletClient.writeContract.mockImplementationOnce(async () => {
+      order.push('send');
+      return TX_HASH;
+    });
+    const signer = createEvaluatorSigner(84532, EVALUATOR_KEY);
+    const args = [1n, `0x${'00'.repeat(32)}`, '0x'] as const;
+    await signer.writeContract({ address: ESCROW, abi: AGENT_JOB_ESCROW_ABI, functionName: 'complete', args }, {
+      onBeforeBroadcast: async () => {
+        order.push('stamp');
+      },
+    });
+    expect(order).toEqual(['simulate', 'stamp', 'send']);
+
+    const stamp = vi.fn();
+    publicClient.simulateContract.mockRejectedValueOnce(new Error('TransferFailed (provider blacklisted)'));
+    await expect(signer.writeContract({ address: ESCROW, abi: AGENT_JOB_ESCROW_ABI, functionName: 'complete', args }, { onBeforeBroadcast: stamp })).rejects.toThrow();
+    expect(stamp).not.toHaveBeenCalled(); // the payout-blocked path never stamps
+
+    walletClient.writeContract.mockClear();
+    await expect(
+      signer.writeContract({ address: ESCROW, abi: AGENT_JOB_ESCROW_ABI, functionName: 'complete', args }, {
+        onBeforeBroadcast: async () => {
+          throw new Error('database down');
+        },
+      }),
+    ).rejects.toThrow(/database down/);
+    expect(walletClient.writeContract).not.toHaveBeenCalled();
+  });
 });

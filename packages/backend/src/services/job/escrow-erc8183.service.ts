@@ -1330,7 +1330,18 @@ export async function requestCancellationReject(
  * broadcast without a receipt (pending, or dropped and unknown) or a mined
  * one is "in flight" — the contest race rule refuses then.
  */
-async function noSettlementInFlight(deps: Erc8183Deps, job: Pick<EscrowJobRow, 'settleTxHash' | 'escrowChainId'>): Promise<{ ok: boolean; reason?: string }> {
+async function noSettlementInFlight(
+  deps: Erc8183Deps,
+  job: Pick<EscrowJobRow, 'settleTxHash' | 'escrowChainId' | 'settleAttemptAt'>,
+): Promise<{ ok: boolean; reason?: string }> {
+  // C3e item 2: a settlement was stamped for broadcast and its hash never
+  // recorded (the write failed, or the process died): it may still mine.
+  if (job.settleAttemptAt) {
+    return {
+      ok: false,
+      reason: `a settlement was broadcast at ${job.settleAttemptAt.toISOString()} and its transaction hash was not recorded; it may still mine`,
+    };
+  }
   if (!job.settleTxHash) return { ok: true };
   try {
     const receipt = await deps.publicClient(job.escrowChainId!).getTransactionReceipt({ hash: job.settleTxHash as Hex });
@@ -1387,7 +1398,7 @@ export async function contestEscrowJob(deps: Erc8183Deps, params: { jobId: strin
 
   const contestedAt = nowOf(deps);
   const claimed = await deps.db.job.updateMany({
-    where: { id: job.id, status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', contestedAt: null, settleTxHash: job.settleTxHash },
+    where: { id: job.id, status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', contestedAt: null, settleTxHash: job.settleTxHash, settleAttemptAt: null },
     data: { onChainStatus: 'CONTESTED', contestedAt, contestReason: params.reason, escrowError: null },
   });
   if (claimed.count === 0) {
@@ -1496,7 +1507,7 @@ export async function resolveEscrowJob(deps: Erc8183Deps, params: ResolveParams)
   const at = nowOf(deps);
   const previous = { status: job.status, onChainStatus: job.onChainStatus, settleTxHash: job.settleTxHash, reviewLog: job.reviewLog };
   const claimed = await deps.db.job.updateMany({
-    where: { id: job.id, status: previous.status, onChainStatus: previous.onChainStatus, settleTxHash: previous.settleTxHash },
+    where: { id: job.id, status: previous.status, onChainStatus: previous.onChainStatus, settleTxHash: previous.settleTxHash, settleAttemptAt: null },
     data: {
       onChainStatus: 'SETTLING',
       resolution: params.decision,
@@ -1953,8 +1964,14 @@ async function sendEvaluatorTx(
   await assertNoPendingSettlement(deps, job);
   await checkEvaluatorBalance(deps, chainId);
   const signer = deps.evaluatorSigner(chainId);
-  const txHash = await signer.writeContract(params);
-  await deps.db.job.update({ where: { id: job.id }, data: { settleTxHash: txHash } });
+  // C3e item 2: stamped BEFORE the send (after the simulation): if the hash
+  // write below is lost, the stamp keeps contest / resolve refusing.
+  const txHash = await signer.writeContract(params, {
+    onBeforeBroadcast: async () => {
+      await deps.db.job.update({ where: { id: job.id }, data: { settleAttemptAt: nowOf(deps) } });
+    },
+  });
+  await deps.db.job.update({ where: { id: job.id }, data: { settleTxHash: txHash, settleAttemptAt: null } });
   return { signer, txHash };
 }
 
@@ -2398,7 +2415,12 @@ async function reconcileTerminal(deps: Erc8183Deps, job: EscrowJobRow, chainStat
   await deps.db.job.update({
     where: { id: job.id },
     // Expiry carries no feedback params: an uncommitted file must not be published as if it were.
-    data: { onChainStatus, escrowError: null, ...(onChainStatus === 'EXPIRED' && job.feedbackFile != null ? { feedbackFile: Prisma.DbNull } : {}) },
+    data: {
+      onChainStatus,
+      escrowError: null,
+      settleAttemptAt: null,
+      ...(onChainStatus === 'EXPIRED' && job.feedbackFile != null ? { feedbackFile: Prisma.DbNull } : {}),
+    },
   });
   deps.logger.warn(
     { jobId: job.id, onChainJobId: job.onChainJobId, onChainStatus, jobStatus: job.status },
@@ -2961,6 +2983,7 @@ const ESCROW_COLUMNS = [
   'expiresAt',
   'deliverableHash',
   'settleTxHash',
+  'settleAttemptAt',
   'platformFeeAmount',
   'feedbackStatus',
   'feedbackFile',

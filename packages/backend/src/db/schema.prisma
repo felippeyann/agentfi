@@ -158,6 +158,7 @@ model Job {
   expiresAt         DateTime? // on-chain `expiredAt`
   deliverableHash   String?   // keccak256(JSON.stringify(result)) passed to `submit`
   settleTxHash      String?   // evaluator's complete / reject / claimRefund tx
+  settleAttemptAt   DateTime? // C3e: stamped right before an evaluator broadcast, cleared when its hash is recorded (migration 0023)
   platformFeeAmount String?   // PlatformFeeAccrued amount (base units) on completion
   feedbackStatus    String?   // "written" | "skipped:<reason>" | "failed" | "failed:penalized"
   feedbackFile      Json?     // ERC-8004 feedback file, generated once before settlement
