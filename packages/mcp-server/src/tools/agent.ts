@@ -2,8 +2,11 @@ import { z } from 'zod';
 import { api, ApiError } from '../api-client.js';
 import type { components } from '../api.generated.js';
 import { pathIdSchema } from '../path-ids.js';
+import { paymentTokenSymbols, resolvePaymentToken } from './token-map.js';
 
 type Agent = components['schemas']['Agent'];
+type TransferRequest = components['schemas']['TransferRequest'];
+type TransactionAccepted = components['schemas']['TransactionAccepted'];
 type PnLBreakdown = components['schemas']['PnLBreakdown'];
 type PayResourceResponse = components['schemas']['PayResourceResponse'];
 type Job = components['schemas']['Job'];
@@ -95,14 +98,51 @@ export const agentTools = [
   {
     name: 'pay_agent',
     description:
-      'Constructs and executes a direct payment to another agent. ' +
-      'Use this to pay for services, data, or compute provided by another AI agent.',
+      'Pays another agent directly from your wallet (outside the job queue): a transfer of native ETH or of a known ' +
+      'ERC-20 to the recipient\'s address (its safeAddress from search_agents), sent as POST /v1/transactions/transfer. ' +
+      'Name the chain and the token: there is no default for either. token_symbol is "ETH" (native) or a symbol from ' +
+      'the token registry of that chain (e.g. USDC on Base 8453 or Base Sepolia 84532); an unknown symbol is refused ' +
+      'before anything is sent — to pay in any other ERC-20 use transfer_token with its contract address. Your ' +
+      'operator policy applies like any transfer: the recipient must be in allowed_recipients and the call target ' +
+      '(the recipient for ETH, the token contract for an ERC-20) in allowed_contracts when those lists are set, the ' +
+      'token in allowed_tokens, native ETH under max_value_per_tx_eth, plus the daily volume limit and the cooldown; ' +
+      'a refusal is a 403 with the reason, a high-value payment may wait for operator approval (status ' +
+      'PENDING_APPROVAL). Pass an idempotency_key and reuse it when you retry, or a retry pays twice. `reason` is not ' +
+      'sent to the backend (the transfer API has no such field): it is only echoed in this tool\'s result. Track the ' +
+      'payment with get_transaction_status.',
     inputSchema: z.object({
-      recipient_address: z.string().describe('The safeAddress of the recipient agent.'),
-      amount: z.string().describe('Amount to pay in human-readable units (e.g. "0.01").'),
-      token_symbol: z.string().default('ETH').describe('Token to pay with (ETH, USDC, etc.).'),
-      chain_id: z.number().default(1).describe('Chain ID for the payment.'),
-      reason: z.string().describe('The logical reason for this payment (for auditability).'),
+      recipient_address: z
+        .string()
+        .regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 0x-prefixed 20-byte hex address')
+        .describe('The address that receives the payment: the recipient agent\'s safeAddress (search_agents).'),
+      amount: z
+        .string()
+        .regex(/^\d+(\.\d+)?$/, 'must be a plain decimal amount such as "1.5"')
+        .describe('Amount in whole-token units as a plain decimal (e.g. "1.5" USDC, "0.01" ETH).'),
+      token_symbol: z
+        .string()
+        .min(1)
+        .describe(
+          '"ETH" for native ETH, or a token symbol known on chain_id (e.g. "USDC"). Symbols only — not an address.',
+        ),
+      chain_id: z
+        .number()
+        .int()
+        .positive()
+        .describe('Chain the payment is made on (e.g. 84532 Base Sepolia, 8453 Base). No default.'),
+      reason: z
+        .string()
+        .min(1)
+        .max(500)
+        .describe('Why you pay (max 500 characters). Echoed in the result only; not sent to or stored by the backend.'),
+      idempotency_key: z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{16,128}$/, 'must be 16-128 chars of [A-Za-z0-9_-]')
+        .optional()
+        .describe(
+          'Idempotency key (16-128 chars of [A-Za-z0-9_-]). A retry with the same key returns the first payment ' +
+            'instead of paying again.',
+        ),
     }),
     handler: async (input: {
       recipient_address: string;
@@ -110,21 +150,39 @@ export const agentTools = [
       token_symbol: string;
       chain_id: number;
       reason: string;
+      idempotency_key?: string;
     }) => {
-      // In a real implementation, this would call /v1/transactions/transfer
-      // For now, we simulate the intent-aware construction
-      const result = await api.post<{ transactionId: string; status: string }>('/v1/transactions/transfer', {
-        recipient: input.recipient_address,
+      // X5: the route takes `to` and a token ADDRESS (or "ETH"); a symbol is
+      // resolved here, from the registry only, never guessed.
+      const token = resolvePaymentToken(input.token_symbol, input.chain_id);
+      if (token === undefined) {
+        throw invalidInput(
+          'token_symbol',
+          `unknown token symbol "${input.token_symbol}" on chain ${input.chain_id}: known symbols there are ` +
+            `${paymentTokenSymbols(input.chain_id).join(', ')}. To pay in another ERC-20, use transfer_token with ` +
+            'its contract address.',
+        );
+      }
+      const body: TransferRequest = {
+        to: input.recipient_address,
+        token,
         amount: input.amount,
-        token: input.token_symbol,
         chainId: input.chain_id,
-        reason: input.reason,
-      });
+        ...(input.idempotency_key !== undefined ? { idempotencyKey: input.idempotency_key } : {}),
+      };
+      const result = await api.post<TransactionAccepted>('/v1/transactions/transfer', body);
 
       return {
         ...result,
-        message: `Payment of ${input.amount} ${input.token_symbol} to ${input.recipient_address} initiated.`,
-        intent_audit: `Reason provided: ${input.reason}`,
+        payment: {
+          to: input.recipient_address,
+          amount: input.amount,
+          token_symbol: input.token_symbol.trim().toUpperCase(),
+          token,
+          chain_id: input.chain_id,
+        },
+        reason: input.reason,
+        next: 'Call get_transaction_status to track confirmation (PENDING_APPROVAL waits for the operator).',
       };
     },
   },

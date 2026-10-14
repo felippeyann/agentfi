@@ -301,9 +301,20 @@ is refunded: it stays `SUBMITTED` with that hash until a receipt settles it, or
 until no RPC node has known it for `TX_DROP_AFTER_SEC` (it is then `FAILED`,
 still counted for its day). For a paid job this means the job stays
 `PAYMENT_PENDING` (its reward still reserved) until then. A retry never signs a
-second transaction while the chain knows an earlier one. A transaction the
-operator approves on a later UTC day than it was requested counts on the
-approval day (when it executes), whatever the remaining limit of that day.
+second transaction while the chain knows an earlier one.
+
+**An operator approval is judged on the day it is given (A6c).** A
+`PENDING_APPROVAL` transaction approved on a later UTC day than it was
+requested counts on the approval day (when it executes), and the approval is
+refused — `409 APPROVAL_DAILY_LIMIT`, with the day, the limit, what is already
+committed that day and the amount requested — when that day's limit (DailyVolume
+plus the day's x402 payments) would be exceeded. An approval never exceeds the
+daily limit and has no override. The approval also re-checks that the agent and
+its policy are active and the policy unexpired (`409 APPROVAL_AGENT_PAUSED`,
+`APPROVAL_POLICY_INACTIVE`, `APPROVAL_POLICY_EXPIRED`), and refuses a spend
+that reserved nothing while a daily limit now applies
+(`APPROVAL_UNCOUNTED_SPEND`). A refused approval changes nothing: the
+transaction stays `PENDING_APPROVAL` with its reservation where it was.
 
 ---
 

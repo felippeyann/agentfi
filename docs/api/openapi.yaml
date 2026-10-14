@@ -592,6 +592,12 @@ paths:
         native transfer, the token contract for an ERC-20 transfer. The value
         is capped by `maxValuePerTxEth` (native) and counted against the daily
         limit; `maxValuePerTxUsd` does not apply here.
+
+        `token` is `"ETH"` or a contract address — the route does not resolve
+        symbols. Keys the schema does not define (e.g. `recipient`, `reason`)
+        are dropped silently; a body without `to`, `token` or `amount` is
+        `400 VALIDATION_FAILED`. The MCP tool `pay_agent` resolves a symbol
+        through its token registry before calling this route.
       requestBody:
         required: true
         content:
@@ -599,6 +605,7 @@ paths:
             schema: { $ref: '#/components/schemas/TransferRequest' }
       responses:
         '202': { $ref: '#/components/responses/TransactionAccepted' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/PolicyViolation' }
         '409': { $ref: '#/components/responses/IdempotencyConflict' }
         '422': { $ref: '#/components/responses/SimulationFailed' }
@@ -1726,12 +1733,52 @@ paths:
     post:
       tags: [Admin]
       summary: Approve a PENDING_APPROVAL transaction
+      description: |
+        The approval is revalidated on the day it is given (UTC), atomically
+        with the status change: the agent and its policy must be active and
+        the policy unexpired, and the transaction's daily-volume reservation
+        — moved to the approval day when it was made on an earlier day —
+        plus everything else committed that day (transactions, escrow jobs,
+        x402 payments) must stay within `maxDailyVolumeUsd`. An approval never
+        exceeds the daily limit and there is no override: a refusal (409)
+        leaves the transaction PENDING_APPROVAL with its reservation untouched;
+        approve it again when the day has room (or after raising the policy's
+        limit), or reject it.
       security:
         - adminSecret: []
       responses:
         '200': { description: Approved. }
-        '409': { description: A concurrent approve or reject already moved the transaction out of PENDING_APPROVAL. }
-        '503': { description: The transaction could not be enqueued; it is still PENDING_APPROVAL and the approval can be retried. }
+        '400': { description: 'The transaction is not PENDING_APPROVAL, or predates approval support (no stored payload).' }
+        '404': { description: No such transaction. }
+        '409':
+          description: |
+            Refused; the transaction is still PENDING_APPROVAL unless `code` is
+            `APPROVAL_NOT_PENDING`. Codes: `APPROVAL_NOT_PENDING` (a concurrent
+            approve or reject already moved it), `APPROVAL_AGENT_PAUSED`,
+            `APPROVAL_POLICY_INACTIVE`, `APPROVAL_POLICY_EXPIRED`,
+            `APPROVAL_DAILY_LIMIT` (with `details`: the approval `day`,
+            `limitUsd`, `committedUsd` that day without this transaction,
+            `requestedUsd`), `APPROVAL_UNCOUNTED_SPEND` (a daily limit applies
+            now but the spend reserved nothing — it was unpriced when no limit
+            applied; reject it).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, code]
+                properties:
+                  error: { type: string }
+                  code:
+                    type: string
+                    enum: [APPROVAL_NOT_PENDING, APPROVAL_AGENT_PAUSED, APPROVAL_POLICY_INACTIVE, APPROVAL_POLICY_EXPIRED, APPROVAL_DAILY_LIMIT, APPROVAL_UNCOUNTED_SPEND]
+                  details:
+                    type: object
+                    properties:
+                      day: { type: string, example: '2026-10-15' }
+                      limitUsd: { type: string }
+                      committedUsd: { type: string }
+                      requestedUsd: { type: string }
+        '503': { description: 'The approval could not be recorded (`APPROVAL_UNAVAILABLE`) or the transaction could not be enqueued; it is still PENDING_APPROVAL and the approval can be retried.' }
 
   /admin/transactions/{id}/reject:
     parameters:
@@ -2530,9 +2577,13 @@ components:
       properties:
         token:
           type: string
-          description: '"ETH" or an ERC-20 contract address.'
-        to: { type: string }
-        amount: { type: string }
+          description: '"ETH" (native) or an ERC-20 contract address. The route does not resolve symbols such as "USDC".'
+        to:
+          type: string
+          description: Recipient address (receives the ETH or the tokens).
+        amount:
+          type: string
+          description: Human-readable decimal amount in whole-token units (e.g. "1.5").
         chainId: { type: integer, default: 1 }
         idempotencyKey: { type: string }
 

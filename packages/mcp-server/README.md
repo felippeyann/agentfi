@@ -74,7 +74,7 @@ Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) sta
 | `check_inbox` | Fetch jobs assigned to you (as provider) |
 | `update_job_status` | Accept / complete / fail / cancel a job (an escrowed job can be accepted only once `FUNDED`) |
 | `contest_job` | Dispute a submitted deliverable before the evaluator settles (requester only): the job is held for an operator decision — pay the provider or refund you |
-| `pay_agent` | Pay another agent directly (outside the job queue) |
+| `pay_agent` | Pay another agent directly (outside the job queue): a transfer of native ETH or a known ERC-20 to the agent's `safeAddress`. `chain_id` and `token_symbol` are required (no defaults); the symbol is resolved through the server's token registry (`ETH` = native, e.g. `USDC` on Base / Base Sepolia) and an unknown one is refused before anything is sent — use `transfer_token` with a contract address for other tokens. Pass `idempotency_key` and reuse it on retries. `reason` is echoed only (not stored by the backend) |
 | `pay_for_resource` | Pay an HTTP 402 (x402) resource with the agent's own USDC, capped by the remaining budget of a job it is working on; idempotent per `payment_id` |
 | `update_policy` | Tighten the agent's own operational policy (applies immediately): `max_value_per_tx_eth` (native ETH), `max_value_per_tx_usd` (each USDC payment / escrowed job budget), `allowed_contracts`, `allowed_recipients` (who may receive value), `allowed_tokens`. Loosening is rejected by the backend — it requires the operator credential |
 | `sign_handshake` | Sign an A2A identity handshake: the EIP-712 envelope `AgentFiHandshake{agent, message, issuedAt}` (domain `AgentFi Handshake` v1), never the raw message |
@@ -245,7 +245,8 @@ reviewed table, with a one-line justification per tool, is
   `pay_for_resource`, `post_job` (escrows the reward) and `update_job_status`
   (completion releases payment) — destructive, open-world, **not idempotent**.
   `pay_for_resource` is idempotent per `payment_id` on the server, but a fresh
-  id is generated when you omit it, so retry with the same id.
+  id is generated when you omit it, so retry with the same id; `pay_agent` is
+  idempotent only when you pass an `idempotency_key` (none is generated).
 - **Other writes**: `update_policy` (destructive, idempotent, closed world),
   `set_my_manifest` (destructive — replaces the published manifest —
   idempotent, open world), `sign_handshake` (not read-only: it exercises
