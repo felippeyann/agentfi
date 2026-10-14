@@ -83,6 +83,7 @@ The backend is the source of truth. The MCP server is a thin adapter over the ba
    npm test
    cd packages/contracts && forge test -vvv
    ```
+   Every layer (unit, real Postgres, MCP, admin, Anvil E2E, fork rehearsals, the dev smoke), the test environment, the order that matters locally and the known Windows quirks are in [docs/operations/local-validation.md](docs/operations/local-validation.md).
 
 4. **Open a PR** against `develop`, not `main`. Fill in the PR template.
 
