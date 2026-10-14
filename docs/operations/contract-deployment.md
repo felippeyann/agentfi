@@ -157,15 +157,57 @@ Chain (EXPECTED_CHAIN_ID matches): 8453
 Deployer (CLI signer): 0x...
 AgentPolicyModule: 0xABCD...
 AgentExecutor:     0xEFGH...
+Executor bound:     0xEFGH...
 
 --- Copy to .env ---
 POLICY_MODULE_ADDRESS_8453=0xABCD...
 EXECUTOR_ADDRESS_8453=0xEFGH...
+POLICY_OPERATOR_ADDRESS_8453=0x...   (= OPERATOR_ADDRESS)
 OPERATOR_FEE_WALLET=0x...
 --------------------
 ```
 
 Copy those lines to your `.env` (local) or hosting provider's secret manager (production).
+`POLICY_OPERATOR_ADDRESS_<chainId>` is required in production / staging whenever
+`POLICY_MODULE_ADDRESS_<chainId>` is set.
+
+**Executor binding (owner decision 2026-10-14, before C4).** `AgentPolicyModule.validateTransaction`
+and `recordExecution` accept only the executor bound with `bindExecutor` — once, by the deployer
+(recorded in the constructor) or the operator, `ExecutorBound` event. `Deploy.s.sol` binds the
+executor it just deployed in the same broadcast and stops if `executor()` is not that address.
+Until a module is bound it refuses every validation (an agent with an on-chain policy could not
+transact through the executor). The cooldown is checked and stamped once per `executeBatch` /
+`executeSingle`; value, whitelists, token, active and expiry stay per action.
+
+### Contract identity (S9, owner decision 2026-10-14: "bytecode of the repo build")
+
+The backend uses a configured `AgentPolicyModule`, `AgentExecutor`, `AgentJobEscrow` or
+`ReputationHook` only after it verified that the address holds, byte for byte, the **runtime
+bytecode of this repository's build** — masking only the immutable slots the compiler declares —
+and that the bindings match the configuration (executor ↔ module both ways, `feeWallet()` =
+`OPERATOR_FEE_WALLET`, `feeBps()` = 30, `operator()` = `POLICY_OPERATOR_ADDRESS_<chainId>`, hook ↔
+escrow / evaluator / registries, `eth_chainId`). A lookalike answering the same views, an EOA, a
+proxy and any other build (including every legacy deployment) fail. Consequences:
+
+- `foundry.toml` compiles without metadata (`bytecode_hash = "none"`, `cbor_metadata = false`), so
+  the code depends on the source logic and the compiler settings only, not on comments or paths.
+- The expected code is generated from the artifacts into
+  `packages/backend/src/abi/contract-code.generated.ts` (`forge build`, then `npm run contracts:code`);
+  CI fails when it drifts (`npm run contracts:code:check`). **Deploy from the same commit the backend
+  runs** — after any contract change: rebuild, regenerate, redeploy.
+- Each process (API and worker) verifies at boot and every `ESCROW_CONFIG_RECHECK_SECONDS`
+  (validity `ESCROW_CONFIG_VERIFIED_TTL_SECONDS`, revoked by any failed read): FATAL on a mismatch
+  in production / staging; an unreachable RPC leaves the chain unverified (never fatal). While a chain
+  is unverified, executor-routed transactions answer `503 CONTRACTS_UNVERIFIED` (queued ones wait),
+  the policy sync and the Safe module enablement are refused, and escrow operations wait (Q7);
+  reads and reconciliation continue. `GET /admin/contracts/verification` shows the state.
+- Third-party contracts (Safe singleton / factory, ERC-8004 registries, USDC) stay pinned to their
+  official addresses; no code hash.
+
+**Safe mode is refused in production / staging** (`SAFE_DEPLOYER_PRIVATE_KEY` is FATAL there): the
+module enablement is signed by the deployer, who is not an owner of the new Safe, and agent
+transactions are never executed from the Safe. In development it only warns, and the module is
+enabled only after the identity check above.
 
 ---
 

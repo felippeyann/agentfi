@@ -567,6 +567,12 @@ paths:
     post:
       tags: [Transactions]
       summary: Execute a Uniswap V3 swap
+      description: >-
+        An ETH-input swap is routed through the chain's AgentExecutor (it
+        receives the value + fee). S9: while this process has not verified that
+        executor against this build (runtime bytecode + bindings), such a swap
+        answers `503` `{ "code": "CONTRACTS_UNVERIFIED" }` with `Retry-After`
+        before anything is simulated or written.
       requestBody:
         required: true
         content:
@@ -749,7 +755,10 @@ paths:
         `POLICY_MODULE_TARGET`, S8): through the executor its admin calls
         always revert, and its unauthenticated `validateTransaction` would only
         restart a wallet's on-chain cooldown. The on-chain policy is synced by
-        the operator.
+        the operator. S9: while this process has not verified the executor
+        against this build (runtime bytecode + bindings), the batch answers
+        `503` `{ "code": "CONTRACTS_UNVERIFIED" }` with `Retry-After` before
+        anything is simulated or written.
       requestBody:
         required: true
         content:
@@ -1629,7 +1638,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/PolicySyncResult' }
         '503':
-          description: ONCHAIN_POLICY_UNREADABLE (RPC unreachable), or some calls could not be queued (`enqueueError`).
+          description: ONCHAIN_POLICY_UNREADABLE (RPC unreachable), CONTRACTS_UNVERIFIED (S9 — the chain's AgentExecutor / AgentPolicyModule is not verified against this build in this process), or some calls could not be queued (`enqueueError`).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PolicySyncResult' }
@@ -1707,6 +1716,49 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+
+  /admin/contracts/verification:
+    get:
+      tags: [Admin]
+      summary: Identity verification of each chain's AgentExecutor / AgentPolicyModule (S9)
+      description: |
+        This API process's verification of each chain with an executor or a
+        policy module: the runtime bytecode at each address must be this
+        repository's build (immutables masked; `buildCodeVersion` identifies
+        the build) and the bindings must match the configuration
+        (`executor.policyModule()` = POLICY_MODULE_ADDRESS, `module.executor()`
+        = EXECUTOR_ADDRESS, `feeWallet()` = OPERATOR_FEE_WALLET, `feeBps()`,
+        `operator()` = POLICY_OPERATOR_ADDRESS, `eth_chainId`). Same lifecycle
+        as the escrow verification. While a chain is not verified,
+        executor-routed transactions answer `503 CONTRACTS_UNVERIFIED` (queued
+        ones wait), the policy sync and the Safe module enablement are refused.
+      security:
+        - adminSecret: []
+      responses:
+        '200':
+          description: The state of every chain with an executor or a policy module.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  process: { type: string, enum: [api] }
+                  buildCodeVersion: { type: string }
+                  ttlSeconds: { type: integer }
+                  recheckSeconds: { type: integer }
+                  chains:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        chainId: { type: integer }
+                        state: { type: string, enum: [verified, not-configured, not-verified-yet, unverified, mismatch, expired, config-changed] }
+                        allowed: { type: boolean }
+                        verifiedAt: { type: string, nullable: true }
+                        validUntil: { type: string, nullable: true }
+                        since: { type: string, nullable: true }
+                        reason: { type: string }
+        '401': { description: Missing or wrong admin secret. }
 
   /admin/escrow/verification:
     get:
@@ -1809,6 +1861,7 @@ paths:
         '202': { description: Batch queued. }
         '400': { description: Invalid body — including a missing or empty `agentId`. }
         '403': { description: "`POLICY_MODULE_TARGET`: an action targets the chain's AgentPolicyModule." }
+        '503': { description: "`CONTRACTS_UNVERIFIED` (S9): the chain's AgentExecutor / AgentPolicyModule is not verified against this build in this process — nothing was written; retry after `Retry-After`." }
         '404': { description: No agent with that `agentId`. }
 
   /admin/transactions/{id}/approve:
@@ -2559,6 +2612,13 @@ components:
             createdAt: { type: string, format: date-time }
         offChainOnlyFields: { type: array, items: { type: string } }
         warnings: { type: array, items: { type: string } }
+        contracts:
+          type: object
+          description: S9 — this process's verification of the chain's AgentExecutor / AgentPolicyModule; a sync is queued only when `allowed`.
+          properties:
+            allowed: { type: boolean }
+            state: { type: string, description: "`verified`, or why not: not-configured, not-verified-yet, unverified, mismatch, expired, config-changed." }
+            reason: { type: string, nullable: true }
 
     PolicySyncTransaction:
       type: object
@@ -2604,7 +2664,7 @@ components:
         notice: { type: string }
         code:
           type: string
-          description: On a refusal — POLICY_MODULE_NOT_CONFIGURED, NO_DB_POLICY, POLICY_NOT_REPRESENTABLE, ONCHAIN_POLICY_UNREADABLE, POLICY_MODULE_MISMATCH, POLICY_SYNC_WALLET_MODE, POLICY_SYNC_UNKNOWN_ENTRIES, POLICY_SYNC_ERROR.
+          description: On a refusal — POLICY_MODULE_NOT_CONFIGURED, NO_DB_POLICY, POLICY_NOT_REPRESENTABLE, ONCHAIN_POLICY_UNREADABLE, CONTRACTS_UNVERIFIED, POLICY_MODULE_MISMATCH, POLICY_SYNC_WALLET_MODE, POLICY_SYNC_UNKNOWN_ENTRIES, POLICY_SYNC_ERROR.
         error: { type: string }
         view: { $ref: '#/components/schemas/PolicySyncView' }
 
