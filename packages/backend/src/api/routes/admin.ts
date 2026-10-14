@@ -15,6 +15,7 @@ import { logger } from '../middleware/logger.js';
 import { isLocalOnlyRequest } from '../middleware/local-request.js';
 import { publicErrorMessage } from '../errors/sanitize.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
+import { transactionJobId } from '../../queues/transaction-job-id.js';
 import { getContracts } from '../../config/contracts.js';
 import {
   PolicyService,
@@ -230,25 +231,34 @@ export async function adminRoutes(fastify: FastifyInstance) {
         status: 'QUEUED',
         type: 'BATCH',
         amountIn: '0',
-        metadata: { admin: true, actionCount: body.actions.length },
+        metadata: {
+          admin: true,
+          actionCount: body.actions.length,
+          // A6b: what the stranded-QUEUED sweep re-enqueues after a crash before the add.
+          queuePayload: { to: contracts.executor, data: batchCalldata, value: '0', feeAmountWei: '0', feeBps: 0, routedViaExecutor: true },
+        },
       },
     });
 
-    await transactionQueue.add('batch', {
-      transactionId: tx.id,
-      chainId: body.chainId,
-      walletId: agent.walletId,
-      from: getAddress(agent.safeAddress),
-      to: contracts.executor,
-      data: batchCalldata,
-      value: '0',
-      agentId: agent.id,
-      tier: agent.tier,
-      feeAmountWei: '0', // Admin txs are free
-      feeUsd: '0',
-      feeBps: 0,
-      routedViaExecutor: true,
-    });
+    await transactionQueue.add(
+      'batch',
+      {
+        transactionId: tx.id,
+        chainId: body.chainId,
+        walletId: agent.walletId,
+        from: getAddress(agent.safeAddress),
+        to: contracts.executor,
+        data: batchCalldata,
+        value: '0',
+        agentId: agent.id,
+        tier: agent.tier,
+        feeAmountWei: '0', // Admin txs are free
+        feeUsd: '0',
+        feeBps: 0,
+        routedViaExecutor: true,
+      },
+      { jobId: transactionJobId(tx.id) },
+    );
 
     return { transactionId: tx.id, status: 'QUEUED' };
   });
@@ -766,31 +776,44 @@ export async function adminRoutes(fastify: FastifyInstance) {
         return reply.code(409).send({ error: 'Transaction is no longer PENDING_APPROVAL.' });
       }
 
+      // A6b: the row's own job id — a crash between the QUEUED write above and
+      // this add leaves a QUEUED row the stranded-QUEUED sweep re-enqueues
+      // (the operator cannot approve it again), never twice.
       try {
-        await transactionQueue.add(tx.type.toLowerCase(), {
-          transactionId: tx.id,
-          chainId: tx.chainId,
-          walletId: tx.agent.walletId,
-          from: getAddress(tx.agent.safeAddress),
-          to,
-          data,
-          value: value.toString(),
-          agentId: tx.agentId,
-          tier: tx.agent.tier,
-          feeAmountWei: feeAmountWei.toString(),
-          feeUsd: '0',
-          feeBps,
-          routedViaExecutor,
-        });
+        await transactionQueue.add(
+          tx.type.toLowerCase(),
+          {
+            transactionId: tx.id,
+            chainId: tx.chainId,
+            walletId: tx.agent.walletId,
+            from: getAddress(tx.agent.safeAddress),
+            to,
+            data,
+            value: value.toString(),
+            agentId: tx.agentId,
+            tier: tx.agent.tier,
+            feeAmountWei: feeAmountWei.toString(),
+            feeUsd: '0',
+            feeBps,
+            routedViaExecutor,
+          },
+          { jobId: transactionJobId(tx.id) },
+        );
       } catch (err) {
         // Not enqueued: back to PENDING_APPROVAL (still holding its daily-volume
         // reservation) so the operator can approve again, instead of a QUEUED
-        // row no worker will ever run (A6 review).
-        await db.transaction.updateMany({
-          where: { id: tx.id, status: 'QUEUED', txHash: null },
+        // row no worker will ever run (A6 review). A6b: unless the add did
+        // reach Redis (a timeout after the write) and a worker already stamped
+        // a broadcast attempt — that row is in flight and stays QUEUED.
+        const reverted = await db.transaction.updateMany({
+          where: { id: tx.id, status: 'QUEUED', txHash: null, broadcastAttemptedAt: null },
           data: { status: 'PENDING_APPROVAL' },
         });
         logger.error({ transactionId: tx.id, err: (err as Error)?.message ?? String(err) }, 'Admin approval could not enqueue the transaction');
+        if (reverted.count === 0) {
+          // The job did reach the queue: the approval stands.
+          return { status: 'QUEUED' };
+        }
         return reply.code(503).send({ error: 'Could not enqueue the transaction; it is still PENDING_APPROVAL. Retry the approval.' });
       }
 

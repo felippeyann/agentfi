@@ -15,6 +15,7 @@ import { PolicyService } from '../../services/policy/policy.service.js';
 import { createTransactionWithVolume, settleVolumeAfterFailure } from '../../services/policy/daily-volume.js';
 import { FeeService } from '../../services/policy/fee.service.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
+import { transactionJobId } from '../../queues/transaction-job-id.js';
 import { weiToUsd, tokenAmountToUsd } from '../../services/transaction/price.service.js';
 import { getKnownTokenDecimals } from '../../services/transaction/token-registry.js';
 import { cacheSimulation, getSimulation } from '../../services/transaction/simulation-cache.js';
@@ -1945,7 +1946,19 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         type: 'BATCH',
         amountIn: totalValueWei.toString(),
         simulation: sim as any,
-        metadata: { actionCount: body.actions.length, actions: body.actions },
+        metadata: {
+          actionCount: body.actions.length,
+          actions: body.actions,
+          // A6b: what the stranded-QUEUED sweep re-enqueues and the re-poll accounts from.
+          queuePayload: {
+            to: contracts.executor,
+            data: batchCalldata,
+            value: totalValueWei.toString(),
+            feeAmountWei: feeCalc.feeAmountWei.toString(),
+            feeBps: feeCalc.feeBps,
+            routedViaExecutor: true,
+          },
+        },
       },
     });
     if (!tx) return;
@@ -2062,6 +2075,7 @@ const VOLUME_BOOKKEEPING_FIELDS = [
   'volumeState',
   'broadcastAttemptedAt',
   'broadcastAttempts',
+  'broadcastTxHash',
 ] as const;
 
 function withoutVolumeBookkeeping<T>(tx: T): T {
@@ -2166,9 +2180,14 @@ async function createWithVolumeReservation(
  * Enqueues a created transaction. When the queue refuses (Redis down, quota),
  * the row would sit QUEUED forever with its DailyVolume reservation and no
  * job to run it (A6 review): it is marked FAILED — only while still QUEUED
- * without a hash — and its reservation settled (released: nothing was
- * broadcast), then the error propagates to the caller. Its idempotencyKey is
- * cleared so the client can retry with the same key.
+ * without a hash and without a broadcast stamp — and its reservation settled
+ * (released: nothing was broadcast), then the error propagates to the caller.
+ * Its idempotencyKey is cleared so the client can retry with the same key.
+ *
+ * A6b: the job id is the row's (`transactionJobId`), so a crash between the
+ * row and the job is repaired by the stranded-QUEUED sweep without ever adding
+ * a second job; and a refusal that in fact reached Redis (a timeout after the
+ * write) is a job a worker may already have stamped — that row is left to it.
  */
 async function enqueueOrFail(
   transactionId: string,
@@ -2177,12 +2196,12 @@ async function enqueueOrFail(
   opts?: Parameters<typeof transactionQueue.add>[2],
 ): Promise<void> {
   try {
-    await transactionQueue.add(name, data, opts);
+    await transactionQueue.add(name, data, { jobId: transactionJobId(transactionId), ...opts });
   } catch (err) {
     const error = `enqueue failed: ${(err as Error)?.message ?? String(err)}`.slice(0, 500);
     try {
       const failed = await db.transaction.updateMany({
-        where: { id: transactionId, status: 'QUEUED', txHash: null },
+        where: { id: transactionId, status: 'QUEUED', txHash: null, broadcastAttemptedAt: null },
         data: { status: 'FAILED', error, idempotencyKey: null },
       });
       if (failed.count > 0) await settleVolumeAfterFailure(db, transactionId);

@@ -1,0 +1,23 @@
+-- Migration: 0024_a6b_broadcast_tx_hash
+-- Purpose: once a signed transaction may have left the process, the chain
+--   decides its outcome (plan task A6b).
+--   "broadcastTxHash" is the hash of the most recent signed transaction that
+--   `markBroadcastAttempt` stamped, written in the same conditional UPDATE as
+--   "broadcastAttemptedAt" / "broadcastAttempts", i.e. after signing and
+--   before the send. With it:
+--     - a retry first asks the chain whether the previous signed attempt is
+--       known (pending or mined) and adopts that hash instead of signing a
+--       second transaction with the next nonce (a SUBMITTED write lost after
+--       a successful broadcast used to move the value twice);
+--     - a row the pre-submit guard, the failed handler or the stranded-QUEUED
+--       sweep must stop after a stamp is not FAILED (an A2A payment used to
+--       be finalized PAYMENT_FAILED and its reservation refunded although the
+--       payment could still be mined): it is handed to the chain as SUBMITTED
+--       with this hash, and the re-poll records its receipt or, after the drop
+--       grace with no node knowing it, fails it.
+--   Nullable, no backfill: rows stamped before this migration have no hash;
+--   when one of them must be stopped it is FAILED with its reservation held
+--   and an A2A payment is left PAYMENT_PENDING for the operator (never
+--   refunded automatically).
+
+ALTER TABLE "Transaction" ADD COLUMN "broadcastTxHash" TEXT;

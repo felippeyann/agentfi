@@ -325,6 +325,11 @@ model Transaction {
   // signed broadcasts: a revert releases only after exactly one. Migration 0020.
   broadcastAttemptedAt DateTime?
   broadcastAttempts    Int       @default(0)
+  // A6b: the hash of the most recent signed transaction stamped for broadcast
+  // (written with the stamp, before the send). A retry adopts it when the
+  // chain knows it; a row stopped after a stamp is handed to the re-poll with
+  // it instead of being FAILED. Migration 0024.
+  broadcastTxHash      String?
 
   feeEvents  FeeEvent[]
 

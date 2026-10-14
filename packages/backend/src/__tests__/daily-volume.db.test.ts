@@ -516,12 +516,21 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     const a = await app(agent.id);
     const res = await transfer(a, '0.01');
     await runJob(jobOf(res.json().transactionId), { broadcast: 'fail-after-broadcast', attempts: 3 });
+    // A6b: not FAILED — handed to the chain (SUBMITTED with the last stamped hash), still reserved.
+    expect(await txStatus(res.json().transactionId)).toBe('SUBMITTED');
+    expect(await volumeStateOf(res.json().transactionId)).toBe('RESERVED');
+    expect(await volume(agent.id)).toBeCloseTo(20, 6);
+    // No node ever knew it: the re-poll drops it after the grace, and the reservation is HELD.
+    await m.processor.repollSubmittedTransactions(
+      { db: m.db, feeService: { incrementTxUsage: async () => undefined, recordFeeEvent: async () => undefined } as never, logger: quietLogger, getReceipt: async () => null, isKnownTransaction: async () => false },
+      { olderThanMs: 0, dropAfterMs: 0, limit: 500 },
+    );
     expect(await txStatus(res.json().transactionId)).toBe('FAILED');
     expect(await volumeStateOf(res.json().transactionId)).toBe('HELD');
     expect(await volume(agent.id)).toBeCloseTo(20, 6);
   });
 
-  it('a guard failure on a retry after an earlier broadcast attempt keeps the reservation', async () => {
+  it('a guard block on a retry after an earlier broadcast attempt keeps the reservation (A6b: handed to the chain, not FAILED)', async () => {
     const agent = await mkAgent();
     const a = await app(agent.id);
     const res = await transfer(a, '0.01');
@@ -535,8 +544,10 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
         if (n === 2) await m.db.agent.update({ where: { id: agent.id }, data: { active: false } });
       },
     });
-    expect(await txStatus(data.transactionId)).toBe('FAILED');
-    expect(await volumeStateOf(data.transactionId)).toBe('HELD');
+    // A6b: the paused agent's job is not signed again, and the earlier signed
+    // attempt is handed to the chain (SUBMITTED), still reserved.
+    expect(await txStatus(data.transactionId)).toBe('SUBMITTED');
+    expect(await volumeStateOf(data.transactionId)).toBe('RESERVED');
     expect(await volume(agent.id)).toBeCloseTo(20, 6);
   });
 
@@ -651,6 +662,11 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     await runJob(jobOf(ids.reverted), { receipt: 'reverted' });
     await runJob(jobOf(ids.preBroadcast), { broadcast: 'fail-before-broadcast', attempts: 2 });
     await runJob(jobOf(ids.postBroadcast), { broadcast: 'fail-after-broadcast', attempts: 2 });
+    // A6b: handed to the chain; dropped by the re-poll (no node knows it) → HELD.
+    await m.processor.repollSubmittedTransactions(
+      { db: m.db, feeService: { incrementTxUsage: async () => undefined, recordFeeEvent: async () => undefined } as never, logger: quietLogger, getReceipt: async () => null, isKnownTransaction: async () => false },
+      { olderThanMs: 0, dropAfterMs: 0, limit: 500 },
+    );
     const rows = await m.db.transaction.findMany({
       where: { id: { in: Object.values(ids) } },
       select: { id: true, volumeState: true, volumeReservedUsd: true, volumeReservedDate: true, broadcastAttemptedAt: true },

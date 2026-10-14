@@ -277,21 +277,91 @@ async function releaseWhere(
 /**
  * Stamps a broadcast attempt, after signing and before the signed transaction
  * is sent: the first one sets `broadcastAttemptedAt`, every one increments
- * `broadcastAttempts`. Conditional on the row still being QUEUED without a
- * hash; otherwise throws `BroadcastNotAllowedError` and the submitter sends
- * nothing (a stalled-job redelivery whose row the guard already failed and
- * released). Any other error also aborts the submit before broadcasting.
+ * `broadcastAttempts`, and `broadcastTxHash` records the hash of the signed
+ * transaction about to be sent (A6b: the chain can then decide the outcome of
+ * a row whose attempt failed or whose SUBMITTED write was lost). Conditional
+ * on the row still being QUEUED without a hash; otherwise throws
+ * `BroadcastNotAllowedError` and the submitter sends nothing (a stalled-job
+ * redelivery whose row the guard already failed and released). Any other
+ * error also aborts the submit before broadcasting.
  */
-export async function markBroadcastAttempt(db: Pick<PrismaClient, '$executeRaw'>, transactionId: string): Promise<void> {
+export async function markBroadcastAttempt(
+  db: Pick<PrismaClient, '$executeRaw'>,
+  transactionId: string,
+  signedTxHash: string | null = null,
+): Promise<void> {
   const updated = await db.$executeRaw`
     UPDATE "Transaction"
     SET "broadcastAttemptedAt" = COALESCE("broadcastAttemptedAt", NOW()),
-        "broadcastAttempts" = "broadcastAttempts" + 1
+        "broadcastAttempts" = "broadcastAttempts" + 1,
+        "broadcastTxHash" = COALESCE(${signedTxHash}::text, "broadcastTxHash")
     WHERE "id" = ${transactionId} AND "status" = 'QUEUED' AND "txHash" IS NULL
   `;
   if (updated === 0) {
     throw new BroadcastNotAllowedError(`Transaction ${transactionId} is no longer QUEUED without a hash — not broadcasting`);
   }
+}
+
+/** What `stopStampedTransaction` did to the row. */
+export type StampedStop =
+  /** SUBMITTED with the stamped hash: the re-poll (or the delivery that sent it) records the receipt, or drops it after the grace. */
+  | { outcome: 'handed-to-chain'; txHash: string }
+  /**
+   * FAILED with the error. `broadcastAttempted`: a signed attempt was stamped
+   * but cannot be handed to the chain (stamped before migration 0024, so no
+   * hash; or `handToChain: false`) — its outcome is unknown.
+   */
+  | { outcome: 'failed'; broadcastAttempted: boolean }
+  /** The row was no longer QUEUED without a hash (another delivery recorded its broadcast): untouched. */
+  | { outcome: 'not-queued' };
+
+/**
+ * Stops a row that is still QUEUED without a hash, when an earlier attempt
+ * may have been stamped for broadcast (A6b). The pre-submit guard (agent
+ * paused, policy expired), the permanent-failure handler and the
+ * stranded-QUEUED sweep call it once their plain "never stamped → FAILED"
+ * write matched nothing.
+ *
+ * A stamped row is never FAILED when its signed hash is known and
+ * `handToChain` is set: that transaction may be in a mempool or a block (the
+ * delivery that sent it may even be about to write SUBMITTED), and FAILED
+ * would let the A2A finalizer refund a payment that is then mined. It becomes
+ * SUBMITTED with `broadcastTxHash`, exactly the state of a recorded broadcast,
+ * and the chain decides: the re-poll records its receipt (CONFIRMED commits,
+ * REVERTED settles) or, after the drop grace with no node knowing it, FAILS it
+ * — with the reservation HELD for an ordinary transaction and the A2A
+ * finalizer run then.
+ *
+ * One conditional UPDATE (Postgres re-evaluates it against a concurrent stamp
+ * or SUBMITTED write), so no stamp can slip between a check and the write.
+ * The hash is not handed over when another row already carries it (two rows
+ * that signed byte-identical transactions — the unique `txHash`).
+ */
+export async function stopStampedTransaction(
+  db: Pick<PrismaClient, '$queryRaw'>,
+  transactionId: string,
+  error: string,
+  opts: { handToChain: boolean },
+): Promise<StampedStop> {
+  const rows = await db.$queryRaw<Array<{ status: string; txHash: string | null; broadcastAttempted: boolean }>>`
+    UPDATE "Transaction" AS t
+    SET "status" = (CASE WHEN ${opts.handToChain}::boolean AND t."broadcastTxHash" IS NOT NULL
+                           AND NOT EXISTS (SELECT 1 FROM "Transaction" o WHERE o."txHash" = t."broadcastTxHash")
+                         THEN 'SUBMITTED' ELSE 'FAILED' END)::"TxStatus",
+        "txHash" = (CASE WHEN ${opts.handToChain}::boolean AND t."broadcastTxHash" IS NOT NULL
+                           AND NOT EXISTS (SELECT 1 FROM "Transaction" o WHERE o."txHash" = t."broadcastTxHash")
+                         THEN t."broadcastTxHash" ELSE NULL END),
+        "error" = (CASE WHEN ${opts.handToChain}::boolean AND t."broadcastTxHash" IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM "Transaction" o WHERE o."txHash" = t."broadcastTxHash")
+                        THEN NULL ELSE ${error}::text END),
+        "updatedAt" = NOW()
+    WHERE t."id" = ${transactionId} AND t."status" = 'QUEUED' AND t."txHash" IS NULL
+    RETURNING t."status"::text AS "status", t."txHash", (t."broadcastAttemptedAt" IS NOT NULL) AS "broadcastAttempted"
+  `;
+  const row = rows[0];
+  if (!row) return { outcome: 'not-queued' };
+  if (row.status === 'SUBMITTED' && row.txHash) return { outcome: 'handed-to-chain', txHash: row.txHash };
+  return { outcome: 'failed', broadcastAttempted: row.broadcastAttempted };
 }
 
 export interface VolumeSweepSummary {
