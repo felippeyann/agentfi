@@ -59,9 +59,16 @@ vi.hoisted(() => {
     if (!process.env[k]) process.env[k] = v;
   }
   // The recovery tick treats every row as stale here (the suite controls time).
-  process.env['PAYMENT_RECOVERY_STALE_THRESHOLD_SEC'] = '0';
-  process.env['ESCROW_RECONCILE_STALE_SEC'] = '0';
+  // Negative, not 0 (item 7): rows stamped with Postgres NOW() by a Docker
+  // database whose clock runs a few ms ahead of Node look "in the future" to a
+  // 0-s cut-off and were skipped — an intermittent failure of the re-poll /
+  // recovery tests in full runs (7 of 81 in one run on 2026-10-14).
+  process.env['PAYMENT_RECOVERY_STALE_THRESHOLD_SEC'] = '-60';
+  process.env['ESCROW_RECONCILE_STALE_SEC'] = '-60';
 });
+
+/** Clock allowance for the "everything is due" cut-offs above and below (item 7). */
+const DB_CLOCK_ALLOWANCE_MS = 60_000;
 
 vi.mock('../api/middleware/logger.js', () => {
   const noop = () => undefined;
@@ -350,7 +357,8 @@ function makeSim(opts: { lane?: boolean } = {}): Sim {
         },
         now: () => s.now(),
       },
-      { olderThanMs: o?.olderThanMs ?? 0, dropAfterMs: o?.dropAfterMs ?? s.dropAfterMs, limit: 100 },
+      // Item 7: the age cut-off minus DB_CLOCK_ALLOWANCE_MS (a 0-ms cut-off skips rows stamped by a database clock that runs ahead).
+      { olderThanMs: (o?.olderThanMs ?? 0) - DB_CLOCK_ALLOWANCE_MS, dropAfterMs: o?.dropAfterMs ?? s.dropAfterMs, limit: 100 },
     ),
   );
 
@@ -575,7 +583,7 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
     // declares it dropped (FAILED). Before C3c that unwound the job: FAILED,
     // reservation released, USDC locked with no path back.
     sim.chain.hideFromRpc(fundRow!.txHash as Hex);
-    sim.dropAfterMs = 0;
+    sim.dropAfterMs = -DB_CLOCK_ALLOWANCE_MS; // drop at once (0 kept a row stamped by a DB clock ahead "within the grace")
     sim.lostMonitors.clear();
     await m.runPaymentRecoveryTick();
     await sim.drive();
@@ -628,7 +636,7 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
 
     // Evicted from every mempool: dropped → FAILED → chain Open → unwound.
     sim.chain.evict(fundRow!.txHash as Hex);
-    sim.dropAfterMs = 0;
+    sim.dropAfterMs = -DB_CLOCK_ALLOWANCE_MS; // drop at once (0 kept a row stamped by a DB clock ahead "within the grace")
     await m.runPaymentRecoveryTick();
     await sim.drive();
     expect(await job(jobId)).toMatchObject({ status: 'FAILED', onChainStatus: 'FAILED', reservationStatus: 'CANCELLED' });
