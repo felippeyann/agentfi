@@ -15,17 +15,23 @@
  *  - already SUBMITTED / has txHash        → skipped, submitter not called
  *  - A2A payment blocked                   → Job finalized as FAILED
  *  - C3d: a setProviderAgentId whose job is no longer live + Funded → not broadcast
+ *  - Q7: an escrow / ERC-8004 step on an unverified chain → defer (nothing
+ *    written); ordinary transfers on the same chain are never gated
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
 
-const { finalizeMock, escrowOutcomeMock, vetBindMock, settleVolumeMock, stopStampedMock } = vi.hoisted(() => ({
+const { finalizeMock, escrowOutcomeMock, vetBindMock, settleVolumeMock, stopStampedMock, gateMock } = vi.hoisted(() => ({
   finalizeMock: vi.fn(),
   escrowOutcomeMock: vi.fn(),
   vetBindMock: vi.fn(),
   settleVolumeMock: vi.fn(),
   stopStampedMock: vi.fn(),
+  gateMock: vi.fn(),
 }));
+
+// Q7: the per-process verification state of each escrow chain (default: verified).
+vi.mock('../config/escrow-verification.runtime.js', () => ({ escrowConfigGate: gateMock }));
 
 // The DailyVolume settlement (A6) and the A6b hand-over of a stamped row to the
 // chain run on Postgres in daily-volume.db.test.ts / broadcast-outcome.db.test.ts;
@@ -114,6 +120,7 @@ beforeEach(() => {
   vetBindMock.mockReset().mockResolvedValue(null);
   settleVolumeMock.mockReset().mockResolvedValue('released');
   stopStampedMock.mockReset().mockResolvedValue({ outcome: 'not-queued' });
+  gateMock.mockReset().mockImplementation((chainId: number) => ({ allowed: true, chainId, verifiedAt: new Date(), validUntil: new Date(Date.now() + 600_000) }));
 });
 
 // ── Happy path ─────────────────────────────────────────────────────────────
@@ -486,5 +493,64 @@ describe('preSubmitGuard — setProviderAgentId (bindAgent) of a job no longer F
     const { db } = makeMockDb(snapshot({ metadata: { jobId: 'job-1', erc8183: true, escrowStep: 'submit' } }));
     expect(await runWorkerStep(db, makeSubmitter())).toEqual({ action: 'proceed' });
     expect(vetBindMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── Q7: unverified on-chain configuration → defer, never fail or unwind ────
+
+describe('preSubmitGuard — Q7: escrow-dependent steps wait while the chain configuration is unverified', () => {
+  const unverified = (chainId: number) => ({
+    allowed: false,
+    chainId,
+    block: 'unverified',
+    reason: `the ERC-8183 configuration of chain ${chainId} is unverified since …: the chain could not be read: timed out`,
+    retryAfterSeconds: 120,
+  });
+
+  it.each(['create', 'setBudget', 'approve', 'fund', 'submit', 'register', 'bindAgent'])(
+    'escrow step "%s" → defer (120 s): no DB write, no broadcast stamp, no FAILED, no unwind, no finalizer, no vet',
+    async (escrowStep) => {
+      gateMock.mockImplementation(unverified);
+      const { db, update, updateMany } = makeMockDb({ ...snapshot({ metadata: { jobId: 'job-1', erc8183: true, escrowStep } }), chainId: 84532 } as never);
+      const submitter = makeSubmitter();
+
+      const decision = await runWorkerStep(db, submitter);
+
+      expect(decision).toEqual({ action: 'defer', reason: expect.stringContaining('unverified'), delayMs: 120_000 });
+      expect(gateMock).toHaveBeenCalledWith(84532);
+      expect(submitter.submit).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+      expect(updateMany).not.toHaveBeenCalled();
+      expect(settleVolumeMock).not.toHaveBeenCalled();
+      expect(escrowOutcomeMock).not.toHaveBeenCalled();
+      expect(finalizeMock).not.toHaveBeenCalled();
+      expect(vetBindMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['an ordinary transfer', { queuePayload: { to: '0x0' } }],
+    ['an A2A payment', { a2aPayment: true, jobId: 'job-9' }],
+    ['no metadata', null],
+  ])('scope: %s on the same chain is never gated (proceeds while the escrow chain is unverified)', async (_label, metadata) => {
+    gateMock.mockImplementation(unverified);
+    const { db } = makeMockDb({ ...snapshot({ metadata: metadata as Record<string, unknown> | null }), chainId: 84532 } as never);
+    const submitter = makeSubmitter();
+    expect(await runWorkerStep(db, submitter)).toEqual({ action: 'proceed' });
+    expect(submitter.submit).toHaveBeenCalledTimes(1);
+    expect(gateMock).not.toHaveBeenCalled();
+  });
+
+  it('verified → the escrow step proceeds (the gate asked with the row chain)', async () => {
+    const { db } = makeMockDb({ ...snapshot({ metadata: { jobId: 'job-1', erc8183: true, escrowStep: 'fund' } }), chainId: 84532 } as never);
+    expect(await runWorkerStep(db, makeSubmitter())).toEqual({ action: 'proceed' });
+    expect(gateMock).toHaveBeenCalledWith(84532);
+  });
+
+  it('a row that already left QUEUED is skipped before the gate (re-poll / confirmation paths are never deferred)', async () => {
+    gateMock.mockImplementation(unverified);
+    const { db } = makeMockDb({ ...snapshot({ status: 'SUBMITTED', txHash: TX_HASH, metadata: { jobId: 'job-1', erc8183: true, escrowStep: 'fund' } }), chainId: 84532 } as never);
+    expect((await preSubmitGuard(db, TX_ID)).action).toBe('skip');
+    expect(gateMock).not.toHaveBeenCalled();
   });
 });

@@ -118,6 +118,12 @@ export interface TransactionProcessorDeps {
    * attempt was stamped with. Without it that check is skipped (unit tests).
    */
   isKnownTransaction?: (chainId: number, txHash: Hex) => Promise<boolean>;
+  /**
+   * Q7: re-queue THIS job after `delayMs` without consuming an attempt (the
+   * worker binds it per job: `job.moveToDelayed` + `DelayedError`, see
+   * `defer-job.ts`). Absent (unit tests) → the job returns `deferred`.
+   */
+  deferJob?: (delayMs: number) => Promise<void>;
 }
 
 /**
@@ -152,7 +158,7 @@ export interface TransactionFailureDeps {
 
 export type TransactionJobResult =
   | { txHash: Hex }
-  | { txHash: null; outcome: 'skipped' | 'blocked'; reason: string };
+  | { txHash: null; outcome: 'skipped' | 'blocked' | 'deferred'; reason: string };
 
 /**
  * Processes one transaction job. Throws only when the broadcast itself fails
@@ -191,6 +197,15 @@ export async function processTransactionJob(
       'Transaction blocked before submission — marked FAILED',
     );
     return { txHash: null, outcome: 'blocked', reason: guard.reason };
+  }
+  if (guard.action === 'defer') {
+    // Q7: nothing was written; the row stays QUEUED and the job comes back later.
+    logger.warn(
+      { transactionId: data.transactionId, chainId: data.chainId, delayMs: guard.delayMs, reason: guard.reason },
+      'Escrow transaction deferred — on-chain configuration not verified (no attempt consumed)',
+    );
+    await deps.deferJob?.(guard.delayMs);
+    return { txHash: null, outcome: 'deferred', reason: guard.reason };
   }
 
   // The tx stays QUEUED while broadcasting. A throw here propagates so BullMQ

@@ -7,7 +7,7 @@
  */
 import { vi } from 'vitest';
 
-const { state, logged, redisStore } = vi.hoisted(() => ({
+const { state, logged, redisStore, notified } = vi.hoisted(() => ({
   state: {
     nodeEnv: 'production',
     hookAcp: '0x00000000000000000000000000000000000E5C20',
@@ -15,17 +15,26 @@ const { state, logged, redisStore } = vi.hoisted(() => ({
     readFails: false,
     hookHasCode: true,
     hookConfigured: true,
+    servedChainId: 84532,
   },
   logged: { error: [] as string[], warn: [] as string[], info: [] as string[] },
   redisStore: new Map<string, string>(),
+  notified: [] as Array<{ message: string; metadata: Record<string, unknown> }>,
 }));
 
 vi.mock('../config/env.js', () => ({
   get env() {
-    return { NODE_ENV: state.nodeEnv, REDIS_URL: 'redis://mock:6379/0' };
+    return { NODE_ENV: state.nodeEnv, REDIS_URL: 'redis://mock:6379/0', ESCROW_CONFIG_VERIFIED_TTL_SECONDS: 600, ESCROW_CONFIG_RECHECK_SECONDS: 120 };
   },
   configuredEscrowChainIds: [84532],
   escrowEvaluatorAddress: '0x90F79bf6EB2c4f870365E785982E1f101E93b906',
+}));
+vi.mock('../services/notification.service.js', () => ({
+  notificationService: {
+    notify: async (payload: { message: string; metadata: Record<string, unknown> }) => {
+      notified.push(payload);
+    },
+  },
 }));
 vi.mock('../config/contracts.js', () => ({
   getContracts: () => ({
@@ -37,6 +46,10 @@ vi.mock('../config/contracts.js', () => ({
 }));
 vi.mock('../config/chains.js', () => ({
   createChainPublicClient: () => ({
+    getChainId: async () => {
+      if (state.readFails) throw new Error('rpc down');
+      return state.servedChainId;
+    },
     readContract: async ({ functionName }: { functionName: string }) => {
       if (state.readFails) throw new Error('rpc down');
       if (!state.hookHasCode && functionName !== 'token') {
@@ -80,7 +93,13 @@ vi.mock('ioredis', () => ({
 }));
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { announceProcessCapabilities, processCapabilities, runEscrowBootCheck } from '../config/escrow-boot.runtime.js';
+import {
+  __stopEscrowRecheckForTests,
+  announceProcessCapabilities,
+  processCapabilities,
+  runEscrowBootCheck,
+} from '../config/escrow-boot.runtime.js';
+import { __resetEscrowVerificationForTests, escrowConfigGate, escrowVerificationSnapshot } from '../config/escrow-verification.runtime.js';
 
 const OTHER = '0x1111111111111111111111111111111111111111';
 let exitSpy: { mockRestore(): void; mock: { calls: unknown[][] } };
@@ -93,14 +112,20 @@ beforeEach(() => {
   state.readFails = false;
   state.hookHasCode = true;
   state.hookConfigured = true;
+  state.servedChainId = 84532;
   logged.error.length = 0;
   logged.warn.length = 0;
   logged.info.length = 0;
+  notified.length = 0;
   redisStore.clear();
+  __stopEscrowRecheckForTests();
+  __resetEscrowVerificationForTests();
   exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
   consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 });
 afterEach(() => {
+  __stopEscrowRecheckForTests();
+  vi.useRealTimers();
   exitSpy.mockRestore();
   consoleSpy.mockRestore();
 });
@@ -160,6 +185,90 @@ describe('runEscrowBootCheck', () => {
     expect(exitSpy).not.toHaveBeenCalled();
     expect(verdict).toMatchObject({ verified: [], unreadable: [84532] });
     expect(logged.error.join('\n')).toMatch(/could not be verified/);
+  });
+});
+
+describe('Q7 — per-process verification state, forever re-check, gate', () => {
+  /** Lets the async re-check tick (setInterval callback → promises) run to completion. */
+  async function tick(ms = 120_000) {
+    await vi.advanceTimersByTimeAsync(ms);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  }
+
+  it('before any read the gate refuses (not-verified-yet); a matching boot verifies the chain for the TTL; nothing alerted for a healthy boot', async () => {
+    expect(escrowConfigGate(84532)).toMatchObject({ allowed: false, block: 'not-verified-yet', retryAfterSeconds: 120 });
+    await runEscrowBootCheck('worker');
+    expect(escrowConfigGate(84532)).toMatchObject({ allowed: true, chainId: 84532 });
+    expect(escrowConfigGate(84532, new Date(Date.now() + 599_000)).allowed).toBe(true);
+    expect(escrowConfigGate(84532, new Date(Date.now() + 601_000))).toMatchObject({ allowed: false, block: 'expired' });
+    expect(escrowConfigGate(8453)).toMatchObject({ allowed: false, block: 'not-configured' });
+    expect(notified).toHaveLength(0);
+    expect(escrowVerificationSnapshot({ withReason: false })).toEqual([
+      expect.objectContaining({ chainId: 84532, state: 'verified', allowed: true }),
+    ]);
+  });
+
+  it('an unreadable chain at boot: unverified (never fatal), alerted once; the re-check verifies it later and alerts the recovery once', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    state.readFails = true;
+    await runEscrowBootCheck('api');
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(escrowConfigGate(84532)).toMatchObject({ allowed: false, block: 'unverified', reason: expect.stringMatching(/could not be read: rpc down/) });
+    expect(notified.map((n) => n.metadata['kind'])).toEqual(['escrow-config-unverified']);
+
+    await tick(); // still down: no second alert
+    await tick();
+    expect(notified).toHaveLength(1);
+
+    state.readFails = false;
+    await tick();
+    expect(escrowConfigGate(84532).allowed).toBe(true);
+    expect(notified.map((n) => n.metadata['kind'])).toEqual(['escrow-config-unverified', 'escrow-config-verified']);
+  });
+
+  it('a failure after a success revokes the verification at once (the TTL does not keep it alive); re-checks go on forever (> 30 ticks)', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    await runEscrowBootCheck('worker');
+    expect(escrowConfigGate(84532).allowed).toBe(true);
+
+    state.readFails = true;
+    await tick();
+    expect(escrowConfigGate(84532)).toMatchObject({ allowed: false, block: 'unverified' });
+    expect(notified.map((n) => n.metadata['kind'])).toEqual(['escrow-config-unverified']);
+
+    for (let i = 0; i < 35; i++) await tick();
+    expect(escrowConfigGate(84532).allowed).toBe(false);
+    state.readFails = false;
+    await tick();
+    expect(escrowConfigGate(84532).allowed).toBe(true); // the 37th re-check still ran
+    expect(notified).toHaveLength(2);
+  });
+
+  it.each(['production', 'staging'])('NODE_ENV=%s: an RPC serving another chain (eth_chainId) is a mismatch — FATAL', async (nodeEnv) => {
+    state.nodeEnv = nodeEnv;
+    state.servedChainId = 8453;
+    await runEscrowBootCheck('api');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(String(consoleSpy.mock.calls[0]?.[0])).toMatch(/^FATAL: .*answers eth_chainId 8453, not 84532/);
+  });
+
+  it('NODE_ENV=development: a mismatch boots but blocks every escrow signature on the chain (state mismatch, alerted)', async () => {
+    state.nodeEnv = 'development';
+    state.trustedEvaluator = OTHER;
+    await runEscrowBootCheck('worker');
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(escrowConfigGate(84532)).toMatchObject({ allowed: false, block: 'mismatch', reason: expect.stringMatching(/trustedEvaluator/) });
+    expect(notified.map((n) => n.metadata['kind'])).toEqual(['escrow-config-mismatch']);
+  });
+
+  it('production: a mismatch found by a later re-check is FATAL like at boot', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    await runEscrowBootCheck('worker');
+    expect(exitSpy).not.toHaveBeenCalled();
+    state.hookAcp = OTHER; // the hook at the configured address changed answer (redeployed / wrong contract)
+    await tick();
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(escrowConfigGate(84532)).toMatchObject({ allowed: false, block: 'mismatch' });
   });
 });
 

@@ -52,6 +52,14 @@ vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({
   // C3d: the guard re-checks ERC-8004 binds before broadcast (none in these tests).
   vetBindBeforeBroadcast: async () => null,
 }));
+// Q7: the escrow chain's verification state (verified unless a test says otherwise).
+const gate = vi.hoisted(() => ({ verified: true }));
+vi.mock('../config/escrow-verification.runtime.js', () => ({
+  escrowConfigGate: (chainId: number) =>
+    gate.verified
+      ? { allowed: true, chainId, verifiedAt: new Date(), validUntil: new Date(Date.now() + 600_000) }
+      : { allowed: false, chainId, block: 'unverified', reason: `chain ${chainId} unverified`, retryAfterSeconds: 120 },
+}));
 
 import {
   EarlierBroadcastLiveError,
@@ -166,6 +174,7 @@ beforeEach(() => {
   volume.settleVolumeAfterFailure.mockResolvedValue('released');
   // A6b: by default no row in these tests was stamped for broadcast.
   volume.stopStampedTransaction.mockResolvedValue({ outcome: 'not-queued' });
+  gate.verified = true;
 });
 
 // ── Happy path ─────────────────────────────────────────────────────────────
@@ -441,6 +450,47 @@ describe('processTransactionJob — pre-submit guard', () => {
     expect(result).toMatchObject({ txHash: null, outcome: 'skipped' });
     expect(submitter.submit).not.toHaveBeenCalled();
     expect(update).not.toHaveBeenCalled();
+  });
+
+  it('Q7: escrow step on an unverified chain → deferJob(120 s), no broadcast, no broadcast stamp, nothing written, QUEUED kept', async () => {
+    gate.verified = false;
+    const { deps, submitter, update, updateMany, row } = makeDeps(
+      txRow({ metadata: { erc8183: true, jobId: 'job-1', escrowStep: 'fund' } }),
+    );
+    (row as TxRow & { chainId: number }).chainId = 84532;
+    const deferJob = vi.fn().mockResolvedValue(undefined);
+
+    const result = await processTransactionJob(job({ attemptsMade: 2 }), { ...deps, deferJob });
+
+    expect(result).toEqual({ txHash: null, outcome: 'deferred', reason: 'chain 84532 unverified' });
+    expect(deferJob).toHaveBeenCalledWith(120_000);
+    expect(submitter.submit).not.toHaveBeenCalled();
+    expect(volume.markBroadcastAttempt).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(escrowOutcomeMock).not.toHaveBeenCalled();
+    expect(row).toMatchObject({ status: 'QUEUED', txHash: null, error: null });
+  });
+
+  it('Q7: the production deferJob throws (BullMQ DelayedError) — the processor lets it through, still nothing written', async () => {
+    gate.verified = false;
+    const { deps, submitter, row } = makeDeps(txRow({ metadata: { erc8183: true, jobId: 'job-1', escrowStep: 'submit' } }));
+    (row as TxRow & { chainId: number }).chainId = 84532;
+    const delayed = Object.assign(new Error('moved to delayed'), { name: 'DelayedError' });
+    await expect(processTransactionJob(job(), { ...deps, deferJob: vi.fn().mockRejectedValue(delayed) })).rejects.toBe(delayed);
+    expect(submitter.submit).not.toHaveBeenCalled();
+    expect(row.status).toBe('QUEUED');
+  });
+
+  it('Q7: an ordinary transfer is broadcast while an escrow chain is unverified (scope)', async () => {
+    gate.verified = false;
+    const { deps, submitter, row } = makeDeps(txRow());
+    const deferJob = vi.fn();
+    const result = await processTransactionJob(job(), { ...deps, deferJob });
+    expect(result).toEqual({ txHash: TX_HASH });
+    expect(submitter.submit).toHaveBeenCalledTimes(1);
+    expect(deferJob).not.toHaveBeenCalled();
+    expect(row.status).toBe('SUBMITTED');
   });
 });
 

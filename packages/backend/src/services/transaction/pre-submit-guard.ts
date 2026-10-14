@@ -18,6 +18,7 @@ import type { PrismaClient } from '@prisma/client';
 import { finalizeA2APaymentJob } from '../job/payment-finalizer.service.js';
 import { onEscrowTxOutcome, vetBindBeforeBroadcast } from '../job/escrow-erc8183.runtime.js';
 import { settleVolumeAfterFailure, stopStampedTransaction } from '../policy/daily-volume.js';
+import { escrowConfigGate } from '../../config/escrow-verification.runtime.js';
 
 export const PAUSED_BEFORE_SUBMISSION = 'Agent paused before submission';
 export const POLICY_EXPIRED_BEFORE_SUBMISSION = 'Agent policy expired before submission';
@@ -39,11 +40,34 @@ export type PreSubmitDecision =
    * DB; the worker must return without submitting and without throwing so
    * BullMQ does not retry it.
    */
-  | { action: 'fail'; reason: string; finalizerError?: string };
+  | { action: 'fail'; reason: string; finalizerError?: string }
+  /**
+   * Q7: an escrow-dependent transaction (`metadata.erc8183`) whose chain's
+   * on-chain configuration is not verified in this process. NOTHING was
+   * written: the row stays QUEUED, no broadcast attempt is stamped, nothing is
+   * failed or unwound. The worker re-queues the job after `delayMs` without
+   * consuming an attempt.
+   */
+  | { action: 'defer'; reason: string; delayMs: number };
 
 interface AgentSnapshot {
   active: boolean;
   policy: { active: boolean; expiresAt: Date | null } | null;
+}
+
+/**
+ * Q7 — scope (owner, 2026-10-14): only transactions that depend on the
+ * verified ERC-8183 configuration are gated: the rows the escrow orchestrator
+ * creates (`metadata.erc8183 === true`: createJob / setBudget / approve /
+ * fund / submit, and the provider's ERC-8004 register / setProviderAgentId).
+ * Ordinary transfers, swaps and DeFi calls on the same chain never depend on
+ * it and are never deferred. Returns the `defer` decision, or null to go on.
+ */
+function escrowConfigDeferral(tx: { chainId: number; metadata: unknown }): PreSubmitDecision | null {
+  if ((tx.metadata as { erc8183?: unknown } | null)?.erc8183 !== true) return null;
+  const gate = escrowConfigGate(tx.chainId);
+  if (gate.allowed) return null;
+  return { action: 'defer', reason: gate.reason, delayMs: gate.retryAfterSeconds * 1000 };
 }
 
 function resolveBlockReason(agent: AgentSnapshot, now: Date): string | null {
@@ -84,6 +108,7 @@ export async function preSubmitGuard(
     select: {
       status: true,
       txHash: true,
+      chainId: true,
       metadata: true,
       agent: {
         select: {
@@ -107,6 +132,9 @@ export async function preSubmitGuard(
 
   const reason = resolveBlockReason(tx.agent, new Date());
   if (!reason) {
+    // Q7: an escrow-dependent step waits while its chain is unverified.
+    const deferred = escrowConfigDeferral(tx);
+    if (deferred) return deferred;
     // C3d (H14 dry-run): the provider's ERC-8004 bind is only valid while the
     // job is live and Funded. It was enqueued at FUNDED; a cancellation (and
     // its refund) may have happened since — then broadcasting it only

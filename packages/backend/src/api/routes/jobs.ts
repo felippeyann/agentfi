@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { Job, JobStatus, Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { db } from '../../db/client.js';
@@ -14,6 +14,7 @@ import {
   queueOnChainEscrowLock,
 } from '../../services/policy/escrow.service.js';
 import { finalizeA2APaymentJob } from '../../services/job/payment-finalizer.service.js';
+import { escrowConfigGate } from '../../config/escrow-verification.runtime.js';
 import {
   contestJob,
   enqueueSubmit,
@@ -25,6 +26,7 @@ import {
 } from '../../services/job/escrow-erc8183.runtime.js';
 import {
   ESCROW_KIND,
+  FINAL_ON_CHAIN_STATUSES,
   expiryMarginMs,
   isEscrowTokenReward,
   isFeedbackFileCommitted,
@@ -88,6 +90,32 @@ function errorMessage(err: unknown): string {
   return (err as Error)?.message ?? String(err);
 }
 
+/**
+ * Q7: a request that would start a new escrow money movement on `chainId`
+ * (escrow job creation → create/fund; delivery → submit → settlement;
+ * cancellation / provider failure → evaluator reject) is refused with
+ * `503 ESCROW_CONFIG_UNVERIFIED` + `Retry-After` while this process has not
+ * verified the chain's on-chain configuration — before anything is reserved
+ * or written. Returns the reply sent, or null to go on.
+ */
+function refuseUnverifiedEscrow(reply: FastifyReply, chainId: number) {
+  const gate = escrowConfigGate(chainId);
+  if (gate.allowed) return null;
+  logger.warn({ chainId, block: gate.block, reason: gate.reason }, 'Escrow request refused — on-chain configuration not verified');
+  return reply
+    .code(503)
+    .header('Retry-After', String(gate.retryAfterSeconds))
+    .send({
+      error: 'ESCROW_CONFIG_UNVERIFIED',
+      message:
+        `The ERC-8183 escrow configuration of chain ${chainId} is not verified right now (${gate.block}); new escrow ` +
+        'operations wait until it is. Nothing was reserved or changed — retry after the indicated delay.',
+      chainId,
+      state: gate.block,
+      retryAfterSeconds: gate.retryAfterSeconds,
+    });
+}
+
 export async function jobRoutes(fastify: FastifyInstance) {
   /**
    * POST /v1/jobs — create a new service request (job) for another agent.
@@ -134,6 +162,10 @@ export async function jobRoutes(fastify: FastifyInstance) {
           message: 'An escrowed job cannot name the evaluator signer as the provider',
         });
       }
+
+      // Q7: no new escrow while the chain's on-chain configuration is unverified (nothing reserved yet).
+      const unverified = refuseUnverifiedEscrow(reply, rewardChainId);
+      if (unverified) return unverified;
 
       // Decision D8: USDC only on escrow chains.
       try {
@@ -373,6 +405,21 @@ export async function jobRoutes(fastify: FastifyInstance) {
         expiresAt: job.expiresAt,
         onChainStatus: job.onChainStatus,
       });
+    }
+
+    // Q7: delivering (→ submit, then the evaluator's settlement) or cancelling /
+    // failing (→ the evaluator's refund) an escrow job that may still move
+    // money on-chain starts an escrow signature: refused while the chain's
+    // configuration is unverified, before the transition is written. Accepting
+    // only changes the DB and stays allowed.
+    if (
+      isErc8183 &&
+      body.status !== 'ACCEPTED' &&
+      job.escrowChainId !== null &&
+      !(FINAL_ON_CHAIN_STATUSES as readonly string[]).includes(job.onChainStatus ?? '')
+    ) {
+      const unverified = refuseUnverifiedEscrow(reply, job.escrowChainId);
+      if (unverified) return unverified;
     }
 
     // Issue #71 — A2A revenue integrity (see docs/project/issue-71-a2a-revenue-integrity.md).

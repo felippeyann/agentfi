@@ -620,6 +620,18 @@ export async function adminRoutes(fastify: FastifyInstance) {
   });
 
   /**
+   * GET /admin/escrow/verification — Q7: this API process's verification
+   * state of each ERC-8183 chain, with the reason when new escrow operations
+   * are blocked (`/health/ready` shows the same without reasons). The worker
+   * verifies on its own; its state is in its logs and ESCROW_ALERT notifications.
+   */
+  fastify.get('/admin/escrow/verification', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+    const { escrowVerificationSnapshot, escrowVerificationSettings } = await import('../../config/escrow-verification.runtime.js');
+    return { process: 'api', ...escrowVerificationSettings(), chains: escrowVerificationSnapshot({ withReason: true }) };
+  });
+
+  /**
    * GET /admin/transactions — global transaction log.
    */
   fastify.get('/admin/transactions', async (request, reply) => {

@@ -20,11 +20,13 @@ import { Queue, Worker, type Job } from 'bullmq';
 import { env } from '../config/env.js';
 import { logger } from '../api/middleware/logger.js';
 import {
+  EscrowConfigUnverifiedError,
   handleFailedSettlementJob,
   processSettlementJob,
   type Erc8183Deps,
   type EscrowSettlementJobData,
 } from '../services/job/escrow-erc8183.service.js';
+import { deferBullJob } from './defer-job.js';
 
 export const ESCROW_SETTLEMENT_QUEUE_NAME = 'escrow-settlement';
 
@@ -102,10 +104,36 @@ export async function scheduleEscrowExpirySweep(): Promise<void> {
   logger.info({ queue: ESCROW_SETTLEMENT_QUEUE_NAME, intervalMs: SWEEP_INTERVAL_MS }, 'Escrow expiry sweep scheduled');
 }
 
+/**
+ * The worker body: `processSettlementJob`, except that a settlement refused
+ * because its chain's on-chain configuration is unverified (Q7) is moved back
+ * to the delayed set — no attempt consumed, no `failed` event, so neither the
+ * hold hand-back nor the `settlement-failed` alert of
+ * `handleFailedSettlementJob` runs for it. The verification runtime alerts once
+ * per chain and state change; here it is one log line per deferral.
+ */
+export async function runSettlementJob(
+  getDeps: () => Erc8183Deps,
+  job: Job<EscrowSettlementJobData>,
+  token: string | undefined,
+  defer: (job: Job<EscrowSettlementJobData>, token: string | undefined, delayMs: number) => Promise<never> = deferBullJob,
+) {
+  try {
+    return await processSettlementJob(getDeps(), job);
+  } catch (err) {
+    if (!(err instanceof EscrowConfigUnverifiedError)) throw err;
+    logger.warn(
+      { jobId: job.data.jobId, action: job.data.action, chainId: err.chainId, retryAfterMs: err.retryAfterMs, reason: err.reason },
+      'ERC-8183 settlement deferred — on-chain configuration not verified (no attempt consumed)',
+    );
+    return defer(job, token, err.retryAfterMs);
+  }
+}
+
 export function startEscrowSettlementWorker(getDeps: () => Erc8183Deps): Worker<EscrowSettlementJobData> {
   const worker = new Worker<EscrowSettlementJobData>(
     ESCROW_SETTLEMENT_QUEUE_NAME,
-    (job: Job<EscrowSettlementJobData>) => processSettlementJob(getDeps(), job),
+    (job: Job<EscrowSettlementJobData>, token?: string) => runSettlementJob(getDeps, job, token),
     {
       connection,
       // One settlement at a time: the evaluator key has one nonce sequence.

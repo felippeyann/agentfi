@@ -52,6 +52,7 @@ import {
   alertExpiringReviews,
   contestEscrowJob,
   deliverableHashOf,
+  EscrowConfigUnverifiedError,
   enqueueSubmit,
   expiryMarginMs,
   escrowIntentId,
@@ -899,6 +900,67 @@ describe('processSettlementJob — reject (cancellation) and claimRefund (expiry
     const { deps, finalize } = makeDeps([SUBMITTED_JOB()], { chainStatus: CHAIN_JOB_STATUS.Submitted, settleLogs: [makeLog(AGENT_JOB_ESCROW_ABI, 'JobExpired', { jobId: 7n }, ESCROW)] });
     await processSettlementJob(deps, { data: { jobId: 'job-1', action: 'claimRefund' } });
     expect(finalize).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'job-1', outcome: 'FAILED', reason: expect.stringContaining('Expired') }));
+  });
+});
+
+// ── Q7: evaluator settlement deferred while the configuration is unverified ──
+
+describe('processSettlementJob — Q7: no evaluator signature on an unverified chain', () => {
+  const refuse = (chainId: number) => ({
+    allowed: false as const,
+    chainId,
+    block: 'unverified' as const,
+    reason: `the ERC-8183 configuration of chain ${chainId} is unverified: the chain could not be read`,
+    retryAfterSeconds: 120,
+  });
+  const allow = (chainId: number) => ({ allowed: true as const, chainId, verifiedAt: NOW, validUntil: new Date(NOW.getTime() + 600_000) });
+
+  it('settle: EscrowConfigUnverifiedError (retry in 120 s) BEFORE the claim — job stays SUBMITTED (contestable), nothing signed, nothing alerted', async () => {
+    const { deps, jobs, signer, finalize, alert } = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    deps.configGate = refuse;
+    const err = await processSettlementJob(deps, settleJob()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EscrowConfigUnverifiedError);
+    expect(err).toMatchObject({ chainId: CHAIN_ID, retryAfterMs: 120_000 });
+    expect(signer.writeContract).not.toHaveBeenCalled();
+    expect(jobs.get('job-1')).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', settleTxHash: null, escrowError: null });
+    expect(finalize).not.toHaveBeenCalled();
+    expect(alert).not.toHaveBeenCalled();
+
+    // Verified again: the same job settles normally.
+    deps.configGate = allow;
+    expect(await processSettlementJob(deps, settleJob())).toMatchObject({ outcome: 'settled', onChainStatus: 'COMPLETED' });
+    expect(signer.writeContract).toHaveBeenCalledTimes(1);
+  });
+
+  it('an operator decision on a contested job: deferred, the job stays CONTESTED with its decision (still resolvable)', async () => {
+    const { deps, jobs, signer } = makeDeps([CONTESTED_JOB({ resolution: 'refund' })], { settleLogs: rejectLogs() });
+    deps.configGate = refuse;
+    await expect(processSettlementJob(deps, { data: { jobId: 'job-1', action: 'resolve' }, attemptsMade: 0, opts: { attempts: 3 } })).rejects.toBeInstanceOf(
+      EscrowConfigUnverifiedError,
+    );
+    expect(signer.writeContract).not.toHaveBeenCalled();
+    expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'CONTESTED', resolution: 'refund' });
+  });
+
+  it.each([
+    ['reject (cancellation)', { status: 'CANCELLED' }, CHAIN_JOB_STATUS.Funded, { action: 'reject' as const, reason: 'cancelled' as const }],
+    ['claimRefund (expiry)', { status: 'ACCEPTED' }, CHAIN_JOB_STATUS.Funded, { action: 'claimRefund' as const }],
+  ])('%s: deferred before signing; the job and the reservation are untouched', async (_label, overrides, chainStatus, data) => {
+    const { deps, jobs, signer, releaseJobEscrow } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'FUNDED', ...overrides })], { chainStatus });
+    deps.configGate = refuse;
+    await expect(processSettlementJob(deps, { data: { jobId: 'job-1', ...data } })).rejects.toBeInstanceOf(EscrowConfigUnverifiedError);
+    expect(signer.writeContract).not.toHaveBeenCalled();
+    expect(releaseJobEscrow).not.toHaveBeenCalled();
+    expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'FUNDED', settleTxHash: null });
+  });
+
+  it('a job already terminal on-chain is still mirrored (a read + DB write, no signature) while unverified', async () => {
+    const { deps, jobs, signer, finalize } = makeDeps([SUBMITTED_JOB()], { chainStatus: CHAIN_JOB_STATUS.Completed });
+    deps.configGate = refuse;
+    expect(await processSettlementJob(deps, settleJob())).toMatchObject({ outcome: 'reconciled', onChainStatus: 'COMPLETED' });
+    expect(signer.writeContract).not.toHaveBeenCalled();
+    expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'COMPLETED' });
+    expect(finalize).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'CONFIRMED' }));
   });
 });
 
