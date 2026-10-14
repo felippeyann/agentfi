@@ -86,9 +86,20 @@ export interface LocalChain {
   stop(): void;
 }
 
-/** Starts Anvil on `port` with `chainId` and returns clients bound to it. */
-export async function startLocalChain(opts: { port: number; chainId: number }): Promise<LocalChain> {
-  const child: ChildProcess = await startAnvil({ port: opts.port, chainId: opts.chainId });
+/** Starts Anvil on `port` with `chainId` (a fork of `forkUrl` when given) and returns clients bound to it. */
+export async function startLocalChain(opts: {
+  port: number;
+  chainId: number;
+  forkUrl?: string | undefined;
+  forkBlockNumber?: string | undefined;
+}): Promise<LocalChain> {
+  const child: ChildProcess = await startAnvil({
+    port: opts.port,
+    chainId: opts.chainId,
+    forkUrl: opts.forkUrl,
+    forkBlockNumber: opts.forkBlockNumber,
+    ...(opts.forkUrl ? { readyTimeoutMs: 90_000 } : {}),
+  });
   const rpcUrl = `http://127.0.0.1:${opts.port}`;
   const chain = defineChain({
     id: opts.chainId,
