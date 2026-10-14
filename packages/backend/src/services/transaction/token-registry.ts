@@ -51,6 +51,11 @@ for (const token of KNOWN_TOKENS) {
   );
 }
 
+/** Every registered token (read-only), for consistency checks such as the MCP token map's. */
+export function listKnownTokens(): readonly KnownToken[] {
+  return KNOWN_TOKENS;
+}
+
 export function isNativeTokenSymbol(token: string): boolean {
   return token.toUpperCase() === 'ETH';
 }
