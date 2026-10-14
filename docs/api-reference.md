@@ -260,7 +260,7 @@ because it could not be priced:
 | `transfer` | the native value, or the ERC-20 amount |
 | `swap` (Uniswap) | the input: WETH priced as the native asset, any other token as that token |
 | `swap-curve` | the input token amount |
-| `deposit` / `withdraw` (Aave), `supply-compound` / `withdraw-compound`, `deposit-erc4626` / `withdraw-erc4626` | the asset amount; a `"max"` withdrawal's amount is unknown before it executes, so it is **unpriced** (send an explicit amount while a daily limit applies) — except a `"max"` withdrawal from Aave or Compound that the backend proves, from the calldata it built, returns everything to the agent's own wallet from the trusted protocol contract (the pool the configured Aave provider reports, the configured Comet) with no native value: **nothing**, marked `metadata.volumeExemption` (`max-withdrawal-to-own-wallet`). An ERC-4626 vault is chosen by the agent and never exempt |
+| `deposit` / `withdraw` (Aave), `supply-compound` / `withdraw-compound`, `deposit-erc4626` / `withdraw-erc4626` | the asset amount; a `"max"` withdrawal's amount is unknown before it executes, so it is **unpriced** (send an explicit amount while a daily limit applies) — except a `"max"` withdrawal from Aave or Compound that the backend proves, from the calldata it built, returns everything to the agent's own wallet from the trusted protocol contract (the pool the configured Aave provider reports, the configured Comet) with no native value, signed by the agent's own wallet (not in Safe mode): **nothing**, marked `metadata.volumeExemption` (`max-withdrawal-to-own-wallet`). An ERC-4626 vault is chosen by the agent and never exempt |
 | `gmx-open` | the collateral amount (the keeper execution fee is checked against `maxValuePerTxEth` and not counted) |
 | `gmx-close` | nothing (a close returns value to the agent) |
 | `batch` | its native value; while a daily limit applies also every action whose calldata is exactly an ERC-20 `transfer` / `transferFrom` (see below) |
@@ -338,8 +338,12 @@ plus the day's x402 payments) would be exceeded. An approval never exceeds the
 daily limit and has no override. The approval also re-checks that the agent and
 its policy are active and the policy unexpired (`409 APPROVAL_AGENT_PAUSED`,
 `APPROVAL_POLICY_INACTIVE`, `APPROVAL_POLICY_EXPIRED`), and refuses a spend
-that reserved nothing while a daily limit now applies
-(`APPROVAL_UNCOUNTED_SPEND`). A refused approval changes nothing: the
+that reserved nothing because it was unpriced while a daily limit now applies
+(`APPROVAL_UNCOUNTED_SPEND`). Each row records why it reserved nothing
+(`metadata.volumeAccounting`: `zero` — e.g. a GMX close, approvable — or
+`unpriced`); a row created before that record is refused as unpriced (it
+cannot be told apart). The limit is compared exactly, in micro-USD. A refused
+approval changes nothing: the
 transaction stays `PENDING_APPROVAL` with its reservation where it was.
 
 ---

@@ -19,6 +19,7 @@
   "keywords": ["mcp", "defi", "ethereum", "ai-agents", "uniswap", "aave", "compound", "curve", "erc4626"],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@noble/hashes": "1.8.0",
     "zod": "^3.22.4",
     "dotenv": "^17.4.2",
     "tsx": "^4.7.0"

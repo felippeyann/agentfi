@@ -980,11 +980,16 @@ export interface paths {
          *     is capped by `maxValuePerTxEth` (native) and counted against the daily
          *     limit; `maxValuePerTxUsd` does not apply here.
          *
-         *     `token` is `"ETH"` or a contract address — the route does not resolve
-         *     symbols. Keys the schema does not define (e.g. `recipient`, `reason`)
-         *     are dropped silently; a body without `to`, `token` or `amount` is
+         *     `token` is `"ETH"` — the chain's native asset, which is POL on Polygon
+         *     (137) — or a contract address; the route does not resolve symbols.
+         *     `to` and a `token` address must be all-lowercase or carry a valid
+         *     EIP-55 checksum (viem `isAddress` strict): a malformed value or a
+         *     mixed-case address with a wrong checksum is `400 VALIDATION_FAILED`.
+         *     Keys the schema does not define (e.g. `recipient`, `reason`) are
+         *     dropped silently; a body without `to`, `token` or `amount` is
          *     `400 VALIDATION_FAILED`. The MCP tool `pay_agent` resolves a symbol
-         *     through its token registry before calling this route.
+         *     through its token registry before calling this route, and the MCP
+         *     tools refuse native `"ETH"` where the native asset is not ETH.
          */
         post: {
             parameters: {
@@ -1066,10 +1071,12 @@ export interface paths {
          *     limit. `"max"` (everything the agent holds there) cannot be priced: it
          *     is accepted outside the count only when the built calldata is exactly
          *     `Pool.withdraw(asset, max, <the agent's own wallet>)` to the pool the
-         *     configured PoolAddressesProvider reports, with no native value — the
-         *     row is then marked `metadata.volumeExemption` (`rule:
-         *     max-withdrawal-to-own-wallet`). Otherwise, under a daily limit, `503
-         *     PRICE_UNAVAILABLE`.
+         *     configured PoolAddressesProvider reports, with no native value, and
+         *     the address that signs it (the wallet provider's address for the
+         *     agent's wallet — `msg.sender`) IS the agent's own wallet (not in Safe
+         *     mode, where the owner EOA signs) — the row is then marked
+         *     `metadata.volumeExemption` (`rule: max-withdrawal-to-own-wallet`).
+         *     Otherwise, under a daily limit, `503 PRICE_UNAVAILABLE`.
          */
         post: {
             parameters: {
@@ -1146,7 +1153,8 @@ export interface paths {
          * @description An explicit amount is priced and counted against the daily volume
          *     limit. `"max"` is accepted outside the count only when the built
          *     calldata is exactly `Comet.withdraw(asset, max)` (from and to the
-         *     sender) to the configured Comet, with no native value — marked
+         *     signer) to the configured Comet, with no native value, and the signer
+         *     IS the agent's own wallet (not in Safe mode) — marked
          *     `metadata.volumeExemption`. Otherwise, under a daily limit, `503
          *     PRICE_UNAVAILABLE`.
          */
@@ -3364,9 +3372,12 @@ export interface paths {
                  *     `APPROVAL_POLICY_INACTIVE`, `APPROVAL_POLICY_EXPIRED`,
                  *     `APPROVAL_DAILY_LIMIT` (with `details`: the approval `day`,
                  *     `limitUsd`, `committedUsd` that day without this transaction,
-                 *     `requestedUsd`), `APPROVAL_UNCOUNTED_SPEND` (a daily limit applies
-                 *     now but the spend reserved nothing — it was unpriced when no limit
-                 *     applied; reject it).
+                 *     `requestedUsd`; compared exactly in micro-USD),
+                 *     `APPROVAL_UNCOUNTED_SPEND` (a daily limit applies now but the spend
+                 *     reserved nothing because it was unpriced when no limit applied —
+                 *     or its row predates the record of why; reject it. A spend counted
+                 *     as zero on purpose, e.g. a GMX close whose execution fee needed
+                 *     approval, is approved normally).
                  */
                 409: {
                     headers: {
@@ -4240,9 +4251,9 @@ export interface components {
             idempotencyKey?: string;
         };
         TransferRequest: {
-            /** @description "ETH" (native) or an ERC-20 contract address. The route does not resolve symbols such as "USDC". */
+            /** @description "ETH" (any case: the chain's native asset — POL on Polygon 137) or an ERC-20 contract address, all-lowercase or with a valid EIP-55 checksum. The route does not resolve symbols such as "USDC"; anything else is 400 VALIDATION_FAILED. */
             token: string;
-            /** @description Recipient address (receives the ETH or the tokens). */
+            /** @description Recipient address (receives the native asset or the tokens), all-lowercase or with a valid EIP-55 checksum. A mixed-case address whose checksum does not match (a typo) is 400 VALIDATION_FAILED, never re-checksummed. */
             to: string;
             /** @description Human-readable decimal amount in whole-token units (e.g. "1.5"). */
             amount: string;

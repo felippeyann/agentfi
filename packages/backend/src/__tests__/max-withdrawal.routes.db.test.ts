@@ -93,7 +93,19 @@ vi.mock('../services/transaction/simulator.service.js', () => ({
 vi.mock('../services/notification.service.js', () => ({
   notificationService: { notify: async () => undefined },
 }));
-vi.mock('../services/wallet/index.js', () => ({ getWalletService: () => ({}) }));
+// #180 review: a max withdrawal is proven against the address that signs it;
+// here the wallet signs as the agent's own address (EOA mode).
+// policy-review-followups.db.test.ts covers Safe mode.
+vi.mock('../services/wallet/index.js', () => ({
+  getWalletService: () => ({
+    getWalletAddress: async (walletId: string) => {
+      const { db } = await import('../db/client.js');
+      const agent = await db.agent.findFirst({ where: { walletId }, select: { safeAddress: true } });
+      if (!agent) throw new Error(`wallet ${walletId} not found`);
+      return agent.safeAddress;
+    },
+  }),
+}));
 vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({
   onEscrowTxOutcome: async () => undefined,
   isErc8183Enabled: () => false,
@@ -166,7 +178,8 @@ const CHAIN_ID = 84532;
 const USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 const COMET = '0x00000000000000000000000000000000000000a7';
 const POOL = '0x00000000000000000000000000000000000000Ab';
-const ATTACKER = '0x000000000000000000000000000000000000bAd0';
+// EIP-55 form: the transfer route refuses a mixed-case address whose checksum does not match (was `…bAd0`).
+const ATTACKER = '0x000000000000000000000000000000000000BAd0';
 const VAULT = '0x0000000000000000000000000000000000004626';
 let seq = 0;
 
