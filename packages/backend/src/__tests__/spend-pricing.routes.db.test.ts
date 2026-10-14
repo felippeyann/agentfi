@@ -97,6 +97,11 @@ vi.mock('../services/transaction/simulation-cache.js', () => ({
 vi.mock('../services/notification.service.js', () => ({
   notificationService: { notify: async () => undefined },
 }));
+// S9: the executor this suite routes batches / swaps through counts as verified
+// (the identity check against real deployments runs on Anvil, contract-identity.*.anvil.ts).
+vi.mock('../config/policy-stack-verification.runtime.js', () => ({
+  policyStackGate: (chainId: number) => ({ allowed: true, chainId, verifiedAt: new Date(), validUntil: new Date(Date.now() + 600_000) }),
+}));
 // #180 review: a max withdrawal is proven against the address that signs it;
 // here the wallet signs as the agent's own address (EOA mode).
 vi.mock('../services/wallet/index.js', () => ({

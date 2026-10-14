@@ -60,6 +60,14 @@ vi.mock('../config/escrow-verification.runtime.js', () => ({
       ? { allowed: true, chainId, verifiedAt: new Date(), validUntil: new Date(Date.now() + 600_000) }
       : { allowed: false, chainId, block: 'unverified', reason: `chain ${chainId} unverified`, retryAfterSeconds: 120 },
 }));
+// S9: the chain's AgentExecutor / AgentPolicyModule verification state (verified unless a test says otherwise).
+const stackGate = vi.hoisted(() => ({ verified: true }));
+vi.mock('../config/policy-stack-verification.runtime.js', () => ({
+  policyStackGate: (chainId: number) =>
+    stackGate.verified
+      ? { allowed: true, chainId, verifiedAt: new Date(), validUntil: new Date(Date.now() + 600_000) }
+      : { allowed: false, chainId, block: 'unverified', reason: `executor of chain ${chainId} unverified`, retryAfterSeconds: 60 },
+}));
 
 import {
   EarlierBroadcastLiveError,
@@ -176,6 +184,7 @@ beforeEach(() => {
   // A6b: by default no row in these tests was stamped for broadcast.
   volume.stopStampedTransaction.mockResolvedValue({ outcome: 'not-queued' });
   gate.verified = true;
+  stackGate.verified = true;
 });
 
 // ── Happy path ─────────────────────────────────────────────────────────────
@@ -503,6 +512,110 @@ describe('processTransactionJob — pre-submit guard', () => {
     const result = await processTransactionJob(job(), { ...deps, deferJob });
     expect(result).toEqual({ txHash: TX_HASH });
     expect(submitter.submit).toHaveBeenCalledTimes(1);
+    expect(deferJob).not.toHaveBeenCalled();
+    expect(row.status).toBe('SUBMITTED');
+  });
+});
+
+describe('processTransactionJob — the contract gate closes between the guard and the broadcast (#182 review)', () => {
+  const SIGNED = '0x5160000000000000000000000000000000000000000000000000000000000001' as Hex;
+
+  /**
+   * Like the real submitter: the guard has passed; the job then waits for the
+   * wallet lane, the RPC reads and the signature (`whileSigning` runs there,
+   * deterministically), awaits the hook, and only then sends.
+   */
+  function racingSubmitter(submitter: { submit: ReturnType<typeof vi.fn> }, sent: Hex[], whileSigning: () => void = () => undefined) {
+    submitter.submit.mockImplementation(async (params: { onBeforeBroadcast?: (h: Hex) => Promise<void> }) => {
+      whileSigning();
+      await params.onBeforeBroadcast?.(SIGNED);
+      sent.push(SIGNED);
+      return { txHash: SIGNED, nonce: 1 };
+    });
+  }
+
+  it('S9: an executor-routed transaction whose verification is revoked after the guard → deferred: nothing stamped or sent, nothing FAILED, QUEUED kept; sent once re-verified', async () => {
+    const { deps, submitter, update, updateMany, row } = makeDeps(txRow({ metadata: { queuePayload: { routedViaExecutor: true } } }));
+    (row as TxRow & { chainId: number }).chainId = 84532;
+    const sent: Hex[] = [];
+    racingSubmitter(submitter, sent, () => {
+      stackGate.verified = false; // a failed re-check / the TTL ran out while the job waited
+    });
+    const deferJob = vi.fn().mockResolvedValue(undefined);
+
+    const result = await processTransactionJob(job({ attemptsMade: 1 }), { ...deps, deferJob });
+
+    expect(result).toEqual({ txHash: null, outcome: 'deferred', reason: 'executor of chain 84532 unverified' });
+    expect(submitter.submit).toHaveBeenCalledTimes(1); // the guard passed
+    expect(deferJob).toHaveBeenCalledWith(60_000); // re-queued, no attempt consumed
+    expect(sent).toEqual([]);
+    expect(volume.markBroadcastAttempt).not.toHaveBeenCalled();
+    expect(volume.stopStampedTransaction).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(row).toMatchObject({ status: 'QUEUED', txHash: null, error: null });
+
+    // Verified again: the deferred job comes back and goes out.
+    stackGate.verified = true;
+    racingSubmitter(submitter, sent);
+    expect(await processTransactionJob(job({ attemptsMade: 1 }), { ...deps, deferJob })).toEqual({ txHash: SIGNED });
+    expect(sent).toEqual([SIGNED]);
+    expect(volume.markBroadcastAttempt).toHaveBeenCalledWith(deps.db, TX_ID, SIGNED);
+    expect(row).toMatchObject({ status: 'SUBMITTED', txHash: SIGNED });
+    expect(deferJob).toHaveBeenCalledTimes(1);
+  });
+
+  it('Q7: an escrow / ERC-8004 step whose escrow verification is revoked after the guard → deferred the same way (no orchestrator outcome)', async () => {
+    const { deps, submitter, updateMany, row } = makeDeps(txRow({ metadata: { erc8183: true, jobId: 'job-1', escrowStep: 'fund' } }));
+    (row as TxRow & { chainId: number }).chainId = 84532;
+    const sent: Hex[] = [];
+    racingSubmitter(submitter, sent, () => {
+      gate.verified = false;
+    });
+    const deferJob = vi.fn().mockResolvedValue(undefined);
+
+    const result = await processTransactionJob(job(), { ...deps, deferJob });
+
+    expect(result).toEqual({ txHash: null, outcome: 'deferred', reason: 'chain 84532 unverified' });
+    expect(deferJob).toHaveBeenCalledWith(120_000);
+    expect(sent).toEqual([]);
+    expect(volume.markBroadcastAttempt).not.toHaveBeenCalled();
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(escrowOutcomeMock).not.toHaveBeenCalled();
+    expect(row).toMatchObject({ status: 'QUEUED', txHash: null, error: null });
+
+    gate.verified = true;
+    racingSubmitter(submitter, sent);
+    expect(await processTransactionJob(job(), { ...deps, deferJob })).toEqual({ txHash: SIGNED });
+    expect(sent).toEqual([SIGNED]);
+  });
+
+  it('the production deferJob (BullMQ DelayedError) propagates from the hook path too; nothing stamped or sent', async () => {
+    const { deps, submitter, row } = makeDeps(txRow({ metadata: { queuePayload: { routedViaExecutor: true } } }));
+    const sent: Hex[] = [];
+    racingSubmitter(submitter, sent, () => {
+      stackGate.verified = false;
+    });
+    const delayed = Object.assign(new Error('moved to delayed'), { name: 'DelayedError' });
+
+    await expect(processTransactionJob(job(), { ...deps, deferJob: vi.fn().mockRejectedValue(delayed) })).rejects.toBe(delayed);
+
+    expect(sent).toEqual([]);
+    expect(volume.markBroadcastAttempt).not.toHaveBeenCalled();
+    expect(row).toMatchObject({ status: 'QUEUED', txHash: null });
+  });
+
+  it('scope: an ordinary transfer is sent even if a gate closes meanwhile (it never depends on those contracts)', async () => {
+    const { deps, submitter, row } = makeDeps(txRow());
+    const sent: Hex[] = [];
+    racingSubmitter(submitter, sent, () => {
+      stackGate.verified = false;
+      gate.verified = false;
+    });
+    const deferJob = vi.fn();
+
+    expect(await processTransactionJob(job(), { ...deps, deferJob })).toEqual({ txHash: SIGNED });
+    expect(sent).toEqual([SIGNED]);
     expect(deferJob).not.toHaveBeenCalled();
     expect(row.status).toBe('SUBMITTED');
   });

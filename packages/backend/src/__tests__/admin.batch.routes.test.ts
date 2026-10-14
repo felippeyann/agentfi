@@ -31,13 +31,17 @@ vi.hoisted(() => {
   process.env['EXECUTOR_ADDRESS_8453'] = '0x00000000000000000000000000000000000000E1';
 });
 
-const { mockDb, queueAdd } = vi.hoisted(() => ({
+const { mockDb, queueAdd, contractsGate } = vi.hoisted(() => ({
   mockDb: {
     agent: { findUnique: vi.fn(), findFirst: vi.fn() },
     transaction: { create: vi.fn() },
   } as any,
   queueAdd: vi.fn(),
+  contractsGate: vi.fn(),
 }));
+
+// S9: the executor's verification (real checks run on Anvil in contract-identity.*.anvil.ts).
+vi.mock('../config/policy-stack-verification.runtime.js', () => ({ policyStackGate: contractsGate }));
 
 vi.mock('@prisma/client', () => ({
   PrismaClient: vi.fn(() => mockDb),
@@ -82,6 +86,7 @@ beforeEach(() => {
   mockDb.agent.findFirst.mockResolvedValue(other);
   mockDb.transaction.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'tx-1', ...data }));
   queueAdd.mockResolvedValue({ id: 'job-1' });
+  contractsGate.mockImplementation((chainId: number) => ({ allowed: true, chainId, verifiedAt: new Date(), validUntil: new Date(Date.now() + 600_000) }));
 });
 
 async function buildApp(): Promise<FastifyInstance> {
@@ -140,4 +145,22 @@ describe('POST /admin/transactions/batch — the signing agent is always named',
     expect(data).toMatchObject({ agentId: named.id, walletId: named.walletId, from: named.safeAddress });
     await app.close();
   });
+});
+
+describe('POST /admin/transactions/batch — S9: only through a verified executor', () => {
+  it.each(['not-verified-yet', 'unverified', 'mismatch', 'expired'] as const)(
+    'gate %s → 503 CONTRACTS_UNVERIFIED with Retry-After; nothing written or queued',
+    async (block) => {
+      contractsGate.mockReturnValue({ allowed: false, chainId: 8453, block, reason: `executor ${block}`, retryAfterSeconds: 120 });
+      const app = await buildApp();
+      const res = await post(app, { chainId: 8453, actions: ACTIONS, agentId: named.id });
+      expect(res.statusCode).toBe(503);
+      expect(res.headers['retry-after']).toBe('120');
+      expect(res.json()).toMatchObject({ code: 'CONTRACTS_UNVERIFIED', chainId: 8453, state: block });
+      expect(contractsGate).toHaveBeenCalledWith(8453);
+      expect(mockDb.transaction.create).not.toHaveBeenCalled();
+      expect(queueAdd).not.toHaveBeenCalled();
+      await app.close();
+    },
+  );
 });

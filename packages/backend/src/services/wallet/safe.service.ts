@@ -4,6 +4,7 @@ import { createWalletClient, getAddress, http, type Address, type Hex } from 'vi
 import { privateKeyToAccount } from 'viem/accounts';
 import { createChainPublicClient, getChain, getPrimaryRpcUrl } from '../../config/chains.js';
 import { getContracts } from '../../config/contracts.js';
+import { policyStackGate } from '../../config/policy-stack-verification.runtime.js';
 
 export interface DeployedSafe {
   safeAddress: Address;
@@ -51,6 +52,20 @@ export class SafeService {
     const { ownerAddress, chainId, signerPrivateKey } = params;
     const contracts = getContracts(chainId);
     const rpcUrl = getPrimaryRpcUrl(chainId);
+
+    // S9: the policy module is enabled as a Safe MODULE below — it may then move
+    // everything the Safe holds without an owner signature. Nothing is deployed
+    // (no orphaned Safe) unless this process verified that the configured
+    // module runs this build's AgentPolicyModule and is the executor's module.
+    if (contracts.policyModule) {
+      const gate = policyStackGate(chainId);
+      if (!gate.allowed) {
+        throw new Error(
+          `Safe not deployed: the AgentPolicyModule of chain ${chainId} is not verified against this build (${gate.block}) — ` +
+            `it would be enabled as a module of the new Safe. ${gate.reason}`,
+        );
+      }
+    }
 
     const safeAccountConfig: SafeAccountConfig = {
       owners: [ownerAddress],

@@ -17,6 +17,8 @@ contract AgentPolicyModuleTest is Test {
     address internal targetAddr  = address(0x9ABC);
     address internal tokenAddr   = address(0xDEF0);
     address internal unauthorized = address(0xDEAD);
+    /// Stands in for the bound AgentExecutor (the only caller of validateTransaction / recordExecution).
+    address internal executorAddr = address(0xE0E0);
 
     /// Default open policy (no whitelists, 60 s cooldown, 1 ETH max)
     AgentPolicyModule.PolicyParams internal defaultPolicy;
@@ -43,6 +45,7 @@ contract AgentPolicyModuleTest is Test {
 
     function setUp() public {
         module = new AgentPolicyModule(operator);
+        module.bindExecutor(executorAddr); // this test contract is the deployer
 
         defaultPolicy = _makeParams(
             1 ether,       // maxValuePerTx
@@ -240,7 +243,7 @@ contract AgentPolicyModuleTest is Test {
 
     function test_ValidateTransaction_NoPolicy_AlwaysPasses() public {
         // No policy means no restrictions — any value, any target, any token
-        vm.prank(safe);
+        vm.prank(executorAddr);
         module.validateTransaction(safe, targetAddr, 999 ether, tokenAddr);
         // Must not revert
     }
@@ -253,7 +256,7 @@ contract AgentPolicyModuleTest is Test {
         vm.prank(operator);
         module.setPolicy(safe, defaultPolicy, 0);
 
-        vm.prank(safe);
+        vm.prank(executorAddr);
         module.validateTransaction(safe, targetAddr, 0, address(0));
         // Must not revert
     }
@@ -265,7 +268,7 @@ contract AgentPolicyModuleTest is Test {
         vm.prank(operator);
         module.setPolicy(safe, p, 0);
 
-        vm.prank(safe);
+        vm.prank(executorAddr);
         vm.expectRevert(AgentPolicyModule.PolicyPausedError.selector);
         module.validateTransaction(safe, targetAddr, 0, address(0));
     }
@@ -278,7 +281,7 @@ contract AgentPolicyModuleTest is Test {
         vm.prank(operator);
         module.setPolicy(safe, defaultPolicy, 0);
 
-        vm.prank(safe);
+        vm.prank(executorAddr);
         module.validateTransaction(safe, targetAddr, 1 ether, address(0));
     }
 
@@ -286,7 +289,7 @@ contract AgentPolicyModuleTest is Test {
         vm.prank(operator);
         module.setPolicy(safe, defaultPolicy, 0);
 
-        vm.prank(safe);
+        vm.prank(executorAddr);
         vm.expectRevert(
             abi.encodeWithSelector(
                 AgentPolicyModule.ValueExceedsLimit.selector,
@@ -305,7 +308,7 @@ contract AgentPolicyModuleTest is Test {
         vm.prank(operator);
         module.setPolicy(safe, defaultPolicy, 0);
 
-        vm.prank(safe);
+        vm.prank(executorAddr);
         module.validateTransaction(safe, address(0xBEEF), 0, address(0));
     }
 
@@ -321,7 +324,7 @@ contract AgentPolicyModuleTest is Test {
         vm.prank(operator);
         module.updateContractWhitelist(safe, targets, allowed);
 
-        vm.prank(safe);
+        vm.prank(executorAddr);
         module.validateTransaction(safe, targetAddr, 0, address(0));
     }
 
@@ -337,7 +340,7 @@ contract AgentPolicyModuleTest is Test {
         vm.prank(operator);
         module.updateContractWhitelist(safe, targets, allowed);
 
-        vm.prank(safe);
+        vm.prank(executorAddr);
         vm.expectRevert(
             abi.encodeWithSelector(AgentPolicyModule.ContractNotWhitelisted.selector, targetAddr)
         );
@@ -348,20 +351,129 @@ contract AgentPolicyModuleTest is Test {
     // validateTransaction — cooldown
     // =========================================================================
 
-    function test_ValidateTransaction_SecondTxTooEarly_Reverts() public {
+    function test_RecordExecution_SecondExecutionTooEarly_Reverts() public {
         vm.prank(operator);
         module.setPolicy(safe, defaultPolicy, 0); // cooldown = 60 s
 
         vm.warp(1000);
-        vm.prank(safe);
-        module.validateTransaction(safe, targetAddr, 0, address(0));
+        vm.prank(executorAddr);
+        module.recordExecution(safe);
+        assertEq(module.getLastTxTimestamp(safe), 1000);
 
         vm.warp(1030); // only 30 s elapsed; 30 s remaining
-        vm.prank(safe);
+        vm.prank(executorAddr);
         vm.expectRevert(
             abi.encodeWithSelector(AgentPolicyModule.CooldownActive.selector, 30)
         );
-        module.validateTransaction(safe, targetAddr, 0, address(0));
+        module.recordExecution(safe);
+
+        vm.warp(1060);
+        vm.prank(executorAddr);
+        module.recordExecution(safe);
+        assertEq(module.getLastTxTimestamp(safe), 1060);
+    }
+
+    /// @dev validateTransaction no longer touches the cooldown: any number of actions per execution.
+    function test_ValidateTransaction_DoesNotStampOrCheckCooldown() public {
+        vm.prank(operator);
+        module.setPolicy(safe, defaultPolicy, 0);
+        vm.warp(1000);
+        vm.prank(executorAddr);
+        module.recordExecution(safe);
+        for (uint256 i = 0; i < 3; i++) {
+            vm.prank(executorAddr);
+            module.validateTransaction(safe, targetAddr, 0, address(0));
+        }
+        assertEq(module.getLastTxTimestamp(safe), 1000);
+    }
+
+    // =========================================================================
+    // Executor binding and caller restriction (owner decision 2026-10-14)
+    // =========================================================================
+
+    function test_Constructor_RecordsDeployer_ExecutorUnbound() public {
+        AgentPolicyModule fresh = new AgentPolicyModule(operator);
+        assertEq(fresh.deployer(), address(this));
+        assertEq(fresh.executor(), address(0));
+    }
+
+    function test_BindExecutor_ByDeployer_EmitsAndSets() public {
+        AgentPolicyModule fresh = new AgentPolicyModule(operator);
+        vm.expectEmit(true, true, false, false);
+        emit AgentPolicyModule.ExecutorBound(executorAddr, address(this));
+        fresh.bindExecutor(executorAddr);
+        assertEq(fresh.executor(), executorAddr);
+    }
+
+    function test_BindExecutor_ByOperator() public {
+        AgentPolicyModule fresh = new AgentPolicyModule(operator);
+        vm.prank(operator);
+        fresh.bindExecutor(executorAddr);
+        assertEq(fresh.executor(), executorAddr);
+    }
+
+    function test_BindExecutor_OnlyOnce() public {
+        vm.expectRevert(AgentPolicyModule.ExecutorAlreadyBound.selector);
+        module.bindExecutor(address(0xBEEF));
+        vm.prank(operator);
+        vm.expectRevert(AgentPolicyModule.ExecutorAlreadyBound.selector);
+        module.bindExecutor(address(0xBEEF));
+        assertEq(module.executor(), executorAddr);
+    }
+
+    function test_BindExecutor_StrangerOrSafe_Reverts() public {
+        AgentPolicyModule fresh = new AgentPolicyModule(operator);
+        vm.prank(unauthorized);
+        vm.expectRevert(AgentPolicyModule.Unauthorized.selector);
+        fresh.bindExecutor(executorAddr);
+        vm.prank(safe);
+        vm.expectRevert(AgentPolicyModule.Unauthorized.selector);
+        fresh.bindExecutor(executorAddr);
+        assertEq(fresh.executor(), address(0));
+    }
+
+    function test_BindExecutor_ZeroAddress_Reverts() public {
+        AgentPolicyModule fresh = new AgentPolicyModule(operator);
+        vm.expectRevert(AgentPolicyModule.ZeroAddress.selector);
+        fresh.bindExecutor(address(0));
+    }
+
+    function test_Unbound_RefusesEveryValidation() public {
+        AgentPolicyModule fresh = new AgentPolicyModule(operator);
+        vm.prank(executorAddr);
+        vm.expectRevert(AgentPolicyModule.ExecutorNotBound.selector);
+        fresh.validateTransaction(safe, targetAddr, 0, address(0));
+        vm.prank(executorAddr);
+        vm.expectRevert(AgentPolicyModule.ExecutorNotBound.selector);
+        fresh.recordExecution(safe);
+    }
+
+    /// @dev Griefing: before the fix anyone could call validateTransaction(victim, …) and restart
+    ///      the victim's cooldown. Now only the bound executor can — not a stranger, not the
+    ///      operator, not the Safe itself (the Safe goes through the executor).
+    function test_ValidationEntryPoints_OnlyBoundExecutor() public {
+        vm.prank(operator);
+        module.setPolicy(safe, defaultPolicy, 0);
+        address[3] memory callers = [unauthorized, operator, safe];
+        for (uint256 i = 0; i < callers.length; i++) {
+            vm.prank(callers[i]);
+            vm.expectRevert(AgentPolicyModule.Unauthorized.selector);
+            module.validateTransaction(safe, targetAddr, 0, address(0));
+            vm.prank(callers[i]);
+            vm.expectRevert(AgentPolicyModule.Unauthorized.selector);
+            module.recordExecution(safe);
+        }
+        assertEq(module.getLastTxTimestamp(safe), 0);
+    }
+
+    function testFuzz_RecordExecution_StrangerNeverStamps(address caller) public {
+        vm.assume(caller != executorAddr);
+        vm.prank(operator);
+        module.setPolicy(safe, defaultPolicy, 0);
+        vm.prank(caller);
+        vm.expectRevert(AgentPolicyModule.Unauthorized.selector);
+        module.recordExecution(safe);
+        assertEq(module.getLastTxTimestamp(safe), 0);
     }
 
     // =========================================================================

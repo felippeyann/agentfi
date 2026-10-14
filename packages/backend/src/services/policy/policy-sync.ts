@@ -81,6 +81,9 @@ export type DesiredPolicyResult = { ok: true; desired: DesiredOnChainPolicy } | 
 
 const ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
 
+/** Every number the sync encodes is a uint256 on the module. */
+const MAX_UINT256 = 2n ** 256n - 1n;
+
 function normalizeList(field: string, raw: string[], problems: string[]): Address[] {
   const seen = new Set<string>();
   const out: Address[] = [];
@@ -121,6 +124,9 @@ export function desiredOnChainPolicy(input: DbPolicyInput): DesiredPolicyResult 
       `maxValuePerTxEth ${JSON.stringify(input.policy.maxValuePerTxEth)} is not a plain decimal with at most 18 decimals ` +
         '(AgentPolicyModule stores wei)',
     );
+  } else if (wei > MAX_UINT256) {
+    // #179 review P2-1: encodeFunctionData would throw (→ 500) instead of a refusal.
+    problems.push(`maxValuePerTxEth ${JSON.stringify(input.policy.maxValuePerTxEth)} exceeds uint256 in wei — AgentPolicyModule cannot store it`);
   } else if (wei === 0n) {
     problems.push(
       'maxValuePerTxEth "0" (no native value at all) cannot be stored: AgentPolicyModule.setPolicy reverts InvalidPolicy for 0. ' +
@@ -128,7 +134,11 @@ export function desiredOnChainPolicy(input: DbPolicyInput): DesiredPolicyResult 
     );
   }
   const cooldown = input.policy.cooldownSeconds;
+  // A safe integer is always far below uint256; expiresAt below is a Date in seconds (same).
   if (!Number.isSafeInteger(cooldown) || cooldown < 0) problems.push(`cooldownSeconds ${cooldown} is not a non-negative integer`);
+  if (input.policy.expiresAt && !(input.policy.expiresAt.getTime() >= 0)) {
+    problems.push(`expiresAt ${String(input.policy.expiresAt)} is not a time the module can store`);
+  }
 
   const allowedContracts = normalizeList('allowedContracts', input.policy.allowedContracts, problems);
   const allowedTokens = normalizeList('allowedTokens', input.policy.allowedTokens, problems);

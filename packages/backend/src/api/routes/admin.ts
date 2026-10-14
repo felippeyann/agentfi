@@ -13,6 +13,7 @@ import { getAddress, type Address } from 'viem';
 import { AGENT_EXECUTOR_ABI } from '../../abi/AgentExecutor.abi.js';
 import { logger } from '../middleware/logger.js';
 import { isLocalOnlyRequest } from '../middleware/local-request.js';
+import { refuseUnverifiedContracts } from '../contracts-gate.js';
 import { publicErrorMessage } from '../errors/sanitize.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
 import { transactionJobId } from '../../queues/transaction-job-id.js';
@@ -29,6 +30,7 @@ import { PolicySyncService, type PolicySyncOutcome } from '../../services/policy
 import type { PolicyModuleReader } from '../../services/policy/policy-sync.js';
 import { createChainPublicClient } from '../../config/chains.js';
 import { getWalletService } from '../../services/wallet/index.js';
+import { policyStackGate } from '../../config/policy-stack-verification.runtime.js';
 
 const policyService = new PolicyService(db);
 const reputationService = new ReputationService();
@@ -60,6 +62,7 @@ const policySync = new PolicySyncService({
   },
   walletAddress: (walletId) => getWalletService().getWalletAddress(walletId),
   policyModule: configuredPolicyModule,
+  contractsGate: (chainId) => policyStackGate(chainId),
   logger,
 });
 
@@ -257,6 +260,8 @@ export async function adminRoutes(fastify: FastifyInstance) {
     if (!contracts.executor) {
       return reply.code(400).send({ error: `Executor not deployed on chain ${body.chainId}` });
     }
+    // S9: nothing is routed through an executor this process has not verified.
+    if (refuseUnverifiedContracts(reply, body.chainId, 'an admin batch routed through the AgentExecutor')) return;
 
     const { encodeFunctionData } = await import('viem');
 
@@ -680,6 +685,25 @@ export async function adminRoutes(fastify: FastifyInstance) {
     if (!requireAdmin(request, reply)) return;
     const { escrowVerificationSnapshot, escrowVerificationSettings } = await import('../../config/escrow-verification.runtime.js');
     return { process: 'api', ...escrowVerificationSettings(), chains: escrowVerificationSnapshot({ withReason: true }) };
+  });
+
+  /**
+   * GET /admin/contracts/verification — S9: this API process's verification
+   * of each chain's AgentExecutor / AgentPolicyModule (runtime code of this
+   * build + bindings), with the reason when executor-routed transactions,
+   * policy syncs and Safe module enablement are blocked. The worker verifies
+   * on its own (logs + notifications).
+   */
+  fastify.get('/admin/contracts/verification', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+    const { policyStackSnapshot, policyStackVerificationSettings } = await import('../../config/policy-stack-verification.runtime.js');
+    const { EXPECTED_CONTRACT_CODE_VERSION } = await import('../../config/contract-identity.js');
+    return {
+      process: 'api',
+      buildCodeVersion: EXPECTED_CONTRACT_CODE_VERSION,
+      ...policyStackVerificationSettings(),
+      chains: policyStackSnapshot({ withReason: true }),
+    };
   });
 
   /**

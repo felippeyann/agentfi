@@ -14,8 +14,17 @@ pragma solidity 0.8.24;
  * - Daily volume cap (USD via oracle, or ETH as fallback)
  * - Contract address whitelist
  * - Token address whitelist
- * - Minimum cooldown between transactions
+ * - Minimum cooldown between executions (one per `executeBatch` / `executeSingle`)
  * - Emergency pause (kill switch) per Safe
+ *
+ * Executor binding (owner decision 2026-10-14, before C4): `validateTransaction`
+ * and `recordExecution` accept ONLY the bound `AgentExecutor`. The executor is
+ * deployed after the module (its constructor takes the module), so it is bound
+ * once with `bindExecutor`, by the deployer or the operator, in the same
+ * deployment broadcast (`script/Deploy.s.sol`). Until bound, the module refuses
+ * every validation. Before this, `validateTransaction` had no caller check —
+ * anyone could restart any Safe's cooldown — and the cooldown was applied per
+ * action, so every batch of two actions reverted once a cooldown was set.
  */
 contract AgentPolicyModule {
     // -------------------------------------------------------------------------
@@ -28,6 +37,7 @@ contract AgentPolicyModule {
     event TransactionValidated(address indexed safe, address indexed target, uint256 value);
     event ContractWhitelistUpdated(address indexed safe, address indexed target, bool allowed);
     event TokenWhitelistUpdated(address indexed safe, address indexed token, bool allowed);
+    event ExecutorBound(address indexed executor, address indexed by);
 
     // -------------------------------------------------------------------------
     // Errors
@@ -43,6 +53,8 @@ contract AgentPolicyModule {
     error CooldownActive(uint256 remaining);
     error InvalidPolicy();
     error ZeroAddress();
+    error ExecutorAlreadyBound();
+    error ExecutorNotBound();
 
     // -------------------------------------------------------------------------
     // Types
@@ -82,6 +94,12 @@ contract AgentPolicyModule {
     /// @notice Operator address — can set policies for any Safe.
     address public immutable operator;
 
+    /// @notice The account that deployed the module — may bind the executor (once), like the operator.
+    address public immutable deployer;
+
+    /// @notice The only AgentExecutor whose calls are validated; bound once with `bindExecutor`.
+    address public executor;
+
     /// @notice Policy per Safe address.
     mapping(address safe => AgentPolicy) private _policies;
 
@@ -104,6 +122,29 @@ contract AgentPolicyModule {
     constructor(address _operator) {
         if (_operator == address(0)) revert ZeroAddress();
         operator = _operator;
+        deployer = msg.sender;
+    }
+
+    // -------------------------------------------------------------------------
+    // Executor binding
+    // -------------------------------------------------------------------------
+
+    /**
+     * @notice Binds the AgentExecutor whose calls this module validates. Once only.
+     * @dev Called by the deployer or the operator right after the executor is deployed
+     *      (`script/Deploy.s.sol`, same broadcast). Until then every validation reverts.
+     */
+    function bindExecutor(address _executor) external {
+        if (msg.sender != deployer && msg.sender != operator) revert Unauthorized();
+        if (executor != address(0)) revert ExecutorAlreadyBound();
+        if (_executor == address(0)) revert ZeroAddress();
+        executor = _executor;
+        emit ExecutorBound(_executor, msg.sender);
+    }
+
+    function _onlyExecutor() internal view {
+        if (executor == address(0)) revert ExecutorNotBound();
+        if (msg.sender != executor) revert Unauthorized();
     }
 
     // -------------------------------------------------------------------------
@@ -196,8 +237,10 @@ contract AgentPolicyModule {
     // -------------------------------------------------------------------------
 
     /**
-     * @notice Validates a transaction against the agent's policy.
-     * @dev Now O(1) for whitelist checks.
+     * @notice Validates ONE action of an execution against the agent's policy: active,
+     *         expiry, value, contract whitelist, token whitelist. Bound executor only.
+     * @dev O(1). The cooldown is not checked here: it applies once per execution
+     *      (`recordExecution`), so a batch of several actions is one execution.
      * @param target The contract address being called.
      * @param value ETH value being sent.
      * @param tokenAddress Token involved in the operation (address(0) if ETH-only).
@@ -208,6 +251,7 @@ contract AgentPolicyModule {
         uint256 value,
         address tokenAddress
     ) external {
+        _onlyExecutor();
         if (!_hasPolicy[safe]) return; // No policy = no restrictions
 
         AgentPolicy storage policy = _policies[safe];
@@ -224,15 +268,6 @@ contract AgentPolicyModule {
             revert ValueExceedsLimit(value, policy.maxValuePerTx);
         }
 
-        // Check cooldown
-        uint256 lastTx = _lastTxTimestamp[safe];
-        if (lastTx > 0 && policy.cooldownBetweenTx > 0) {
-            uint256 elapsed = block.timestamp - lastTx;
-            if (elapsed < policy.cooldownBetweenTx) {
-                revert CooldownActive(policy.cooldownBetweenTx - elapsed);
-            }
-        }
-
         // O(1) Check contract whitelist
         if (policy.numAllowedContracts > 0) {
             if (!_isContractAllowed[safe][target]) {
@@ -247,10 +282,28 @@ contract AgentPolicyModule {
             }
         }
 
-        // Update last transaction timestamp
-        _lastTxTimestamp[safe] = block.timestamp;
-
         emit TransactionValidated(safe, target, value);
+    }
+
+    /**
+     * @notice Checks the cooldown and records the execution time — ONCE per
+     *         `executeBatch` / `executeSingle` of the bound executor, however many
+     *         actions it carries.
+     * @dev Bound executor only: nobody else can restart a Safe's cooldown.
+     */
+    function recordExecution(address safe) external {
+        _onlyExecutor();
+        if (!_hasPolicy[safe]) return; // No policy = no restrictions
+
+        AgentPolicy storage policy = _policies[safe];
+        uint256 lastTx = _lastTxTimestamp[safe];
+        if (lastTx > 0 && policy.cooldownBetweenTx > 0) {
+            uint256 elapsed = block.timestamp - lastTx;
+            if (elapsed < policy.cooldownBetweenTx) {
+                revert CooldownActive(policy.cooldownBetweenTx - elapsed);
+            }
+        }
+        _lastTxTimestamp[safe] = block.timestamp;
     }
 
     // -------------------------------------------------------------------------

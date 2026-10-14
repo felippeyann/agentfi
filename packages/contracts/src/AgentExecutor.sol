@@ -116,12 +116,16 @@ contract AgentExecutor {
             revert InsufficientValueForFee(msg.value, totalActionValue + fee);
         }
 
+        // Policy: the cooldown once per execution (the whole batch), then every action.
+        bool governed = policyModule.hasPolicy(msg.sender);
+        if (governed) policyModule.recordExecution(msg.sender);
+
         // Execute all actions
         for (uint256 i = 0; i < actions.length; i++) {
             Action calldata action = actions[i];
 
             // Validate against policy if one exists
-            if (policyModule.hasPolicy(msg.sender)) {
+            if (governed) {
                 policyModule.validateTransaction(msg.sender, action.target, action.value, action.token);
             }
 
@@ -163,6 +167,7 @@ contract AgentExecutor {
         }
 
         if (policyModule.hasPolicy(msg.sender)) {
+            policyModule.recordExecution(msg.sender);
             policyModule.validateTransaction(msg.sender, action.target, action.value, action.token);
         }
 

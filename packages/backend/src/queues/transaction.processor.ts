@@ -58,7 +58,7 @@
 import type { Job, Queue } from 'bullmq';
 import type { PrismaClient } from '@prisma/client';
 import type { Address, Hex, TransactionReceipt } from 'viem';
-import { preSubmitGuard } from '../services/transaction/pre-submit-guard.js';
+import { preSubmitGuard, recheckBeforeBroadcast } from '../services/transaction/pre-submit-guard.js';
 import { finalizeA2APaymentJob } from '../services/job/payment-finalizer.service.js';
 import { onEscrowTxOutcome } from '../services/job/escrow-erc8183.runtime.js';
 import { weiToUsd } from '../services/transaction/price.service.js';
@@ -137,6 +137,29 @@ export class EarlierBroadcastLiveError extends Error {
   }
 }
 
+/**
+ * #179 review P2-2: thrown from the broadcast hook when a policy-sync call no
+ * longer matches the stored policy (a change landed after the guard). Nothing
+ * is stamped or sent; the processor fails the row.
+ */
+export class PolicySyncSupersededError extends Error {}
+
+/**
+ * #182 review: thrown from the broadcast hook when the verification the guard
+ * relied on (Q7 escrow, S9 executor / policy module) expired or was revoked
+ * while the job waited for the lane, the RPC reads and the signature. Nothing
+ * is stamped or sent; the processor defers the job (no attempt consumed).
+ */
+export class ContractsUnverifiedAtBroadcastError extends Error {
+  constructor(
+    reason: string,
+    readonly delayMs: number,
+  ) {
+    super(reason);
+    this.name = 'ContractsUnverifiedAtBroadcastError';
+  }
+}
+
 /** What the post-confirmation accounting needs — from the queue payload, or from `metadata.queuePayload` on a replay. */
 export interface PostConfirmationInput {
   transactionId: string;
@@ -202,7 +225,7 @@ export async function processTransactionJob(
     // Q7: nothing was written; the row stays QUEUED and the job comes back later.
     logger.warn(
       { transactionId: data.transactionId, chainId: data.chainId, delayMs: guard.delayMs, reason: guard.reason },
-      'Escrow transaction deferred — on-chain configuration not verified (no attempt consumed)',
+      'Transaction deferred — on-chain configuration not verified (escrow: Q7; executor / policy module: S9; no attempt consumed)',
     );
     await deps.deferJob?.(guard.delayMs);
     return { txHash: null, outcome: 'deferred', reason: guard.reason };
@@ -224,10 +247,39 @@ export async function processTransactionJob(
       value: BigInt(data.value),
       onBeforeBroadcast: async (signedTxHash) => {
         await refuseIfEarlierBroadcastLive(deps, data, signedTxHash);
+        // Inside the wallet lane, after signing, before anything is stamped
+        // or sent (the guard ran before the lane): a policy-sync call is
+        // re-derived from the policy stored NOW (#179 review P2-2), and the
+        // Q7 / S9 gate is asked again (#182 review).
+        const recheck = await recheckBeforeBroadcast(db, data.transactionId);
+        if (recheck?.kind === 'superseded') throw new PolicySyncSupersededError(recheck.reason);
+        if (recheck?.kind === 'defer') throw new ContractsUnverifiedAtBroadcastError(recheck.reason, recheck.delayMs);
         await markBroadcastAttempt(db, data.transactionId, signedTxHash);
       },
     }));
   } catch (err) {
+    if (err instanceof ContractsUnverifiedAtBroadcastError) {
+      // Like the guard's deferral: nothing was stamped, sent or written; the
+      // row stays QUEUED and the job comes back without consuming an attempt.
+      logger.warn(
+        { transactionId: data.transactionId, chainId: data.chainId, delayMs: err.delayMs, reason: err.message },
+        'Transaction deferred inside the wallet lane — on-chain configuration no longer verified (nothing stamped or sent; no attempt consumed)',
+      );
+      await deps.deferJob?.(err.delayMs);
+      return { txHash: null, outcome: 'deferred', reason: err.message };
+    }
+    if (err instanceof PolicySyncSupersededError) {
+      // Nothing was stamped or sent for this attempt. Conditional like every
+      // other stop (A6 / A6b): a row an EARLIER attempt was stamped for is
+      // handed to the chain, never failed while it may still be mined.
+      const failed = await db.transaction.updateMany({
+        where: { id: data.transactionId, status: 'QUEUED', txHash: null, broadcastAttemptedAt: null },
+        data: { status: 'FAILED', error: err.message },
+      });
+      if (failed.count === 0) await stopStampedTransaction(db, data.transactionId, err.message, { handToChain: true });
+      logger.warn({ transactionId: data.transactionId, reason: err.message }, 'Policy-sync call superseded inside the wallet lane — not broadcast');
+      return { txHash: null, outcome: 'blocked', reason: err.message };
+    }
     if (!(err instanceof EarlierBroadcastLiveError)) throw err;
     // A6b: a previous attempt reached the chain (its SUBMITTED write was lost,
     // or its send "failed" after the node took it). Record that one.

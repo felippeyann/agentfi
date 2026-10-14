@@ -319,3 +319,57 @@ export function escrowVerificationIntervalProblem(ttlSeconds: number, recheckSec
     'operation in the gap.'
   );
 }
+
+// ── 7b. Safe mode (owner decision 2026-10-14) ────────────────────────────
+
+/**
+ * `SAFE_DEPLOYER_PRIVATE_KEY` turns on Safe mode (agents provisioned with a
+ * Safe). It cannot work today: the module enablement is signed by the
+ * deployer, who is not an owner (protocol-kit refuses — the Safe stays
+ * deployed and orphaned, the agent falls back to its EOA), and every agent
+ * transaction is signed by the agent's EOA, never from the Safe (no
+ * owner-signed Safe-transaction path). Reproduced on an Anvil fork of Base
+ * Sepolia (`contract-identity.safe.anvil.ts`). FATAL in production / staging
+ * until that path exists; in development a warning (and the module enablement
+ * still requires the S9 identity check of the policy module).
+ */
+export function safeModeVerdict(source: EnvSource, nodeEnv: string): { fatal: string | null; warning: string | null } {
+  if ((source['SAFE_DEPLOYER_PRIVATE_KEY'] ?? '').trim() === '') return { fatal: null, warning: null };
+  const why =
+    'Safe mode cannot work yet: the policy-module enablement is signed by the deployer, who is not an owner of the new Safe ' +
+    '(it is refused and the agent falls back to its EOA, leaving an orphaned Safe the deployer paid for), and agent ' +
+    'transactions are signed by the agent EOA, never executed from the Safe — funds sent to a Safe address could not be ' +
+    'moved by the backend. It stays refused until an owner-signed Safe-transaction path exists.';
+  if (PRODUCTION_LIKE.has(nodeEnv)) {
+    return { fatal: `FATAL: SAFE_DEPLOYER_PRIVATE_KEY is set with NODE_ENV=${nodeEnv}. ${why} Unset it (agents use their EOA).`, warning: null };
+  }
+  return {
+    fatal: null,
+    warning:
+      `WARNING: SAFE_DEPLOYER_PRIVATE_KEY is set (NODE_ENV=${nodeEnv}): Safe mode is experimental. ${why} ` +
+      'The module is only enabled after the S9 identity check of POLICY_MODULE_ADDRESS.',
+  };
+}
+
+// ── 7. Expected policy-module operator (S9) ──────────────────────────────
+
+/**
+ * FATAL message when production / staging configures an AgentPolicyModule
+ * (`POLICY_MODULE_ADDRESS_<id>`) without `POLICY_OPERATOR_ADDRESS_<id>`; null
+ * otherwise. The module's `operator()` can set and pause every agent's
+ * on-chain policy: the verification must compare it with an explicit value.
+ */
+export function policyOperatorMissingProblem(source: EnvSource, nodeEnv: string, chainIds: readonly number[]): string | null {
+  if (!PRODUCTION_LIKE.has(nodeEnv)) return null;
+  const missing = chainIds.filter(
+    (chainId) =>
+      (source[`POLICY_MODULE_ADDRESS_${chainId}`] ?? '').trim() !== '' &&
+      (source[`POLICY_OPERATOR_ADDRESS_${chainId}`] ?? '').trim() === '',
+  );
+  if (missing.length === 0) return null;
+  return (
+    `FATAL: NODE_ENV=${nodeEnv} configures POLICY_MODULE_ADDRESS_${missing[0]} without POLICY_OPERATOR_ADDRESS_${missing[0]}` +
+    `${missing.length > 1 ? ` (also chains ${missing.slice(1).join(', ')})` : ''}. Set it to the OPERATOR_ADDRESS the module was ` +
+    'deployed with (Deploy.s.sol): the backend refuses a module whose operator() differs (S9).'
+  );
+}

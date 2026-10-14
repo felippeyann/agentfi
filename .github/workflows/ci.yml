@@ -147,6 +147,11 @@ jobs:
           version: nightly
       - working-directory: packages/contracts
         run: forge build
+      # S9: the runtime bytecode the backend verifies deployments against must
+      # be this build's (fails when a contract or foundry.toml changed without
+      # `npm run contracts:code`).
+      - name: Embedded contract code matches the artifacts
+        run: node scripts/gen-contract-code.mjs --check
       - run: npm ci
       - run: npx prisma generate --schema=packages/backend/src/db/schema.prisma
       - name: Apply database migrations

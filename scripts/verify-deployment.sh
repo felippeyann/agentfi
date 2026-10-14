@@ -54,6 +54,10 @@ echo "--- AgentPolicyModule ($POLICY_MODULE) ---"
 ACTUAL_OPERATOR=$(cast call "$POLICY_MODULE" "operator()(address)" --rpc-url "$RPC_URL")
 check "operator()" "$ACTUAL_OPERATOR" "$EXPECTED_OPERATOR"
 
+# The module validates only the executor bound once by Deploy.s.sol (bindExecutor).
+ACTUAL_BOUND_EXECUTOR=$(cast call "$POLICY_MODULE" "executor()(address)" --rpc-url "$RPC_URL")
+check "executor()" "$ACTUAL_BOUND_EXECUTOR" "$EXECUTOR"
+
 echo ""
 echo "--- AgentExecutor ($EXECUTOR) ---"
 ACTUAL_FEE_WALLET=$(cast call "$EXECUTOR" "feeWallet()(address)" --rpc-url "$RPC_URL")

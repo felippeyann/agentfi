@@ -19,6 +19,7 @@ import { finalizeA2APaymentJob } from '../job/payment-finalizer.service.js';
 import { onEscrowTxOutcome, vetBindBeforeBroadcast } from '../job/escrow-erc8183.runtime.js';
 import { settleVolumeAfterFailure, stopStampedTransaction } from '../policy/daily-volume.js';
 import { escrowConfigGate } from '../../config/escrow-verification.runtime.js';
+import { policyStackGate } from '../../config/policy-stack-verification.runtime.js';
 import { getContracts } from '../../config/contracts.js';
 import {
   desiredOnChainPolicy,
@@ -77,6 +78,54 @@ function escrowConfigDeferral(tx: { chainId: number; metadata: unknown }): PreSu
   const gate = escrowConfigGate(tx.chainId);
   if (gate.allowed) return null;
   return { action: 'defer', reason: gate.reason, delayMs: gate.retryAfterSeconds * 1000 };
+}
+
+/**
+ * S9 — a transaction that gives the chain's AgentExecutor / AgentPolicyModule
+ * value or authority (routed through the executor: `queuePayload.routedViaExecutor`;
+ * or an on-chain policy sync) waits while this process has not verified them
+ * against this build (`policyStackGate`). Nothing is written: the row stays
+ * QUEUED and the job comes back after the re-check interval, no attempt
+ * consumed. Returns the `defer` decision, or null to go on.
+ */
+function contractsDeferral(tx: { chainId: number; metadata: unknown }, isPolicySync: boolean): PreSubmitDecision | null {
+  const routed = (tx.metadata as { queuePayload?: { routedViaExecutor?: unknown } } | null)?.queuePayload?.routedViaExecutor === true;
+  if (!routed && !isPolicySync) return null;
+  const gate = policyStackGate(tx.chainId);
+  if (gate.allowed) return null;
+  return { action: 'defer', reason: gate.reason, delayMs: gate.retryAfterSeconds * 1000 };
+}
+
+/** What `recheckBeforeBroadcast` found: the send must not happen now. */
+export type BroadcastRecheck =
+  /** A policy-sync call the stored policy has moved past: the processor FAILs the row. */
+  | { kind: 'superseded'; reason: string }
+  /** The row's on-chain configuration is no longer verified: the processor DEFERS the job. */
+  | { kind: 'defer'; reason: string; delayMs: number };
+
+/**
+ * The guard runs before the submitter takes the wallet lane, reads the chain
+ * and signs. What it checked can change in that window, so the processor
+ * calls this from `onBeforeBroadcast` — inside the lane, after signing,
+ * before anything is stamped or sent — and acts on it:
+ *  - #179 review P2-2: a policy change landing in between (a pause after a
+ *    queued `resume`…) supersedes a policy-sync call → `superseded`;
+ *  - #182 review: the verification the guard relied on expired or was
+ *    revoked (a failed re-check) → `defer`, with the guard's scope: Q7 for
+ *    escrow / ERC-8004 steps, S9 for executor-routed transactions and
+ *    policy syncs. Ordinary transactions never wait on either.
+ * Null: the send may go ahead. The order is the guard's: superseded first.
+ */
+export async function recheckBeforeBroadcast(db: PrismaClient, transactionId: string): Promise<BroadcastRecheck | null> {
+  const row = await db.transaction.findUnique({ where: { id: transactionId }, select: { chainId: true, metadata: true } });
+  if (!row) return null;
+  const sync = policySyncMetadataOf(row.metadata);
+  if (sync) {
+    const superseded = await policySyncBlockReason(db, transactionId, row.chainId, sync);
+    if (superseded) return { kind: 'superseded', reason: superseded };
+  }
+  const deferred = sync ? contractsDeferral(row, true) : (escrowConfigDeferral(row) ?? contractsDeferral(row, false));
+  return deferred?.action === 'defer' ? { kind: 'defer', reason: deferred.reason, delayMs: deferred.delayMs } : null;
 }
 
 function resolveBlockReason(agent: AgentSnapshot, now: Date): string | null {
@@ -198,10 +247,10 @@ export async function preSubmitGuard(
   const reason = sync
     ? await policySyncBlockReason(db, transactionId, tx.chainId, sync)
     : resolveBlockReason(tx.agent, new Date());
-  if (!reason && sync) return { action: 'proceed' };
+  if (!reason && sync) return contractsDeferral(tx, true) ?? { action: 'proceed' };
   if (!reason) {
     // Q7: an escrow-dependent step waits while its chain is unverified.
-    const deferred = escrowConfigDeferral(tx);
+    const deferred = escrowConfigDeferral(tx) ?? contractsDeferral(tx, false);
     if (deferred) return deferred;
     // C3d (H14 dry-run): the provider's ERC-8004 bind is only valid while the
     // job is live and Funded. It was enqueued at FUNDED; a cancellation (and

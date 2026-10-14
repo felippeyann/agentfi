@@ -61,7 +61,7 @@ cd packages/contracts
 forge test
 ```
 
-Last line: `341 tests passed, 0 failed, 2 skipped (343 total tests)`. The two skipped suites are the Base Sepolia fork suites; to run them against the real registries: `BASE_SEPOLIA_FORK_URL=https://sepolia.base.org forge test --match-path "test/*.fork.t.sol"` → `14 tests passed, 0 failed, 0 skipped` (the public RPC sometimes rate-limits: rerun).
+Last line: `356 tests passed, 0 failed, 2 skipped (358 total tests)`. The two skipped suites are the Base Sepolia fork suites; to run them against the real registries: `BASE_SEPOLIA_FORK_URL=https://sepolia.base.org forge test --match-path "test/*.fork.t.sol"` → `14 tests passed, 0 failed, 0 skipped` (the public RPC sometimes rate-limits: rerun).
 
 ### 2.4 Environment (same shell for both scripts)
 
@@ -82,12 +82,13 @@ Leave every other variable unset: the escrow script then uses USDC `0x036C…CF7
 forge script script/Deploy.s.sol --rpc-url base_sepolia --account agentfi-deployer --broadcast --verify
 ```
 
-Without an Etherscan key, drop `--verify` (the contracts work unverified; see "Verify later" below). Enter the keystore password when asked. The output ends with:
+Without an Etherscan key, drop `--verify` (the contracts work unverified; see "Verify later" below). Enter the keystore password when asked. **Deploy from the commit the backend runs** (S9): the backend accepts only the runtime bytecode of its own build (`npm run contracts:code:check` passes on that commit). The script deploys the module, the executor, then binds the executor to the module in the same broadcast (`Executor bound:` line = the executor). The output ends with:
 
 ```
 --- Copy to .env ---
 POLICY_MODULE_ADDRESS_84532=0x…
 EXECUTOR_ADDRESS_84532=0x…
+POLICY_OPERATOR_ADDRESS_84532=0x…   (= OPERATOR_ADDRESS)
 OPERATOR_FEE_WALLET=0x…
 --------------------
 ```
@@ -124,7 +125,7 @@ HOOK=0x...        # REPUTATION_HOOK_ADDRESS_84532
 bash ../../scripts/verify-deployment.sh "$RPC" "$POLICY" "$EXECUTOR" "$OPERATOR_ADDRESS" "$FEE_WALLET" "$EXECUTOR_FEE_BPS"
 ```
 
-Expected: `=== Results: 4 passed, 0 failed ===`. Then paste the second block of [contract-deployment.md, "Post-deployment checks"](../operations/contract-deployment.md#post-deployment-checks), the `cast call` reads, into the same shell (it uses the `ESCROW`, `HOOK`, `RPC` and `TRUSTED_EVALUATOR` set above; its first block only defines those variables); every line carries its expected value as a comment, including the hook's gas requirements, `canonicalAgentId` and `penalties` (both 0 on a fresh hook). `cast` prints large numbers with their scientific form appended (`1000000 [1e6]`).
+Expected: `=== Results: 5 passed, 0 failed ===` (the fifth is the module's `executor()`: the binding `Deploy.s.sol` makes). Then paste the second block of [contract-deployment.md, "Post-deployment checks"](../operations/contract-deployment.md#post-deployment-checks), the `cast call` reads, into the same shell (it uses the `ESCROW`, `HOOK`, `RPC` and `TRUSTED_EVALUATOR` set above; its first block only defines those variables); every line carries its expected value as a comment, including the hook's gas requirements, `canonicalAgentId` and `penalties` (both 0 on a fresh hook). `cast` prints large numbers with their scientific form appended (`1000000 [1e6]`).
 
 ### 2.8 Record
 
@@ -240,12 +241,13 @@ WALLET_PROVIDER=turnkey
 TURNKEY_API_PUBLIC_KEY=<step 1>
 TURNKEY_API_PRIVATE_KEY=<step 1>
 TURNKEY_ORGANIZATION_ID=<step 1>
-# Leave empty: escrow steps are signed by the agent's own EOA
+# Leave empty: escrow steps are signed by the agent's own EOA (Safe mode is refused in production / staging)
 SAFE_DEPLOYER_PRIVATE_KEY=
 # C4 copy blocks (§2.5, §2.6)
 OPERATOR_FEE_WALLET=<FEE_WALLET>
 POLICY_MODULE_ADDRESS_84532=<§2.5>
 EXECUTOR_ADDRESS_84532=<§2.5>
+POLICY_OPERATOR_ADDRESS_84532=<§2.5>
 AGENT_JOB_ESCROW_ADDRESS_84532=<§2.6>
 REPUTATION_HOOK_ADDRESS_84532=<§2.6>
 # The evaluator private key from §2.1 (its address is the hook's TRUSTED_EVALUATOR)

@@ -22,6 +22,8 @@
     "abi": "node scripts/gen-abi.mjs",
     "abi:executor": "node scripts/gen-abi.mjs AgentExecutor",
     "abi:policy": "node scripts/gen-abi.mjs AgentPolicyModule",
+    "contracts:code": "node scripts/gen-contract-code.mjs",
+    "contracts:code:check": "node scripts/gen-contract-code.mjs --check",
     "abi:escrow": "node scripts/gen-abi.mjs AgentJobEscrow ReputationHook",
     "release:v1:check": "node scripts/release-v1.mjs check",
     "release:v1:tag": "node scripts/release-v1.mjs tag",
