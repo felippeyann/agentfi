@@ -125,6 +125,8 @@ type Modules = {
   SubmitterService: typeof import('../services/transaction/submitter.service.js')['SubmitterService'];
   MonitorService: typeof import('../services/transaction/monitor.service.js')['MonitorService'];
   getWalletService: typeof import('../services/wallet/index.js')['getWalletService'];
+  policyStack: typeof import('../config/policy-stack-boot.runtime.js');
+  policyStackState: typeof import('../config/policy-stack-verification.runtime.js');
 };
 let m: Modules;
 let chain: LocalChain;
@@ -143,11 +145,13 @@ beforeAll(async () => {
   ({ policyModule, executor } = await deployPolicyStack(chain, {
     deployer,
     operator: anvilAccount(1).address,
-    feeWallet: deployer.address,
+    // The S9 verification compares executor.feeWallet() with OPERATOR_FEE_WALLET.
+    feeWallet: getAddress(process.env['OPERATOR_FEE_WALLET']!),
   }));
   process.env['RPC_URL_84532'] = chain.rpcUrl;
   process.env['POLICY_MODULE_ADDRESS_84532'] = policyModule;
   process.env['EXECUTOR_ADDRESS_84532'] = executor;
+  process.env['POLICY_OPERATOR_ADDRESS_84532'] = anvilAccount(1).address;
 
   m = {
     db: (await import('../db/client.js')).db,
@@ -158,8 +162,13 @@ beforeAll(async () => {
     SubmitterService: (await import('../services/transaction/submitter.service.js')).SubmitterService,
     MonitorService: (await import('../services/transaction/monitor.service.js')).MonitorService,
     getWalletService: (await import('../services/wallet/index.js')).getWalletService,
+    policyStack: await import('../config/policy-stack-boot.runtime.js'),
+    policyStackState: await import('../config/policy-stack-verification.runtime.js'),
   };
   await wipe();
+  // S9: the real boot check against the real deployment — the sync is gated on it.
+  const verdict = await m.policyStack.runPolicyStackBootCheck('api');
+  expect(verdict).toMatchObject({ fatal: null, verified: [CHAIN_ID] });
 
   app = Fastify({ logger: false });
   m.registerErrorHandler(app);
@@ -183,6 +192,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!DB_READY) return;
   await wipe().catch(() => undefined);
+  m?.policyStack.__stopPolicyStackRecheckForTests();
   await app?.close();
   await m?.db.$disconnect();
   chain?.stop();
@@ -464,6 +474,31 @@ describeDb('S8 — nobody else can change the on-chain policy', () => {
     expect(res.statusCode).toBe(422);
     expect(res.json().code).toBe('POLICY_NOT_REPRESENTABLE');
     expect(h.queued).toHaveLength(0);
+  });
+});
+
+describeDb('S9 — the sync is gated on the AgentExecutor / AgentPolicyModule verification', () => {
+  it('unverified (process restarted, nothing read yet): 503 CONTRACTS_UNVERIFIED, nothing queued; the kill switch reports the refusal; verified again → syncs', async () => {
+    const agent = await mkAgent({});
+    m.policyStackState.__resetPolicyStackVerificationForTests();
+
+    const res = await requestSync(agent.id);
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({ status: 'refused', code: 'CONTRACTS_UNVERIFIED' });
+    expect((await syncStatus(agent.id)).contracts).toMatchObject({ allowed: false, state: 'not-verified-yet' });
+
+    const pause = await app.inject({ method: 'POST', url: `/admin/agents/${agent.id}/pause`, headers: adminHeaders, payload: { syncOnChain: true } });
+    expect(pause.statusCode).toBe(200);
+    expect(pause.json()).toMatchObject({ active: false, onChainSync: { status: 'refused', code: 'CONTRACTS_UNVERIFIED' } });
+    expect(h.queued).toHaveLength(0);
+    expect(await hasPolicy(agent.eoa)).toBe(false);
+
+    // The real check against the real deployment verifies the chain again.
+    expect(await m.policyStack.runPolicyStackBootCheck('api')).toMatchObject({ verified: [CHAIN_ID] });
+    expect((await syncStatus(agent.id)).contracts).toMatchObject({ allowed: true, state: 'verified' });
+    expect((await requestSync(agent.id)).statusCode).toBe(202);
+    await drain();
+    expect((await onChainPolicy(agent.eoa)).active).toBe(false); // the paused DB policy
   });
 });
 

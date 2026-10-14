@@ -1,31 +1,21 @@
 /**
- * S9 — what a wrong `EXECUTOR_ADDRESS_<id>` receives, on REAL local contracts.
+ * S9 — a configured `EXECUTOR_ADDRESS_<id>` must be this repository's
+ * AgentExecutor, bound to the configured module, before any transaction is
+ * routed through it. REAL local contracts, the backend's real boot check and
+ * re-check loop (`policy-stack-boot.runtime.ts`), the real gate and the API's
+ * 503.
  *
- * The backend trusts the configured executor by address: nothing checks, at
- * boot or before use, that the address runs `AgentExecutor` (only a list of
- * two known legacy addresses is refused). An ETH-value swap is wrapped by
- * `ExecutorService.wrapSingle` into `executeSingle` with `value = amount +
- * fee` and sent TO the executor. These tests run that real wrapping, the real
- * production dry-run (`SimulatorService`'s eth_call / estimateGas path — what
- * production uses without Tenderly) and the real submitter (signing with the
- * agent key, broadcasting to Anvil), against:
- *   - our executor (baseline: the target and the fee wallet are paid);
- *   - an EOA (a typo): the dry-run passes, the transaction succeeds, the EOA
- *     keeps amount + fee;
- *   - a contract that is not ours (any payable fallback; here the 1-byte
- *     runtime `STOP`): same;
- *   - a lookalike that answers `policyModule()` / `feeWallet()` / `feeBps()`
- *     exactly like our deployment (a view-based boot check passes) and
- *     forwards everything to a thief;
- *   - the legacy build (old `Action` struct): same views, every call reverts
- *     (fail closed — no funds move, every executor transaction fails).
- * Then the identity evidence: only our executor runs the artifact's code with
- * its immutables filled in.
+ * Before S9 (demonstrated on this file's first version): with the address
+ * pointing at an EOA, a foreign contract or a lookalike answering our views,
+ * the production dry-run passed, the transaction succeeded and the wrong
+ * address kept amount + fee. Now each one is a MISMATCH at boot, the gate is
+ * closed, executor-routed requests answer 503 CONTRACTS_UNVERIFIED and
+ * nothing is sent. The legacy build fails closed too. RPC down → unverified
+ * (503, no fatal); RPC back → the re-check verifies again by itself.
  *
- * These are demonstrations of the CURRENT behaviour (they pass on the unfixed
- * code). The check itself waits for the owner's trust-policy decision.
- *
- * Anvil: `anvilTestPort(2)` (default 8747), chain id 84532.
+ * Hermetic: `createChainPublicClient` reads only RPC_URL_84532 here (no
+ * fallback to the public Base Sepolia RPC the production client keeps behind
+ * the override). Anvil: `anvilTestPort(2)` (default 8747), chain id 84532.
  */
 import { vi } from 'vitest';
 
@@ -45,6 +35,9 @@ vi.hoisted(() => {
   for (const [k, v] of required) {
     if (!process.env[k]) process.env[k] = v;
   }
+  // A fast re-check so the recovery is observable: TTL 4 s, re-check every 1 s.
+  process.env['ESCROW_CONFIG_VERIFIED_TTL_SECONDS'] = '4';
+  process.env['ESCROW_CONFIG_RECHECK_SECONDS'] = '1';
 });
 
 vi.mock('../api/middleware/logger.js', () => {
@@ -53,14 +46,23 @@ vi.mock('../api/middleware/logger.js', () => {
   logger['child'] = () => logger;
   return { logger };
 });
+vi.mock('../services/notification.service.js', () => ({ notificationService: { notify: async () => undefined } }));
+vi.mock('../config/chains.js', async () => {
+  const actual = await vi.importActual<typeof import('../config/chains.js')>('../config/chains.js');
+  const { createPublicClient, http } = await import('viem');
+  return {
+    ...actual,
+    createChainPublicClient: (chainId: number) =>
+      createPublicClient({ chain: actual.getChain(chainId), transport: http(process.env[`RPC_URL_${chainId}`], { retryCount: 0, timeout: 3_000 }) }),
+  };
+});
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   BaseError,
   decodeErrorResult,
   encodeFunctionData,
   getAddress,
-  keccak256,
   parseEther,
   parseTransaction,
   zeroAddress,
@@ -76,7 +78,6 @@ import {
   startLocalChain,
   type LocalChain,
 } from './helpers/anvil-contracts.js';
-import { cborTrailer, immutableValues, runsArtifact } from './helpers/contract-identity.js';
 
 const CHAIN_ID = 84532;
 const EXECUTOR_ARTIFACT = readArtifact('AgentExecutor');
@@ -84,15 +85,17 @@ const LOOKALIKE = readArtifact('LookalikeExecutor', 'Impostors.sol');
 const LEGACY = readArtifact('LegacyActionExecutor', 'Impostors.sol');
 
 const deployer = anvilAccount(0);
+const operator = anvilAccount(1).address;
 const agent = anvilAccount(2);
 const thief = anvilAccount(3).address;
-/** The intended recipient of the swap / transfer. */
 const TARGET = getAddress('0x00000000000000000000000000000000000d0001');
 /** The "typo": an address with no code. */
 const TYPO_EOA = getAddress('0x00000000000000000000000000000000000d0e0a');
 /** A contract that is not ours: runtime `STOP` (accepts any call and value). */
 const FOREIGN_CONTRACT = getAddress('0x00000000000000000000000000000000000d0c0c');
-const FEE_WALLET = getAddress('0x00000000000000000000000000000000000d0fee');
+const FEE_WALLET = getAddress(process.env['OPERATOR_FEE_WALLET']!);
+const AMOUNT = parseEther('1');
+const FEE = (AMOUNT * 30n) / 10_000n;
 
 let chain: LocalChain;
 let policyModule: Address;
@@ -100,145 +103,166 @@ let executor: Address;
 let lookalike: Address;
 let legacy: Address;
 
-type ExecutorModule = typeof import('../services/transaction/executor.service.js');
-type SimulatorModule = typeof import('../services/transaction/simulator.service.js');
-type SubmitterModule = typeof import('../services/transaction/submitter.service.js');
-let m: { ExecutorService: ExecutorModule['ExecutorService']; SimulatorService: SimulatorModule['SimulatorService']; SubmitterService: SubmitterModule['SubmitterService'] };
+type Runtime = {
+  boot: typeof import('../config/policy-stack-boot.runtime.js');
+  state: typeof import('../config/policy-stack-verification.runtime.js');
+  gate: typeof import('../api/contracts-gate.js');
+  ExecutorService: typeof import('../services/transaction/executor.service.js')['ExecutorService'];
+  SubmitterService: typeof import('../services/transaction/submitter.service.js')['SubmitterService'];
+};
+let current: Runtime | null = null;
 
 beforeAll(async () => {
   chain = await startLocalChain({ port: anvilTestPort(2), chainId: CHAIN_ID });
-  ({ policyModule, executor } = await deployPolicyStack(chain, { deployer, operator: anvilAccount(1).address, feeWallet: FEE_WALLET }));
+  ({ policyModule, executor } = await deployPolicyStack(chain, { deployer, operator, feeWallet: FEE_WALLET }));
   lookalike = await chain.deploy(deployer, LOOKALIKE, [policyModule, FEE_WALLET, 30n, thief]);
   legacy = await chain.deploy(deployer, LEGACY, [policyModule, FEE_WALLET, 30n]);
   await chain.rpc('anvil_setCode', [FOREIGN_CONTRACT, '0x00']);
-  process.env['RPC_URL_84532'] = chain.rpcUrl;
-  m = {
-    ExecutorService: (await import('../services/transaction/executor.service.js')).ExecutorService,
-    SimulatorService: (await import('../services/transaction/simulator.service.js')).SimulatorService,
-    SubmitterService: (await import('../services/transaction/submitter.service.js')).SubmitterService,
-  };
+});
+
+afterEach(() => {
+  current?.boot.__stopPolicyStackRecheckForTests();
+  current = null;
 });
 
 afterAll(() => {
   chain?.stop();
 });
 
-const balance = (address: Address) => chain.publicClient.getBalance({ address });
-
-/**
- * The backend's ETH-value path with EXECUTOR_ADDRESS_84532 = `configured`:
- * wrap (ExecutorService), dry-run (SimulatorService eth_call path), sign +
- * broadcast (SubmitterService with the agent's key). Returns the dry-run
- * verdict, the receipt status and the balance changes.
- */
-async function sendThroughConfiguredExecutor(configured: Address, amount: bigint) {
-  process.env['EXECUTOR_ADDRESS_84532'] = configured;
-  const wrapped = new m.ExecutorService({ warn: () => undefined }).wrapSingle(CHAIN_ID, { to: TARGET, data: '0x', value: amount });
-  const simulator = new m.SimulatorService() as unknown as {
-    simulateWithEthCall(p: { chainId: number; from: Address; to: Address; data: Hex; value: bigint }): Promise<{ success: boolean; error?: string }>;
+/** A fresh process (module registry) configured with `executorAddress`, after its boot check. */
+async function bootWith(executorAddress: Address, rpcUrl: string = chain.rpcUrl) {
+  process.env['RPC_URL_84532'] = rpcUrl;
+  process.env['EXECUTOR_ADDRESS_84532'] = executorAddress;
+  process.env['POLICY_MODULE_ADDRESS_84532'] = policyModule;
+  process.env['POLICY_OPERATOR_ADDRESS_84532'] = operator;
+  vi.resetModules();
+  current = {
+    boot: await import('../config/policy-stack-boot.runtime.js'),
+    state: await import('../config/policy-stack-verification.runtime.js'),
+    gate: await import('../api/contracts-gate.js'),
+    ExecutorService: (await import('../services/transaction/executor.service.js')).ExecutorService,
+    SubmitterService: (await import('../services/transaction/submitter.service.js')).SubmitterService,
   };
-  const dryRun = await simulator.simulateWithEthCall({ chainId: CHAIN_ID, from: agent.address, to: wrapped.to, data: wrapped.data, value: wrapped.value });
-
-  const watched = [TARGET, configured, thief, FEE_WALLET] as const;
-  const before = await Promise.all(watched.map(balance));
-  let status: 'success' | 'reverted' | 'not-sent' = 'not-sent';
-  if (dryRun.success) {
-    const submitter = new m.SubmitterService({
-      client: () => chain.publicClient as never,
-      wallet: { signTransaction: async ({ unsignedTx }) => agent.signTransaction(parseTransaction(unsignedTx as Hex) as TransactionSerializable) },
-    });
-    const { txHash } = await submitter.submit({ chainId: CHAIN_ID, walletId: 'agent', from: agent.address, to: wrapped.to, data: wrapped.data, value: wrapped.value });
-    status = (await chain.publicClient.waitForTransactionReceipt({ hash: txHash })).status;
-  }
-  const after = await Promise.all(watched.map(balance));
-  const delta = (i: number) => after[i]! - before[i]!;
-  return { wrapped, dryRun, status, target: delta(0), configured: delta(1), thief: delta(2), feeWallet: delta(3) };
+  const verdict = await current.boot.runPolicyStackBootCheck('api');
+  return { verdict, rt: current };
 }
 
-const AMOUNT = parseEther('1');
-const FEE = (AMOUNT * 30n) / 10_000n;
+/** What `POST /v1/transactions/batch` / the swap route answer through `refuseUnverifiedContracts`. */
+function apiAnswer(rt: Runtime): { status: number; body: Record<string, unknown> | null } {
+  const sent: { status: number; body: Record<string, unknown> | null } = { status: 200, body: null };
+  const reply = {
+    code(status: number) {
+      sent.status = status;
+      return reply;
+    },
+    header() {
+      return reply;
+    },
+    send(body: Record<string, unknown>) {
+      sent.body = body;
+      return reply;
+    },
+  };
+  rt.gate.refuseUnverifiedContracts(reply as never, CHAIN_ID, 'a batch routed through the AgentExecutor');
+  return sent;
+}
 
-describe('S9 — a wrong EXECUTOR_ADDRESS receives the value (current behaviour)', () => {
-  it('baseline, our executor: the target gets the amount, the fee wallet the fee', async () => {
-    const r = await sendThroughConfiguredExecutor(executor, AMOUNT);
-    expect(r.wrapped.routedViaExecutor).toBe(true);
-    expect(r.wrapped.value).toBe(AMOUNT + FEE);
-    expect(r.dryRun.success).toBe(true);
-    expect(r.status).toBe('success');
-    expect(r.target).toBe(AMOUNT);
-    expect(r.feeWallet).toBe(FEE);
+const balance = (address: Address) => chain.publicClient.getBalance({ address });
+
+async function sendWrappedSwap(rt: Runtime) {
+  const wrapped = new rt.ExecutorService({ warn: () => undefined }).wrapSingle(CHAIN_ID, { to: TARGET, data: '0x', value: AMOUNT });
+  const submitter = new rt.SubmitterService({
+    client: () => chain.publicClient as never,
+    wallet: { signTransaction: async ({ unsignedTx }) => agent.signTransaction(parseTransaction(unsignedTx as Hex) as TransactionSerializable) },
   });
+  const { txHash } = await submitter.submit({ chainId: CHAIN_ID, walletId: 'agent', from: agent.address, to: wrapped.to, data: wrapped.data, value: wrapped.value });
+  return { wrapped, status: (await chain.publicClient.waitForTransactionReceipt({ hash: txHash })).status };
+}
 
-  it('an EOA (typo): the dry-run passes, the transaction succeeds, the EOA keeps amount + fee, the target gets nothing', async () => {
-    const r = await sendThroughConfiguredExecutor(TYPO_EOA, AMOUNT);
-    expect(r.dryRun.success).toBe(true);
-    expect(r.status).toBe('success');
-    expect(r.configured).toBe(AMOUNT + FEE);
-    expect(r.target).toBe(0n);
-  });
+describe('S9 — the correct build verifies and the executor path works', () => {
+  it('our executor + module, bound, with the configured fee wallet / fee / operator: verified, the gate is open, the swap pays target and fee wallet', async () => {
+    const { verdict, rt } = await bootWith(executor);
+    expect(verdict).toMatchObject({ fatal: null, errors: [], verified: [CHAIN_ID] });
+    expect(rt.state.policyStackGate(CHAIN_ID)).toMatchObject({ allowed: true });
+    expect(apiAnswer(rt).body).toBeNull();
 
-  it('a contract that is not ours (any payable fallback): same — it keeps amount + fee', async () => {
-    const r = await sendThroughConfiguredExecutor(FOREIGN_CONTRACT, AMOUNT);
-    expect(r.dryRun.success).toBe(true);
-    expect(r.status).toBe('success');
-    expect(r.configured).toBe(AMOUNT + FEE);
-    expect(r.target).toBe(0n);
-  });
-
-  it('a lookalike answering our views exactly passes a view-based check, then forwards everything to a thief', async () => {
-    const views = async (address: Address) =>
-      Promise.all(
-        (['policyModule', 'feeWallet', 'feeBps'] as const).map((functionName) =>
-          chain.publicClient.readContract({ address, abi: EXECUTOR_ARTIFACT.abi, functionName }),
-        ),
-      );
-    expect(await views(lookalike)).toEqual(await views(executor));
-
-    const r = await sendThroughConfiguredExecutor(lookalike, AMOUNT);
-    expect(r.dryRun.success).toBe(true);
-    expect(r.status).toBe('success');
-    expect(r.thief).toBe(AMOUNT + FEE);
-    expect(r.target).toBe(0n);
-    expect(r.feeWallet).toBe(0n);
-  });
-
-  it('the legacy build (old Action struct): same views, every executor call reverts — fail closed, nothing moves', async () => {
-    const r = await sendThroughConfiguredExecutor(legacy, AMOUNT);
-    expect(r.dryRun.success).toBe(false);
-    expect(r.status).toBe('not-sent');
-    expect(r.target).toBe(0n);
-    expect(r.configured).toBe(0n);
+    const [targetBefore, feeBefore] = await Promise.all([balance(TARGET), balance(FEE_WALLET)]);
+    const { wrapped, status } = await sendWrappedSwap(rt);
+    expect(getAddress(wrapped.to)).toBe(getAddress(executor));
+    expect(wrapped).toMatchObject({ routedViaExecutor: true, value: AMOUNT + FEE });
+    expect(status).toBe('success');
+    expect((await balance(TARGET)) - targetBefore).toBe(AMOUNT);
+    expect((await balance(FEE_WALLET)) - feeBefore).toBe(FEE);
   });
 });
 
-describe('S9 — identity evidence: code, not views', () => {
-  async function code(address: Address): Promise<Hex | undefined> {
-    return chain.publicClient.getCode({ address });
-  }
+describe('S9 — a wrong EXECUTOR_ADDRESS is refused before it receives anything (the demonstrations, now blocked)', () => {
+  it.each([
+    ['an EOA (typo)', () => TYPO_EOA, /EXECUTOR_ADDRESS_84532=.* is not this build's AgentExecutor: no code at the address/],
+    ['a contract that is not ours', () => FOREIGN_CONTRACT, /is not this build's AgentExecutor: its runtime code is 1 bytes/],
+    ['a lookalike answering our views', () => lookalike, /is not this build's AgentExecutor/],
+    ['the legacy build (old Action struct)', () => legacy, /is not this build's AgentExecutor/],
+  ])('%s → mismatch at boot, gate closed, the API answers 503 CONTRACTS_UNVERIFIED, nothing is sent', async (_label, address, message) => {
+    const configured = address();
+    const watched = [TARGET, configured, thief, FEE_WALLET] as const;
+    const before = await Promise.all(watched.map(balance));
 
-  it('only our executor runs the artifact’s runtime code with its immutables filled in', async () => {
-    expect(runsArtifact(await code(executor), EXECUTOR_ARTIFACT)).toBe(true);
-    for (const impostor of [TYPO_EOA, FOREIGN_CONTRACT, lookalike, legacy]) {
-      expect(runsArtifact(await code(impostor), EXECUTOR_ARTIFACT), impostor).toBe(false);
+    const { verdict, rt } = await bootWith(configured);
+    expect(verdict!.verified).toEqual([]);
+    expect(verdict!.errors).toEqual([expect.stringMatching(message)]);
+    expect(rt.state.policyStackGate(CHAIN_ID)).toMatchObject({ allowed: false, block: 'mismatch' });
+    const answer = apiAnswer(rt);
+    expect(answer.status).toBe(503);
+    expect(answer.body).toMatchObject({ code: 'CONTRACTS_UNVERIFIED', state: 'mismatch' });
+
+    expect(await Promise.all(watched.map(balance))).toEqual(before);
+  });
+
+  it('production would not even boot with the lookalike (FATAL, exit 1)', async () => {
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      process.env['NODE_ENV'] = 'production';
+      const { verdict } = await bootWith(lookalike);
+      expect(verdict!.fatal).toMatch(/^FATAL: the deployed AgentExecutor \/ AgentPolicyModule does not match this build/);
+      expect(exit).toHaveBeenCalledWith(1);
+    } finally {
+      process.env['NODE_ENV'] = 'test';
+      exit.mockRestore();
+      err.mockRestore();
     }
   });
 
-  it('the immutables are read from the code itself and equal the configuration the backend expects', async () => {
-    const onChain = (await code(executor))!;
-    const words = immutableValues(onChain, EXECUTOR_ARTIFACT.immutableReferences).map((w) => BigInt(w));
-    // policyModule, feeWallet, feeBps — order of `immutableReferences` keys (AST ids) is not guaranteed: compare as a set.
-    expect(new Set(words)).toEqual(new Set([BigInt(policyModule), BigInt(FEE_WALLET), 30n]));
+  it('why it matters (contract level, no backend in the path): the lookalike keeps amount + fee of a swap sent to it', async () => {
+    const { rt } = await bootWith(executor); // our executor configured — only to borrow the encoders
+    const wrapped = new rt.ExecutorService({ warn: () => undefined }).wrapSingle(CHAIN_ID, { to: TARGET, data: '0x', value: AMOUNT });
+    const before = await balance(thief);
+    const hash = await chain.wallet(agent).sendTransaction({ to: lookalike, data: wrapped.data, value: wrapped.value, account: agent, chain: null });
+    expect((await chain.publicClient.waitForTransactionReceipt({ hash })).status).toBe('success');
+    expect((await balance(thief)) - before).toBe(AMOUNT + FEE);
   });
+});
 
-  it('the CBOR metadata trailer is part of the code (bytecode_hash = ipfs): a rebuild from changed source has another identity', async () => {
-    const onChain = (await code(executor))!;
-    const trailer = cborTrailer(onChain);
-    expect(trailer).toBe(cborTrailer(EXECUTOR_ARTIFACT.deployedBytecode));
-    // a2 64 'ipfs' 58 22 <34-byte multihash> 64 'solc' 43 <0.8.24> 00 33
-    expect(trailer.startsWith('0xa264697066735822')).toBe(true);
-    expect(trailer.endsWith('64736f6c634300081800 33'.replace(' ', ''))).toBe(true);
-    expect(keccak256(onChain)).not.toBe(keccak256(EXECUTOR_ARTIFACT.deployedBytecode)); // immutables differ
-  });
+describe('S9 — RPC down, then recovered', () => {
+  it('unreadable at boot: unverified (never fatal), 503 meanwhile; the re-check verifies it by itself once the RPC answers', async () => {
+    const dead = `http://127.0.0.1:${anvilTestPort(2) + 50}`;
+    const { verdict, rt } = await bootWith(executor, dead);
+    expect(verdict).toMatchObject({ fatal: null, verified: [], unreadable: [CHAIN_ID] });
+    expect(rt.state.policyStackGate(CHAIN_ID)).toMatchObject({ allowed: false, block: 'unverified' });
+    expect(apiAnswer(rt).status).toBe(503);
+
+    process.env['RPC_URL_84532'] = chain.rpcUrl; // the RPC is back
+    const deadline = Date.now() + 15_000;
+    while (!rt.state.policyStackGate(CHAIN_ID).allowed && Date.now() < deadline) await new Promise((r) => setTimeout(r, 250));
+    expect(rt.state.policyStackGate(CHAIN_ID)).toMatchObject({ allowed: true });
+    expect(apiAnswer(rt).body).toBeNull();
+
+    // A failure after a success revokes the verification at once (TTL 4 s, re-check 1 s).
+    process.env['RPC_URL_84532'] = dead;
+    const revokeBy = Date.now() + 10_000;
+    while (rt.state.policyStackGate(CHAIN_ID).allowed && Date.now() < revokeBy) await new Promise((r) => setTimeout(r, 250));
+    expect(rt.state.policyStackGate(CHAIN_ID)).toMatchObject({ allowed: false, block: 'unverified' });
+  }, 40_000);
 });
 
 describe('side finding — the agent batch sends the action value without the executor fee', () => {
@@ -258,7 +282,6 @@ describe('side finding — the agent batch sends the action value without the ex
     const decoded = decodeErrorResult({ abi: EXECUTOR_ARTIFACT.abi, data: revertData! });
     expect(decoded.errorName).toBe('InsufficientValueForFee');
     expect(decoded.args).toEqual([AMOUNT, AMOUNT + FEE]);
-    // With the fee included it goes through.
     await expect(chain.publicClient.call({ account: agent.address, to: executor, data, value: AMOUNT + FEE })).resolves.toBeDefined();
   });
 });

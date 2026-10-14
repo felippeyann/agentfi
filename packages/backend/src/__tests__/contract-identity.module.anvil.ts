@@ -3,22 +3,22 @@
  * on REAL local contracts.
  *
  * 1. Policy module ≠ the executor's module. `AgentExecutor` enforces the
- *    module it was DEPLOYED with (`policyModule()` immutable); the backend
- *    syncs (S8) and reads the module in its env. When they differ — a second
- *    genuine deployment (an earlier Deploy.s.sol run), a typo — the operator
- *    sync "succeeds" and reads back in sync while the executor enforces
- *    nothing: the on-chain policy is silently void. Nothing binds the two.
- * 2. Policy module = an address with no code: the sync's direct call is
- *    mined as a success (gas spent, nothing written); only the read-back
- *    notices (S8 reports `mismatch`).
- * 3. Escrow / hook: the Q7 / C3d boot check compares VIEWS. A lookalike
- *    escrow answering `token()` = USDC, and a lookalike hook answering the
- *    four views, are reported verified — then the lookalike escrow takes the
- *    budget the requester approved, and the lookalike hook blocks every
- *    settlement.
+ *    module it was DEPLOYED with (`policyModule()` immutable); before S9 a
+ *    second genuine deployment configured as POLICY_MODULE_ADDRESS read back
+ *    "in sync" while the executor enforced nothing. Now the binding
+ *    executor.policyModule() = POLICY_MODULE_ADDRESS (and, since the module
+ *    fix, module.executor() = EXECUTOR_ADDRESS) is part of the verification:
+ *    mismatch, the sync and the executor path are gated.
+ * 2. No code at the module address, an unbound module, another operator:
+ *    mismatch.
+ * 3. Escrow / hook: a lookalike escrow answering `token()` = USDC and a
+ *    lookalike hook answering the four views — the views match, the code
+ *    identity refuses them (before S9 they were reported verified and the
+ *    lookalike escrow took the budget the requester approved).
  *
- * Demonstrations of the CURRENT behaviour (pass on the unfixed code).
- * Anvil: `anvilTestPort(3)` (default 8748), chain id 84532.
+ * The verification is the real `checkPolicyStacks` / `checkEscrowDeployments`
+ * with readers on the real chain. Anvil: `anvilTestPort(3)` (default 8748),
+ * chain id 84532.
  */
 import { vi } from 'vitest';
 
@@ -66,6 +66,7 @@ import {
   type PolicyModuleReader,
 } from '../services/policy/policy-sync.js';
 import { checkEscrowDeployments, compareEscrowDeployment, isDefinitiveContractError } from '../config/escrow-boot-check.js';
+import { checkPolicyStacks, type PolicyStackExpectation } from '../config/policy-stack-check.js';
 
 const CHAIN_ID = 84532;
 const MODULE_ARTIFACT = readArtifact('AgentPolicyModule');
@@ -116,16 +117,41 @@ async function syncPolicyTo(module: Address, maxEth: string) {
   return derived.desired;
 }
 
-describe('S9 — POLICY_MODULE_ADDRESS is not bound to the executor (current behaviour)', () => {
-  it('both addresses run genuine AgentPolicyModule code — identity alone does not catch it', async () => {
-    expect(runsArtifact(await chain.publicClient.getCode({ address: boundModule }), MODULE_ARTIFACT)).toBe(true);
-    expect(runsArtifact(await chain.publicClient.getCode({ address: otherModule }), MODULE_ARTIFACT)).toBe(true);
-    expect(getAddress((await chain.publicClient.readContract({ address: executor, abi: EXECUTOR_ARTIFACT.abi, functionName: 'policyModule' })) as string)).toBe(
-      getAddress(boundModule),
-    );
+/** The real S9 check of one configuration against the chain. */
+async function verify(overrides: Partial<PolicyStackExpectation> = {}) {
+  const [result] = await checkPolicyStacks({
+    chains: [{ chainId: CHAIN_ID, executor, policyModule: boundModule, operator: operator.address, feeWallet: deployer.address, feeBps: 30n, ...overrides }],
+    reader: () => (params) => chain.publicClient.readContract(params as never),
+    codeReader: () => (address) => chain.publicClient.getCode({ address }),
+    chainIdReader: () => () => chain.publicClient.getChainId(),
+    attempts: 1,
+  });
+  return result!;
+}
+
+describe('S9 — POLICY_MODULE_ADDRESS must be the executor’s module, bound to it', () => {
+  it('the deployed pair (executor + its module, bound by the deployment, expected operator) verifies', async () => {
+    expect(await verify()).toMatchObject({ problems: [], notes: [], unreadable: null });
   });
 
-  it('a sync to the other module reads back in sync, yet the executor enforces nothing: a 1 ETH action passes a 0.01 ETH policy', async () => {
+  it('a second GENUINE module (same build, so code identity alone passes) is refused on the binding', async () => {
+    expect(runsArtifact(await chain.publicClient.getCode({ address: otherModule }), MODULE_ARTIFACT)).toBe(true);
+    const result = await verify({ policyModule: otherModule });
+    expect(result.problems).toEqual([expect.stringMatching(/the executor enforces AgentPolicyModule 0x[0-9a-fA-F]+, not POLICY_MODULE_ADDRESS_84532=/)]);
+  });
+
+  it('a module the deployment did not bind to this executor (unbound / bound elsewhere) is refused', async () => {
+    const unbound = await deployPolicyStack(chain, { deployer, operator: operator.address, feeWallet: deployer.address, bind: false });
+    const result = await verify({ executor: unbound.executor, policyModule: unbound.policyModule });
+    expect(result.problems).toEqual([expect.stringMatching(/not bound to any executor \(bindExecutor was never called\)/)]);
+  });
+
+  it('no code at the module address, or another operator, is refused', async () => {
+    expect((await verify({ executor: null, policyModule: NO_CODE })).problems).toEqual([expect.stringMatching(/is not this build's AgentPolicyModule: no code/)]);
+    expect((await verify({ operator: thief })).problems).toEqual([expect.stringMatching(/operator\(\) is 0x[0-9a-fA-F]+, not POLICY_OPERATOR_ADDRESS_84532/)]);
+  });
+
+  it('why the binding matters (contract level): a policy synced to the other module reads back in sync, yet the executor enforces nothing', async () => {
     const desired = await syncPolicyTo(otherModule, '0.01');
     const after = await readOnChainPolicy(reader(), otherModule, agent.address, { contracts: [], tokens: [] });
     expect(planPolicySync(desired, after).differences).toEqual([]); // the S8 view would say in-sync
@@ -145,7 +171,7 @@ describe('S9 — POLICY_MODULE_ADDRESS is not bound to the executor (current beh
     await expect(chain.publicClient.call({ account: agent.address, to: executor, data: batch, value: oneEth + fee })).rejects.toThrow();
   });
 
-  it('an address with no code: the sync call is mined as a success with nothing written; only the read-back notices', async () => {
+  it('an address with no code (contract level): a sync call to it is mined as a success with nothing written — the verification above refuses it first', async () => {
     const derived = desiredOnChainPolicy({
       safeAddress: agent.address,
       agentActive: true,
