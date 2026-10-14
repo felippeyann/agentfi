@@ -91,6 +91,7 @@ contract AgentExecutorTest is Test {
     function setUp() public {
         policyModule = new AgentPolicyModule(operator);
         executor     = new AgentExecutor(address(policyModule), feeWallet, FEE_BPS);
+        policyModule.bindExecutor(address(executor));
         mockTarget   = new MockTarget();
 
         vm.deal(safe, 100 ether);
@@ -599,6 +600,105 @@ contract AgentExecutorTest is Test {
         executor.executeBatch(actions);
 
         assertEq(mockTarget.counter(), 2);
+    }
+
+    /// @dev Owner decision 2026-10-14: the cooldown applies once per execution. A batch of two
+    ///      actions under a 60 s cooldown passes and stamps the timestamp once; a second batch
+    ///      inside the cooldown reverts; after it, the next batch passes.
+    function test_ExecuteBatch_TwoActions_Cooldown_StampedOncePerBatch() public {
+        AgentPolicyModule.PolicyParams memory p = AgentPolicyModule.PolicyParams({
+            maxValuePerTx:     10 ether,
+            cooldownBetweenTx: 60,
+            active:            true
+        });
+        vm.prank(operator);
+        policyModule.setPolicy(safe, p, 0);
+
+        AgentExecutor.Action[] memory two = new AgentExecutor.Action[](2);
+        two[0] = _incrementAction(0)[0];
+        two[1] = _incrementAction(0)[0];
+
+        vm.warp(1000);
+        vm.prank(safe);
+        executor.executeBatch(two);
+        assertEq(mockTarget.counter(), 2, "both actions ran");
+        assertEq(policyModule.getLastTxTimestamp(safe), 1000, "stamped once, at the batch");
+
+        vm.warp(1059);
+        vm.prank(safe);
+        vm.expectRevert(abi.encodeWithSelector(AgentPolicyModule.CooldownActive.selector, 1));
+        executor.executeBatch(two);
+
+        vm.warp(1060);
+        vm.prank(safe);
+        executor.executeBatch(two);
+        assertEq(mockTarget.counter(), 4);
+        assertEq(policyModule.getLastTxTimestamp(safe), 1060);
+    }
+
+    /// @dev Per-action checks stay per action: one action over the value cap fails the batch.
+    function test_ExecuteBatch_PerActionChecksStay_ValueOfSecondActionChecked() public {
+        vm.prank(operator);
+        policyModule.setPolicy(safe, AgentPolicyModule.PolicyParams({maxValuePerTx: 1 ether, cooldownBetweenTx: 60, active: true}), 0);
+
+        AgentExecutor.Action[] memory two = new AgentExecutor.Action[](2);
+        two[0] = _incrementAction(1 ether)[0];
+        two[1] = _incrementAction(2 ether)[0];
+        uint256 total = 3 ether;
+        vm.prank(safe);
+        vm.expectRevert(abi.encodeWithSelector(AgentPolicyModule.ValueExceedsLimit.selector, 2 ether, 1 ether));
+        executor.executeBatch{value: total + _feeFor(total)}(two);
+        assertEq(policyModule.getLastTxTimestamp(safe), 0, "a reverted batch stamps nothing");
+    }
+
+    /// @dev executeSingle and executeBatch share the cooldown: one execution each.
+    function test_ExecuteSingle_And_ExecuteBatch_ShareTheCooldown() public {
+        vm.prank(operator);
+        policyModule.setPolicy(safe, AgentPolicyModule.PolicyParams({maxValuePerTx: 10 ether, cooldownBetweenTx: 60, active: true}), 0);
+        AgentExecutor.Action memory one = _incrementAction(0)[0];
+
+        vm.warp(2000);
+        vm.prank(safe);
+        executor.executeSingle(one);
+        assertEq(policyModule.getLastTxTimestamp(safe), 2000);
+
+        vm.warp(2030);
+        vm.prank(safe);
+        vm.expectRevert(abi.encodeWithSelector(AgentPolicyModule.CooldownActive.selector, 30));
+        executor.executeBatch(_incrementAction(0));
+    }
+
+    /// @dev Griefing by a third party is impossible: the module accepts validations only from the
+    ///      bound executor, and the executor stamps only the caller's own Safe.
+    function test_ThirdParty_CannotRestartAnotherSafesCooldown() public {
+        vm.prank(operator);
+        policyModule.setPolicy(safe, AgentPolicyModule.PolicyParams({maxValuePerTx: 10 ether, cooldownBetweenTx: 60, active: true}), 0);
+        address stranger = address(0xBAD);
+
+        vm.warp(5000);
+        vm.startPrank(stranger);
+        vm.expectRevert(AgentPolicyModule.Unauthorized.selector);
+        policyModule.recordExecution(safe);
+        vm.expectRevert(AgentPolicyModule.Unauthorized.selector);
+        policyModule.validateTransaction(safe, address(mockTarget), 0, address(0));
+        // Through the executor the stranger is msg.sender: only its own (policy-less) Safe is concerned.
+        executor.executeBatch(_incrementAction(0));
+        vm.stopPrank();
+        assertEq(policyModule.getLastTxTimestamp(safe), 0, "the victim's cooldown was not touched");
+
+        vm.prank(safe);
+        executor.executeBatch(_incrementAction(0));
+        assertEq(policyModule.getLastTxTimestamp(safe), 5000);
+    }
+
+    /// @dev An executor the module is not bound to cannot validate for anybody.
+    function test_UnboundExecutor_GovernedSafe_Reverts() public {
+        AgentExecutor other = new AgentExecutor(address(policyModule), feeWallet, FEE_BPS);
+        vm.prank(operator);
+        policyModule.setPolicy(safe, _defaultPolicy(), 0);
+        vm.prank(safe);
+        vm.expectRevert(AgentPolicyModule.Unauthorized.selector);
+        other.executeBatch(_incrementAction(0));
     }
 
     /// @dev After a policy is resumed, execution succeeds again.

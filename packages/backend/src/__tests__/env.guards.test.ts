@@ -30,6 +30,8 @@ import {
   PLACEHOLDER_CHECKED_KEYS,
   detectContainer,
   escrowVerificationIntervalProblem,
+  policyOperatorMissingProblem,
+  safeModeVerdict,
   evaluationDelayUnsetProblem,
   isLoopbackOrPrivateHost,
   isPlaceholderValue,
@@ -445,6 +447,52 @@ describe('env-guards rules (unit)', () => {
   it('nodeEnvUnsetVerdict is null when NODE_ENV is set, even to an invalid value', () => {
     expect(nodeEnvUnsetVerdict({ NODE_ENV: 'production' }, () => true)).toBeNull();
     expect(nodeEnvUnsetVerdict({ NODE_ENV: '' }, () => true)).toBeNull();
+  });
+
+  it('S9: policyOperatorMissingProblem — production / staging need POLICY_OPERATOR_ADDRESS_<id> for every configured module', () => {
+    const module = { POLICY_MODULE_ADDRESS_84532: '0x00000000000000000000000000000000000A0D01' };
+    const chains = [1, 8453, 42161, 137, 84532];
+    for (const nodeEnv of ['production', 'staging']) {
+      expect(policyOperatorMissingProblem(module, nodeEnv, chains)).toMatch(/^FATAL: .*POLICY_MODULE_ADDRESS_84532 without POLICY_OPERATOR_ADDRESS_84532/);
+      expect(policyOperatorMissingProblem({ ...module, POLICY_OPERATOR_ADDRESS_84532: '   ' }, nodeEnv, chains)).toMatch(/^FATAL/);
+      expect(policyOperatorMissingProblem({ ...module, POLICY_OPERATOR_ADDRESS_84532: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8' }, nodeEnv, chains)).toBeNull();
+      expect(policyOperatorMissingProblem({}, nodeEnv, chains)).toBeNull();
+      expect(policyOperatorMissingProblem({ POLICY_MODULE_ADDRESS_84532: '' }, nodeEnv, chains)).toBeNull();
+    }
+    expect(policyOperatorMissingProblem(module, 'development', chains)).toBeNull();
+    expect(policyOperatorMissingProblem(module, 'test', chains)).toBeNull();
+  });
+
+  it('Safe mode at boot: production / staging refuse to boot with SAFE_DEPLOYER_PRIVATE_KEY, development boots with a warning', async () => {
+    const key = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+    for (const nodeEnv of ['production', 'staging']) {
+      const out = await boot({ NODE_ENV: nodeEnv, SAFE_DEPLOYER_PRIVATE_KEY: key });
+      expect(out.booted, nodeEnv).toBe(false);
+      expect(out.errors).toMatch(/FATAL: SAFE_DEPLOYER_PRIVATE_KEY is set/);
+    }
+    const dev = await boot({ NODE_ENV: 'development', SAFE_DEPLOYER_PRIVATE_KEY: key });
+    expect(dev.booted).toBe(true);
+    expect(dev.warnings).toMatch(/SAFE_DEPLOYER_PRIVATE_KEY is set \(NODE_ENV=development\): Safe mode is experimental/);
+    expect((await boot({ NODE_ENV: 'production', SAFE_DEPLOYER_PRIVATE_KEY: '' })).errors).not.toMatch(/SAFE_DEPLOYER/);
+  });
+
+  it('Safe mode (owner decision 2026-10-14): SAFE_DEPLOYER_PRIVATE_KEY is FATAL in production / staging, a warning elsewhere', () => {
+    const key = { SAFE_DEPLOYER_PRIVATE_KEY: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' };
+    for (const nodeEnv of ['production', 'staging']) {
+      const verdict = safeModeVerdict(key, nodeEnv);
+      expect(verdict.fatal).toMatch(new RegExp(`^FATAL: SAFE_DEPLOYER_PRIVATE_KEY is set with NODE_ENV=${nodeEnv}\\. Safe mode cannot work yet`));
+      expect(verdict.fatal).toMatch(/not an owner/);
+      expect(verdict.warning).toBeNull();
+    }
+    for (const nodeEnv of ['development', 'test']) {
+      const verdict = safeModeVerdict(key, nodeEnv);
+      expect(verdict.fatal).toBeNull();
+      expect(verdict.warning).toMatch(/Safe mode is experimental.*only enabled after the S9 identity check/);
+    }
+    for (const nodeEnv of ['production', 'development']) {
+      expect(safeModeVerdict({}, nodeEnv)).toEqual({ fatal: null, warning: null });
+      expect(safeModeVerdict({ SAFE_DEPLOYER_PRIVATE_KEY: '  ' }, nodeEnv)).toEqual({ fatal: null, warning: null });
+    }
   });
 
   it('parseTrustProxy', () => {

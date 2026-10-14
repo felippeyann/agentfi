@@ -86,9 +86,20 @@ export interface LocalChain {
   stop(): void;
 }
 
-/** Starts Anvil on `port` with `chainId` and returns clients bound to it. */
-export async function startLocalChain(opts: { port: number; chainId: number }): Promise<LocalChain> {
-  const child: ChildProcess = await startAnvil({ port: opts.port, chainId: opts.chainId });
+/** Starts Anvil on `port` with `chainId` (a fork of `forkUrl` when given) and returns clients bound to it. */
+export async function startLocalChain(opts: {
+  port: number;
+  chainId: number;
+  forkUrl?: string | undefined;
+  forkBlockNumber?: string | undefined;
+}): Promise<LocalChain> {
+  const child: ChildProcess = await startAnvil({
+    port: opts.port,
+    chainId: opts.chainId,
+    forkUrl: opts.forkUrl,
+    forkBlockNumber: opts.forkBlockNumber,
+    ...(opts.forkUrl ? { readyTimeoutMs: 90_000 } : {}),
+  });
   const rpcUrl = `http://127.0.0.1:${opts.port}`;
   const chain = defineChain({
     id: opts.chainId,
@@ -134,16 +145,33 @@ export async function startLocalChain(opts: { port: number; chainId: number }): 
   };
 }
 
-/** `AgentPolicyModule(operator)` + `AgentExecutor(module, feeWallet, feeBps)` from the Foundry artifacts. */
+/**
+ * `AgentPolicyModule(operator)` + `AgentExecutor(module, feeWallet, feeBps)` from the Foundry
+ * artifacts, then `module.bindExecutor(executor)` from the deployer — what `script/Deploy.s.sol`
+ * does in one broadcast (`bind: false` leaves the module unbound).
+ */
 export async function deployPolicyStack(
   chain: LocalChain,
-  opts: { deployer: PrivateKeyAccount; operator: Address; feeWallet: Address; feeBps?: bigint },
+  opts: { deployer: PrivateKeyAccount; operator: Address; feeWallet: Address; feeBps?: bigint; bind?: boolean },
 ): Promise<{ policyModule: Address; executor: Address }> {
-  const policyModule = await chain.deploy(opts.deployer, readArtifact('AgentPolicyModule'), [opts.operator]);
+  const moduleArtifact = readArtifact('AgentPolicyModule');
+  const policyModule = await chain.deploy(opts.deployer, moduleArtifact, [opts.operator]);
   const executor = await chain.deploy(opts.deployer, readArtifact('AgentExecutor'), [
     policyModule,
     opts.feeWallet,
     opts.feeBps ?? 30n,
   ]);
+  if (opts.bind !== false) {
+    const hash = await chain.wallet(opts.deployer).writeContract({
+      address: policyModule,
+      abi: moduleArtifact.abi,
+      functionName: 'bindExecutor',
+      args: [executor],
+      account: opts.deployer,
+      chain: null,
+    });
+    const receipt = await chain.publicClient.waitForTransactionReceipt({ hash });
+    if (receipt.status !== 'success') throw new Error('bindExecutor reverted');
+  }
   return { policyModule, executor };
 }

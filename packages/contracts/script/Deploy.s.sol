@@ -59,6 +59,9 @@ contract DeployScript is DeployGuards {
     /// @notice `EXECUTOR_FEE_BPS` is not below 10 000.
     error InvalidExecutorFee(uint256 executorFeeBps);
 
+    /// @notice The module does not report the executor just deployed as bound.
+    error ExecutorNotBound(address bound);
+
     function run()
         external
         returns (AgentPolicyModule policyModule, AgentExecutor executor, EscrowModule escrowModule)
@@ -81,6 +84,12 @@ contract DeployScript is DeployGuards {
         executor = new AgentExecutor(address(policyModule), cfg.feeWallet, cfg.executorFeeBps);
         console.log("AgentExecutor:    ", address(executor));
 
+        // 2b. Bind the executor to the module (once; deployer or operator). Until bound the
+        //     module refuses every validation, so a governed agent could not transact.
+        policyModule.bindExecutor(address(executor));
+        if (policyModule.executor() != address(executor)) revert ExecutorNotBound(address(policyModule.executor()));
+        console.log("Executor bound:    ", policyModule.executor());
+
         // 3. Legacy escrow module (ETH A2A payments) — opt-in only (D8).
         if (cfg.deployLegacyEscrowModule) {
             escrowModule = new EscrowModule(cfg.operator);
@@ -94,6 +103,7 @@ contract DeployScript is DeployGuards {
         console.log("\n--- Copy to .env ---");
         console.log(string.concat("POLICY_MODULE_ADDRESS_", chainId, "=", vm.toString(address(policyModule))));
         console.log(string.concat("EXECUTOR_ADDRESS_", chainId, "=", vm.toString(address(executor))));
+        console.log(string.concat("POLICY_OPERATOR_ADDRESS_", chainId, "=", vm.toString(cfg.operator)));
         if (cfg.deployLegacyEscrowModule) {
             console.log(string.concat("ESCROW_MODULE_ADDRESS_", chainId, "=", vm.toString(address(escrowModule))));
         }

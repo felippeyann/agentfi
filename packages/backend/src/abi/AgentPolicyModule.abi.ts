@@ -24,6 +24,32 @@ export const AGENT_POLICY_MODULE_ABI_FULL = [
   },
   {
     "type": "function",
+    "name": "bindExecutor",
+    "inputs": [
+      {
+        "name": "_executor",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "deployer",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "emergencyPause",
     "inputs": [
       {
@@ -34,6 +60,19 @@ export const AGENT_POLICY_MODULE_ABI_FULL = [
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "executor",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -184,6 +223,19 @@ export const AGENT_POLICY_MODULE_ABI_FULL = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "recordExecution",
+    "inputs": [
+      {
+        "name": "safe",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -339,6 +391,25 @@ export const AGENT_POLICY_MODULE_ABI_FULL = [
   },
   {
     "type": "event",
+    "name": "ExecutorBound",
+    "inputs": [
+      {
+        "name": "executor",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "by",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "PolicyPaused",
     "inputs": [
       {
@@ -477,6 +548,16 @@ export const AGENT_POLICY_MODULE_ABI_FULL = [
         "internalType": "uint256"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "ExecutorAlreadyBound",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ExecutorNotBound",
+    "inputs": []
   },
   {
     "type": "error",

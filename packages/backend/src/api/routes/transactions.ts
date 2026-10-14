@@ -34,6 +34,7 @@ import { cacheSimulation, getSimulation } from '../../services/transaction/simul
 import { getContracts, UNISWAP_V3_QUOTER_V2 } from '../../config/contracts.js';
 import { createChainPublicClient } from '../../config/chains.js';
 import { logger } from '../middleware/logger.js';
+import { refuseUnverifiedContracts } from '../contracts-gate.js';
 import { sanitizeContextFromEnv, sanitizeErrorFields, type SanitizeContext } from '../errors/sanitize.js';
 import { notificationService } from '../../services/notification.service.js';
 import type { Address } from 'viem';
@@ -365,6 +366,8 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       routedViaExecutor: wrapped.routedViaExecutor,
       feeWei: wrapped.feeWei.toString(),
     }, 'Executor wrap');
+    // S9: the executor receives this transaction's value — only once it is verified.
+    if (wrapped.routedViaExecutor && refuseUnverifiedContracts(reply, body.chainId, 'a swap routed through the AgentExecutor')) return;
 
     // Simulate before submitting
     const sim = await simulator.simulate({
@@ -1892,7 +1895,6 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         actionIndex: moduleIndex,
       });
     }
-
     // The off-chain token whitelist can only be applied to what the caller
     // declares (the backend does not decode raw calldata), so an agent that
     // HAS a whitelist must declare a token on every action carrying calldata.
@@ -2013,6 +2015,13 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         ...(culprit?.actionIndex !== undefined ? { actionIndex: culprit.actionIndex } : {}),
       });
     }
+
+    // S9: the batch runs through (and sends its value to) the executor. Order
+    // (same as the swap route): the cheap deterministic refusals above —
+    // validation, policy 403, UNACCOUNTED_CALL, PRICE_UNAVAILABLE — answer
+    // first; then the identity gate; nothing is simulated, reserved or
+    // signed before it.
+    if (refuseUnverifiedContracts(reply, body.chainId, 'a batch routed through the AgentExecutor')) return;
 
     const { encodeFunctionData } = await import('viem');
 

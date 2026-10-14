@@ -930,7 +930,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Execute a Uniswap V3 swap */
+        /**
+         * Execute a Uniswap V3 swap
+         * @description An ETH-input swap is routed through the chain's AgentExecutor (it receives the value + fee). S9: while this process has not verified that executor against this build (runtime bytecode + bindings), such a swap answers `503` `{ "code": "CONTRACTS_UNVERIFIED" }` with `Retry-After` before anything is simulated or written.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -1301,7 +1304,7 @@ export interface paths {
         put?: never;
         /**
          * Execute up to 20 actions atomically via the AgentExecutor
-         * @description An action may not target the chain's AgentPolicyModule (403 `POLICY_MODULE_TARGET`, S8): through the executor its admin calls always revert, and its unauthenticated `validateTransaction` would only restart a wallet's on-chain cooldown. The on-chain policy is synced by the operator.
+         * @description An action may not target the chain's AgentPolicyModule (403 `POLICY_MODULE_TARGET`, S8): through the executor its admin calls always revert, and its unauthenticated `validateTransaction` would only restart a wallet's on-chain cooldown. The on-chain policy is synced by the operator. S9: while this process has not verified the executor against this build (runtime bytecode + bindings), the batch answers `503` `{ "code": "CONTRACTS_UNVERIFIED" }` with `Retry-After` before anything is simulated or written.
          */
         post: {
             parameters: {
@@ -2888,7 +2891,7 @@ export interface paths {
                         "application/json": components["schemas"]["PolicySyncResult"];
                     };
                 };
-                /** @description ONCHAIN_POLICY_UNREADABLE (RPC unreachable), or some calls could not be queued (`enqueueError`). */
+                /** @description ONCHAIN_POLICY_UNREADABLE (RPC unreachable), CONTRACTS_UNVERIFIED (S9 — the chain's AgentExecutor / AgentPolicyModule is not verified against this build in this process), or some calls could not be queued (`enqueueError`). */
                 503: {
                     headers: {
                         [name: string]: unknown;
@@ -3015,6 +3018,77 @@ export interface paths {
                 };
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/contracts/verification": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Identity verification of each chain's AgentExecutor / AgentPolicyModule (S9)
+         * @description This API process's verification of each chain with an executor or a
+         *     policy module: the runtime bytecode at each address must be this
+         *     repository's build (immutables masked; `buildCodeVersion` identifies
+         *     the build) and the bindings must match the configuration
+         *     (`executor.policyModule()` = POLICY_MODULE_ADDRESS, `module.executor()`
+         *     = EXECUTOR_ADDRESS, `feeWallet()` = OPERATOR_FEE_WALLET, `feeBps()`,
+         *     `operator()` = POLICY_OPERATOR_ADDRESS, `eth_chainId`). Same lifecycle
+         *     as the escrow verification. While a chain is not verified,
+         *     executor-routed transactions answer `503 CONTRACTS_UNVERIFIED` (queued
+         *     ones wait), the policy sync and the Safe module enablement are refused.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The state of every chain with an executor or a policy module. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {string} */
+                            process?: "api";
+                            buildCodeVersion?: string;
+                            ttlSeconds?: number;
+                            recheckSeconds?: number;
+                            chains?: {
+                                chainId?: number;
+                                /** @enum {string} */
+                                state?: "verified" | "not-configured" | "not-verified-yet" | "unverified" | "mismatch" | "expired" | "config-changed";
+                                allowed?: boolean;
+                                verifiedAt?: string | null;
+                                validUntil?: string | null;
+                                since?: string | null;
+                                reason?: string;
+                            }[];
+                        };
+                    };
+                };
+                /** @description Missing or wrong admin secret. */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3215,6 +3289,13 @@ export interface paths {
                 };
                 /** @description No agent with that `agentId`. */
                 404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description `CONTRACTS_UNVERIFIED` (S9): the chain's AgentExecutor / AgentPolicyModule is not verified against this build in this process — nothing was written; retry after `Retry-After`. */
+                503: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -3984,6 +4065,13 @@ export interface components {
             } | null;
             offChainOnlyFields?: string[];
             warnings?: string[];
+            /** @description S9 — this process's verification of the chain's AgentExecutor / AgentPolicyModule; a sync is queued only when `allowed`. */
+            contracts?: {
+                allowed?: boolean;
+                /** @description `verified`, or why not: not-configured, not-verified-yet, unverified, mismatch, expired, config-changed. */
+                state?: string;
+                reason?: string | null;
+            };
         };
         PolicySyncTransaction: {
             transactionId?: string;
@@ -4019,7 +4107,7 @@ export interface components {
             /** @description Some rows could not be queued (they are FAILED). */
             enqueueError?: string;
             notice?: string;
-            /** @description On a refusal — POLICY_MODULE_NOT_CONFIGURED, NO_DB_POLICY, POLICY_NOT_REPRESENTABLE, ONCHAIN_POLICY_UNREADABLE, POLICY_MODULE_MISMATCH, POLICY_SYNC_WALLET_MODE, POLICY_SYNC_UNKNOWN_ENTRIES, POLICY_SYNC_ERROR. */
+            /** @description On a refusal — POLICY_MODULE_NOT_CONFIGURED, NO_DB_POLICY, POLICY_NOT_REPRESENTABLE, ONCHAIN_POLICY_UNREADABLE, CONTRACTS_UNVERIFIED, POLICY_MODULE_MISMATCH, POLICY_SYNC_WALLET_MODE, POLICY_SYNC_UNKNOWN_ENTRIES, POLICY_SYNC_ERROR. */
             code?: string;
             error?: string;
             view?: components["schemas"]["PolicySyncView"];

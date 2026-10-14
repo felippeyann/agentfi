@@ -28,6 +28,7 @@ import type { PrismaClient } from '@prisma/client';
 import { getAddress, type Address, type Hex } from 'viem';
 import type { TransactionJobData } from '../../queues/transaction.processor.js';
 import { isDefinitiveContractError } from '../../config/escrow-boot-check.js';
+import type { GateVerdict } from '../../config/verification-state.js';
 import { sanitizeText } from '../../api/errors/sanitize.js';
 import {
   OFF_CHAIN_ONLY_POLICY_FIELDS,
@@ -109,6 +110,8 @@ export interface PolicySyncView {
   lastFailure: SyncRowView | null;
   offChainOnlyFields: readonly string[];
   warnings: string[];
+  /** S9: this process's verification of the chain's AgentExecutor / AgentPolicyModule (a sync is queued only when allowed). */
+  contracts: { allowed: boolean; state: string; reason: string | null };
 }
 
 export type PolicySyncOutcome =
@@ -140,6 +143,12 @@ export interface PolicySyncDeps {
   walletAddress(walletId: string): Promise<Address>;
   /** The configured `AgentPolicyModule` of the chain, if any. */
   policyModule(chainId: number): Address | undefined;
+  /**
+   * S9: the chain's AgentExecutor / AgentPolicyModule verification
+   * (`policyStackGate`). A sync is queued only while it is allowed: the
+   * module must run this build's code and be the executor's module.
+   */
+  contractsGate(chainId: number): GateVerdict;
   logger: PolicySyncLogger;
 }
 
@@ -220,9 +229,20 @@ export class PolicySyncService {
     const { view } = assessed;
     const refuse = (httpStatus: 409 | 422 | 503, code: string, error: string): PolicySyncOutcome => ({ kind: 'refused', httpStatus, code, error, view });
 
+    if (view.status === 'not-configured') {
+      return refuse(409, 'POLICY_MODULE_NOT_CONFIGURED', view.reason ?? 'no AgentPolicyModule configured for the agent\'s chain');
+    }
+    // S9: nothing is sent to a module this process has not verified (this
+    // build's code, the executor's module, the expected operator).
+    if (!view.contracts.allowed) {
+      return refuse(
+        503,
+        'CONTRACTS_UNVERIFIED',
+        `the AgentExecutor / AgentPolicyModule of chain ${assessed.chainId} is not verified against this build (${view.contracts.state})` +
+          `${view.contracts.reason ? `: ${view.contracts.reason}` : ''}`,
+      );
+    }
     switch (view.status) {
-      case 'not-configured':
-        return refuse(409, 'POLICY_MODULE_NOT_CONFIGURED', view.reason ?? 'no AgentPolicyModule configured for the agent\'s chain');
       case 'no-db-policy':
         return refuse(409, 'NO_DB_POLICY', view.reason ?? 'the agent has no stored policy');
       case 'not-representable':
@@ -388,6 +408,7 @@ export class PolicySyncService {
       walletError = firstLine(err);
     }
 
+    const gate = this.deps.contractsGate(chainId);
     const base: PolicySyncView = {
       agentId,
       chainId,
@@ -403,6 +424,9 @@ export class PolicySyncService {
       lastFailure,
       offChainOnlyFields: OFF_CHAIN_ONLY_POLICY_FIELDS,
       warnings: [],
+      contracts: gate.allowed
+        ? { allowed: true, state: 'verified', reason: null }
+        : { allowed: false, state: gate.block, reason: sanitizeText(gate.reason) },
     };
     const done = (view: PolicySyncView, extra: Partial<Assessment> = {}): Assessment => ({
       agent: { id: agent.id, walletId: agent.walletId, safeAddress: agent.safeAddress, chainIds: agent.chainIds, tier: agent.tier },
@@ -428,13 +452,9 @@ export class PolicySyncService {
     }
     const desired = derived.desired;
     const warnings: string[] = [];
-    if (desired.cooldownSeconds > 0n) {
-      warnings.push(
-        `cooldown ${desired.cooldownSeconds} s: AgentPolicyModule applies the cooldown to every ACTION, so once synced any executor ` +
-          'batch with more than one action reverts CooldownActive, and anyone can restart the cooldown through the unauthenticated ' +
-          'validateTransaction (contract findings in the S8 PR)',
-      );
-    }
+    // (The S8 contract findings — cooldown per action, unauthenticated
+    // validateTransaction — are fixed in AgentPolicyModule: one cooldown per
+    // execution, validations by the bound executor only.)
     if (walletMode === 'safe') {
       warnings.push('Safe mode: the sync cannot be signed by the agent wallet (msg.sender would not be the safe); use the operator key');
     }

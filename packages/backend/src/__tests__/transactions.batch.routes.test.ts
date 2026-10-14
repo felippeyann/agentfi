@@ -30,6 +30,10 @@ vi.hoisted(() => {
   process.env['POLICY_MODULE_ADDRESS_1'] = '0x00000000000000000000000000000000000000A9';
 });
 
+const { contractsGate } = vi.hoisted(() => ({ contractsGate: vi.fn() }));
+// S9: the executor's verification (real checks run on Anvil in contract-identity.*.anvil.ts).
+vi.mock('../config/policy-stack-verification.runtime.js', () => ({ policyStackGate: contractsGate }));
+
 const { mockDb, queueAddMock, validateMock, getPolicyMock, simulateMock } = vi.hoisted(() => ({
   mockDb: {
     agent: { findUnique: vi.fn() },
@@ -135,6 +139,7 @@ beforeEach(() => {
   validateMock.mockResolvedValue({ allowed: true });
   simulateMock.mockResolvedValue({ success: true, simulationId: 'sim-1', gasUsed: '1', gasPrice: '1', provider: 'mock' });
   queueAddMock.mockResolvedValue(undefined);
+  contractsGate.mockImplementation((chainId: number) => ({ allowed: true, chainId, verifiedAt: new Date(), validUntil: new Date(Date.now() + 600_000) }));
 });
 
 describe('POST /v1/transactions/batch — caller-declared token', () => {
@@ -267,6 +272,38 @@ describe('POST /v1/transactions/batch — S8: the policy module is never a batch
     expect(res.json()).toMatchObject({ code: 'POLICY_MODULE_TARGET', actionIndex: 1 });
     expect(simulateMock).not.toHaveBeenCalled();
     expect(queueAddMock).not.toHaveBeenCalled();
+    await app.close();
+  });
+});
+
+describe('POST /v1/transactions/batch — S9: only through a verified executor', () => {
+  it('an unverified executor → 503 CONTRACTS_UNVERIFIED after the policy checks, before any simulation, reservation or write', async () => {
+    getPolicyMock.mockResolvedValue(null);
+    contractsGate.mockReturnValue({ allowed: false, chainId: 1, block: 'mismatch', reason: 'not this build', retryAfterSeconds: 120 });
+    const app = await buildApp();
+
+    const res = await app.inject(batch([{ to: TARGET, value: '1000', data: '0x' }]));
+
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['retry-after']).toBe('120');
+    expect(res.json()).toMatchObject({ code: 'CONTRACTS_UNVERIFIED', chainId: 1, state: 'mismatch' });
+    expect(validateMock).toHaveBeenCalledTimes(1); // the deterministic policy checks ran first
+    expect(simulateMock).not.toHaveBeenCalled();
+    expect(mockDb.transaction.create).not.toHaveBeenCalled();
+    expect(queueAddMock).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('order: a policy refusal (403) answers before the identity gate is even asked', async () => {
+    getPolicyMock.mockResolvedValue(null);
+    validateMock.mockResolvedValue({ allowed: false, reason: 'blocked by policy' });
+    contractsGate.mockReturnValue({ allowed: false, chainId: 1, block: 'unverified', reason: 'rpc down', retryAfterSeconds: 120 });
+    const app = await buildApp();
+
+    const res = await app.inject(batch([{ to: TARGET, value: '1000', data: '0x' }]));
+
+    expect(res.statusCode).toBe(403);
+    expect(contractsGate).not.toHaveBeenCalled();
     await app.close();
   });
 });

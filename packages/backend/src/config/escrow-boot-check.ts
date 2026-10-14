@@ -17,7 +17,10 @@
  *
  * So at backend and worker boot, for every chain with an escrow address, the
  * values are read and compared with the configuration (escrow.token() always,
- * the four hook views when a hook is configured). A mismatch is FATAL in
+ * the four hook views when a hook is configured). S9: before the views, the
+ * runtime code at the escrow (and hook) address must be this repository's
+ * build (`contract-identity.ts`) — a lookalike answering the same views is a
+ * mismatch (reproduced on Anvil). A mismatch is FATAL in
  * production / staging (the process refuses to boot) and a loud error in
  * development / test. An address with no code, a view that reverts or returns
  * zero / undecodable data is a mismatch too ("no ReputationHook at X": a typo
@@ -30,11 +33,12 @@
  * as a parameter, so every rule is unit-testable without an RPC.
  */
 
-import { getAddress, type Abi, type Address } from 'viem';
+import { getAddress, type Abi, type Address, type Hex } from 'viem';
 import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
 import { REPUTATION_HOOK_ABI } from '../abi/ReputationHook.abi.js';
 import { sanitizeText } from '../api/errors/sanitize.js';
 import { PRODUCTION_LIKE } from './env-guards.js';
+import { codeIdentityProblem, type VerifiedContractName } from './contract-identity.js';
 
 /** What the backend is configured with for one escrow chain. */
 export interface EscrowChainExpectation {
@@ -146,6 +150,35 @@ export type ContractReader = (params: { address: Address; abi: Abi; functionName
 /** `eth_chainId` of one chain's RPC (viem `getChainId`). Q7. */
 export type ChainIdReader = () => Promise<number>;
 
+/** `eth_getCode` of one chain (viem `getCode({ address })`; undefined / "0x" = no code). S9. */
+export type CodeReader = (address: Address) => Promise<Hex | undefined>;
+
+/**
+ * S9: the runtime code at each configured address must be this build's
+ * contract (`contract-identity.ts`). Returns the mismatch lines (empty when
+ * every address is ours); a transport error propagates (unreadable).
+ */
+export async function codeIdentityProblems(
+  readCode: CodeReader,
+  items: ReadonlyArray<{ name: VerifiedContractName; address: Address; label: string }>,
+): Promise<string[]> {
+  const settled = await Promise.allSettled(items.map((item) => readCode(item.address)));
+  const problems: string[] = [];
+  let transport: unknown = null;
+  settled.forEach((outcome, i) => {
+    const item = items[i]!;
+    if (outcome.status === 'rejected') {
+      transport ??= outcome.reason;
+      return;
+    }
+    const problem = codeIdentityProblem(item.name, outcome.value);
+    if (problem) problems.push(`${item.label}=${item.address} is not this build's ${item.name}: ${problem}`);
+  });
+  // A code that answered "not ours" is conclusive even if another read failed.
+  if (problems.length === 0 && transport) throw transport;
+  return problems;
+}
+
 /**
  * viem errors that are an ANSWER from the chain, not a failure to reach it:
  * the call executed and reverted, or returned no / undecodable data (no code
@@ -187,7 +220,12 @@ function firstLine(err: unknown): string {
   return sanitizeText((e?.shortMessage ?? e?.message ?? String(err)).split('\n')[0] ?? '') || 'unknown error';
 }
 
-async function readOnce(read: ContractReader, expected: EscrowChainExpectation, readChainId?: ChainIdReader): Promise<EscrowChainReading> {
+async function readOnce(
+  read: ContractReader,
+  expected: EscrowChainExpectation,
+  readChainId: ChainIdReader | undefined,
+  readCode: CodeReader,
+): Promise<EscrowChainReading> {
   // Q7: the RPC must serve the configured chain — every read below and every
   // signature would otherwise go to another network. A different answer is a
   // mismatch (RPC_URL_<id> / the provider points elsewhere); a failure to ask
@@ -201,6 +239,14 @@ async function readOnce(read: ContractReader, expected: EscrowChainExpectation, 
       ]);
     }
   }
+  // S9: identity before anything else — a lookalike answers the views below.
+  const identity = await codeIdentityProblems(readCode, [
+    { name: 'AgentJobEscrow', address: expected.escrow, label: `chain ${expected.chainId}: AGENT_JOB_ESCROW_ADDRESS_${expected.chainId}` },
+    ...(expected.hook
+      ? [{ name: 'ReputationHook' as const, address: expected.hook, label: `chain ${expected.chainId}: REPUTATION_HOOK_ADDRESS_${expected.chainId}` }]
+      : []),
+  ]);
+  if (identity.length > 0) throw new DeploymentMismatchError(identity);
   const calls: Array<{ contract: 'escrow' | 'hook'; address: Address; abi: Abi; functionName: string }> = [
     { contract: 'escrow', address: expected.escrow, abi: AGENT_JOB_ESCROW_ABI as unknown as Abi, functionName: 'token' },
     ...(expected.hook
@@ -286,6 +332,8 @@ export async function checkEscrowDeployments(params: {
   reader: (chainId: number) => ContractReader;
   /** Q7: `eth_chainId` of each chain's RPC; checked first when given. */
   chainIdReader?: (chainId: number) => ChainIdReader;
+  /** S9: `eth_getCode` of each chain — the escrow and the hook must run this build's code. Required. */
+  codeReader: (chainId: number) => CodeReader;
   timeoutMs?: number;
   attempts?: number;
 }): Promise<EscrowChainCheck[]> {
@@ -298,7 +346,7 @@ export async function checkEscrowDeployments(params: {
       for (let attempt = 1; attempt <= attempts; attempt++) {
         try {
           const reading = await withTimeout(
-            readOnce(params.reader(expected.chainId), expected, params.chainIdReader?.(expected.chainId)),
+            readOnce(params.reader(expected.chainId), expected, params.chainIdReader?.(expected.chainId), params.codeReader(expected.chainId)),
             timeoutMs,
           );
           return { ...base, ...compareEscrowDeployment(expected, reading), unreadable: null };

@@ -29,7 +29,12 @@ import { AGENT_EXECUTOR_ABI } from '../../abi/AgentExecutor.abi.js';
 import { describeLegacyContract, resolveExecutorAddress } from '../../config/contracts.js';
 import type { TransactionData } from './builder.service.js';
 
-const FEE_BPS = 30n; // mirrors on-chain value — used for pre-estimation only
+/**
+ * The fee (bps) the backend adds to `msg.value` of executor-routed calls. It must
+ * equal the deployed executor's immutable `feeBps()` — S9 verifies that
+ * (`config/policy-stack-check.ts`) before any executor-routed transaction.
+ */
+export const FEE_BPS = 30n;
 
 /** Minimal logger surface (pino-compatible) so this module stays free of env.ts. */
 export interface ExecutorLogger {

@@ -18,6 +18,7 @@ contract AgentExecutorReproTest is Test {
     function setUp() public {
         policyModule = new AgentPolicyModule(operator);
         executor     = new AgentExecutor(address(policyModule), feeWallet, 30);
+        policyModule.bindExecutor(address(executor));
         vm.deal(safe, 100 ether);
     }
 

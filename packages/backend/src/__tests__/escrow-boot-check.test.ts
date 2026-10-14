@@ -18,6 +18,7 @@ import {
 } from '../config/escrow-boot-check.js';
 import { capabilityDrift, describeCapabilities, type ProcessCapabilities } from '../config/process-capabilities.js';
 import { DEFAULT_REPUTATION_REGISTRIES, resolveReputationRegistry } from '../config/contracts.js';
+import { EXPECTED_CONTRACT_CODE } from '../abi/contract-code.generated.js';
 
 const ESCROW = '0x00000000000000000000000000000000000E5C20' as Address;
 const HOOK = '0x000000000000000000000000000000000000400C' as Address;
@@ -26,6 +27,14 @@ const IDENTITY = '0x8004A818BFB912233c491871b3d84c89A494BD9e' as Address;
 const REPUTATION = '0x8004B663056A597Dffe9eCcC1965A193B7388713' as Address;
 const USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as Address;
 const OTHER = '0x1111111111111111111111111111111111111111' as Address;
+
+/** S9: the escrow and the hook run this build's code; any other address has none (identity is tested in contract-identity.test.ts). */
+const ourCode = () => async (address: Address) =>
+  address.toLowerCase() === ESCROW.toLowerCase()
+    ? EXPECTED_CONTRACT_CODE.AgentJobEscrow.runtime
+    : address.toLowerCase() === HOOK.toLowerCase()
+      ? EXPECTED_CONTRACT_CODE.ReputationHook.runtime
+      : undefined;
 
 const expected: EscrowChainExpectation = {
   chainId: 84532,
@@ -98,7 +107,7 @@ describe('compareEscrowDeployment', () => {
 
 describe('checkEscrowDeployments + escrowBootVerdict', () => {
   it('a matching deployment is verified in every environment', async () => {
-    const checks = await checkEscrowDeployments({ chains: [expected], reader: () => readerFor(matching) });
+    const checks = await checkEscrowDeployments({ codeReader: ourCode, chains: [expected], reader: () => readerFor(matching) });
     for (const env of ['production', 'staging', 'development', 'test']) {
       expect(escrowBootVerdict(env, checks)).toMatchObject({ fatal: null, errors: [], verified: [84532], unreadable: [] });
     }
@@ -111,7 +120,7 @@ describe('checkEscrowDeployments + escrowBootVerdict', () => {
     ['reputationRegistry', { reputationRegistry: OTHER }, /reputationRegistry\(\) is .*REPUTATION_REGISTRY_ADDRESS_84532/],
     ['escrow.token', { token: OTHER }, /token\(\) is .*not the chain's USDC/],
   ] as const)('%s mismatch alone: exactly one problem — FATAL in production and staging, error (boot continues) in development and test', async (_field, override, pattern) => {
-    const checks = await checkEscrowDeployments({ chains: [expected], reader: () => readerFor({ ...matching, ...override }) });
+    const checks = await checkEscrowDeployments({ codeReader: ourCode, chains: [expected], reader: () => readerFor({ ...matching, ...override }) });
     expect(checks[0]!.problems).toEqual([expect.stringMatching(pattern)]);
     for (const env of ['production', 'staging']) {
       expect(escrowBootVerdict(env, checks).fatal).toMatch(pattern);
@@ -125,7 +134,7 @@ describe('checkEscrowDeployments + escrowBootVerdict', () => {
   });
 
   it('a mismatch is FATAL in production and staging, a loud error in development / test', async () => {
-    const checks = await checkEscrowDeployments({ chains: [expected], reader: () => readerFor({ ...matching, trustedEvaluator: OTHER }) });
+    const checks = await checkEscrowDeployments({ codeReader: ourCode, chains: [expected], reader: () => readerFor({ ...matching, trustedEvaluator: OTHER }) });
     for (const env of ['production', 'staging']) {
       const verdict = escrowBootVerdict(env, checks);
       expect(verdict.fatal).toMatch(new RegExp(`^FATAL: .*NODE_ENV=${env}.*trustedEvaluator`));
@@ -140,10 +149,10 @@ describe('checkEscrowDeployments + escrowBootVerdict', () => {
 
   it('retries a failing read, then reports the chain unreadable (an error everywhere, never "ok", never fatal)', async () => {
     const flaky = readerFor(matching, { fail: 1 }); // one failed call, then healthy
-    const recovered = await checkEscrowDeployments({ chains: [expected], reader: () => flaky });
+    const recovered = await checkEscrowDeployments({ codeReader: ourCode, chains: [expected], reader: () => flaky });
     expect(recovered[0]).toMatchObject({ unreadable: null, problems: [] });
 
-    const down = await checkEscrowDeployments({ chains: [expected], reader: () => readerFor(matching, { fail: 99 }), attempts: 2 });
+    const down = await checkEscrowDeployments({ codeReader: ourCode, chains: [expected], reader: () => readerFor(matching, { fail: 99 }), attempts: 2 });
     expect(down[0]).toMatchObject({ unreadable: 'HTTP request failed.', problems: [] });
     const verdict = escrowBootVerdict('production', down);
     expect(verdict).toMatchObject({ fatal: null, verified: [], unreadable: [84532] });
@@ -151,15 +160,16 @@ describe('checkEscrowDeployments + escrowBootVerdict', () => {
   });
 
   it('a hanging RPC times out instead of blocking the boot', async () => {
-    const checks = await checkEscrowDeployments({ chains: [expected], reader: () => readerFor(matching, { hang: true }), timeoutMs: 20, attempts: 1 });
+    const checks = await checkEscrowDeployments({ codeReader: ourCode, chains: [expected], reader: () => readerFor(matching, { hang: true }), timeoutMs: 20, attempts: 1 });
     expect(checks[0]!.unreadable).toMatch(/timed out/);
   });
 
   it('checks every chain independently', async () => {
-    const base = { ...expected, chainId: 8453, escrow: OTHER };
+    const base = { ...expected, chainId: 8453 };
     const checks = await checkEscrowDeployments({
+      codeReader: ourCode,
       chains: [expected, base],
-      reader: (chainId) => readerFor(chainId === 84532 ? matching : { ...matching, acp: ESCROW }),
+      reader: (chainId) => readerFor(chainId === 84532 ? matching : { ...matching, acp: OTHER }),
     });
     const verdict = escrowBootVerdict('production', checks);
     expect(verdict.verified).toEqual([84532]);
@@ -173,13 +183,13 @@ describe('checkEscrowDeployments + escrowBootVerdict', () => {
       reads.push(`${address}.${functionName}`);
       return token;
     };
-    const ok = await checkEscrowDeployments({ chains: [noHook], reader: () => reader(USDC) });
+    const ok = await checkEscrowDeployments({ codeReader: ourCode, chains: [noHook], reader: () => reader(USDC) });
     expect(reads).toEqual([`${ESCROW}.token`]);
     expect(ok[0]).toMatchObject({ hook: null, problems: [], unreadable: null });
     expect(ok[0]!.notes).toEqual([expect.stringMatching(/no REPUTATION_HOOK_ADDRESS_84532 — only escrow\.token\(\) checked/)]);
     expect(escrowBootVerdict('production', ok)).toMatchObject({ fatal: null, verified: [84532] });
 
-    const wrong = await checkEscrowDeployments({ chains: [noHook], reader: () => reader(OTHER) });
+    const wrong = await checkEscrowDeployments({ codeReader: ourCode, chains: [noHook], reader: () => reader(OTHER) });
     expect(escrowBootVerdict('production', wrong).fatal).toMatch(/token\(\) is .*not the chain's USDC/);
   });
 
@@ -234,7 +244,7 @@ describe('boot check: no contract / revert / zero data is a mismatch; only trans
     ['the call returns 2 bytes (undecodable)', async () => '0x1234', /too small/],
   ];
   it.each(definitive)('real viem client — %s: FATAL in production / staging, loud error in development / test', async (_case, hookCall, why) => {
-    const checks = await checkEscrowDeployments({ chains: [vExpected], reader: () => viemReader(hookCall), attempts: 2 });
+    const checks = await checkEscrowDeployments({ codeReader: ourCode, chains: [vExpected], reader: () => viemReader(hookCall), attempts: 2 });
     expect(checks[0]).toMatchObject({ unreadable: null });
     expect(checks[0]!.problems).toEqual([expect.stringMatching(NO_HOOK)]);
     expect(checks[0]!.problems[0]).toMatch(why);
@@ -250,21 +260,21 @@ describe('boot check: no contract / revert / zero data is a mismatch; only trans
 
   it('a reader that RESOLVES "0x" (not an address) is a mismatch, not unreadable', async () => {
     const zeroHook: ContractReader = async ({ functionName }) => (functionName === 'token' ? USDC : '0x');
-    const checks = await checkEscrowDeployments({ chains: [expected], reader: () => zeroHook });
+    const checks = await checkEscrowDeployments({ codeReader: ourCode, chains: [expected], reader: () => zeroHook });
     expect(checks[0]).toMatchObject({ unreadable: null, problems: [expect.stringMatching(/no ReputationHook at .*acp\(\) returned "0x"/)] });
     expect(escrowBootVerdict('production', checks).fatal).toMatch(/^FATAL: .*no ReputationHook at/);
   });
 
   it('no code at the escrow address: "no AgentJobEscrow at …" (also on a chain without a hook)', async () => {
     for (const chain of [vExpected, { ...vExpected, hook: null }]) {
-      const checks = await checkEscrowDeployments({ chains: [chain], reader: () => viemReader(async () => encodeAbiParameters([{ type: 'address' }], [V_ESCROW]), async () => '0x') });
+      const checks = await checkEscrowDeployments({ codeReader: ourCode, chains: [chain], reader: () => viemReader(async () => encodeAbiParameters([{ type: 'address' }], [V_ESCROW]), async () => '0x') });
       expect(checks[0]!.problems).toEqual(expect.arrayContaining([expect.stringMatching(/no AgentJobEscrow at AGENT_JOB_ESCROW_ADDRESS_84532=0x00000000000000000000000000000000000e5c20 \(token\(\) .*returned no data/)]));
       expect(escrowBootVerdict('staging', checks).fatal).toMatch(/no AgentJobEscrow at/);
     }
   });
 
   it('a transport error (HTTP 503 through viem) stays unreadable — never fatal — and the RPC key is not in the message', async () => {
-    const checks = await checkEscrowDeployments({ chains: [vExpected], reader: () => viemReader(rpcDown, rpcDown), attempts: 2 });
+    const checks = await checkEscrowDeployments({ codeReader: ourCode, chains: [vExpected], reader: () => viemReader(rpcDown, rpcDown), attempts: 2 });
     expect(checks[0]).toMatchObject({ problems: [], unreadable: 'HTTP request failed.' });
     const verdict = escrowBootVerdict('production', checks);
     expect(verdict).toMatchObject({ fatal: null, unreadable: [84532], verified: [] });
@@ -272,7 +282,7 @@ describe('boot check: no contract / revert / zero data is a mismatch; only trans
   });
 
   it('a definitive answer from the hook wins over a transport error on the escrow read', async () => {
-    const checks = await checkEscrowDeployments({ chains: [vExpected], reader: () => viemReader(async () => '0x', rpcDown) });
+    const checks = await checkEscrowDeployments({ codeReader: ourCode, chains: [vExpected], reader: () => viemReader(async () => '0x', rpcDown) });
     expect(checks[0]).toMatchObject({ unreadable: null, problems: [expect.stringMatching(NO_HOOK)] });
   });
 

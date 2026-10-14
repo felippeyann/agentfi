@@ -2055,6 +2055,11 @@ async function sendEvaluatorTx(
   try {
     txHash = await signer.writeContract(params, {
       onBeforeBroadcast: async (signedTxHash: Hex) => {
+        // #182 review: the Q7 gate checked above may have closed while the
+        // signer simulated, estimated and signed (TTL ran out, a re-check
+        // failed): asked again before the stamp, so a refusal leaves nothing
+        // recorded (the claim is handed back) and nothing sent.
+        assertEscrowConfigVerified(deps, chainId);
         const stamped = await deps.db.job.updateMany({
           where: { id: job.id, settleTxHash: previous, ...(opts.claimed ? { onChainStatus: 'SETTLING' } : {}) },
           data: { settleTxHash: signedTxHash, settleAttemptAt: nowOf(deps) },
