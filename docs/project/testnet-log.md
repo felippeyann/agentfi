@@ -255,9 +255,16 @@ ESCROW_EVALUATOR_PRIVATE_KEY=<0x + 64 hex>
 # the requester may POST /v1/jobs/<id>/contest. A validation value, not the
 # mainnet one (that stays an owner decision, execution plan §5).
 ESCROW_EVALUATION_DELAY_SECONDS=3600
+# Synthetic TEST prices for the agents' daily limits (owner decision Q9, 2026-10-14):
+# on Base Sepolia a spend is priced ONLY with these values (no oracle, never the
+# mainnet ETH price); any other asset has no price, and a spend in it is refused
+# (503 PRICE_UNAVAILABLE) while the agent has a daily limit. Test values, not market
+# prices: marked "synthetic" in the admin, never used for fees / P&L / revenue,
+# refused at boot in production / staging. Escrow budgets need none (USDC at 1.00).
+SYNTHETIC_TEST_PRICES_USD=84532:native=2500,84532:0x036CbD53842c5426634e7929541eC2318f3dCF7e=1
 ```
 
-That is the full list the boot needs (`API_SECRET`, `ADMIN_SECRET`, `DATABASE_URL`, `REDIS_URL`, `ALCHEMY_API_KEY`, `OPERATOR_FEE_WALLET`, and the three `TURNKEY_*` with `WALLET_PROVIDER=turnkey`) plus what C5 uses. `ESCROW_EVALUATION_DELAY_SECONDS=3600` is set on purpose (the code default is 0, which leaves no time to contest): with the default `ESCROW_JOB_TTL_SECONDS=604800` the window is never clamped, so every happy-path settlement arrives about one hour after `submit`. Everything else keeps its default: `ESCROW_JOB_TTL_SECONDS=604800`, `IDENTITY_REGISTRY_ADDRESS_84532` = the official registry the hook was deployed with, `RATE_LIMIT_FREE=30` requests/min per agent (the example polls every 3 s), and the on-chain configuration check (`ESCROW_CONFIG_VERIFIED_TTL_SECONDS=600`, `ESCROW_CONFIG_RECHECK_SECONDS=120`: while the RPC cannot confirm the escrow / hook configuration, new escrow jobs answer `503 ESCROW_CONFIG_UNVERIFIED` and queued escrow signatures wait, see [erc-8183-mapping.md](../architecture/erc-8183-mapping.md) §6.9). `NODE_ENV=development` is explicit on purpose: unset it means development too, with a loud warning.
+That is the full list the boot needs (`API_SECRET`, `ADMIN_SECRET`, `DATABASE_URL`, `REDIS_URL`, `ALCHEMY_API_KEY`, `OPERATOR_FEE_WALLET`, and the three `TURNKEY_*` with `WALLET_PROVIDER=turnkey`) plus what C5 uses. `ESCROW_EVALUATION_DELAY_SECONDS=3600` is set on purpose (the code default is 0, which leaves no time to contest): with the default `ESCROW_JOB_TTL_SECONDS=604800` the window is never clamped, so every happy-path settlement arrives about one hour after `submit`. Everything else keeps its default: `ESCROW_JOB_TTL_SECONDS=604800`, `IDENTITY_REGISTRY_ADDRESS_84532` = the official registry the hook was deployed with, `RATE_LIMIT_FREE=30` requests/min per agent (the example polls every 3 s), and the on-chain configuration check (`ESCROW_CONFIG_VERIFIED_TTL_SECONDS=600`, `ESCROW_CONFIG_RECHECK_SECONDS=120`: while the RPC cannot confirm the escrow / hook configuration, new escrow jobs answer `503 ESCROW_CONFIG_UNVERIFIED` and queued escrow signatures wait, see [erc-8183-mapping.md](../architecture/erc-8183-mapping.md) §6.9). `NODE_ENV=development` is explicit on purpose: unset it means development too, with a loud warning. `SYNTHETIC_TEST_PRICES_USD` covers native ETH and USDC on 84532 (Q9): without it an ordinary transfer, swap or batch with value by an agent with the default daily limit (`10000` USD) is refused with `503 PRICE_UNAVAILABLE`; the escrow flow itself (USDC at 1.00) does not depend on it. The boot prints a `WARN` naming the synthetic prices.
 
 **4. Prisma client and schema** (once per checkout / database):
 

@@ -238,10 +238,55 @@ enqueued, or mined and reverted after a single signed broadcast), and stays
 counted when the outcome is unknown (a failure after a broadcast attempt, a
 revert after more than one signed broadcast, or a transaction dropped from the
 mempool) because it may still be mined. A paid job's reward is counted by the
-job (at creation) and not again by its payment transaction. A batch counts the
-native value it moves. When the USD price of the native value cannot be
-resolved and a daily limit is set, the request is refused with `503` (the limit
-cannot be checked); without a daily limit it proceeds and counts nothing.
+job (at creation) and not again by its payment transaction.
+
+**What is counted, and at which price (Q9).** No spend is ever counted as 0
+because it could not be priced:
+
+| Operation | Counted USD |
+|-----------|-------------|
+| `transfer` | the native value, or the ERC-20 amount |
+| `swap` (Uniswap) | the input: WETH priced as the native asset, any other token as that token |
+| `swap-curve` | the input token amount |
+| `deposit` / `withdraw` (Aave), `supply-compound` / `withdraw-compound`, `deposit-erc4626` / `withdraw-erc4626` | the asset amount; a `"max"` withdrawal's amount is unknown before it executes, so it is **unpriced** (send an explicit amount while a daily limit applies) |
+| `gmx-open` | the collateral amount (the keeper execution fee is checked against `maxValuePerTxEth` and not counted) |
+| `gmx-close` | nothing (a close returns value to the agent) |
+| `batch` | its native value; while a daily limit applies also every action whose calldata is exactly an ERC-20 `transfer` / `transferFrom` (see below) |
+| paid job, legacy reward | the reward, at creation (`POST /v1/jobs`) |
+| paid job, ERC-8183 escrow / x402 `pay-resource` | the USDC amount at exactly 1.00 USD (`usdc-peg`) |
+
+Prices come only from trusted sources:
+
+- **Mainnet chains** (Ethereum, Base, Arbitrum, Polygon): the price oracle. A
+  failed or zero answer, or a token the oracle does not know, is **unpriced**.
+- **Testnets** (Base Sepolia, 84532): only an explicitly configured
+  **synthetic test price** (`SYNTHETIC_TEST_PRICES_USD`, operator setting,
+  `chainId:asset=usd` per asset — `native` or the token's checksummed address).
+  No oracle, and never the mainnet price of the "same" asset (before Q9 native
+  value on Base Sepolia was priced with the mainnet ETH price, and testnet
+  tokens counted 0). An asset that is not configured is **unpriced**. Synthetic
+  values are test values, not market prices: production and staging refuse to
+  boot with the variable set, the reservation is marked `synthetic` (admin
+  views), and they never reach fees, P&L or revenue.
+
+While the agent's policy has a daily limit (`maxDailyVolumeUsd > 0`), a request
+with an **unpriced** component is refused with **`503`** `{ "error": …,
+"code": "PRICE_UNAVAILABLE" }` before anything is simulated or reserved (a
+legacy paid job is not created). Without a daily limit nothing changes: the
+request proceeds and only its priced part is counted.
+
+**Batch calldata while a daily limit applies (owner decision "only authorised
+contracts").** Each action with calldata must be one of: a call to the agent's
+own `AgentPolicyModule` on that chain (on-chain policy sync — allowed, counted
+0); exactly an ERC-20 `transfer(to, amount)` / `transferFrom(from, to,
+amount)` (strict ABI encoding; the token is the action's target) — priced and
+counted like any spend, its `to` checked against `allowedRecipients` and the
+token against `allowedTokens`; anything else (including `approve` and unknown
+selectors) only when the operator listed the target in `allowedContracts` —
+otherwise `403 { "code": "UNACCOUNTED_CALL", "rule": "unaccountedCall",
+"actionIndex", "selector" }`. Calldata to an authorised contract stays
+uncounted by design: the operator's authorisation replaces the accounting.
+Without a daily limit the batch behaves as before.
 
 **Once a signed transaction may have left the backend, the chain decides
 (A6b).** The hash of every signed attempt is recorded before it is sent. A
@@ -488,4 +533,4 @@ The operator's log holds the full error under the same `traceId` (`"msg":"Unhand
 | 429 | Rate limit exceeded |
 | 500 | Unexpected error — `INTERNAL_ERROR` with a `traceId`, no message |
 | 501 | Not implemented |
-| 503 | Service unavailable (dependency down) |
+| 503 | Service unavailable (dependency down); `PRICE_UNAVAILABLE` (Q9): a spend with no trusted price while a daily limit applies — see *What is counted* above |
