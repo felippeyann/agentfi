@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { api, ApiError } from '../api-client.js';
 import type { components } from '../api.generated.js';
+import { addressSchema } from '../addresses.js';
 import { invalidInput } from '../input-error.js';
 import { pathIdSchema } from '../path-ids.js';
 import { isNativeEthLiteral, nativeEthRefusal, paymentTokenSymbols, resolvePaymentToken } from './token-map.js';
@@ -105,10 +106,10 @@ export const agentTools = [
       'sent to the backend (the transfer API has no such field): it is only echoed in this tool\'s result. Track the ' +
       'payment with get_transaction_status.',
     inputSchema: z.object({
-      recipient_address: z
-        .string()
-        .regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 0x-prefixed 20-byte hex address')
-        .describe('The address that receives the payment: the recipient agent\'s safeAddress (search_agents).'),
+      recipient_address: addressSchema(
+        'The address that receives the payment: the recipient agent\'s safeAddress (search_agents), as returned ' +
+          '(EIP-55 checksummed) or all-lowercase. A mixed-case address with a wrong checksum is refused.',
+      ),
       amount: z
         .string()
         .regex(/^\d+(\.\d+)?$/, 'must be a plain decimal amount such as "1.5"')

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { api } from '../api-client.js';
+import { addressSchema } from '../addresses.js';
 import { invalidInput } from '../input-error.js';
 import { isNativeEthLiteral, nativeEthRefusal, resolveAssetToken, resolveTransferToken } from './token-map.js';
 
@@ -16,7 +17,9 @@ export const defiTools = [
         .describe(
           'Token to transfer. Use "ETH" for native ETH (not on Polygon 137), or the ERC-20 contract address.',
         ),
-      to: z.string().describe('Destination Ethereum address (checksummed).'),
+      to: addressSchema(
+        'Destination address: EIP-55 checksummed or all-lowercase (a mixed-case address with a wrong checksum is refused).',
+      ),
       amount: z
         .string()
         .describe('Amount in human-readable units. Example: "100" for 100 USDC.'),

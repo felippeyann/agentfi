@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { Prisma, type Transaction } from '@prisma/client';
-import { getAddress, parseUnits, maxUint256, zeroAddress } from 'viem';
+import { getAddress, isAddress, parseUnits, maxUint256, zeroAddress } from 'viem';
 import { db } from '../../db/client.js';
 import { TransactionBuilder } from '../../services/transaction/builder.service.js';
 import { SimulatorService } from '../../services/transaction/simulator.service.js';
@@ -151,9 +151,22 @@ const executeSwapSchema = simulateSwapSchema.extend({
   idempotencyKey: z.string().optional(),
 });
 
+/**
+ * An address as viem's strict `isAddress` reads it: all-lowercase, or mixed
+ * case with a valid EIP-55 checksum. `getAddress` alone is not enough: it
+ * checks the hex shape only and re-checksums a mixed-case address whose
+ * checksum is wrong (a typo) instead of refusing it (review of #181).
+ */
+const STRICT_ADDRESS_MESSAGE = 'must be a 0x-prefixed 20-byte address, all-lowercase or with a valid EIP-55 checksum';
+const isStrictAddress = (value: string) => isAddress(value, { strict: true });
+
 const transferSchema = z.object({
-  token: z.string(), // "ETH" or token address
-  to: z.string(),
+  // "ETH" (the chain's native asset, any case) or an ERC-20 contract address.
+  token: z.string().refine((value) => value.toUpperCase() === 'ETH' || isStrictAddress(value), {
+    message:
+      'must be "ETH" or an ERC-20 contract address (all-lowercase or with a valid EIP-55 checksum); symbols are not resolved',
+  }),
+  to: z.string().refine(isStrictAddress, { message: STRICT_ADDRESS_MESSAGE }),
   amount: z.string(),
   chainId: z.number().default(1),
   idempotencyKey: z.string().optional(),
