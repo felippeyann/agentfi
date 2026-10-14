@@ -41,11 +41,13 @@ The automated version of the same run (plus the contest, cancellation and expiry
 
 ## Run it against Base Sepolia (task C5, after C4)
 
-Set up the backend exactly as in [docs/project/testnet-log.md §5.4](../../docs/project/testnet-log.md#54-c5-runbook--base-sepolia-owner-runs-it-after-c4): `packages/backend/.env` with `WALLET_PROVIDER=turnkey` and the Turnkey credentials, the C4 addresses (`AGENT_JOB_ESCROW_ADDRESS_84532`, `REPUTATION_HOOK_ADDRESS_84532`), `ESCROW_EVALUATOR_PRIVATE_KEY`, `ALCHEMY_API_KEY` (always required; `RPC_URL_84532` optional), `BACKEND_PUBLIC_URL=http://localhost:3000` (D10); migrations applied; the API and the worker process both running. Then, from the repository root:
+Set up the backend exactly as in [docs/project/testnet-log.md §5.4](../../docs/project/testnet-log.md#54-c5-runbook--base-sepolia-owner-runs-it-after-c4): `packages/backend/.env` with `WALLET_PROVIDER=turnkey` and the Turnkey credentials, the C4 addresses (`AGENT_JOB_ESCROW_ADDRESS_84532`, `REPUTATION_HOOK_ADDRESS_84532`), `ESCROW_EVALUATOR_PRIVATE_KEY`, `ALCHEMY_API_KEY` (always required; `RPC_URL_84532` optional), `BACKEND_PUBLIC_URL=http://localhost:3000` (D10), `ESCROW_EVALUATION_DELAY_SECONDS=3600` (the contest window is on for the whole validation run, owner decision Q6); migrations applied; the API and the worker process both running. Then, from the repository root:
 
 ```bash
-AGENTFI_API_URL=http://localhost:3000 AGENTFI_OPERATOR_SECRET=<that backend's API_SECRET> node examples/escrow-erc8183/index.mjs
+AGENTFI_STEP_TIMEOUT_SEC=4500 AGENTFI_API_URL=http://localhost:3000 AGENTFI_OPERATOR_SECRET=<that backend's API_SECRET> node examples/escrow-erc8183/index.mjs
 ```
+
+With the one-hour window the evaluator completes the job about an hour after `submit`, so the per-step wait is raised above that hour (`AGENTFI_STEP_TIMEOUT_SEC`, default 600 s).
 
 On a first run the script registers two new agents, prints their wallet addresses and API keys, and waits (up to `AGENTFI_FUNDING_TIMEOUT_SEC`, default 900 s) until you fund them from faucets: at least `AGENTFI_REWARD_USDC` testnet USDC (Circle faucet, <https://faucet.circle.com>) and about 0.0005 ETH on the requester, about 0.0005 ETH on the provider (Coinbase Developer Platform or Alchemy Base Sepolia faucet). The next run can reuse the two agents and their funded Turnkey wallets with the printed keys:
 

@@ -29,6 +29,8 @@ import {
   CONTAINER_ENV_MARKERS,
   PLACEHOLDER_CHECKED_KEYS,
   detectContainer,
+  escrowVerificationIntervalProblem,
+  evaluationDelayUnsetProblem,
   isLoopbackOrPrivateHost,
   isPlaceholderValue,
   nodeEnvUnsetVerdict,
@@ -273,6 +275,69 @@ describe('TRUST_PROXY', () => {
     expect(result.booted).toBe(true);
     expect(result.trustProxy).toBe(true);
     expect(result.warnings).toMatch(/TRUST_PROXY=true trusts every X-Forwarded-For hop/);
+  });
+});
+
+describe('ESCROW_EVALUATION_DELAY_SECONDS must be explicit in production / staging with an escrow (Q6)', () => {
+  const ESCROW = {
+    AGENT_JOB_ESCROW_ADDRESS_84532: '0x00000000000000000000000000000000000E5C20',
+    ESCROW_EVALUATOR_PRIVATE_KEY: `0x${'11'.repeat(32)}`,
+  };
+
+  it.each(['production', 'staging'])('NODE_ENV=%s with an escrow and no window (unset or blank): FATAL naming the owner decision', async (NODE_ENV) => {
+    for (const value of [undefined, '', '  ']) {
+      const result = await boot({ NODE_ENV, ...ESCROW, ESCROW_EVALUATION_DELAY_SECONDS: value });
+      expect(result.booted, `ESCROW_EVALUATION_DELAY_SECONDS=${JSON.stringify(value)}`).toBe(false);
+      expect(result.errors).toMatch(/FATAL: ESCROW_EVALUATION_DELAY_SECONDS is not set with NODE_ENV=/);
+      expect(result.errors).toMatch(/owner decision \(docs\/project\/execution-plan-2026-10\.md §5, question 6\)/);
+    }
+  });
+
+  it.each(['0', '600', '3600'])('production with an escrow boots with an explicit window (%s, 0 included)', async (value) => {
+    const result = await boot({ NODE_ENV: 'production', ...ESCROW, ESCROW_EVALUATION_DELAY_SECONDS: value });
+    expect(result.booted, result.errors).toBe(true);
+  });
+
+  it('no escrow configured, or development / test: the code default 0 still boots', async () => {
+    expect((await boot({ NODE_ENV: 'production' })).booted).toBe(true);
+    expect((await boot({ NODE_ENV: 'development', ...ESCROW })).booted).toBe(true);
+    expect((await boot({ NODE_ENV: 'test', ...ESCROW })).booted).toBe(true);
+  });
+
+  it('evaluationDelayUnsetProblem (unit)', () => {
+    expect(evaluationDelayUnsetProblem({}, 'production', [84532])).toMatch(/AGENT_JOB_ESCROW_ADDRESS_84532/);
+    expect(evaluationDelayUnsetProblem({ ESCROW_EVALUATION_DELAY_SECONDS: '' }, 'staging', [8453])).toMatch(/NODE_ENV=staging/);
+    expect(evaluationDelayUnsetProblem({ ESCROW_EVALUATION_DELAY_SECONDS: '0' }, 'production', [84532])).toBeNull();
+    expect(evaluationDelayUnsetProblem({}, 'production', [])).toBeNull();
+    expect(evaluationDelayUnsetProblem({}, 'development', [84532])).toBeNull();
+  });
+});
+
+describe('ESCROW_CONFIG_RECHECK_SECONDS < ESCROW_CONFIG_VERIFIED_TTL_SECONDS (Q7)', () => {
+  it('defaults 600 / 120 boot', async () => {
+    const result = await boot({ NODE_ENV: 'development' });
+    expect(result.booted).toBe(true);
+  });
+
+  it.each([
+    ['development', '600', '600'],
+    ['development', '60', '120'],
+    ['production', '300', '301'],
+  ])('NODE_ENV=%s TTL=%s RECHECK=%s: FATAL in every environment', async (NODE_ENV, ttl, recheck) => {
+    const result = await boot({ NODE_ENV, ESCROW_CONFIG_VERIFIED_TTL_SECONDS: ttl, ESCROW_CONFIG_RECHECK_SECONDS: recheck });
+    expect(result.booted).toBe(false);
+    expect(result.errors).toMatch(/FATAL: ESCROW_CONFIG_RECHECK_SECONDS \(\d+\) must be shorter than ESCROW_CONFIG_VERIFIED_TTL_SECONDS/);
+  });
+
+  it('refuses 0 or garbage', async () => {
+    expect((await boot({ NODE_ENV: 'development', ESCROW_CONFIG_VERIFIED_TTL_SECONDS: '0' })).booted).toBe(false);
+    expect((await boot({ NODE_ENV: 'development', ESCROW_CONFIG_RECHECK_SECONDS: 'soon' })).booted).toBe(false);
+  });
+
+  it('escrowVerificationIntervalProblem (unit)', () => {
+    expect(escrowVerificationIntervalProblem(600, 120)).toBeNull();
+    expect(escrowVerificationIntervalProblem(600, 599)).toBeNull();
+    expect(escrowVerificationIntervalProblem(600, 600)).toMatch(/must be shorter/);
   });
 });
 

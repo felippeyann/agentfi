@@ -59,6 +59,8 @@ Every variable below must be configured on the **backend service** of your host.
 | `WALLET_PROVIDER=local` | FATAL | allowed |
 | `RPC_URL_<chainId>` over plain `http://` | FATAL (https only) | allowed only to a loopback / private host (`localhost`, `127.x`, `::1`, RFC 1918, link-local, ULA, a single-label compose name, `*.local` / `*.internal` / `*.lan` / `*.home.arpa`) |
 | `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS=true`, a legacy executor, an escrow address without `ESCROW_EVALUATOR_PRIVATE_KEY` | FATAL | allowed / WARN |
+| An escrow address with `ESCROW_EVALUATION_DELAY_SECONDS` unset or blank (Q6: the contest window is the operator's choice, `0` included; the mainnet value is an owner decision, the Base Sepolia validation uses `3600`) | FATAL | allowed (code default `0`) |
+| `ESCROW_CONFIG_RECHECK_SECONDS` ≥ `ESCROW_CONFIG_VERIFIED_TTL_SECONDS` (Q7) | FATAL | FATAL |
 
 **`NODE_ENV` unset.** The schema then means `development`, with every guard above off. The backend always prints a loud warning, and refuses to boot when both hold: (1) it runs in a container or on a hosting platform — `/.dockerenv`, `/run/.containerenv`, or one of `KUBERNETES_SERVICE_HOST`, `container`, `FLY_APP_NAME`, `RAILWAY_ENVIRONMENT`, `RAILWAY_ENVIRONMENT_NAME`, `RENDER`, `DYNO`, `ECS_CONTAINER_METADATA_URI_V4`, `ECS_CONTAINER_METADATA_URI`, `K_SERVICE` is set; and (2) the configuration looks like production — `WALLET_PROVIDER=turnkey` (the default), a contract address on a mainnet chain (1, 8453, 42161, 137), a live Stripe key (`sk_live_` / `rk_live_`), `ADMIN_ALLOW_REMOTE=true`, or a public `BACKEND_PUBLIC_URL`. `Dockerfile.backend` sets `NODE_ENV=production`; a development container sets `NODE_ENV=development` explicitly (as `docker-compose.dev.yml` does).
 

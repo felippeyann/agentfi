@@ -186,6 +186,39 @@ describe('RESOURCE_PAYMENT_ALLOWED_PORTS (P6 port policy)', () => {
   });
 });
 
+describe('ESCROW_EVALUATION_DELAY_SECONDS ships unset (Q6: the operator chooses the window)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    restoreEnv();
+  });
+
+  function example(): Record<string, string> {
+    return parse(readFileSync(EXAMPLE_FILE, 'utf8'));
+  }
+
+  it('is commented out in .env.example (code default 0) with the C5 validation value as the example', async () => {
+    expect(example()['ESCROW_EVALUATION_DELAY_SECONDS']).toBeUndefined();
+    expect(readFileSync(EXAMPLE_FILE, 'utf8')).toMatch(/^# ESCROW_EVALUATION_DELAY_SECONDS=3600$/m);
+    const { env } = await bootWith(example());
+    expect(env.ESCROW_EVALUATION_DELAY_SECONDS).toBe(0);
+    expect(env.ESCROW_CONFIG_VERIFIED_TTL_SECONDS).toBe(600);
+    expect(env.ESCROW_CONFIG_RECHECK_SECONDS).toBe(120);
+  });
+
+  it('a production copy of the example with an escrow address refuses to boot until the window is chosen', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const escrow = {
+      NODE_ENV: 'production',
+      WALLET_PROVIDER: 'turnkey',
+      AGENT_JOB_ESCROW_ADDRESS_84532: '0x00000000000000000000000000000000000E5C20',
+      ESCROW_EVALUATOR_PRIVATE_KEY: `0x${'22'.repeat(32)}`,
+    };
+    await expect(bootWith({ ...example(), ...escrow })).rejects.toThrow(/FATAL: ESCROW_EVALUATION_DELAY_SECONDS is not set with NODE_ENV=production/);
+    const { exit } = await bootWith({ ...example(), ...escrow, ESCROW_EVALUATION_DELAY_SECONDS: '0' });
+    expect(exit).not.toHaveBeenCalled();
+  });
+});
+
 describe('RPC_URL_<chainId> (per-chain RPC override, C5a)', () => {
   afterEach(() => {
     vi.restoreAllMocks();

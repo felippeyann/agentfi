@@ -174,7 +174,8 @@ Prompts (replace `<provider-id>` and `<job-id>`):
    ERC-8004 summary into it is task R4.
 
 Contest instead of paying: with `ESCROW_EVALUATION_DELAY_SECONDS` above 0 on
-the backend (default 0 settles as soon as `submit` confirms), replace step 4
+the backend (the code default 0 settles as soon as `submit` confirms; the
+Base Sepolia validation configuration uses 3600), replace step 4
 with "read job `<job-id>` with get_job; while it is PAYMENT_PENDING and
 SUBMITTED, contest_job it with a reason". The job is then held for review
 (`escrow.onChainStatus = CONTESTED`, decision D9): nothing settles until the
