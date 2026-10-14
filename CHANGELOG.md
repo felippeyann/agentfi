@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (review follow-ups of #178 / #180; no migration)
+
+- **A "max" withdrawal is proven against the address that signs it (#180 review, P1).** The proof compared the calldata with `Agent.safeAddress`, but the transaction is signed by the key behind `walletId`. In Safe mode (`SAFE_DEPLOYER_PRIVATE_KEY` at provisioning) `safeAddress` is the Safe while its owner EOA signs, so Comet — which pays `msg.sender` — would send the funds to the EOA while the row was recorded as returning them to the Safe, uncounted (reproduced on Postgres, `policy-review-followups.db.test.ts`). The withdraw routes now resolve the signer from the wallet provider and the exemption is granted only when it IS the agent's wallet; Safe mode or an unresolvable signer → no exemption (`503 PRICE_UNAVAILABLE` under a daily limit).
+- **A spend counted as zero on purpose can be approved under a daily limit (#178 review, P2).** `APPROVAL_UNCOUNTED_SPEND` refused every pending row without a reservation, including a GMX close (pricing `zero`) whose native execution fee needed approval. Each row created without a reservation now records why in `metadata.volumeAccounting` (`zero` / `unpriced`); only `unpriced` is refused — and, conservatively, a row from before this record, which cannot be told apart.
+- **The approval-day limit is compared exactly (#178 review, P2).** Micro-USD bigints instead of floats: 0.2 USD moved onto a day with 0.1 USD of x402 now fills a 0.3 USD limit (was refused as 0.30000000000000004 > 0.3); refusal details are exact 6-decimal strings.
+
 ### Fixed (S8 — on-chain policy sync through the authority the module defines; no migration)
 
 - **The on-chain policy sync never worked.** `AgentPolicyModule` accepts `setPolicy`, the whitelist updates, `emergencyPause` and `resume` only from its `operator` or `msg.sender == safe`; the admin "Sync to Chain" button and the kill-switch `onChainSync` notice sent them through `POST /admin/transactions/batch`, i.e. `AgentExecutor.executeBatch`, where the executor is `msg.sender` — every call reverted `Unauthorized` (reproduced on Anvil with the Foundry artifacts; the button's first request also went to an admin route that did not exist). The kill-switch calldata could not even reach the chain: the paused agent's batch was failed by the pre-submit guard.
