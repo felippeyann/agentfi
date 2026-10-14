@@ -626,6 +626,15 @@ paths:
     post:
       tags: [Transactions]
       summary: Withdraw from Aave V3
+      description: |
+        An explicit amount is priced and counted against the daily volume
+        limit. `"max"` (everything the agent holds there) cannot be priced: it
+        is accepted outside the count only when the built calldata is exactly
+        `Pool.withdraw(asset, max, <the agent's own wallet>)` to the pool the
+        configured PoolAddressesProvider reports, with no native value — the
+        row is then marked `metadata.volumeExemption` (`rule:
+        max-withdrawal-to-own-wallet`). Otherwise, under a daily limit, `503
+        PRICE_UNAVAILABLE`.
       requestBody:
         required: true
         content:
@@ -657,6 +666,13 @@ paths:
     post:
       tags: [Transactions]
       summary: Withdraw from Compound V3
+      description: |
+        An explicit amount is priced and counted against the daily volume
+        limit. `"max"` is accepted outside the count only when the built
+        calldata is exactly `Comet.withdraw(asset, max)` (from and to the
+        sender) to the configured Comet, with no native value — marked
+        `metadata.volumeExemption`. Otherwise, under a daily limit, `503
+        PRICE_UNAVAILABLE`.
       requestBody:
         required: true
         content:
@@ -686,6 +702,11 @@ paths:
     post:
       tags: [Transactions]
       summary: Withdraw from any ERC-4626 vault
+      description: |
+        An explicit amount is priced and counted against the daily volume
+        limit. `"max"` is never exempt: the vault is chosen by the agent, not a
+        trusted protocol contract, so under a daily limit it is `503
+        PRICE_UNAVAILABLE` (send an explicit amount).
       requestBody:
         required: true
         content:
@@ -1960,7 +1981,12 @@ components:
         price oracle failed or does not know the token; on a testnet (Base Sepolia)
         no synthetic test price is configured for the asset
         (`SYNTHETIC_TEST_PRICES_USD`, never the mainnet price); a `max`
-        withdrawal, whose amount is unknown before it executes. The spend would
+        withdrawal, whose amount is unknown before it executes — unless the
+        backend proves from the calldata it built that it returns everything to
+        the agent's own wallet from a trusted protocol contract (§5-7: the Aave
+        V3 pool the configured provider reports, or the configured Compound V3
+        Comet; never an ERC-4626 vault), in which case it is accepted outside
+        the count and marked `metadata.volumeExemption`. The spend would
         otherwise count as 0, so it is refused before anything is simulated or
         reserved (`{ "error": "…", "code": "PRICE_UNAVAILABLE" }`, plus
         `actionIndex` on a batch). Without a daily limit the request proceeds and

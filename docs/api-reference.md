@@ -248,7 +248,7 @@ because it could not be priced:
 | `transfer` | the native value, or the ERC-20 amount |
 | `swap` (Uniswap) | the input: WETH priced as the native asset, any other token as that token |
 | `swap-curve` | the input token amount |
-| `deposit` / `withdraw` (Aave), `supply-compound` / `withdraw-compound`, `deposit-erc4626` / `withdraw-erc4626` | the asset amount; a `"max"` withdrawal's amount is unknown before it executes, so it is **unpriced** (send an explicit amount while a daily limit applies) |
+| `deposit` / `withdraw` (Aave), `supply-compound` / `withdraw-compound`, `deposit-erc4626` / `withdraw-erc4626` | the asset amount; a `"max"` withdrawal's amount is unknown before it executes, so it is **unpriced** (send an explicit amount while a daily limit applies) — except a `"max"` withdrawal from Aave or Compound that the backend proves, from the calldata it built, returns everything to the agent's own wallet from the trusted protocol contract (the pool the configured Aave provider reports, the configured Comet) with no native value: **nothing**, marked `metadata.volumeExemption` (`max-withdrawal-to-own-wallet`). An ERC-4626 vault is chosen by the agent and never exempt |
 | `gmx-open` | the collateral amount (the keeper execution fee is checked against `maxValuePerTxEth` and not counted) |
 | `gmx-close` | nothing (a close returns value to the agent) |
 | `batch` | its native value; while a daily limit applies also every action whose calldata is exactly an ERC-20 `transfer` / `transferFrom` (see below) |
