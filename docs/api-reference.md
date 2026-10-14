@@ -234,7 +234,12 @@ A field loosens when: `maxValuePerTxEth`, `maxValuePerTxUsd`,
 `maxOutflowPerTxUsd` or `maxDailyVolumeUsd` increases (`maxOutflowPerTxUsd:
 null` is the lowest value, so any value set from `null` loosens;
 `maxDailyVolumeUsd: "0"` means *no daily limit*,
-so it loosens any positive limit); `allowedContracts` / `allowedRecipients` /
+so it loosens any positive limit — as does a positive limit below one
+micro-dollar, which the x402 / escrow checks read as no limit). Decimal limits
+are compared the way every check that enforces them reads them — micro-USD for
+the USD limits, wei and the transaction check's number for `maxValuePerTxEth`
+— so a raise by one micro-dollar or one wei loosens at any magnitude, and
+digits no check reads are neutral; `allowedContracts` / `allowedRecipients` /
 `allowedTokens` go from non-empty to empty or gain an address not already in
 the list (case-insensitive); `cooldownSeconds`
 decreases; `active` goes `false → true`; `expiresAt` is cleared or moved later

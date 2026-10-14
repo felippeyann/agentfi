@@ -670,7 +670,13 @@ export interface paths {
          *       value from `null` loosens (operator only); lowering it or setting it
          *       back to `null` tightens;
          *     - `maxDailyVolumeUsd` increases — `"0"` means *no daily limit* and therefore
-         *       loosens any positive limit;
+         *       loosens any positive limit, and so does a positive limit below one
+         *       micro-dollar (the x402 / escrow enforcers read it as no limit);
+         *     - decimal limits are compared as every enforcer of the limit reads them,
+         *       never as floating-point numbers alone: micro-USD for the USD limits,
+         *       wei (18 decimals) and the transaction check's number for
+         *       `maxValuePerTxEth` — a raise by one micro-dollar or one wei loosens at
+         *       any magnitude, digits no enforcer reads are neutral;
          *     - `allowedContracts` / `allowedRecipients` / `allowedTokens` go from non-empty
          *       to empty, or gain an address not in the current list (compared
          *       case-insensitively);
