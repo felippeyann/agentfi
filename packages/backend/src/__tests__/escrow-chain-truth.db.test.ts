@@ -284,6 +284,15 @@ function makeSim(opts: { lane?: boolean } = {}): Sim {
       alerts.push(alert);
     },
     configGate: (chainId) => simGate(chainId),
+    // G1 review P3-1: the multi-node "is it known" (the fake chain is every node at once).
+    isKnownTransaction: async (_chainId, hash) => {
+      try {
+        chain.getTransaction(hash);
+        return true;
+      } catch {
+        return false;
+      }
+    },
   };
   s.deps = deps;
 
@@ -1893,21 +1902,28 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
     const decide = (jobId: string, decision: 'pay' | 'refund' | 'quality-rejected' | 'payout-blocked') =>
       m.svc.resolveEscrowJob(sim.deps, { jobId, decision, note: `c3e ${decision}`, operator: 'ops@test' });
 
-    /** `sim.deps.db` whose job.update throws ONCE when it writes `settleTxHash` (connection lost after the broadcast). */
+    /**
+     * `sim.deps.db` whose first job write AFTER the settle-attempt stamp throws
+     * (connection lost right after the broadcast). Before G1 review P3-2 that
+     * was the write of `settleTxHash`; since P3-2 the signed hash is recorded
+     * with the stamp BEFORE the send, and the lost write is the stamp clear.
+     */
     function loseNextSettleHashWrite(): () => void {
       const real = m.db;
+      let stamped = false;
       let armed = true;
+      const wrap = (write: (args: { data?: Record<string, unknown> }) => Promise<unknown>) => async (args: { data?: Record<string, unknown> }) => {
+        if (armed && stamped) {
+          armed = false;
+          throw new Error('Connection terminated unexpectedly (after the broadcast)');
+        }
+        if (args?.data?.['settleAttemptAt'] instanceof Date) stamped = true;
+        return write(args);
+      };
       const job = new Proxy(real.job, {
         get(target, prop, receiver) {
-          if (prop === 'update') {
-            return async (args: { data?: Record<string, unknown> }) => {
-              if (armed && args?.data && 'settleTxHash' in args.data) {
-                armed = false;
-                throw new Error('Connection terminated unexpectedly (after the broadcast)');
-              }
-              return target.update(args as never);
-            };
-          }
+          if (prop === 'update') return wrap((a) => target.update(a as never));
+          if (prop === 'updateMany') return wrap((a) => target.updateMany(a as never));
           return Reflect.get(target, prop, receiver);
         },
       });
@@ -1937,15 +1953,18 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(sim.chain.evaluatorBroadcasts.filter((b) => b.outcome === 'reverted')).toHaveLength(0);
     });
 
-    it('item 2: a complete broadcast whose hash write is lost — a contest is refused while it may still mine (never accepted, then overridden)', async () => {
+    it('item 2: a complete broadcast whose post-send write is lost — a contest is refused while it may still mine (never accepted, then overridden)', async () => {
       const { requester, provider, jobId } = await delivered();
       sim.chain.evaluatorHold = () => true;
       const restore = loseNextSettleHashWrite();
-      await sim.drive(1); // attempt 1: complete broadcast (pending), the hash write fails
+      await sim.drive(1); // attempt 1: complete broadcast (pending), the write after it fails
       restore();
       sim.settlements.clear(); // ... and that was the last attempt
       await m.svc.handleFailedSettlementJob(sim.deps, { data: { jobId, action: 'settle' }, attemptsMade: 3, opts: { attempts: 3 } }, new Error('Connection terminated unexpectedly'));
-      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', settleTxHash: null });
+      // P3-2: the signed hash was recorded before the send, so the pending complete is known to the job.
+      const pending = sim.chain.evaluatorBroadcasts.filter((b) => b.functionName === 'complete');
+      expect(pending).toHaveLength(1);
+      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', settleTxHash: pending[0]!.hash });
 
       const res = await contestAs(requester.id, jobId);
       expect(res.statusCode).toBe(409);
@@ -1961,7 +1980,7 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(sim.alerts.map((a) => a.kind)).not.toContain('review-overridden');
     });
 
-    it('item 2: same with an operator decision — "refund" is refused while the lost complete may still mine (no decision the chain then overrides)', async () => {
+    it('item 2: same with an operator decision — "refund" is refused while the pending complete may still mine (no decision the chain then overrides)', async () => {
       const { jobId } = await delivered();
       sim.chain.evaluatorHold = () => true;
       const restore = loseNextSettleHashWrite();
@@ -2194,6 +2213,31 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC - BUDGET);
     });
 
+    it('P2-1 + P3-3: an operator "pay" on a held delivery after expiresAt is not overtaken by the sweep while the gate defers it; verified → paid', async () => {
+      const { requester, provider, jobId } = await delivered();
+      unverify();
+      await sim.drive();
+      await pastExpiry(jobId);
+      await sweep();
+      expect(heldAlerts(jobId)).toHaveLength(1);
+      expect(await decide(jobId, 'pay')).toMatchObject({ outcome: 'scheduled', previousOnChainStatus: 'SUBMITTED' });
+      await sim.drive(); // the resolve is deferred: handed back to SUBMITTED with the decision
+      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', resolution: 'pay' });
+      await sweep();
+      await sim.drive();
+      expect(sim.settlements.has(`claimRefund-${jobId}`)).toBe(false);
+      expect(sim.chain.evaluatorCalls).toHaveLength(0);
+
+      verify();
+      await pastExpiry(jobId, 2 * (RETRY_MS + 1_000));
+      await sweep();
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', resolution: 'pay' });
+      expect(sim.chain.evaluatorCalls.map((c) => c.functionName)).toEqual(['complete']);
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+      expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC - BUDGET);
+    });
+
     it('P2-1: once expiresAt has passed (or is within the margin) a contest is refused — it can no longer turn a held delivery into a refund', async () => {
       const { requester, jobId } = await delivered();
       unverify();
@@ -2244,7 +2288,7 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
           },
         }) as never;
       // … the multi-node check (every candidate with its own client) asks the node that has it.
-      (sim.deps as unknown as { isKnownTransaction: (chainId: number, hash: Hex) => Promise<boolean> }).isKnownTransaction = async (_chainId, hash) => {
+      sim.deps.isKnownTransaction = async (_chainId, hash) => {
         try {
           sim.chain.getTransaction(hash);
           return true;
