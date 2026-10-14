@@ -3,6 +3,7 @@ import { getAddress, type Address } from 'viem';
 import { OnChainPolicyService } from './onchain-policy.service.js';
 import { parsePolicyDecimal } from './policy-numbers.js';
 import { countedUsd, type SpendPricing } from './spend-pricing.js';
+import { judgeOutflowCap } from './outflow-cap.js';
 import { resourcePaymentSpentToday } from '../payments/resource-payment-ledger.js';
 
 export interface PolicyValidationResult {
@@ -11,23 +12,18 @@ export interface PolicyValidationResult {
   reason?: string;
   /**
    * Q9: `PRICE_UNAVAILABLE` when the refusal is that a component of the spend
-   * has no trusted price while a daily limit applies (the routes answer 503).
-   * Absent for an ordinary policy refusal (403).
+   * has no trusted price while a daily limit — or the outflow cap — applies
+   * (the routes answer 503). §5-6: `USD_CAP_NOT_CONFIGURED` when an ordinary
+   * outflow meets a policy without `maxOutflowPerTxUsd` (403), and
+   * `POLICY_VIOLATION` with `rule` / `limit` when it exceeds it (403). Absent
+   * for every other policy refusal (403).
    */
-  code?: 'PRICE_UNAVAILABLE';
+  code?: 'PRICE_UNAVAILABLE' | 'USD_CAP_NOT_CONFIGURED' | 'POLICY_VIOLATION';
+  /** §5-6: the rule that refused (`maxOutflowPerTxUsd`), when `code` is set by it. */
+  rule?: string;
+  /** The stored limit that refused, as stored. */
+  limit?: string;
 }
-
-/**
- * Q8 seam — `maxValuePerTxUsd` on ordinary transactions (`/v1/transactions/*`).
- *
- * The USD per-spend cap applies to spends denominated in USD by definition
- * (USDC x402 payments and ERC-8183 escrow budgets, `usdc-spend-policy.ts`).
- * Whether it should ALSO cap ordinary transactions by their priced USD value
- * is an open owner question (execution plan §5), so it is not enforced here:
- * this flag is the one place to turn it on, and `validateTransaction` already
- * receives the USD value it would compare (`valueUsd`). A test pins it off.
- */
-export const USD_PER_TX_CAP_APPLIES_TO_TRANSACTIONS = false;
 
 /** What `PolicyService.resumeByOperator` did to the policy row. */
 export type OperatorResumeOutcome =
@@ -80,6 +76,15 @@ export class PolicyService {
      * the caller simulates or reserves anything.
      */
     pricing?: SpendPricing;
+    /**
+     * §5-6: this spend is an ORDINARY OUTFLOW (value leaves the agent's
+     * wallet: transfer, swap / Curve input, deposit, GMX collateral, the
+     * legacy A2A payment). Its `pricing` is then judged against
+     * `maxOutflowPerTxUsd` (`outflow-cap.ts`); without `pricing` it counts as
+     * unpriced. Omitted / false for what is not an outflow (withdrawals, a GMX
+     * close) — the batch route judges its total itself.
+     */
+    outflow?: boolean;
     lastTxTimestamp?: number; // unix seconds
     /**
      * The spend is already counted elsewhere — the legacy A2A payment, whose
@@ -117,16 +122,15 @@ export class PolicyService {
       };
     }
 
-    // Q8 seam (off): the USD per-spend cap is not applied to ordinary
-    // transactions — see USD_PER_TX_CAP_APPLIES_TO_TRANSACTIONS.
-    if (USD_PER_TX_CAP_APPLIES_TO_TRANSACTIONS) {
-      const maxUsd = parsePolicyDecimal(policy.maxValuePerTxUsd);
-      const valueUsd = parseFloat(params.valueUsd ?? '0');
-      if (maxUsd !== null && valueUsd > maxUsd) {
-        return {
-          allowed: false,
-          reason: `Transaction value ${params.valueUsd} USD exceeds policy limit of ${policy.maxValuePerTxUsd} USD (maxValuePerTxUsd)`,
-        };
+    // §5-6 (replaces the Q8 seam): an ordinary outflow is capped by
+    // `maxOutflowPerTxUsd` at its priced USD value; NULL blocks it with a
+    // diagnostic, an unpriced one is refused while the cap is set
+    // (`outflow-cap.ts`). `maxValuePerTxUsd` keeps capping USDC x402 /
+    // escrow only.
+    if (params.outflow) {
+      const cap = judgeOutflowCap(policy, params.pricing);
+      if (!cap.allowed) {
+        return { allowed: false, code: cap.code, rule: cap.rule, reason: cap.reason, ...(cap.limit !== undefined ? { limit: cap.limit } : {}) };
       }
     }
 

@@ -1,0 +1,27 @@
+-- Migration: 0025_q6_outflow_usd_cap
+-- Purpose: an explicit USD per-transaction cap on ORDINARY outflows (owner
+--          decision on execution plan §5 question 6, 2026-10-14: "new field;
+--          null = blocked").
+--
+--   AgentPolicy.maxOutflowPerTxUsd — the most an ordinary outflow may move in
+--     one transaction, in USD, compared at the spend's priced value (D15
+--     pricing): /v1/transactions/* transfers (native and ERC-20), swap and
+--     Curve inputs, Aave / Compound / ERC-4626 deposits, GMX collateral, a
+--     batch's native value plus its recognised ERC-20 transfers, and the
+--     legacy A2A payment. Withdrawals are not outflows. Off-chain only (never
+--     synced to AgentPolicyModule).
+--
+-- No backfill, on purpose: every existing row gets NULL ("not configured").
+-- No value is inferred — not from "maxValuePerTxEth" (native ETH; converting
+-- it to USD would need a price and a choice the owner did not make), not from
+-- "maxValuePerTxUsd" (the USDC x402 / escrow cap, itself copied from the ETH
+-- number by 0021). While the field is NULL the backend refuses those outflows
+-- with 403 USD_CAP_NOT_CONFIGURED and a diagnostic until the operator sets
+-- it; setting a value from NULL is loosening (operator credential), an agent
+-- may only lower an existing value. Nothing else changes: no other column is
+-- touched, so every other verdict of an existing policy is identical.
+--
+-- New rows default to NULL as well (no column default), including public
+-- self-registration.
+
+ALTER TABLE "AgentPolicy" ADD COLUMN "maxOutflowPerTxUsd" TEXT;

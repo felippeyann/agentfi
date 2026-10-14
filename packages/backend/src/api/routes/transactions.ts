@@ -27,6 +27,7 @@ import {
 } from '../../services/policy/spend-pricing.js';
 import { classifyBatchCalldata } from '../../services/policy/batch-calldata.js';
 import { MAX_AMOUNT_UNPRICED, maxWithdrawalPricing } from '../../services/policy/max-withdrawal-proof.js';
+import { judgeOutflowCap } from '../../services/policy/outflow-cap.js';
 import { parsePolicyDecimal } from '../../services/policy/policy-numbers.js';
 import { getKnownTokenDecimals } from '../../services/transaction/token-registry.js';
 import { cacheSimulation, getSimulation } from '../../services/transaction/simulation-cache.js';
@@ -308,6 +309,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       valueEth: isNativeInput ? body.amountIn : '0',
       valueUsd: countedUsd(pricing),
       pricing,
+      outflow: true, // §5-6: the swap input leaves the wallet
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
     if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
@@ -502,6 +504,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       valueEth: isEthTransfer ? body.amount : '0',
       valueUsd: countedUsd(pricing),
       pricing,
+      outflow: true, // §5-6
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
     if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
@@ -642,6 +645,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       valueEth: '0',
       valueUsd: countedUsd(pricing),
       pricing,
+      outflow: true, // §5-6: a deposit leaves the wallet
       ...(depositLastTxTimestamp !== undefined ? { lastTxTimestamp: depositLastTxTimestamp } : {}),
     });
     if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
@@ -906,6 +910,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       valueEth: '0',
       valueUsd: countedUsd(pricing),
       pricing,
+      outflow: true, // §5-6
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
     if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
@@ -1153,6 +1158,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       valueEth: '0',
       valueUsd: countedUsd(pricing),
       pricing,
+      outflow: true, // §5-6
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
     if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
@@ -1403,6 +1409,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       valueEth: '0',
       valueUsd: countedUsd(pricing),
       pricing,
+      outflow: true, // §5-6: the swap input leaves the wallet
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
     if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
@@ -1574,6 +1581,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       valueEth: weiToEthDecimalString(executionFeeWei),
       valueUsd: countedUsd(pricing),
       pricing,
+      outflow: true, // §5-6: the collateral leaves the wallet (the keeper fee stays under maxValuePerTxEth)
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
     if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
@@ -1920,14 +1928,19 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     // daily limit applies, every action carrying calldata is accounted for or
     // explicitly authorised (services/policy/batch-calldata.ts), and the
     // whole batch is priced — native value (A6) plus recognised ERC-20
-    // transfers — before anything is simulated or reserved. Without a daily
-    // limit nothing here changes the batch (nothing to count).
+    // transfers — before anything is simulated or reserved.
+    // §5-6: the batch is ONE ordinary outflow for `maxOutflowPerTxUsd` — its
+    // native value plus its recognised ERC-20 transfers — so whenever the
+    // agent has a policy the calldata is classified and priced too (a
+    // non-canonical transfer, which a cap cannot see, is refused; decoded
+    // transfers meet allowedRecipients / allowedTokens). Only the
+    // "authorised contracts" rule for other calldata stays daily-limit-only.
     const dailyLimited = Boolean(policy?.active) && (parsePolicyDecimal(policy?.maxDailyVolumeUsd) ?? 0) > 0;
     const batchNativeWei = body.actions.reduce((sum, a) => sum + BigInt(a.value), 0n);
     const components: Array<{ pricing: SpendPricing; actionIndex?: number }> = [
       { pricing: await priceNativeSpend(batchNativeWei, body.chainId) },
     ];
-    if (dailyLimited && policy) {
+    if (policy) {
       for (let i = 0; i < body.actions.length; i++) {
         const action = body.actions[i]!;
         const call = classifyBatchCalldata(action);
@@ -1972,9 +1985,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
           components.push({ pricing: await priceTokenSpend(call.amount, call.token, decimals, body.chainId), actionIndex: i });
           continue;
         }
-        // Anything else (approve, an unknown selector…): uncounted, so it
-        // needs the operator's explicit authorisation of the target.
-        if (!(policy.allowedContracts.length > 0 && inList(policy.allowedContracts, action.to))) {
+        // Anything else (approve, an unknown selector…): uncounted, so while a
+        // daily limit applies it needs the operator's explicit authorisation
+        // of the target. It moves no value the backend can see (no outflow cap).
+        if (dailyLimited && !(policy.allowedContracts.length > 0 && inList(policy.allowedContracts, action.to))) {
           return reply.code(403).send({
             error:
               `Action at index ${i} calls ${action.to} (selector ${call.selector}) with calldata the backend cannot count ` +
@@ -1998,6 +2012,18 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         code: 'PRICE_UNAVAILABLE',
         ...(culprit?.actionIndex !== undefined ? { actionIndex: culprit.actionIndex } : {}),
       });
+    }
+    // §5-6: the whole batch against maxOutflowPerTxUsd (NULL → 403
+    // USD_CAP_NOT_CONFIGURED; unpriced → 503; above → 403), before anything
+    // is simulated or reserved.
+    const outflowCap = judgeOutflowCap(policy, pricing);
+    if (!outflowCap.allowed) {
+      const culprit = components.find((c) => c.pricing.status === 'unpriced');
+      return sendPolicyRefusal(
+        reply,
+        { allowed: false, code: outflowCap.code, rule: outflowCap.rule, reason: outflowCap.reason, ...(outflowCap.limit !== undefined ? { limit: outflowCap.limit } : {}) },
+        outflowCap.code === 'PRICE_UNAVAILABLE' && culprit?.actionIndex !== undefined ? { actionIndex: culprit.actionIndex } : {},
+      );
     }
 
     const { encodeFunctionData } = await import('viem');
@@ -2351,11 +2377,19 @@ async function getLatestAgentTxTimestamp(agentId: string): Promise<number | unde
  * A policy refusal from `validateTransaction`: 503 `PRICE_UNAVAILABLE` when the
  * spend could not be priced while a daily limit applies (Q9), 403 otherwise.
  */
-function sendPolicyRefusal(reply: FastifyReply, result: PolicyValidationResult) {
+function sendPolicyRefusal(reply: FastifyReply, result: PolicyValidationResult, extra: Record<string, unknown> = {}) {
+  const detail = {
+    ...(result.rule ? { rule: result.rule } : {}),
+    ...(result.limit !== undefined ? { limit: result.limit } : {}),
+    ...extra,
+  };
   if (result.code === 'PRICE_UNAVAILABLE') {
-    return reply.code(503).send({ error: result.reason, code: 'PRICE_UNAVAILABLE' });
+    return reply.code(503).send({ error: result.reason, code: 'PRICE_UNAVAILABLE', ...detail });
   }
-  return reply.code(403).send({ error: result.reason });
+  // §5-6: USD_CAP_NOT_CONFIGURED (no maxOutflowPerTxUsd) and POLICY_VIOLATION
+  // (rule maxOutflowPerTxUsd) carry their code; other refusals stay { error }.
+  if (result.code) return reply.code(403).send({ error: result.reason, code: result.code, ...detail });
+  return reply.code(403).send({ error: result.reason, ...detail });
 }
 
 function inList(list: readonly string[], address: string): boolean {
@@ -2478,8 +2512,14 @@ export async function executeA2APayment(params: {
 
   const lastTxTimestamp = await getLatestAgentTxTimestamp(requester.id);
 
-  // No USD value here: the reward was priced (Q9: with a trusted price, or
-  // refused while a daily limit applies) and counted by the Job at creation.
+  // No USD value for the daily limit here: the reward was priced (Q9: with a
+  // trusted price, or refused while a daily limit applies) and counted by the
+  // Job at creation. §5-6: the payment is an ordinary outflow — priced now and
+  // judged against maxOutflowPerTxUsd (the binding check; job creation
+  // already refused a reward the cap could not take).
+  const outflowPricing = isEthTransfer
+    ? await priceNativeSpend(txData.value, params.chainId)
+    : await priceTokenSpend(parseUnits(params.amount, transferDecimals), getAddress(params.token), transferDecimals, params.chainId);
   const policyResult = await policyService.validateTransaction({
     agentId: requester.id,
     targetContract: isEthTransfer
@@ -2489,6 +2529,8 @@ export async function executeA2APayment(params: {
     recipient: getAddress(params.providerSafeAddress),
     ...(!isEthTransfer ? { tokenAddress: getAddress(params.token) } : {}),
     valueEth: isEthTransfer ? params.amount : '0',
+    pricing: outflowPricing,
+    outflow: true,
     ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     // A6: the Job reserved the reward in DailyVolume at creation
     // (reserveJobEscrow) and gives it back on failure (releaseJobEscrow); the
@@ -2496,7 +2538,7 @@ export async function executeA2APayment(params: {
     dailyVolumeAccounted: true,
   });
   if (!policyResult.allowed) {
-    throw new Error(`Policy check failed: ${policyResult.reason}`);
+    throw new Error(`Policy check failed: ${policyResult.code ? `${policyResult.code}: ` : ''}${policyResult.reason}`);
   }
 
   const sim = await simulator.simulate({

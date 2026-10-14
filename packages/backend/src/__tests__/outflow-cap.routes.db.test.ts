@@ -378,4 +378,121 @@ describeDb('§5-6 — USD cap on ordinary outflows (maxOutflowPerTxUsd), on Post
       expect(await rows(requester.id)).toHaveLength(0);
     });
   });
+
+  // ── Configured ─────────────────────────────────────────────────────────────
+
+  describe('cap configured: each outflow compared at its priced USD value', () => {
+    it.each(OUTFLOWS)('$name within the cap (25 USD) → accepted and reserved as before', async (op) => {
+      const agent = await mkAgent({ maxOutflowPerTxUsd: '25' });
+      const res = await post(await app(agent.id), op.url, op.body);
+      expect(res.statusCode, res.body).toBe(202);
+      expect(await volume(agent.id)).toBeCloseTo(op.usd, 6);
+    });
+
+    it.each(OUTFLOWS)('$name above the cap (19.99 USD) → 403 POLICY_VIOLATION rule maxOutflowPerTxUsd, nothing simulated or reserved', async (op) => {
+      const agent = await mkAgent({ maxOutflowPerTxUsd: '19.99' });
+      const res = await post(await app(agent.id), op.url, op.body);
+      expect(res.statusCode, res.body).toBe(403);
+      expect(res.json()).toMatchObject({ code: 'POLICY_VIOLATION', rule: 'maxOutflowPerTxUsd', limit: '19.99' });
+      expect(await rows(agent.id)).toHaveLength(0);
+      expect(await volume(agent.id)).toBe(0);
+      expect(h.simulations).toBe(0);
+    });
+
+    it.each(OUTFLOWS)('$name unpriced (no trusted price) → 503 PRICE_UNAVAILABLE even without a daily limit', async (op) => {
+      delete process.env['SYNTHETIC_TEST_PRICES_USD'];
+      const agent = await mkAgent({ maxOutflowPerTxUsd: '1000', maxDailyVolumeUsd: '0' });
+      const res = await post(await app(agent.id), op.url, op.body);
+      expect(res.statusCode, res.body).toBe(503);
+      expect(res.json()).toMatchObject({ code: 'PRICE_UNAVAILABLE', rule: 'maxOutflowPerTxUsd' });
+      expect(await rows(agent.id)).toHaveLength(0);
+      expect(h.simulations).toBe(0);
+    });
+
+    it.each(NOT_OUTFLOWS)('$name is not capped: accepted with a cap far below its value', async (op) => {
+      const agent = await mkAgent({ maxOutflowPerTxUsd: '1' });
+      const res = await post(await app(agent.id), op.url, op.body);
+      expect(res.statusCode, res.body).toBe(202);
+    });
+
+    it('a "max" withdrawal is not capped either (no daily limit: accepted, as before)', async () => {
+      const agent = await mkAgent({ maxOutflowPerTxUsd: null, maxDailyVolumeUsd: '0' });
+      const res = await post(await app(agent.id), '/v1/transactions/withdraw', { asset: USDC, amount: 'max' });
+      expect(res.statusCode, res.body).toBe(202);
+    });
+
+    it('maxValuePerTxUsd (the USDC x402 / escrow cap) does not cap ordinary outflows', async () => {
+      const agent = await mkAgent({ maxOutflowPerTxUsd: '1000', maxValuePerTxUsd: '0.01' });
+      const res = await post(await app(agent.id), '/v1/transactions/transfer', { token: USDC, to: RECIPIENT, amount: '25' });
+      expect(res.statusCode, res.body).toBe(202);
+    });
+
+    it('batch: native value and ERC-20 transfers are ONE outflow — 15 + 10 = 25 USD passes a 25 cap, the same with 10.01 is refused', async () => {
+      const ok = await mkAgent({ maxOutflowPerTxUsd: '25' });
+      const fits = await post(await app(ok.id), '/v1/transactions/batch', {
+        actions: [{ to: RECIPIENT, value: '7500000000000000' }, { to: USDC, data: usdcTransferData(10_000_000n) }],
+      });
+      expect(fits.statusCode, fits.body).toBe(202);
+      const over = await mkAgent({ maxOutflowPerTxUsd: '25' });
+      const refused = await post(await app(over.id), '/v1/transactions/batch', {
+        actions: [{ to: RECIPIENT, value: '7500000000000000' }, { to: USDC, data: usdcTransferData(10_010_000n) }],
+      });
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json()).toMatchObject({ code: 'POLICY_VIOLATION', rule: 'maxOutflowPerTxUsd' });
+    });
+
+    it('batch without a daily limit: a non-canonical ERC-20 transfer (the cap cannot see its amount) is refused; other calldata to an unlisted contract is not (that rule is daily-limit-only)', async () => {
+      const agent = await mkAgent({ maxOutflowPerTxUsd: '1000', maxDailyVolumeUsd: '0' });
+      const a = await app(agent.id);
+      const dirty = `${usdcTransferData(25_000_000n)}00`;
+      const nonCanonical = await post(a, '/v1/transactions/batch', { actions: [{ to: USDC, data: dirty }] });
+      expect(nonCanonical.statusCode, nonCanonical.body).toBe(403);
+      expect(nonCanonical.json()).toMatchObject({ code: 'NON_CANONICAL_ERC20_CALL' });
+      const approve = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [RECIPIENT, 1n] });
+      const other = await post(a, '/v1/transactions/batch', { actions: [{ to: USDC, data: approve }] });
+      expect(other.statusCode, other.body).toBe(202);
+    });
+
+    it('batch without a daily limit: a decoded ERC-20 transfer to a recipient outside allowedRecipients is refused (now classified for the cap)', async () => {
+      const agent = await mkAgent({ maxOutflowPerTxUsd: '1000', maxDailyVolumeUsd: '0', allowedRecipients: ['0x00000000000000000000000000000000000000c1'] });
+      const res = await post(await app(agent.id), '/v1/transactions/batch', { actions: [{ to: USDC, data: usdcTransferData(1_000_000n) }] });
+      expect(res.statusCode, res.body).toBe(403);
+      expect(res.json()).toMatchObject({ rule: 'allowedRecipients' });
+    });
+
+    it('legacy paid job: a reward within the cap is reserved; above it the job is refused (403 rule maxOutflowPerTxUsd)', async () => {
+      const ok = await mkAgent({ maxOutflowPerTxUsd: '20' });
+      expect(await m.reserveJobEscrow({ requesterId: ok.id, reward: { amount: '0.01', token: 'ETH', chainId: CHAIN_ID } })).toMatchObject({ success: true });
+      const over = await mkAgent({ maxOutflowPerTxUsd: '19.99' });
+      expect(await m.reserveJobEscrow({ requesterId: over.id, reward: { amount: '0.01', token: 'ETH', chainId: CHAIN_ID } })).toMatchObject({
+        success: false,
+        code: 'POLICY_VIOLATION',
+        rule: 'maxOutflowPerTxUsd',
+      });
+      expect(await volume(over.id)).toBe(0);
+    });
+
+    it('legacy A2A payment: within the cap → created; the cap lowered below it before payment → refused at payment time', async () => {
+      const requester = await mkAgent({ maxOutflowPerTxUsd: '20' });
+      const provider = await mkAgent();
+      const pay = async () => {
+        const job = await m.db.job.create({
+          data: { requesterId: requester.id, providerId: provider.id, payload: {}, reward: { amount: '0.01', token: 'ETH', chainId: CHAIN_ID }, status: 'PAYMENT_PENDING' },
+        });
+        return m.executeA2APayment({
+          requesterId: requester.id,
+          providerSafeAddress: provider.safeAddress,
+          amount: '0.01',
+          token: 'ETH',
+          chainId: CHAIN_ID,
+          jobId: job.id,
+          intentId: `a2a-payment:${job.id}`,
+        });
+      };
+      await expect(pay()).resolves.toMatchObject({ status: 'QUEUED' });
+      await m.db.agentPolicy.update({ where: { agentId: requester.id }, data: { maxOutflowPerTxUsd: '19.99' } });
+      await expect(pay()).rejects.toThrow(/POLICY_VIOLATION.*maxOutflowPerTxUsd/);
+      expect(await rows(requester.id)).toHaveLength(1);
+    });
+  });
 });

@@ -258,6 +258,15 @@ model AgentPolicy {
   /// by definition — USDC x402 payments and ERC-8183 escrow budgets. Off-chain
   /// only. Plain decimal; a non-decimal stored value is unlimited.
   maxValuePerTxUsd          String    @default("1.0")
+  /// §5-6 (migration 0025): per-transaction cap, in USD, on ORDINARY
+  /// outflows (`/v1/transactions/*` transfers, swap / Curve inputs, deposits,
+  /// GMX collateral, batch native value + recognised ERC-20 transfers, the
+  /// legacy A2A payment), each compared at its priced USD value. NULL = not
+  /// configured: those outflows are refused (`USD_CAP_NOT_CONFIGURED`) until
+  /// the operator sets it — never inferred from the ETH or the USDC cap.
+  /// Withdrawals are not outflows. Off-chain only. A non-decimal stored value
+  /// is unlimited (same reading as the other limits).
+  maxOutflowPerTxUsd        String?
   maxValueForAutoApprovalEth String    @default("0.1")
   maxDailyVolumeUsd         String    @default("10000")
   /// Call targets (`tx.to`) of ordinary transactions — the list

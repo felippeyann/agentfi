@@ -74,12 +74,14 @@ const RECIPIENTS_REQUIRED_MESSAGE =
 /**
  * Initial policy for a new agent. `parse({})` yields the server defaults
  * (`maxValuePerTxUsd` omitted → the column default "1.0"; it is never derived
- * from `maxValuePerTxEth`).
+ * from `maxValuePerTxEth`. §5-6: `maxOutflowPerTxUsd` omitted → NULL, "not
+ * configured": ordinary outflows are blocked until the operator sets it).
  */
 const initialPolicySchema = z
   .object({
     maxValuePerTxEth: policyDecimal.default('1.0'),
     maxValuePerTxUsd: policyDecimal.optional(),
+    maxOutflowPerTxUsd: policyDecimal.optional(),
     maxDailyVolumeUsd: policyDecimal.default('10000'),
     allowedContracts: z.array(z.string()).default([]),
     allowedRecipients: z.array(recipientAddress).optional(),
@@ -172,6 +174,8 @@ async function provisionAgent(
             maxValuePerTxEth: body.policy.maxValuePerTxEth,
             // Omitted → the column default "1.0" (Q8: never copied from the ETH field).
             ...(body.policy.maxValuePerTxUsd !== undefined ? { maxValuePerTxUsd: body.policy.maxValuePerTxUsd } : {}),
+            // §5-6: omitted → NULL (no column default; never inferred).
+            ...(body.policy.maxOutflowPerTxUsd !== undefined ? { maxOutflowPerTxUsd: body.policy.maxOutflowPerTxUsd } : {}),
             maxDailyVolumeUsd: body.policy.maxDailyVolumeUsd,
             allowedContracts: body.policy.allowedContracts,
             // Undefined only when allowedContracts is empty (the schema refuses otherwise).
@@ -222,11 +226,13 @@ async function provisionAgent(
  * sync never carries them and only the backend enforces them: the two Q8
  * fields, and the daily limit (off-chain since before Q8).
  */
-const OFF_CHAIN_ONLY_POLICY_FIELDS = ['maxValuePerTxUsd', 'allowedRecipients', 'maxDailyVolumeUsd'] as const;
+const OFF_CHAIN_ONLY_POLICY_FIELDS = ['maxValuePerTxUsd', 'maxOutflowPerTxUsd', 'allowedRecipients', 'maxDailyVolumeUsd'] as const;
 
 const updatePolicySchema = z.object({
   maxValuePerTxEth: policyDecimal.optional(),
   maxValuePerTxUsd: policyDecimal.optional(),
+  /// §5-6: USD cap on ordinary outflows. `null` = not configured (blocks them). Setting a value from null is loosening.
+  maxOutflowPerTxUsd: policyDecimal.nullable().optional(),
   maxDailyVolumeUsd: policyDecimal.optional(),
   allowedContracts: z.array(z.string()).optional(),
   allowedRecipients: z.array(recipientAddress).optional(),
@@ -265,8 +271,10 @@ export async function agentRoutes(fastify: FastifyInstance) {
    *     default 5). Operators can tighten via env.
    *   - Tier forced to FREE regardless of request body.
    *   - Policy forced to the server defaults (`maxValuePerTxEth=1.0`,
-   *     `maxValuePerTxUsd=1.0`, `maxDailyVolumeUsd=10000`, empty whitelists
-   *     — contracts, recipients, tokens — and `cooldownSeconds=60`).
+   *     `maxValuePerTxUsd=1.0`, `maxOutflowPerTxUsd` not configured (NULL:
+   *     ordinary outflows blocked until the operator sets it),
+   *     `maxDailyVolumeUsd=10000`, empty whitelists — contracts, recipients,
+   *     tokens — and `cooldownSeconds=60`).
    *     Any `policy` in the body is IGNORED — an unauthenticated caller must
    *     not pick its own limits. Loosening afterwards requires the operator
    *     credential on `PATCH /v1/agents/:id/policy`.
@@ -425,7 +433,11 @@ export async function agentRoutes(fastify: FastifyInstance) {
    * `maxValuePerTxUsd` caps USD-denominated spends (USDC x402, ERC-8183 escrow
    * budgets); `allowedContracts` is the call target, `allowedRecipients` every
    * address that receives value. Both Q8 fields are off-chain only (the
-   * `onChainSync` answer lists them in `offChainOnlyFields`). A PATCH that
+   * `onChainSync` answer lists them in `offChainOnlyFields`). §5-6:
+   * `maxOutflowPerTxUsd` caps ordinary outflows in USD (off-chain only); `null`
+   * = not configured, which blocks them — the most restrictive value, so
+   * setting any value from `null` needs the operator and the agent may only
+   * lower an existing one (or set it back to `null`). A PATCH that
    * creates the policy row with a non-empty `allowedContracts` must name
    * `allowedRecipients` (400 otherwise); on an existing row omitted fields stay.
    *

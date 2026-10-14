@@ -89,6 +89,7 @@ function basePolicy(overrides: Partial<AgentPolicy> = {}): AgentPolicy {
     active: true,
     maxValuePerTxEth: '1.0',
     maxValuePerTxUsd: '1.0',
+    maxOutflowPerTxUsd: null,
     maxValueForAutoApprovalEth: '0.1',
     maxDailyVolumeUsd: '10000',
     allowedContracts: [UNISWAP_ROUTER],

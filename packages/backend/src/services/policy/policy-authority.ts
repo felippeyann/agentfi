@@ -17,6 +17,7 @@ import { parsePolicyDecimal } from './policy-numbers.js';
 export const POLICY_PATCH_FIELDS = [
   'maxValuePerTxEth',
   'maxValuePerTxUsd',
+  'maxOutflowPerTxUsd',
   'maxDailyVolumeUsd',
   'allowedContracts',
   'allowedRecipients',
@@ -60,6 +61,19 @@ export interface PolicyChangeClassification {
 /** A limit that does not parse never blocks anything, so it is unlimited. */
 function effectiveMaxValuePerTx(raw: string | undefined): number {
   if (raw === undefined) return Number.POSITIVE_INFINITY;
+  return parsePolicyDecimal(raw) ?? Number.POSITIVE_INFINITY;
+}
+
+/**
+ * §5-6: `maxOutflowPerTxUsd`. NULL ("not configured") blocks every ordinary
+ * outflow, so it is the MOST restrictive value (−∞): setting any value from
+ * NULL loosens (operator only), setting NULL tightens. With no policy row the
+ * baseline is "no restrictions" (+∞), so any value — NULL included — tightens.
+ * A non-decimal value is unlimited, as for every other limit.
+ */
+function effectiveOutflowCap(raw: string | null | undefined, rowExists: boolean): number {
+  if (!rowExists) return Number.POSITIVE_INFINITY;
+  if (raw === null || raw === undefined) return Number.NEGATIVE_INFINITY;
   return parsePolicyDecimal(raw) ?? Number.POSITIVE_INFINITY;
 }
 
@@ -108,6 +122,8 @@ function whitelistLoosens(current: readonly string[], next: readonly string[]): 
  * A field LOOSENS when:
  *   - `maxValuePerTxEth` or `maxValuePerTxUsd` increases (a non-decimal value is unlimited,
  *     so it loosens any limit)
+ *   - `maxOutflowPerTxUsd` increases, where NULL ("not configured", every ordinary outflow
+ *     blocked) is the most restrictive value: setting any value from NULL loosens
  *   - `maxDailyVolumeUsd` increases (`"0"` means *no limit* and therefore loosens any positive limit)
  *   - `allowedContracts` / `allowedRecipients` / `allowedTokens` go from non-empty to empty, or
  *     gain an address not in the current list (compared case-insensitively)
@@ -139,6 +155,14 @@ export function classifyPolicyChange(
     effectiveMaxValuePerTx(patch.maxValuePerTxUsd) > effectiveMaxValuePerTx(current?.maxValuePerTxUsd)
   ) {
     loosenedFields.push('maxValuePerTxUsd');
+  }
+
+  // §5-6: NULL is the most restrictive value (it blocks every ordinary outflow).
+  if (
+    patch.maxOutflowPerTxUsd !== undefined &&
+    effectiveOutflowCap(patch.maxOutflowPerTxUsd, true) > effectiveOutflowCap(current?.maxOutflowPerTxUsd, current !== null)
+  ) {
+    loosenedFields.push('maxOutflowPerTxUsd');
   }
 
   if (
