@@ -113,7 +113,9 @@ vi.mock('../services/defi/gmx.service.js', async () => {
     },
   };
 });
-// A real viem client per chain whose JSON-RPC is answered here.
+// A real viem client per chain whose JSON-RPC is answered here — or, with
+// S7_FORK_RPC_<chainId> set (e.g. an Anvil fork of Base mainnet), by that
+// fork: the same routes then read the real provider and the real QuoterV2.
 vi.mock('../config/chains.js', async () => {
   const actual = await vi.importActual<typeof import('../config/chains.js')>('../config/chains.js');
   const viem = await vi.importActual<typeof import('viem')>('viem');
@@ -121,10 +123,27 @@ vi.mock('../config/chains.js', async () => {
   const getPoolSelector = viem.toFunctionSelector('getPool()');
   const quoteSelector = viem.toFunctionSelector('quoteExactInputSingle((address,address,uint256,uint24,uint160))');
   const decimalsSelector = viem.toFunctionSelector('decimals()');
+  const forked = (chainId: number, url: string) =>
+    viem.createPublicClient({
+      chain: actual.getChain(chainId),
+      transport: viem.http(url, {
+        onFetchRequest: async (request: Request) => {
+          const body = (await request.clone().json()) as unknown;
+          for (const rpc of (Array.isArray(body) ? body : [body]) as Array<{ method: string; params?: unknown[] }>) {
+            if (rpc.method !== 'eth_call') continue;
+            const call = (rpc.params?.[0] ?? {}) as { to: string; data?: string; input?: string };
+            const data = call.data ?? call.input ?? '0x';
+            h.ethCalls.push({ chainId, to: viem.getAddress(call.to), selector: data.slice(0, 10) });
+          }
+        },
+      }),
+    });
   return {
     ...actual,
-    createChainPublicClient: (chainId: number) =>
-      viem.createPublicClient({
+    createChainPublicClient: (chainId: number) => {
+      const forkUrl = process.env[`S7_FORK_RPC_${chainId}`];
+      if (forkUrl) return forked(chainId, forkUrl);
+      return viem.createPublicClient({
         chain: actual.getChain(chainId),
         transport: viem.custom({
           request: async ({ method, params }: { method: string; params?: unknown[] }) => {
@@ -155,7 +174,8 @@ vi.mock('../config/chains.js', async () => {
             throw new Error(`unexpected eth_call ${selector} to ${call.to}`);
           },
         }),
-      }),
+      });
+    },
   };
 });
 
@@ -259,7 +279,7 @@ async function mkAgent(chainIds: number[]) {
 
 async function app(agentId: string): Promise<FastifyInstance> {
   h.simulationOwner = agentId;
-  const a = Fastify({ logger: false });
+  const a = Fastify({ logger: Boolean(process.env['S7_DEBUG']) });
   m.registerErrorHandler(a);
   a.addHook('preHandler', async (request) => {
     (request as unknown as { agentId: string; agentTier: string }).agentId = agentId;
@@ -306,7 +326,14 @@ describeDb('S7 — routes that read the corrected contract addresses (Postgres, 
       registerErrorHandler: handler.registerErrorHandler,
       clearPriceCache: price.clearPriceCache,
     };
-    vi.stubGlobal('fetch', async (input: string | URL) => coingecko(String(input)));
+    // CoinGecko is stubbed; JSON-RPC to an S7 fork (viem's http transport) goes through.
+    const realFetch = globalThis.fetch;
+    const forks = [process.env['S7_FORK_RPC_8453'], process.env['S7_FORK_RPC_42161']].filter((u): u is string => Boolean(u));
+    vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (forks.some((f) => url.startsWith(f))) return realFetch(input, init);
+      return coingecko(url);
+    });
     await wipe();
   });
 
@@ -361,9 +388,14 @@ describeDb('S7 — routes that read the corrected contract addresses (Postgres, 
     expect(res.statusCode, res.body).toBe(202);
     const swap = decodeFunctionData({ abi: SWAP_ABI, data: h.simulated[0]!.data as `0x${string}` });
     const params = swap.args[0] as { fee: number; amountOutMinimum: bigint };
-    // Best tier 0.05%: 2000 USDC, minus 0.5% slippage (was: 0 — any price accepted).
-    expect(params.amountOutMinimum).toBe(1_990_000_000n);
-    expect(params.fee).toBe(500);
+    if (process.env['S7_FORK_RPC_8453']) {
+      // Live fork quote: any sane ETH price leaves a floor above 100 USDC (was: 0).
+      expect(params.amountOutMinimum).toBeGreaterThan(100_000_000n);
+    } else {
+      // Best tier 0.05%: 2000 USDC, minus 0.5% slippage (was: 0 — any price accepted).
+      expect(params.amountOutMinimum).toBe(1_990_000_000n);
+      expect(params.fee).toBe(500);
+    }
     const quotes = h.ethCalls.filter((c) => c.selector === QUOTE_EXACT_INPUT_SINGLE);
     expect(quotes.map((q) => q.to)).toEqual([QUOTER_V2_BASE, QUOTER_V2_BASE, QUOTER_V2_BASE]);
   });
