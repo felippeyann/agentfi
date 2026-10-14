@@ -976,6 +976,12 @@ export interface paths {
          *     native transfer, the token contract for an ERC-20 transfer. The value
          *     is capped by `maxValuePerTxEth` (native) and counted against the daily
          *     limit; `maxValuePerTxUsd` does not apply here.
+         *
+         *     `token` is `"ETH"` or a contract address — the route does not resolve
+         *     symbols. Keys the schema does not define (e.g. `recipient`, `reason`)
+         *     are dropped silently; a body without `to`, `token` or `amount` is
+         *     `400 VALIDATION_FAILED`. The MCP tool `pay_agent` resolves a symbol
+         *     through its token registry before calling this route.
          */
         post: {
             parameters: {
@@ -991,6 +997,7 @@ export interface paths {
             };
             responses: {
                 202: components["responses"]["TransactionAccepted"];
+                400: components["responses"]["BadRequest"];
                 403: components["responses"]["PolicyViolation"];
                 409: components["responses"]["IdempotencyConflict"];
                 422: components["responses"]["SimulationFailed"];
@@ -3795,9 +3802,11 @@ export interface components {
             idempotencyKey?: string;
         };
         TransferRequest: {
-            /** @description "ETH" or an ERC-20 contract address. */
+            /** @description "ETH" (native) or an ERC-20 contract address. The route does not resolve symbols such as "USDC". */
             token: string;
+            /** @description Recipient address (receives the ETH or the tokens). */
             to: string;
+            /** @description Human-readable decimal amount in whole-token units (e.g. "1.5"). */
             amount: string;
             /** @default 1 */
             chainId: number;
