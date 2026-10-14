@@ -35,8 +35,13 @@ export interface EvaluatorWriteParams {
 export interface EvaluatorSigner {
   readonly address: Address;
   readonly chainId: number;
-  /** Signs and broadcasts a contract call; resolves with the tx hash. */
-  writeContract(params: EvaluatorWriteParams): Promise<Hex>;
+  /**
+   * Signs and broadcasts a contract call; resolves with the tx hash.
+   * `onBeforeBroadcast` (C3e) runs after the simulation and the gas estimate,
+   * right before the send: a call that reverts in simulation never reaches it,
+   * and a throw from it aborts the send.
+   */
+  writeContract(params: EvaluatorWriteParams, opts?: { onBeforeBroadcast?: () => Promise<void> }): Promise<Hex>;
   /** Waits for the receipt of a tx this signer sent (status 'success' | 'reverted'). */
   waitForTransactionReceipt(hash: Hex): Promise<TransactionReceipt>;
 }
@@ -85,7 +90,7 @@ export function createEvaluatorSigner(chainId: number, privateKey: Hex): Evaluat
   return {
     address: account.address,
     chainId,
-    async writeContract(params) {
+    async writeContract(params, opts) {
       // `simulateContract` first: a revert surfaces as a decoded error (e.g.
       // InvalidStatus) before any gas is spent, and the same request object
       // is then signed and broadcast — with an explicit gas limit, because the
@@ -99,6 +104,7 @@ export function createEvaluatorSigner(chainId: number, privateKey: Hex): Evaluat
       };
       const { request } = await publicClient.simulateContract(call);
       const estimate = await publicClient.estimateContractGas(call);
+      await opts?.onBeforeBroadcast?.();
       return wallet.writeContract({ ...request, gas: evaluatorGasLimit(estimate) });
     },
     waitForTransactionReceipt(hash) {

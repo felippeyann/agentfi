@@ -455,13 +455,31 @@ describe('preSubmitGuard — ERC-8183 escrow steps', () => {
       reason: PAUSED_BEFORE_SUBMISSION,
       finalizerError: 'job table unavailable',
     });
-    // ERC-8183 steps keep their FAILED path whatever the stamp (the orchestrator reads the chain).
+    // 6d (C3e): the FAILED write is conditional on no stamp, like every other row.
     expect(updateMany).toHaveBeenCalledWith({
-      where: { id: TX_ID, status: 'QUEUED', txHash: null },
+      where: { id: TX_ID, status: 'QUEUED', txHash: null, broadcastAttemptedAt: null },
       data: { status: 'FAILED', error: PAUSED_BEFORE_SUBMISSION },
     });
     expect(stopStampedMock).not.toHaveBeenCalled();
   });
+
+  it.each(['create', 'setBudget', 'approve', 'fund', 'submit', 'register', 'bindAgent'])(
+    '6d: blocked escrow step "%s" an earlier attempt was stamped for → handed to the chain (SUBMITTED with the stamped hash), never FAILED, no unwind',
+    async (escrowStep) => {
+      const { db, updateMany } = makeMockDb(
+        snapshot({ metadata: { erc8183: true, jobId: 'job-7', escrowStep }, agent: { active: false, policy: null } }),
+      );
+      updateMany.mockResolvedValueOnce({ count: 0 }); // stamped: the never-stamped FAILED write matches nothing
+      stopStampedMock.mockResolvedValueOnce({ outcome: 'handed-to-chain', txHash: TX_HASH });
+
+      const decision = await preSubmitGuard(db, TX_ID);
+
+      expect(decision).toEqual({ action: 'skip', reason: expect.stringContaining(TX_HASH) });
+      expect(stopStampedMock).toHaveBeenCalledWith(db, TX_ID, PAUSED_BEFORE_SUBMISSION, { handToChain: true });
+      expect(escrowOutcomeMock).not.toHaveBeenCalled();
+      expect(settleVolumeMock).not.toHaveBeenCalled();
+    },
+  );
 });
 
 // ── C3d (H14 dry-run): ERC-8004 bind re-checked before broadcast ───────────
@@ -480,13 +498,37 @@ describe('preSubmitGuard — setProviderAgentId (bindAgent) of a job no longer F
 
   it('cancelled meanwhile → not broadcast: tx FAILED with the reason, the identity lane moves on (no revert, no gas)', async () => {
     vetBindMock.mockResolvedValue('job is CANCELLED / FUNDED — setProviderAgentId is only valid while the job is live and Funded');
-    const { db, update } = makeMockDb(snapshot({ metadata: bindMeta }));
+    const { db, update, updateMany } = makeMockDb(snapshot({ metadata: bindMeta }));
     const submitter = makeSubmitter();
     const decision = await runWorkerStep(db, submitter);
     expect(decision).toMatchObject({ action: 'fail', reason: expect.stringContaining(BIND_SKIPPED_BEFORE_SUBMISSION) });
     expect(submitter.submit).not.toHaveBeenCalled();
-    expect(update).toHaveBeenCalledWith({ where: { id: TX_ID }, data: { status: 'FAILED', error: expect.stringContaining('job is CANCELLED') } });
+    // C3e item 4: conditional (QUEUED, no hash, never stamped), not an unconditional update.
+    expect(update).not.toHaveBeenCalled();
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: TX_ID, status: 'QUEUED', txHash: null, broadcastAttemptedAt: null },
+      data: { status: 'FAILED', error: expect.stringContaining('job is CANCELLED') },
+    });
     expect(escrowOutcomeMock).toHaveBeenCalledWith({ transactionId: TX_ID, status: 'FAILED', error: expect.stringContaining(BIND_SKIPPED_BEFORE_SUBMISSION) });
+  });
+
+  it('C3e item 4: a concurrent delivery broadcast the bind meanwhile → skip: no FAILED overwrite, no outcome', async () => {
+    vetBindMock.mockResolvedValue('job is CANCELLED / FUNDED');
+    const { db, update, updateMany } = makeMockDb(snapshot({ metadata: bindMeta }));
+    updateMany.mockResolvedValueOnce({ count: 0 });
+    stopStampedMock.mockResolvedValueOnce({ outcome: 'not-queued' });
+    expect(await preSubmitGuard(db, TX_ID)).toEqual({ action: 'skip', reason: 'Transaction left QUEUED while it was being checked' });
+    expect(update).not.toHaveBeenCalled();
+    expect(escrowOutcomeMock).not.toHaveBeenCalled();
+  });
+
+  it('C3e item 4: an earlier attempt of the bind was stamped → handed to the chain, not FAILED', async () => {
+    vetBindMock.mockResolvedValue('job is CANCELLED / FUNDED');
+    const { db, updateMany } = makeMockDb(snapshot({ metadata: bindMeta }));
+    updateMany.mockResolvedValueOnce({ count: 0 });
+    stopStampedMock.mockResolvedValueOnce({ outcome: 'handed-to-chain', txHash: TX_HASH });
+    expect(await preSubmitGuard(db, TX_ID)).toEqual({ action: 'skip', reason: expect.stringContaining(TX_HASH) });
+    expect(escrowOutcomeMock).not.toHaveBeenCalled();
   });
 
   it('other escrow steps are not re-checked here', async () => {

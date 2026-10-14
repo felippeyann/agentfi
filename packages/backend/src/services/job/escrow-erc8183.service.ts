@@ -266,7 +266,7 @@ export interface Erc8183Config {
 }
 
 export type EscrowPublicClient = Pick<PublicClient, 'getTransactionReceipt' | 'readContract'> &
-  Partial<Pick<PublicClient, 'getBalance'>>;
+  Partial<Pick<PublicClient, 'getBalance' | 'getTransaction'>>;
 
 export interface SettlementEnqueue {
   add(data: EscrowSettlementJobData, opts?: { delayMs?: number }): Promise<void>;
@@ -1330,7 +1330,18 @@ export async function requestCancellationReject(
  * broadcast without a receipt (pending, or dropped and unknown) or a mined
  * one is "in flight" — the contest race rule refuses then.
  */
-async function noSettlementInFlight(deps: Erc8183Deps, job: Pick<EscrowJobRow, 'settleTxHash' | 'escrowChainId'>): Promise<{ ok: boolean; reason?: string }> {
+async function noSettlementInFlight(
+  deps: Erc8183Deps,
+  job: Pick<EscrowJobRow, 'settleTxHash' | 'escrowChainId' | 'settleAttemptAt'>,
+): Promise<{ ok: boolean; reason?: string }> {
+  // C3e item 2: a settlement was stamped for broadcast and its hash never
+  // recorded (the write failed, or the process died): it may still mine.
+  if (job.settleAttemptAt) {
+    return {
+      ok: false,
+      reason: `a settlement was broadcast at ${job.settleAttemptAt.toISOString()} and its transaction hash was not recorded; it may still mine`,
+    };
+  }
   if (!job.settleTxHash) return { ok: true };
   try {
     const receipt = await deps.publicClient(job.escrowChainId!).getTransactionReceipt({ hash: job.settleTxHash as Hex });
@@ -1387,7 +1398,7 @@ export async function contestEscrowJob(deps: Erc8183Deps, params: { jobId: strin
 
   const contestedAt = nowOf(deps);
   const claimed = await deps.db.job.updateMany({
-    where: { id: job.id, status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', contestedAt: null, settleTxHash: job.settleTxHash },
+    where: { id: job.id, status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', contestedAt: null, settleTxHash: job.settleTxHash, settleAttemptAt: null },
     data: { onChainStatus: 'CONTESTED', contestedAt, contestReason: params.reason, escrowError: null },
   });
   if (claimed.count === 0) {
@@ -1496,7 +1507,7 @@ export async function resolveEscrowJob(deps: Erc8183Deps, params: ResolveParams)
   const at = nowOf(deps);
   const previous = { status: job.status, onChainStatus: job.onChainStatus, settleTxHash: job.settleTxHash, reviewLog: job.reviewLog };
   const claimed = await deps.db.job.updateMany({
-    where: { id: job.id, status: previous.status, onChainStatus: previous.onChainStatus, settleTxHash: previous.settleTxHash },
+    where: { id: job.id, status: previous.status, onChainStatus: previous.onChainStatus, settleTxHash: previous.settleTxHash, settleAttemptAt: null },
     data: {
       onChainStatus: 'SETTLING',
       resolution: params.decision,
@@ -1881,12 +1892,86 @@ function assertEscrowConfigVerified(deps: Erc8183Deps, chainId: number): void {
   throw new EscrowConfigUnverifiedError(chainId, verdict.reason, verdict.retryAfterSeconds * 1000);
 }
 
-/** Every evaluator transaction goes through here: Q7 gate, balance check, then sign + broadcast. */
-async function sendEvaluatorTx(deps: Erc8183Deps, chainId: number, params: EvaluatorWriteParams): Promise<{ signer: EvaluatorSigner; txHash: Hex }> {
+/**
+ * C3e item 1: thrown INSTEAD of a new evaluator broadcast while the job's
+ * previous settlement transaction may still mine. A retry used to sign a
+ * second complete/reject/claimRefund (simulation passes against the latest
+ * block) that queued behind the first by nonce and reverted once it mined:
+ * evaluator gas spent, and `settleTxHash` then pointed at the reverted retry,
+ * so the hook outcome and the platform fee of the transaction that settled
+ * were never recorded. The settlement is retried later (BullMQ / recovery);
+ * once the first one has a receipt the chain read settles the job.
+ */
+export class SettlementStillPendingError extends Error {
+  constructor(
+    readonly txHash: Hex,
+    detail: string,
+  ) {
+    super(`ERC-8183 settlement ${txHash} may still mine (${detail}) — not signing another one`);
+    this.name = 'SettlementStillPendingError';
+  }
+}
+
+function errorNamed(err: unknown, name: string): boolean {
+  let current: unknown = err;
+  for (let depth = 0; current && depth < 5; depth++) {
+    if ((current as { name?: string }).name === name) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/**
+ * C3e item 1: refuses (`SettlementStillPendingError`) while the job's last
+ * evaluator transaction is still pending. Mined (any status) → a new attempt
+ * is safe (a success would have made the chain terminal, which the caller read
+ * first; a revert changed nothing). Unknown to the node (dropped) → safe, the
+ * new transaction replaces it. Unreadable → refused (retried later). A client
+ * without `getTransaction` cannot tell pending from dropped: allowed, as before.
+ */
+async function assertNoPendingSettlement(deps: Erc8183Deps, job: Pick<EscrowJobRow, 'settleTxHash' | 'escrowChainId'>): Promise<void> {
+  if (!job.settleTxHash || job.escrowChainId === null) return;
+  const hash = job.settleTxHash as Hex;
+  const client = deps.publicClient(job.escrowChainId);
+  try {
+    await client.getTransactionReceipt({ hash });
+    return;
+  } catch (err) {
+    if (!errorNamed(err, 'TransactionReceiptNotFoundError')) throw new SettlementStillPendingError(hash, 'its receipt could not be read');
+  }
+  if (!client.getTransaction) return;
+  try {
+    await client.getTransaction({ hash });
+  } catch (err) {
+    if (errorNamed(err, 'TransactionNotFoundError')) return;
+    throw new SettlementStillPendingError(hash, 'the node could not be asked about it');
+  }
+  throw new SettlementStillPendingError(hash, 'no receipt yet and the node still knows it');
+}
+
+/**
+ * Every evaluator transaction goes through here: Q7 gate, no second broadcast
+ * while the job's previous one may still mine (C3e item 1), balance check,
+ * sign + broadcast, and the hash recorded on the job.
+ */
+async function sendEvaluatorTx(
+  deps: Erc8183Deps,
+  job: Pick<EscrowJobRow, 'id' | 'escrowChainId' | 'settleTxHash'>,
+  params: EvaluatorWriteParams,
+): Promise<{ signer: EvaluatorSigner; txHash: Hex }> {
+  const chainId = job.escrowChainId!;
   assertEscrowConfigVerified(deps, chainId);
+  await assertNoPendingSettlement(deps, job);
   await checkEvaluatorBalance(deps, chainId);
   const signer = deps.evaluatorSigner(chainId);
-  const txHash = await signer.writeContract(params);
+  // C3e item 2: stamped BEFORE the send (after the simulation): if the hash
+  // write below is lost, the stamp keeps contest / resolve refusing.
+  const txHash = await signer.writeContract(params, {
+    onBeforeBroadcast: async () => {
+      await deps.db.job.update({ where: { id: job.id }, data: { settleAttemptAt: nowOf(deps) } });
+    },
+  });
+  await deps.db.job.update({ where: { id: job.id }, data: { settleTxHash: txHash, settleAttemptAt: null } });
   return { signer, txHash };
 }
 
@@ -2056,13 +2141,12 @@ async function executeDecision(deps: Erc8183Deps, job: EscrowJobRow, decision: R
   }
 
   const escrow = getAddress(job.escrowContract!);
-  const { signer, txHash } = await sendEvaluatorTx(deps, job.escrowChainId!, {
+  const { signer, txHash } = await sendEvaluatorTx(deps, job, {
     address: escrow,
     abi: AGENT_JOB_ESCROW_ABI,
     functionName: plan.functionName,
     args: [BigInt(job.onChainJobId!), plan.reason, optParams],
   });
-  await deps.db.job.update({ where: { id: job.id }, data: { settleTxHash: txHash } });
   deps.logger.info({ jobId: job.id, action: plan.functionName, decision, resolution: job.resolution, txHash }, 'ERC-8183 settlement sent');
 
   const receipt = await signer.waitForTransactionReceipt(txHash);
@@ -2184,13 +2268,12 @@ async function rejectForCancellation(
     return { outcome: 'noop', reason: 'on-chain job is Submitted — cancellation refused' };
   }
   const escrow = getAddress(job.escrowContract!);
-  const { signer, txHash } = await sendEvaluatorTx(deps, job.escrowChainId!, {
+  const { signer, txHash } = await sendEvaluatorTx(deps, job, {
     address: escrow,
     abi: AGENT_JOB_ESCROW_ABI,
     functionName: 'reject',
     args: [BigInt(job.onChainJobId!), reason === 'cancelled' ? SETTLEMENT_REASONS.cancelled : SETTLEMENT_REASONS.providerFailed, '0x'],
   });
-  await deps.db.job.update({ where: { id: job.id }, data: { settleTxHash: txHash } });
   const receipt = await signer.waitForTransactionReceipt(txHash);
   if (receipt.status !== 'success') throw new SettlementRevertedError('reject', txHash);
 
@@ -2223,13 +2306,12 @@ async function claimRefund(deps: Erc8183Deps, job: EscrowJobRow, chainStatus: nu
   }
   const before = reviewSnapshot(job);
   const escrow = getAddress(job.escrowContract!);
-  const { signer, txHash } = await sendEvaluatorTx(deps, job.escrowChainId!, {
+  const { signer, txHash } = await sendEvaluatorTx(deps, job, {
     address: escrow,
     abi: AGENT_JOB_ESCROW_ABI,
     functionName: 'claimRefund',
     args: [BigInt(job.onChainJobId!)],
   });
-  await deps.db.job.update({ where: { id: job.id }, data: { settleTxHash: txHash } });
   const receipt = await signer.waitForTransactionReceipt(txHash);
   if (receipt.status !== 'success') throw new SettlementRevertedError('claimRefund', txHash);
 
@@ -2333,7 +2415,12 @@ async function reconcileTerminal(deps: Erc8183Deps, job: EscrowJobRow, chainStat
   await deps.db.job.update({
     where: { id: job.id },
     // Expiry carries no feedback params: an uncommitted file must not be published as if it were.
-    data: { onChainStatus, escrowError: null, ...(onChainStatus === 'EXPIRED' && job.feedbackFile != null ? { feedbackFile: Prisma.DbNull } : {}) },
+    data: {
+      onChainStatus,
+      escrowError: null,
+      settleAttemptAt: null,
+      ...(onChainStatus === 'EXPIRED' && job.feedbackFile != null ? { feedbackFile: Prisma.DbNull } : {}),
+    },
   });
   deps.logger.warn(
     { jobId: job.id, onChainJobId: job.onChainJobId, onChainStatus, jobStatus: job.status },
@@ -2896,6 +2983,7 @@ const ESCROW_COLUMNS = [
   'expiresAt',
   'deliverableHash',
   'settleTxHash',
+  'settleAttemptAt',
   'platformFeeAmount',
   'feedbackStatus',
   'feedbackFile',

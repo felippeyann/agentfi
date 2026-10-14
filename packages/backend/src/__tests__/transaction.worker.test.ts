@@ -726,6 +726,23 @@ describe('ERC-8183 escrow steps route to the orchestrator, not the A2A finalizer
     expect(escrowOutcomeMock).toHaveBeenCalledWith({ transactionId: TX_ID, status: 'FAILED', error: 'rpc down' });
     expect(finalizeMock).not.toHaveBeenCalled();
   });
+
+  it('6d (C3e): failed handler, last attempt, a STAMPED escrow step → handed to the chain like any row: no FAILED, no onEscrowTxOutcome (no unwind)', async () => {
+    const { db, updateMany, row, deadLetterQueue, logger } = makeDeps(txRow({ metadata: ESCROW_META }));
+    updateMany.mockResolvedValueOnce({ count: 0 }); // stamped: the never-stamped FAILED write matches nothing
+    volume.stopStampedTransaction.mockResolvedValueOnce({ outcome: 'handed-to-chain', txHash: TX_HASH });
+
+    await handleFailedTransactionJob(job({ attemptsMade: 3, opts: { attempts: 3 } }), new Error('socket hang up'), { db, deadLetterQueue, logger });
+
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: TX_ID, status: 'QUEUED', broadcastAttemptedAt: null },
+      data: { status: 'FAILED', error: 'socket hang up' },
+    });
+    expect(volume.stopStampedTransaction).toHaveBeenCalledWith(db, TX_ID, 'socket hang up', { handToChain: true });
+    expect(row.status).toBe('QUEUED'); // the real stop writes SUBMITTED + the stamped hash (daily-volume / broadcast-outcome DB suites)
+    expect(escrowOutcomeMock).not.toHaveBeenCalled();
+    expect(finalizeMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('isLastAttempt', () => {

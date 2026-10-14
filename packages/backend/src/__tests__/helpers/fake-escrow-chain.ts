@@ -180,6 +180,8 @@ export class FakeEscrowChain {
    */
   dropResponse: ((tx: { from: Address; functionName: string }) => boolean) | null = null;
   dropResponseHide = false;
+  /** C3e / 6d: keep dropping the answer of every matching broadcast (not only the first). */
+  dropResponseSticky = false;
   /** Broadcasts the node refused (nonce collisions and the like). */
   readonly rejectedBroadcasts: string[] = [];
   /** Transactions that stay in the mempool (not mined) until `release`d — a stuck or slow transaction. */
@@ -247,7 +249,7 @@ export class FakeEscrowChain {
     if (this.hold?.({ from, functionName })) this.held.add(hash);
     if (this.autoMine) this.mine();
     if (this.dropResponse?.({ from, functionName })) {
-      this.dropResponse = null;
+      if (!this.dropResponseSticky) this.dropResponse = null;
       if (this.dropResponseHide) this.hidden.add(hash);
       throw new Error('socket hang up (the node took the transaction, the answer was lost)');
     }
@@ -313,6 +315,11 @@ export class FakeEscrowChain {
   }
 
   getTransaction(hash: Hex): { hash: Hex; nonce: number } {
+    // C3e: evaluator transactions — known while pending (no blockNumber) or once mined.
+    if (this.evaluatorTxPending(hash)) return { hash, nonce: 0, blockNumber: null } as { hash: Hex; nonce: number };
+    if (this.evaluatorBroadcasts.some((b) => b.hash === hash && b.outcome !== 'dropped' && b.outcome !== 'pending') && this.receipts.has(hash)) {
+      return { hash, nonce: 0, blockNumber: 1n } as { hash: Hex; nonce: number };
+    }
     const tx = this.known.get(hash);
     const pending = this.mempool.some((p) => p.hash === hash);
     if (!tx || this.hidden.has(hash) || (!pending && !this.receipts.has(hash))) {
@@ -361,21 +368,61 @@ export class FakeEscrowChain {
     };
   }
 
-  /** The evaluator signer (operator key): executes directly, one receipt per call. */
+  // ── evaluator (operator key) ──────────────────────────────────────────────
+
+  /**
+   * C3e: evaluator transactions that stay PENDING after the broadcast (a slow
+   * or stuck settlement) until `releaseEvaluator()`. Nonce order is modelled:
+   * while one evaluator transaction is pending, every later one queues behind
+   * it, and on release they execute in order (a second `complete` of the same
+   * job then reverts on-chain with InvalidStatus — gas spent, nothing changed).
+   */
+  evaluatorHold: ((call: { functionName: string }) => boolean) | null = null;
+  private readonly evaluatorPending: Array<{ hash: Hex; from: Address; to: Address; data: Hex }> = [];
+  /** Every evaluator broadcast, in order, with what became of it. */
+  readonly evaluatorBroadcasts: Array<{ hash: Hex; functionName: string; outcome: 'pending' | 'success' | 'reverted' | 'dropped' }> = [];
+
+  /** Mines every pending evaluator transaction, in nonce order. */
+  releaseEvaluator(): void {
+    for (const tx of this.evaluatorPending.splice(0)) {
+      const { status, logs } = this.execute(tx.from, tx.to, tx.data, tx.hash);
+      this.receipts.set(tx.hash, this.receipt(tx.hash, status, logs));
+      const entry = this.evaluatorBroadcasts.find((b) => b.hash === tx.hash);
+      if (entry) entry.outcome = status;
+    }
+  }
+
+  /** A pending evaluator transaction is evicted from every mempool: no receipt, unknown to the node. */
+  dropEvaluator(hash: Hex): void {
+    const index = this.evaluatorPending.findIndex((tx) => tx.hash === hash);
+    if (index >= 0) this.evaluatorPending.splice(index, 1);
+    const entry = this.evaluatorBroadcasts.find((b) => b.hash === hash);
+    if (entry) entry.outcome = 'dropped';
+  }
+
+  private evaluatorTxPending(hash: Hex): boolean {
+    return this.evaluatorPending.some((tx) => tx.hash === hash);
+  }
+
+  /** The evaluator signer (operator key): simulates, then broadcasts; mined at once unless held (C3e). */
   evaluatorSigner(evaluator: Address) {
     return {
       address: evaluator,
       chainId: SIM_CHAIN_ID,
-      writeContract: async (params: { address: Address; abi: Abi; functionName: string; args: readonly unknown[] }) => {
+      writeContract: async (
+        params: { address: Address; abi: Abi; functionName: string; args: readonly unknown[] },
+        opts?: { onBeforeBroadcast?: () => Promise<void> },
+      ) => {
         const data = encodeFunctionData({ abi: params.abi, functionName: params.functionName, args: params.args } as never);
-        const hash = `0x${(++this.evaluatorTxSeq).toString(16).padStart(64, 'e')}` as Hex;
-        // A real evaluator simulates first: a revert surfaces before sending.
+        // A real evaluator simulates first (against the latest state — a
+        // pending evaluator transaction is not applied): a revert surfaces
+        // before sending.
         const snapshot = this.snapshot();
-        const { status, logs } = this.execute(evaluator, params.address, data, hash);
-        if (status !== 'success') {
-          this.restore(snapshot);
-          throw new Error(`simulation reverted: ${params.functionName}`);
-        }
+        const simulated = this.execute(evaluator, params.address, data, '0x' as Hex);
+        this.restore(snapshot);
+        if (simulated.status !== 'success') throw new Error(`simulation reverted: ${params.functionName}`);
+        await opts?.onBeforeBroadcast?.();
+        const hash = `0x${(++this.evaluatorTxSeq).toString(16).padStart(64, 'e')}` as Hex;
         this.evaluatorCalls.push({
           functionName: params.functionName,
           jobId: params.args[0] as bigint,
@@ -383,7 +430,14 @@ export class FakeEscrowChain {
             ? { reason: params.args[1] as Hex, optParams: params.args[2] as Hex }
             : {}),
         });
+        if (this.evaluatorHold?.({ functionName: params.functionName }) || this.evaluatorPending.length > 0) {
+          this.evaluatorPending.push({ hash, from: evaluator, to: params.address, data });
+          this.evaluatorBroadcasts.push({ hash, functionName: params.functionName, outcome: 'pending' });
+          return hash;
+        }
+        const { status, logs } = this.execute(evaluator, params.address, data, hash);
         this.receipts.set(hash, this.receipt(hash, status, logs));
+        this.evaluatorBroadcasts.push({ hash, functionName: params.functionName, outcome: status });
         return hash;
       },
       waitForTransactionReceipt: async (hash: Hex) => {
@@ -391,6 +445,7 @@ export class FakeEscrowChain {
           this.evaluatorReceiptTimeouts--;
           throw new Error(`Timed out while waiting for transaction with hash "${hash}" to be confirmed.`);
         }
+        if (!this.receipts.has(hash)) throw new Error(`Timed out while waiting for transaction with hash "${hash}" to be confirmed.`);
         return this.getReceipt(hash);
       },
     };
