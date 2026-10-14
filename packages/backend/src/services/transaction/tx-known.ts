@@ -13,12 +13,24 @@
  * signs a second settlement.
  *
  * Here each candidate (`getRpcCandidates`: the `RPC_URL_<chainId>` override,
- * Alchemy, Infura, the public RPC) gets its own client and is asked:
- *  - any node knows the hash (pending or mined) → true;
- *  - otherwise, at least one node answered "not found" → false (the nodes
- *    that errored cannot be asked; the ones that answered did not see it);
- *  - every node errored → throws (the caller treats it as "cannot tell":
- *    abort the attempt, retry later — never "unknown").
+ * Alchemy, Infura, the public RPC) gets its own client and is asked. Strict
+ * semantics (lead review of #176):
+ *  - any node knows the hash (pending or mined) → true, at once;
+ *  - EVERY node answered "not found" → false;
+ *  - otherwise — no node knows it and at least one errored → throws
+ *    `TransactionLookupUnavailableError`: the node that errored may be
+ *    exactly the one that accepted the transaction, so "unknown" cannot be
+ *    concluded. Every caller treats the throw as "uncertain": the A6b
+ *    adoption check aborts before sending, the re-poll counts an error and
+ *    retries next tick (never drops), the evaluator's pending check refuses
+ *    (`SettlementStillPendingError`), and a failed evaluator send keeps its
+ *    hash and stamp.
+ *
+ * Accepted liveness trade-off: a candidate that is permanently broken (a bad
+ * key, a decommissioned endpoint) keeps those questions uncertain — the rows
+ * are logged and retried, never guessed — until it answers again or is
+ * removed from the configuration (`RPC_URL_<chainId>`, `ALCHEMY_API_KEY`,
+ * `INFURA_API_KEY`; see docs/operations/production-deploy.md).
  */
 
 import { createPublicClient, http, type Hex, type PublicClient } from 'viem';
@@ -36,38 +48,45 @@ function isNotFound(err: unknown): boolean {
   return false;
 }
 
-/** Thrown when no RPC node answered (every candidate errored): known or not cannot be told. */
+/**
+ * Thrown when no node knows the transaction and at least one node could not
+ * be asked (it errored): known or not cannot be told.
+ */
 export class TransactionLookupUnavailableError extends Error {
   constructor(
     readonly txHash: Hex,
     readonly nodes: number,
+    readonly erroredNodes: number,
     options?: { cause?: unknown },
   ) {
     // The node errors are kept as `cause` only: viem messages embed the RPC
     // URL, which carries the provider key in its path.
-    super(`No RPC node could be asked whether transaction ${txHash} is known (${nodes} node(s), every one errored)`, options);
+    super(
+      `Cannot tell whether transaction ${txHash} is known: no RPC node knows it and ${erroredNodes} of ${nodes} node(s) could not be asked (errored)`,
+      options,
+    );
     this.name = 'TransactionLookupUnavailableError';
   }
 }
 
 /**
  * Asks every client, in parallel, whether it knows `hash`. Resolves true as
- * soon as one does (without waiting for slower nodes); false when none does
- * and at least one answered — that needs every node's answer; throws
- * `TransactionLookupUnavailableError` when every one errored.
+ * soon as one does (without waiting for slower nodes); false only when every
+ * node answered "not found"; otherwise (no node knows it, at least one
+ * errored) throws `TransactionLookupUnavailableError`.
  */
 export function isTransactionKnownToAny(clients: readonly TxLookupClient[], hash: Hex): Promise<boolean> {
-  if (clients.length === 0) return Promise.reject(new TransactionLookupUnavailableError(hash, 0));
+  if (clients.length === 0) return Promise.reject(new TransactionLookupUnavailableError(hash, 0, 0));
   return new Promise<boolean>((resolve, reject) => {
     let pending = clients.length;
-    let answered = false;
+    let errored = 0;
     let firstError: unknown;
     let settled = false;
     const done = () => {
       if (settled || --pending > 0) return;
       settled = true;
-      if (answered) resolve(false);
-      else reject(new TransactionLookupUnavailableError(hash, clients.length, { cause: firstError }));
+      if (errored === 0) resolve(false);
+      else reject(new TransactionLookupUnavailableError(hash, clients.length, errored, { cause: firstError }));
     };
     for (const client of clients) {
       Promise.resolve()
@@ -80,8 +99,10 @@ export function isTransactionKnownToAny(clients: readonly TxLookupClient[], hash
           }
         },
         (err: unknown) => {
-          if (isNotFound(err)) answered = true;
-          else firstError ??= err;
+          if (!isNotFound(err)) {
+            errored++;
+            firstError ??= err;
+          }
           done();
         },
       );
@@ -93,7 +114,7 @@ export function isTransactionKnownToAny(clients: readonly TxLookupClient[], hash
  * Per-node bound of a lookup: the A6b adoption check runs inside the wallet's
  * broadcast lane (a Redis lock with a TTL), and a "not known" answer has to
  * wait for every node — so a hanging node must not hold the lane for viem's
- * default (10 s × 4 tries).
+ * default (10 s × 4 tries). A node that times out counts as errored.
  */
 export const TX_LOOKUP_TIMEOUT_MS = 8_000;
 export const TX_LOOKUP_RETRY_COUNT = 1;

@@ -321,10 +321,12 @@ export interface Erc8183Deps {
   /**
    * G1 review P3-1: whether ANY RPC node of `chainId` knows the transaction
    * (pending or mined) — every candidate asked with its own client
-   * (`services/transaction/tx-known.ts`); throws only when no node could be
-   * asked. `publicClient` is a fallback transport that stops at the first
-   * node that answers, and "not found" is an answer. Absent (unit tests) →
-   * the single `publicClient(chainId).getTransaction`.
+   * (`services/transaction/tx-known.ts`); false only when every node answered
+   * "not found", and throws when it cannot tell (no node knows it and one
+   * errored) — callers treat the throw as "may still mine". `publicClient`
+   * is a fallback transport that stops at the first node that answers, and
+   * "not found" is an answer. Absent (unit tests) → the single
+   * `publicClient(chainId).getTransaction`.
    */
   isKnownTransaction?(chainId: number, hash: Hex): Promise<boolean>;
 }
@@ -1992,7 +1994,7 @@ async function assertNoPendingSettlement(deps: Erc8183Deps, job: Pick<EscrowJobR
   try {
     known = await isEvaluatorTxKnown(deps, job.escrowChainId, hash);
   } catch {
-    throw new SettlementStillPendingError(hash, 'no RPC node could be asked about it');
+    throw new SettlementStillPendingError(hash, 'the RPC nodes cannot tell whether it is known (a node could not be asked)');
   }
   if (known) throw new SettlementStillPendingError(hash, 'no receipt yet and an RPC node still knows it');
 }
@@ -2025,10 +2027,12 @@ export class SettlementSupersededError extends Error {
  *    resolve refusing and a retry waiting (`assertNoPendingSettlement`) while
  *    it may mine — a lost write after the send cannot open a second one;
  *  - it throws (node refused it, out of gas, lost answer) → the nodes are
- *    asked about that hash: no node knows it → it never left: the hash slot is
- *    given back (the previous hash) and the stamp cleared, so a contest and a
- *    new decision are allowed again; a node knows it → in flight: the hash is
- *    kept, the stamp cleared; no node could be asked → both kept (in doubt).
+ *    asked about that hash: every node answered "not found" → it never left:
+ *    the hash slot is given back (the previous hash) and the stamp cleared, so
+ *    a contest and a new decision are allowed again; a node knows it → in
+ *    flight: the hash is kept, the stamp cleared; uncertain (no node knows it
+ *    and one could not be asked — it may be the one that took it) → both
+ *    kept.
  * A call that reverts in simulation never reaches the hook: it stamps nothing.
  * A signer that does not call the hook (test doubles) gets its hash recorded
  * after the send, as before.
@@ -2106,7 +2110,7 @@ async function resolveFailedSend(
     } else {
       deps.logger.error(
         { jobId, txHash: hash, err: publicErrorMessage(failure.err) },
-        'ERC-8183 settlement send failed and no RPC node could be asked about it — hash and stamp kept (may still mine)',
+        'ERC-8183 settlement send failed and the RPC nodes cannot tell whether it left (a node could not be asked) — hash and stamp kept (may still mine)',
       );
     }
   } catch (dbErr) {

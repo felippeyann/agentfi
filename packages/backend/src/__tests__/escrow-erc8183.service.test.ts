@@ -43,6 +43,7 @@ import {
 import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
 import { InMemoryLaneLock } from '../services/transaction/wallet-lane.js';
 import type { EvaluatorWriteParams } from '../services/escrow/evaluator-signer.js';
+import { TransactionLookupUnavailableError } from '../services/transaction/tx-known.js';
 import { REPUTATION_HOOK_ABI } from '../abi/ReputationHook.abi.js';
 import {
   ALERT_TEXT_MAX_CHARS,
@@ -971,6 +972,53 @@ describe('processSettlementJob — C3e item 1: a retry never signs over a pendin
     });
     await expect(processSettlementJob(deps, settleJob(2))).rejects.toBeInstanceOf(SettlementStillPendingError);
     expect(signer.writeContract).not.toHaveBeenCalled();
+  });
+
+  it('G1 review P3-1 (strict lookup): the multi-node check is uncertain (no node knows it, one errored) → refused, nothing signed — even if the read client says "not found"', async () => {
+    const { deps, signer, jobs } = withPrevious(async () => {
+      throw notFound('TransactionNotFoundError');
+    });
+    deps.isKnownTransaction = vi.fn(async () => Promise.reject(new TransactionLookupUnavailableError(PREV, 3, 1)));
+    const err = await processSettlementJob(deps, settleJob(2)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SettlementStillPendingError);
+    expect((err as Error).message).toMatch(/cannot tell whether it is known/);
+    expect(signer.writeContract).not.toHaveBeenCalled();
+    expect(jobs.get('job-1')!['settleTxHash']).toBe(PREV);
+  });
+});
+
+describe('sendEvaluatorTx — G1 review P3-2: a send that throws after the signed hash was recorded', () => {
+  const SIGNED = '0x5157000000000000000000000000000000000000000000000000000000000001' as Hex;
+
+  /** A signer that records the signed hash through the hook, then fails at send. */
+  function failingSend(known: () => Promise<boolean>) {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    ctx.signer.writeContract.mockImplementation((async (_params: EvaluatorWriteParams, opts?: { onBeforeBroadcast?: (h: Hex) => Promise<void> }) => {
+      await opts?.onBeforeBroadcast?.(SIGNED);
+      throw new Error('insufficient funds for gas * price + value');
+    }) as never);
+    ctx.deps.isKnownTransaction = vi.fn(known);
+    return ctx;
+  }
+
+  it('no node knows it (every node answered) → never sent: hash slot given back, stamp cleared', async () => {
+    const { deps, jobs } = failingSend(async () => false);
+    await expect(processSettlementJob(deps, settleJob())).rejects.toThrow(/insufficient funds/);
+    expect(jobs.get('job-1')).toMatchObject({ settleTxHash: null, settleAttemptAt: null });
+  });
+
+  it('a node knows it → in flight: hash kept, stamp cleared', async () => {
+    const { deps, jobs } = failingSend(async () => true);
+    await expect(processSettlementJob(deps, settleJob())).rejects.toThrow(/insufficient funds/);
+    expect(jobs.get('job-1')).toMatchObject({ settleTxHash: SIGNED, settleAttemptAt: null });
+  });
+
+  it('strict lookup uncertain (no node knows it, one errored) → hash AND stamp kept (may still mine): contest refused', async () => {
+    const { deps, jobs } = failingSend(async () => Promise.reject(new TransactionLookupUnavailableError(SIGNED, 2, 1)));
+    await expect(processSettlementJob(deps, settleJob())).rejects.toThrow(/insufficient funds/);
+    expect(jobs.get('job-1')).toMatchObject({ settleTxHash: SIGNED, settleAttemptAt: NOW });
+    jobs.get('job-1')!['onChainStatus'] = 'SUBMITTED'; // the failed handler's hand-back
+    expect(await contestEscrowJob(deps, { jobId: 'job-1', reason: null })).toMatchObject({ outcome: 'refused', reason: expect.stringMatching(/may still mine/) });
   });
 });
 

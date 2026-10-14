@@ -71,6 +71,7 @@ import {
   type TransactionProcessorDeps,
 } from '../queues/transaction.processor.js';
 import { PAUSED_BEFORE_SUBMISSION } from '../services/transaction/pre-submit-guard.js';
+import { TransactionLookupUnavailableError } from '../services/transaction/tx-known.js';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -368,6 +369,19 @@ describe('processTransactionJob — a retry after an earlier signed attempt (A6b
     await expect(processTransactionJob(job({ attemptsMade: 2 }), { ...deps, isKnownTransaction })).rejects.toThrow('HTTP request failed');
 
     expect(sent).toEqual([]);
+    expect(volume.markBroadcastAttempt).not.toHaveBeenCalled();
+    expect(row).toMatchObject({ status: 'QUEUED', txHash: null });
+  });
+
+  it('G1 review P3-1 (strict lookup): no node knows the earlier attempt but one errored → uncertain → aborts before anything is stamped or sent', async () => {
+    const { deps, submitter, row } = makeDeps(txRow({ broadcastTxHash: EARLIER }));
+    const isKnownTransaction = vi.fn().mockRejectedValue(new TransactionLookupUnavailableError(EARLIER, 2, 1));
+    const sent: Hex[] = [];
+    signingSubmitter(submitter, sent);
+
+    await expect(processTransactionJob(job({ attemptsMade: 2 }), { ...deps, isKnownTransaction })).rejects.toBeInstanceOf(TransactionLookupUnavailableError);
+
+    expect(sent).toEqual([]); // never the next nonce on a guess
     expect(volume.markBroadcastAttempt).not.toHaveBeenCalled();
     expect(row).toMatchObject({ status: 'QUEUED', txHash: null });
   });

@@ -43,6 +43,7 @@ vi.mock('../config/escrow-verification.runtime.js', () => ({ escrowConfigGate: (
 
 import { processTransactionJob, repollSubmittedTransactions, type TransactionJobData } from '../queues/transaction.processor.js';
 import { MonitorService, recordReceiptOnce } from '../services/transaction/monitor.service.js';
+import { TransactionLookupUnavailableError } from '../services/transaction/tx-known.js';
 
 type Row = {
   id: string;
@@ -236,6 +237,17 @@ describe('repollSubmittedTransactions', () => {
     // A6: dropped is not "never executed" — the reservation is held, not released.
     expect(volume.holdTransactionVolume).toHaveBeenCalledWith(db, 'tx-1');
     expect(volume.settleVolumeAfterRevert).not.toHaveBeenCalled();
+  });
+
+  it('G1 review P3-1 (strict lookup): past the grace, an uncertain "is it known?" (a node errored) counts an error and never drops the row', async () => {
+    const { db, table } = makeDb([row()]);
+    const uncertain = new TransactionLookupUnavailableError(`0x${'ab'.repeat(32)}`, 2, 1);
+    const d = { ...deps(db, {}), isKnownTransaction: vi.fn(async () => Promise.reject(uncertain)) };
+    const summary = await repollSubmittedTransactions(d, { olderThanMs: 0, dropAfterMs: 30 * 60_000, limit: 10 });
+    expect(summary).toMatchObject({ errors: 1, dropped: 0, pending: 0 });
+    expect(table.get('tx-1')!.status).toBe('SUBMITTED');
+    expect(escrowOutcomeMock).not.toHaveBeenCalled();
+    expect(volume.holdTransactionVolume).not.toHaveBeenCalled();
   });
 
   it('an RPC error leaves the row for the next tick', async () => {

@@ -82,8 +82,10 @@ function receiptClient(chainId: number) {
 }
 
 /**
- * Whether any RPC node knows the transaction (pending or mined); throws only
- * when no node could be asked. Used by the re-poll (drop detection) and, A6b,
+ * Whether any RPC node knows the transaction (pending or mined); false only
+ * when every node answered "not found", and throws when it cannot tell (no
+ * node knows it and one errored — the re-poll then counts an error and never
+ * drops, the A6b check aborts before sending). Used by the re-poll (drop detection) and, A6b,
  * by the processor before a retry signs again (an earlier signed attempt known
  * to the chain is adopted instead of sending a second transaction).
  *
