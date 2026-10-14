@@ -50,6 +50,8 @@ const h = vi.hoisted(() => {
     oracleCalls: [] as string[],
     /** The agent every cached simulation belongs to (the swap route checks it). */
     simulationOwner: '',
+    /** Simulator calls (a refusal "before simulating" leaves it at 0). */
+    simulations: 0,
   };
 });
 
@@ -82,6 +84,7 @@ vi.mock('../queues/transaction.queue.js', () => ({
 vi.mock('../services/transaction/simulator.service.js', () => ({
   SimulatorService: class {
     async simulate() {
+      h.simulations++;
       return { success: true, gasUsed: '21000', gasPrice: '1', simulationId: `sim-${Math.random()}`, provider: 'stub' };
     }
   },
@@ -115,8 +118,26 @@ vi.mock('../config/contracts.js', async () => {
     getContracts: (chainId: number) => ({
       ...actual.getContracts(chainId),
       executor: '0x00000000000000000000000000000000000E8ec0',
+      policyModule: '0x00000000000000000000000000000000000000A9',
       gmxExchangeRouter: '0x00000000000000000000000000000000000000a5',
       gmxOrderVault: '0x00000000000000000000000000000000000000a6',
+      compoundCometUsdc: '0x00000000000000000000000000000000000000a7',
+      aavePoolAddressProvider: '0x00000000000000000000000000000000000000a8',
+    }),
+  };
+});
+// Chain reads the routes make besides pricing: Aave's getPool and the
+// decimals of a token the registry does not know (18).
+vi.mock('../config/chains.js', async () => {
+  const actual = await vi.importActual<typeof import('../config/chains.js')>('../config/chains.js');
+  return {
+    ...actual,
+    createChainPublicClient: () => ({
+      readContract: async ({ functionName }: { functionName: string }) => {
+        if (functionName === 'getPool') return '0x00000000000000000000000000000000000000Ab';
+        if (functionName === 'decimals') return 18;
+        throw new Error(`unexpected read ${functionName}`);
+      },
     }),
   };
 });
@@ -125,6 +146,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { PrismaClient } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { encodeFunctionData, erc20Abi } from 'viem';
 
 async function databaseReady(): Promise<boolean> {
   const probe = new PrismaClient();
@@ -148,6 +170,7 @@ const describeDb = DB_READY ? describe : describe.skip;
 type Modules = {
   db: typeof import('../db/client.js')['db'];
   transactionRoutes: typeof import('../api/routes/transactions.js')['transactionRoutes'];
+  jobRoutes: typeof import('../api/routes/jobs.js')['jobRoutes'];
   registerErrorHandler: typeof import('../api/errors/handler.js')['registerErrorHandler'];
   reserveJobEscrow: typeof import('../services/policy/escrow.service.js')['reserveJobEscrow'];
   clearPriceCache: typeof import('../services/transaction/price.service.js')['clearPriceCache'];
@@ -233,26 +256,41 @@ async function app(agentId: string): Promise<FastifyInstance> {
     (request as unknown as { agentId: string; agentTier: string }).agentTier = 'FREE';
   });
   await a.register(m.transactionRoutes);
+  await a.register(m.jobRoutes);
   await a.ready();
   return a;
+}
+
+const SYNTHETIC_ALL = `${84532}:native=2000,${84532}:0x036CbD53842c5426634e7929541eC2318f3dCF7e=1`;
+
+/** The one Transaction row of an agent (or undefined), with its reservation bookkeeping. */
+async function onlyRow(agentId: string) {
+  const all = await m.db.transaction.findMany({
+    where: { agentId },
+    select: { volumeReservedUsd: true, volumeState: true, volumePriceSource: true },
+  });
+  expect(all.length).toBeLessThanOrEqual(1);
+  return all[0];
 }
 
 function post(a: FastifyInstance, url: string, payload: Record<string, unknown>) {
   return a.inject({ method: 'POST', url, payload });
 }
 
-describeDb('Q9 — no spend counted as zero (reproduction on the real routes)', () => {
+describeDb('Q9 — trusted prices on the real routes (Postgres)', () => {
   beforeAll(async () => {
-    const [db, routes, handler, escrow, price] = await Promise.all([
+    const [db, routes, handler, escrow, price, jobs] = await Promise.all([
       import('../db/client.js'),
       import('../api/routes/transactions.js'),
       import('../api/errors/handler.js'),
       import('../services/policy/escrow.service.js'),
       import('../services/transaction/price.service.js'),
+      import('../api/routes/jobs.js'),
     ]);
     m = {
       db: db.db,
       transactionRoutes: routes.transactionRoutes,
+      jobRoutes: jobs.jobRoutes,
       registerErrorHandler: handler.registerErrorHandler,
       reserveJobEscrow: escrow.reserveJobEscrow,
       clearPriceCache: price.clearPriceCache,
@@ -272,10 +310,12 @@ describeDb('Q9 — no spend counted as zero (reproduction on the real routes)', 
   beforeEach(() => {
     h.queued.length = 0;
     h.oracleCalls.length = 0;
+    h.simulations = 0;
     m.clearPriceCache();
     delete process.env['SYNTHETIC_TEST_PRICES_USD'];
   });
 
+  describe('reproduction (all 7 failed on c134012)', () => {
   it('ERC-20 transfer of 25 USDC on 84532 with a daily limit: refused 503, nothing reserved (was: accepted and counted 0)', async () => {
     const agent = await mkAgent([TESTNET]);
     const res = await post(await app(agent.id), '/v1/transactions/transfer', { chainId: TESTNET, token: USDC_84532, to: RECIPIENT, amount: '25' });
@@ -344,5 +384,228 @@ describeDb('Q9 — no spend counted as zero (reproduction on the real routes)', 
     const reservation = await m.reserveJobEscrow({ requesterId: requester.id, reward: { amount: '0.01', token: 'ETH', chainId: TESTNET } });
     expect(reservation).toMatchObject({ success: false, code: 'PRICE_UNAVAILABLE' });
     expect(await volume(requester.id)).toBe(0);
+  });
+  });
+
+  // ── Every operation that counts against the daily limit ───────────────────
+
+  type Op = { name: string; url: string; body: Record<string, unknown>; usd: number; priceable: boolean };
+  const t = { chainId: TESTNET };
+  const OPS: Op[] = [
+    { name: 'transfer native', url: '/v1/transactions/transfer', body: { ...t, token: 'ETH', to: RECIPIENT, amount: '0.01' }, usd: 20, priceable: true },
+    { name: 'transfer ERC-20', url: '/v1/transactions/transfer', body: { ...t, token: USDC_84532, to: RECIPIENT, amount: '25' }, usd: 25, priceable: true },
+    {
+      name: 'swap WETH input (priced as native)',
+      url: '/v1/transactions/swap',
+      body: { ...t, fromToken: WETH_84532, toToken: USDC_84532, amountIn: '0.01', simulationId: 'sim-q9' },
+      usd: 20,
+      priceable: true,
+    },
+    {
+      name: 'swap ERC-20 input',
+      url: '/v1/transactions/swap',
+      body: { ...t, fromToken: USDC_84532, toToken: WETH_84532, amountIn: '25', simulationId: 'sim-q9' },
+      usd: 25,
+      priceable: true,
+    },
+    {
+      name: 'Curve swap',
+      url: '/v1/transactions/swap-curve',
+      body: { ...t, pool: RECIPIENT, fromTokenIndex: 0, toTokenIndex: 1, fromTokenAddress: USDC_84532, toTokenAddress: WETH_84532, amountIn: '25', minAmountOut: '0' },
+      usd: 25,
+      priceable: true,
+    },
+    { name: 'Aave deposit', url: '/v1/transactions/deposit', body: { ...t, asset: USDC_84532, amount: '25' }, usd: 25, priceable: true },
+    { name: 'Aave withdraw', url: '/v1/transactions/withdraw', body: { ...t, asset: USDC_84532, amount: '25' }, usd: 25, priceable: true },
+    { name: 'Aave withdraw max', url: '/v1/transactions/withdraw', body: { ...t, asset: USDC_84532, amount: 'max' }, usd: 0, priceable: false },
+    { name: 'Compound supply', url: '/v1/transactions/supply-compound', body: { ...t, asset: USDC_84532, amount: '25' }, usd: 25, priceable: true },
+    { name: 'Compound withdraw', url: '/v1/transactions/withdraw-compound', body: { ...t, asset: USDC_84532, amount: '25' }, usd: 25, priceable: true },
+    { name: 'Compound withdraw max', url: '/v1/transactions/withdraw-compound', body: { ...t, asset: USDC_84532, amount: 'max' }, usd: 0, priceable: false },
+    { name: 'ERC-4626 deposit', url: '/v1/transactions/deposit-erc4626', body: { ...t, vault: RECIPIENT, asset: USDC_84532, amount: '25' }, usd: 25, priceable: true },
+    { name: 'ERC-4626 withdraw', url: '/v1/transactions/withdraw-erc4626', body: { ...t, vault: RECIPIENT, asset: USDC_84532, amount: '25' }, usd: 25, priceable: true },
+    { name: 'ERC-4626 withdraw max', url: '/v1/transactions/withdraw-erc4626', body: { ...t, vault: RECIPIENT, asset: USDC_84532, amount: 'max' }, usd: 0, priceable: false },
+    {
+      name: 'GMX open (collateral)',
+      url: '/v1/transactions/gmx-open',
+      body: { ...t, market: 'ETH/USD', collateralToken: USDC_84532, collateralAmount: '25', sizeDeltaUsd: '1', acceptablePrice: '1', isLong: true },
+      usd: 25,
+      priceable: true,
+    },
+    { name: 'batch native value', url: '/v1/transactions/batch', body: { ...t, actions: [{ to: RECIPIENT, value: '10000000000000000' }] }, usd: 20, priceable: true },
+  ];
+
+  describe('every counted operation on 84532', () => {
+    it.each(OPS)('$name — unpriced with a daily limit: 503 PRICE_UNAVAILABLE before anything is simulated or reserved', async (op) => {
+      const agent = await mkAgent([TESTNET]);
+      const res = await post(await app(agent.id), op.url, op.body);
+      expect(res.statusCode, res.body).toBe(503);
+      expect(res.json()).toMatchObject({ code: 'PRICE_UNAVAILABLE' });
+      expect(await rows(agent.id)).toHaveLength(0);
+      expect(await volume(agent.id)).toBe(0);
+      expect(h.queued).toHaveLength(0);
+      expect(h.simulations).toBe(0);
+    });
+
+    it.each(OPS)('$name — unpriced without a daily limit: accepted, nothing reserved', async (op) => {
+      const agent = await mkAgent([TESTNET], { maxDailyVolumeUsd: '0' });
+      const res = await post(await app(agent.id), op.url, op.body);
+      expect(res.statusCode, res.body).toBe(202);
+      expect(await onlyRow(agent.id)).toMatchObject({ volumeState: null, volumeReservedUsd: null, volumePriceSource: null });
+      expect(await volume(agent.id)).toBe(0);
+    });
+
+    it.each(OPS)('$name — with synthetic test prices: reserved with source "synthetic" (a max withdrawal stays unpriced)', async (op) => {
+      process.env['SYNTHETIC_TEST_PRICES_USD'] = SYNTHETIC_ALL;
+      const agent = await mkAgent([TESTNET]);
+      const res = await post(await app(agent.id), op.url, op.body);
+      if (!op.priceable) {
+        expect(res.statusCode, res.body).toBe(503);
+        expect(res.json().error).toMatch(/"max" withdrawal/);
+        expect(await rows(agent.id)).toHaveLength(0);
+        return;
+      }
+      expect(res.statusCode, res.body).toBe(202);
+      expect(await onlyRow(agent.id)).toMatchObject({ volumeState: 'RESERVED', volumePriceSource: 'synthetic' });
+      expect(Number((await onlyRow(agent.id))!.volumeReservedUsd)).toBeCloseTo(op.usd, 6);
+      expect(await volume(agent.id)).toBeCloseTo(op.usd, 6);
+    });
+
+    it('the daily limit still binds at synthetic prices (25 USDC over a 20 USD limit is 403)', async () => {
+      process.env['SYNTHETIC_TEST_PRICES_USD'] = SYNTHETIC_ALL;
+      const agent = await mkAgent([TESTNET], { maxDailyVolumeUsd: '20' });
+      const res = await post(await app(agent.id), '/v1/transactions/transfer', { chainId: TESTNET, token: USDC_84532, to: RECIPIENT, amount: '25' });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toMatch(/Daily volume limit/);
+      expect(await volume(agent.id)).toBe(0);
+    });
+
+    it('GMX close counts nothing (unchanged, documented)', async () => {
+      const agent = await mkAgent([TESTNET]);
+      const res = await post(await app(agent.id), '/v1/transactions/gmx-close', {
+        chainId: TESTNET,
+        market: 'ETH/USD',
+        collateralToken: USDC_84532,
+        sizeDeltaUsd: '1',
+        acceptablePrice: '1',
+        isLong: true,
+      });
+      expect(res.statusCode, res.body).toBe(202);
+      expect(await onlyRow(agent.id)).toMatchObject({ volumeState: null });
+    });
+  });
+
+  describe('mainnet: oracle prices only', () => {
+    it('an ERC-20 transfer on Ethereum is reserved at the oracle price with source "oracle"; synthetic prices are never consulted', async () => {
+      process.env['SYNTHETIC_TEST_PRICES_USD'] = SYNTHETIC_ALL;
+      const agent = await mkAgent([MAINNET]);
+      const res = await post(await app(agent.id), '/v1/transactions/transfer', { chainId: MAINNET, token: USDC_MAINNET, to: RECIPIENT, amount: '40' });
+      expect(res.statusCode, res.body).toBe(202);
+      expect(await onlyRow(agent.id)).toMatchObject({ volumeState: 'RESERVED', volumeReservedUsd: '40.000000', volumePriceSource: 'oracle' });
+    });
+  });
+
+  // ── Batch calldata (owner decision "only authorised contracts") ───────────
+
+  describe('batch calldata with a daily limit', () => {
+    const LISTED = '0x00000000000000000000000000000000000000b0';
+    const UNKNOWN_TOKEN = '0x00000000000000000000000000000000c0FfEE00';
+    const POLICY_MODULE = '0x00000000000000000000000000000000000000A9';
+    const transferData = (to: string, amount: bigint) => encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [to as `0x${string}`, amount] });
+    const batch = async (agentId: string, actions: unknown[]) => post(await app(agentId), '/v1/transactions/batch', { chainId: TESTNET, actions });
+
+    beforeEach(() => {
+      process.env['SYNTHETIC_TEST_PRICES_USD'] = SYNTHETIC_ALL;
+    });
+
+    it("a call to the agent's own AgentPolicyModule (policy sync) is allowed and counts nothing", async () => {
+      const agent = await mkAgent([TESTNET]);
+      const res = await batch(agent.id, [{ to: POLICY_MODULE, value: '0', data: '0xdeadbeef' }]);
+      expect(res.statusCode, res.body).toBe(202);
+      expect(await onlyRow(agent.id)).toMatchObject({ volumeState: null });
+    });
+
+    it('an ERC-20 transfer is priced and counted together with the native value; source synthetic', async () => {
+      const agent = await mkAgent([TESTNET]);
+      const res = await batch(agent.id, [
+        { to: USDC_84532, value: '0', data: transferData(LISTED, 30_000_000n) },
+        { to: LISTED, value: '1000000000000000' }, // 0.001 ETH = 2 USD
+      ]);
+      expect(res.statusCode, res.body).toBe(202);
+      expect(await onlyRow(agent.id)).toMatchObject({ volumeState: 'RESERVED', volumeReservedUsd: '32.000000', volumePriceSource: 'synthetic' });
+    });
+
+    it('transferFrom is counted too', async () => {
+      const agent = await mkAgent([TESTNET]);
+      const data = encodeFunctionData({ abi: erc20Abi, functionName: 'transferFrom', args: [RECIPIENT, LISTED, 5_000_000n] });
+      const res = await batch(agent.id, [{ to: USDC_84532, value: '0', data }]);
+      expect(res.statusCode, res.body).toBe(202);
+      expect(await volume(agent.id)).toBeCloseTo(5, 6);
+    });
+
+    it("the transfer's recipient is checked against allowedRecipients and its token against allowedTokens", async () => {
+      const recipients = await mkAgent([TESTNET], { allowedRecipients: [LISTED] });
+      const refused = await batch(recipients.id, [{ to: USDC_84532, value: '0', data: transferData(RECIPIENT, 1_000_000n) }]);
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json()).toMatchObject({ rule: 'allowedRecipients', actionIndex: 0 });
+
+      // The declared token (WETH) is allowed, the token the calldata really moves (USDC) is not.
+      const tokens = await mkAgent([TESTNET], { allowedTokens: [WETH_84532] });
+      const res = await batch(tokens.id, [{ to: USDC_84532, value: '0', token: WETH_84532, data: transferData(LISTED, 1_000_000n) }]);
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toMatchObject({ rule: 'allowedTokens', actionIndex: 0 });
+      expect(await volume(recipients.id)).toBe(0);
+      expect(await volume(tokens.id)).toBe(0);
+    });
+
+    it('a transfer of a token without a synthetic price is 503 PRICE_UNAVAILABLE (with the action index)', async () => {
+      const agent = await mkAgent([TESTNET]);
+      const res = await batch(agent.id, [{ to: UNKNOWN_TOKEN, value: '0', data: transferData(LISTED, 10n ** 18n) }]);
+      expect(res.statusCode, res.body).toBe(503);
+      expect(res.json()).toMatchObject({ code: 'PRICE_UNAVAILABLE', actionIndex: 0 });
+      expect(await rows(agent.id)).toHaveLength(0);
+    });
+
+    it('approve / unknown calldata: 403 UNACCOUNTED_CALL unless the operator listed the target in allowedContracts (then allowed, uncounted)', async () => {
+      const approve = encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [LISTED, 10n ** 30n] });
+      const open = await mkAgent([TESTNET]);
+      const refused = await batch(open.id, [{ to: USDC_84532, value: '0', data: approve }]);
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json()).toMatchObject({ code: 'UNACCOUNTED_CALL', rule: 'unaccountedCall', actionIndex: 0, selector: '0x095ea7b3' });
+      expect(await rows(open.id)).toHaveLength(0);
+
+      const authorised = await mkAgent([TESTNET], { allowedContracts: [USDC_84532] });
+      const ok = await batch(authorised.id, [{ to: USDC_84532, value: '0', data: approve }]);
+      expect(ok.statusCode, ok.body).toBe(202);
+      expect(await onlyRow(authorised.id)).toMatchObject({ volumeState: null });
+    });
+
+    it('without a daily limit the batch is unchanged: unknown calldata to any target is accepted, nothing counted', async () => {
+      const agent = await mkAgent([TESTNET], { maxDailyVolumeUsd: '0' });
+      const res = await batch(agent.id, [{ to: RECIPIENT, value: '0', data: '0x12345678' }]);
+      expect(res.statusCode, res.body).toBe(202);
+    });
+  });
+
+  // ── Jobs: the price source is stored next to the reservation ─────────────
+
+  describe('legacy A2A reward via POST /v1/jobs', () => {
+    it('a native reward on 84532 is reserved at the synthetic price, Job.reservedValueSource = "synthetic"; unpriced → 503, no job', async () => {
+      const requester = await mkAgent([TESTNET]);
+      const provider = await mkAgent([TESTNET]);
+      const a = await app(requester.id);
+      const body = { providerId: provider.id, payload: { task: 'q9' }, reward: { amount: '0.01', token: 'ETH', chainId: TESTNET } };
+
+      const refused = await post(a, '/v1/jobs', body);
+      expect(refused.statusCode, refused.body).toBe(503);
+      expect(refused.json()).toMatchObject({ code: 'PRICE_UNAVAILABLE' });
+      expect(await m.db.job.count({ where: { requesterId: requester.id } })).toBe(0);
+
+      process.env['SYNTHETIC_TEST_PRICES_USD'] = SYNTHETIC_ALL;
+      const created = await post(a, '/v1/jobs', body);
+      expect(created.statusCode, created.body).toBe(201);
+      const job = await m.db.job.findFirstOrThrow({ where: { requesterId: requester.id } });
+      expect(job).toMatchObject({ reservedValueUsd: '20.000000', reservedValueSource: 'synthetic', reservationStatus: 'PENDING' });
+      expect(await volume(requester.id)).toBeCloseTo(20, 6);
+    });
   });
 });
