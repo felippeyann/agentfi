@@ -13,7 +13,7 @@ import { defineConfig } from 'vitest/config';
  * worker thread (vitest 1.x's default `threads`). These suites load Prisma's
  * Node-API query engine; on Windows with Node 24 the whole run died with an
  * access violation (exit 139 / 0xC0000005) at a random point after a worker
- * thread that had used Prisma ended — 3 of 4 joint runs, item 7, 2026-10-14
+ * thread that had used Prisma ended — 5 of 11 joint runs, item 7, 2026-10-14
  * (reproduction outside vitest: scripts/repro-prisma-worker-thread-crash.mjs;
  * details: docs/operations/local-validation.md §4). Forked files exit as
  * processes and never crashed. CI (Linux) passed either way.
