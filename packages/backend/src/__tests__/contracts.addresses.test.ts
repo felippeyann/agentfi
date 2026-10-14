@@ -18,7 +18,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getAddress, isAddress } from 'viem';
 import * as contracts from '../config/contracts.js';
 import { GMX_CONTRACTS, GMX_MARKETS } from '../services/defi/gmx.service.js';
@@ -44,17 +44,36 @@ function expectChecksummed(entries: Array<[string, string]>) {
   expect(bad, `invalid EIP-55: ${JSON.stringify(bad)}`).toEqual([]);
 }
 
+type ContractsModule = typeof contracts;
+
+/** The addresses written in config/contracts.ts, with a path each. */
+function hardCodedContractAddresses(mod: ContractsModule): Array<[string, string]> {
+  return [
+    ...addressesIn(mod.CONTRACT_ADDRESSES, 'CONTRACT_ADDRESSES'),
+    ...addressesIn(mod.DEFAULT_IDENTITY_REGISTRIES, 'DEFAULT_IDENTITY_REGISTRIES'),
+    ...addressesIn(mod.DEFAULT_REPUTATION_REGISTRIES, 'DEFAULT_REPUTATION_REGISTRIES'),
+    ...addressesIn(mod.LEGACY_CONTRACT_ADDRESSES, 'LEGACY_CONTRACT_ADDRESSES'),
+    ...addressesIn((mod as Record<string, unknown>)['UNISWAP_V3_QUOTER_V2'], 'UNISWAP_V3_QUOTER_V2'),
+  ];
+}
+
+/** The per-chain env overrides `CONTRACT_ADDRESSES` reads (`<NAME>_<chainId>`). */
+const ENV_OVERRIDES = [
+  'POLICY_MODULE_ADDRESS',
+  'EXECUTOR_ADDRESS',
+  'ESCROW_MODULE_ADDRESS',
+  'AGENT_JOB_ESCROW_ADDRESS',
+  'REPUTATION_HOOK_ADDRESS',
+  'IDENTITY_REGISTRY_ADDRESS',
+];
+/** A valid address, all-lowercase — the env schema (config/env.ts) accepts it for every override above. */
+const LOWERCASE_OVERRIDE = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
+
 describe('S7 — hard-coded addresses are EIP-55', () => {
   it('config/contracts.ts: every chain table, registry default, legacy deployment and quoter', () => {
     const quoters = (contracts as Record<string, unknown>)['UNISWAP_V3_QUOTER_V2'];
     expect(quoters, 'UNISWAP_V3_QUOTER_V2 is exported from config/contracts.ts').toBeDefined();
-    expectChecksummed([
-      ...addressesIn(contracts.CONTRACT_ADDRESSES, 'CONTRACT_ADDRESSES'),
-      ...addressesIn(contracts.DEFAULT_IDENTITY_REGISTRIES, 'DEFAULT_IDENTITY_REGISTRIES'),
-      ...addressesIn(contracts.DEFAULT_REPUTATION_REGISTRIES, 'DEFAULT_REPUTATION_REGISTRIES'),
-      ...addressesIn(contracts.LEGACY_CONTRACT_ADDRESSES, 'LEGACY_CONTRACT_ADDRESSES'),
-      ...addressesIn(quoters, 'UNISWAP_V3_QUOTER_V2'),
-    ]);
+    expectChecksummed(hardCodedContractAddresses(contracts));
   });
 
   it('services/defi/gmx.service.ts: contracts and markets', () => {
@@ -88,6 +107,26 @@ describe('S7 — hard-coded addresses are EIP-55', () => {
     };
     roots.forEach(walk);
     expectChecksummed(found);
+  });
+});
+
+describe('an operator configuration does not fail the hard-coded-address check (review of #183)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it('every per-chain override set to a valid all-lowercase address: the hard-coded literals are still EIP-55', async () => {
+    for (const chainId of Object.keys(contracts.CONTRACT_ADDRESSES)) {
+      for (const name of ENV_OVERRIDES) vi.stubEnv(`${name}_${chainId}`, LOWERCASE_OVERRIDE);
+    }
+    vi.resetModules();
+    const fresh = (await import('../config/contracts.js')) as ContractsModule;
+    // The overrides are in force in the freshly loaded table.
+    expect(fresh.getContracts(84532).policyModule).toBe(LOWERCASE_OVERRIDE);
+    expect(fresh.getContracts(84532).agentJobEscrow).toBe(LOWERCASE_OVERRIDE);
+
+    expectChecksummed(hardCodedContractAddresses(fresh));
   });
 });
 
