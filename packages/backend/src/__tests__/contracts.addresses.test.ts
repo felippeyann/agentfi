@@ -46,10 +46,37 @@ function expectChecksummed(entries: Array<[string, string]>) {
 
 type ContractsModule = typeof contracts;
 
+/**
+ * Fields of `CONTRACT_ADDRESSES` read from the per-chain env overrides
+ * (`ENV_OVERRIDES` below), not written in the file. An operator may set them
+ * in lowercase (config/env.ts accepts it; viem accepts it), so they are not
+ * part of the hard-coded EIP-55 check (review of #183). Their defaults that
+ * ARE literals (`DEFAULT_IDENTITY_REGISTRIES`) are checked on their own; the
+ * test below proves every excluded field follows the env.
+ */
+const ENV_BACKED_FIELDS: ReadonlySet<string> = new Set([
+  'policyModule',
+  'executor',
+  'escrowModule',
+  'agentJobEscrow',
+  'reputationHook',
+  'identityRegistry',
+]);
+
+/** `CONTRACT_ADDRESSES` without the env-backed fields: the third-party literals only. */
+function hardCodedChainTables(mod: ContractsModule): Record<string, Record<string, unknown>> {
+  return Object.fromEntries(
+    Object.entries(mod.CONTRACT_ADDRESSES).map(([chainId, table]) => [
+      chainId,
+      Object.fromEntries(Object.entries(table).filter(([field]) => !ENV_BACKED_FIELDS.has(field))),
+    ]),
+  );
+}
+
 /** The addresses written in config/contracts.ts, with a path each. */
 function hardCodedContractAddresses(mod: ContractsModule): Array<[string, string]> {
   return [
-    ...addressesIn(mod.CONTRACT_ADDRESSES, 'CONTRACT_ADDRESSES'),
+    ...addressesIn(hardCodedChainTables(mod), 'CONTRACT_ADDRESSES'),
     ...addressesIn(mod.DEFAULT_IDENTITY_REGISTRIES, 'DEFAULT_IDENTITY_REGISTRIES'),
     ...addressesIn(mod.DEFAULT_REPUTATION_REGISTRIES, 'DEFAULT_REPUTATION_REGISTRIES'),
     ...addressesIn(mod.LEGACY_CONTRACT_ADDRESSES, 'LEGACY_CONTRACT_ADDRESSES'),
@@ -127,6 +154,23 @@ describe('an operator configuration does not fail the hard-coded-address check (
     expect(fresh.getContracts(84532).agentJobEscrow).toBe(LOWERCASE_OVERRIDE);
 
     expectChecksummed(hardCodedContractAddresses(fresh));
+  });
+
+  it('the fields left out of that check are exactly the env-driven ones (no literal hides behind the exclusion)', async () => {
+    for (const chainId of Object.keys(contracts.CONTRACT_ADDRESSES)) {
+      for (const name of ENV_OVERRIDES) vi.stubEnv(`${name}_${chainId}`, LOWERCASE_OVERRIDE);
+    }
+    vi.resetModules();
+    const fresh = (await import('../config/contracts.js')) as ContractsModule;
+    for (const [chainId, table] of Object.entries(fresh.CONTRACT_ADDRESSES)) {
+      for (const field of ENV_BACKED_FIELDS) {
+        expect((table as unknown as Record<string, unknown>)[field], `${chainId}.${field}`).toBe(LOWERCASE_OVERRIDE);
+      }
+    }
+    // ...and the check still covers every other field, e.g. the quoters and routers.
+    const covered = hardCodedContractAddresses(fresh).map(([path]) => path);
+    expect(covered).toContain('CONTRACT_ADDRESSES.84532.uniswapV3Quoter');
+    expect(covered).toContain('CONTRACT_ADDRESSES.42161.gmxOrderVault');
   });
 });
 
