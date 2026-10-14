@@ -152,7 +152,7 @@ Redeploy order: Base Sepolia → Base mainnet (human-run; see `docs/operations/c
 | Action           | Endpoint                     | Notes                                                                                         |
 | ---------------- | ---------------------------- | --------------------------------------------------------------------------------------------- |
 | Register agent   | `POST /v1/agents` (operator `API_SECRET`) · `POST /v1/public/agents` (rate-limited self-registration, default policy) | Creates a Turnkey wallet → Safe Smart Wallet only when `SAFE_DEPLOYER_PRIVATE_KEY` is set → initial `AgentPolicy` → optional ENS subdomain |
-| Configure policy | `PATCH /v1/agents/:id/policy` | Off-chain limits: `maxValuePerTxEth` (native), `maxValuePerTxUsd` (USDC x402 / escrow, Q8), `allowedContracts` (call targets), `allowedRecipients` (who may receive value, Q8), `cooldownSeconds`, `maxDailyVolumeUsd`; the agent may only tighten, loosening needs the operator credential |
+| Configure policy | `PATCH /v1/agents/:id/policy` | Off-chain limits: `maxValuePerTxEth` (native), `maxValuePerTxUsd` (USDC x402 / escrow, Q8), `maxOutflowPerTxUsd` (USD per ordinary outflow, §5-6; `null` = not configured, outflows blocked until the operator sets it), `allowedContracts` (call targets), `allowedRecipients` (who may receive value, Q8), `cooldownSeconds`, `maxDailyVolumeUsd`; the agent may only tighten, loosening needs the operator credential |
 | Kill switch      | `DELETE /v1/agents/:id`      | Soft-deactivate + emergency pause                                                             |
 | Billing view     | `GET /v1/billing/status`     | Fees paid, tx count this period, subscription tier                                            |
 

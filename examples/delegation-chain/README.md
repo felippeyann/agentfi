@@ -103,6 +103,12 @@ On completion, the backend:
 6. Protocol fee is collected atomically on-chain via `AgentExecutor`
 7. `/v1/agents/me/pnl` now shows real earnings/costs for each agent
 
+The example registers its agents without a policy (no restrictions). If you give the
+paying agent a policy, it must also carry `maxOutflowPerTxUsd` (the USD cap per
+ordinary outflow, set by the operator) — the A2A payment is an ordinary outflow, and a
+policy without that cap refuses it (`USD_CAP_NOT_CONFIGURED`, already when the paid job
+is created).
+
 This requires on the backend:
 - `WALLET_PROVIDER=turnkey` + the three `TURNKEY_*` vars
 - `ALCHEMY_API_KEY=<yours>`

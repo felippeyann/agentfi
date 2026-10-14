@@ -84,6 +84,11 @@ async function registerAgent(name) {
       policy: {
         // 0.5 ETH per tx ceiling — simulates a conservative bot
         maxValuePerTxEth: '0.5',
+        // USD ceiling per ordinary outflow (a swap's input, a transfer, a deposit…).
+        // Without it ("not configured") every outflow is refused with
+        // USD_CAP_NOT_CONFIGURED once you switch to /v1/transactions/swap; only the
+        // operator can set it (this registration uses the operator credential).
+        maxOutflowPerTxUsd: '250',
         maxDailyVolumeUsd: '1000',
         // Only Uniswap V3 router is allowed; arbitrary contracts are blocked
         allowedContracts: [UNISWAP_V3_ROUTER_BASE],
@@ -131,6 +136,7 @@ async function main() {
   console.log('       tier:            ', me.tier);
   console.log('       policy:          ', {
     maxValuePerTxEth: me.policy?.maxValuePerTxEth,
+    maxOutflowPerTxUsd: me.policy?.maxOutflowPerTxUsd,
     maxDailyVolumeUsd: me.policy?.maxDailyVolumeUsd,
     cooldownSeconds: me.policy?.cooldownSeconds,
   });
