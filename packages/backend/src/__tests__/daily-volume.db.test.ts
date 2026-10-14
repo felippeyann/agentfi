@@ -134,6 +134,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { keccak256, toHex, type Hex } from 'viem';
 import type { TransactionJobData } from '../queues/transaction.processor.js';
 
+// Re-poll cut-offs below zero (G1 review): the hand-over to the chain stamps
+// `updatedAt` with Postgres NOW(); with 0 / 0 a database clock a few ms ahead
+// of this process makes the row's age negative — still "within the grace" —
+// and the drop does not happen (a CI flake, not a behaviour under test).
+const DUE_NOW = { olderThanMs: -60_000, dropAfterMs: -60_000 } as const;
+
 // ── Database availability ──────────────────────────────────────────────────
 
 async function databaseReady(): Promise<boolean> {
@@ -534,7 +540,7 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     // No node ever knew it: the re-poll drops it after the grace, and the reservation is HELD.
     await m.processor.repollSubmittedTransactions(
       { db: m.db, feeService: { incrementTxUsage: async () => undefined, recordFeeEvent: async () => undefined } as never, logger: quietLogger, getReceipt: async () => null, isKnownTransaction: async () => false },
-      { olderThanMs: 0, dropAfterMs: 0, limit: 500 },
+      { ...DUE_NOW, limit: 500 },
     );
     expect(await txStatus(res.json().transactionId)).toBe('FAILED');
     expect(await volumeStateOf(res.json().transactionId)).toBe('HELD');
@@ -577,7 +583,7 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
         getReceipt: async () => null,
         isKnownTransaction: async () => false,
       },
-      { olderThanMs: 0, dropAfterMs: 0, limit: 50 },
+      { ...DUE_NOW, limit: 50 },
     );
     expect(summary.dropped).toBeGreaterThanOrEqual(1);
     expect(await txStatus(res.json().transactionId)).toBe('FAILED');
@@ -676,7 +682,7 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     // A6b: handed to the chain; dropped by the re-poll (no node knows it) → HELD.
     await m.processor.repollSubmittedTransactions(
       { db: m.db, feeService: { incrementTxUsage: async () => undefined, recordFeeEvent: async () => undefined } as never, logger: quietLogger, getReceipt: async () => null, isKnownTransaction: async () => false },
-      { olderThanMs: 0, dropAfterMs: 0, limit: 500 },
+      { ...DUE_NOW, limit: 500 },
     );
     const rows = await m.db.transaction.findMany({
       where: { id: { in: Object.values(ids) } },

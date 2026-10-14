@@ -167,6 +167,12 @@ import { SubmitterService } from '../services/transaction/submitter.service.js';
 import { InMemoryLaneLock, InMemoryNonceStore } from '../services/transaction/wallet-lane.js';
 import { FakeEscrowChain, FakeWallets } from './helpers/fake-escrow-chain.js';
 
+// Re-poll cut-offs below zero (G1 review): the hand-over to the chain stamps
+// `updatedAt` with Postgres NOW(); with 0 / 0 a database clock a few ms ahead
+// of this process makes the row's age negative — still "within the grace" —
+// and the drop does not happen (a CI flake, not a behaviour under test).
+const DUE_NOW = { olderThanMs: -60_000, dropAfterMs: -60_000 } as const;
+
 // ── Database availability ──────────────────────────────────────────────────
 
 async function databaseReady(): Promise<boolean> {
@@ -587,7 +593,7 @@ describeDb('A6b — outcomes after a broadcast attempt, on Postgres', () => {
         getReceipt: async (_chainId, hash) => (hash === lastHash ? { status: 'success', gasUsed: 21_000n, effectiveGasPrice: 1n } : null),
         isKnownTransaction: async () => true,
       },
-      { olderThanMs: 0, dropAfterMs: 0, limit: 500 },
+      { ...DUE_NOW, limit: 500 },
     );
     expect(summary.confirmed).toBeGreaterThanOrEqual(1);
     expect(await jobRow(job.id)).toEqual({ status: 'COMPLETED', reservationStatus: 'RELEASED' });
@@ -600,13 +606,9 @@ describeDb('A6b — outcomes after a broadcast attempt, on Postgres', () => {
     await runJob(data, { broadcast: 'fail-after-broadcast', attempts: 3 });
     expect(await jobRow(job.id)).toEqual({ status: 'PAYMENT_PENDING', reservationStatus: 'PENDING' });
 
-    // Cut-offs below zero: the hand-over stamps `updatedAt` with Postgres's
-    // NOW(), and a database clock a few ms ahead of this process's would make
-    // the row's age negative (still "within the grace") with 0 / 0 — a flake
-    // seen in a full local run (G1 review), not a behaviour under test.
     await m.processor.repollSubmittedTransactions(
       { db: m.db, feeService: noFees, logger: quietLogger, getReceipt: async () => null, isKnownTransaction: async () => false },
-      { olderThanMs: -60_000, dropAfterMs: -60_000, limit: 500 },
+      { ...DUE_NOW, limit: 500 },
     );
     expect((await txRow(data.transactionId))?.status).toBe('FAILED');
     expect(await jobRow(job.id)).toEqual({ status: 'PAYMENT_FAILED', reservationStatus: 'CANCELLED' });
