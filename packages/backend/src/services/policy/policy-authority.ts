@@ -11,12 +11,13 @@
  * and reusable by any code path that writes to `AgentPolicy`.
  */
 import type { AgentPolicy } from '@prisma/client';
-import { parsePolicyDecimal } from './policy-numbers.js';
+import { isPolicyDecimal, parsePolicyDecimal } from './policy-numbers.js';
 
 /** Fields of `AgentPolicy` an API caller may patch, in canonical order. */
 export const POLICY_PATCH_FIELDS = [
   'maxValuePerTxEth',
   'maxValuePerTxUsd',
+  'maxOutflowPerTxUsd',
   'maxDailyVolumeUsd',
   'allowedContracts',
   'allowedRecipients',
@@ -51,23 +52,84 @@ export interface PolicyChangeClassification {
 // `undefined` means "no policy row exists", which PolicyService treats as
 // "no restrictions" — the fully open baseline.
 //
-// Every decimal limit goes through `parsePolicyDecimal` — the SAME parser
-// PolicyService enforces with — so the classifier and the enforcer can never
-// disagree about what a string means. A value the parser rejects (`""`,
-// `"  "`, `"1e3"`, `"0x10"`, `"unlimited"`, …) is unlimited here, i.e. it
-// always counts as loosening and an agent can never write it.
+// Decimal limits (#185 review): a patch loosens a limit when ANY enforcer of
+// that limit, reading it its own way, sees the new value as more permissive.
+// Comparing JS numbers alone was a tighten-only bypass: at 2^33 a raise by one
+// micro-dollar (or one wei) is invisible to `Number` but visible to the
+// micro-USD / wei enforcers; and a positive daily limit below one micro-dollar
+// read as a tightening while the micro-USD enforcers (x402, escrow) read it as
+// NO limit. Each reading mirrors one enforcer exactly:
+//   float     `parsePolicyDecimal` → number (validateTransaction, the A6
+//             reservation, the legacy job reservation);
+//   micro     6-decimal fixed point rounded down, as `policyDecimalToMicro`
+//             (x402 / escrow `evaluateUsdcSpend`, `judgeOutflowCap`, the
+//             escrow daily limit);
+//   wei       18-decimal fixed point (the on-chain sync stores wei).
+// A value no reading parses (`""`, `"1e3"`, `"0x10"`, `"unlimited"`, …) is
+// unlimited, so it always counts as loosening and an agent can never write it.
+// A patch the enforcers cannot tell from the current value is neutral.
 
-/** A limit that does not parse never blocks anything, so it is unlimited. */
-function effectiveMaxValuePerTx(raw: string | undefined): number {
-  if (raw === undefined) return Number.POSITIVE_INFINITY;
-  return parsePolicyDecimal(raw) ?? Number.POSITIVE_INFINITY;
+/** A limit as one enforcer reads it. */
+type Level = { kind: 'blocked' } | { kind: 'value'; v: number | bigint } | { kind: 'unlimited' };
+/** One enforcer's reading; `rowExists: false` = no policy row = no restrictions. */
+type Reading = (raw: string | null | undefined, rowExists: boolean) => Level;
+
+const UNLIMITED: Level = { kind: 'unlimited' };
+const BLOCKED: Level = { kind: 'blocked' };
+
+function levelRank(level: Level): number {
+  return level.kind === 'blocked' ? 0 : level.kind === 'value' ? 1 : 2;
 }
 
-/** PolicyService only enforces the daily limit when it is > 0, so 0 / unparsable = unlimited. */
-function effectiveDailyLimit(raw: string | undefined): number {
-  if (raw === undefined) return Number.POSITIVE_INFINITY;
-  const n = parsePolicyDecimal(raw);
-  return n !== null && n > 0 ? n : Number.POSITIVE_INFINITY;
+/** True when `next` permits more than `current` (same reading, so `v` has one type). */
+function isLooser(next: Level, current: Level): boolean {
+  if (levelRank(next) !== levelRank(current)) return levelRank(next) > levelRank(current);
+  return next.kind === 'value' && current.kind === 'value' && next.v > current.v;
+}
+
+/** Fixed point at `decimals`, rounded down. Only called on a well-formed policy decimal. */
+function fixedPoint(raw: string, decimals: number): bigint {
+  const [whole = '0', fraction = ''] = raw.split('.');
+  return BigInt(whole + fraction.padEnd(decimals, '0').slice(0, decimals));
+}
+
+function fixedReading(decimals: number, opts: { zeroIsUnlimited?: boolean; nullIsBlocked?: boolean } = {}): Reading {
+  return (raw, rowExists) => {
+    if (!rowExists) return UNLIMITED;
+    if (raw === null || raw === undefined) return opts.nullIsBlocked ? BLOCKED : UNLIMITED;
+    if (!isPolicyDecimal(raw)) return UNLIMITED;
+    const v = fixedPoint(raw, decimals);
+    return opts.zeroIsUnlimited && v === 0n ? UNLIMITED : { kind: 'value', v };
+  };
+}
+
+function floatReading(opts: { zeroIsUnlimited?: boolean } = {}): Reading {
+  return (raw, rowExists) => {
+    if (!rowExists || raw === null || raw === undefined) return UNLIMITED;
+    const n = parsePolicyDecimal(raw);
+    if (n === null) return UNLIMITED;
+    return opts.zeroIsUnlimited && !(n > 0) ? UNLIMITED : { kind: 'value', v: n };
+  };
+}
+
+/** The readings of every decimal limit, one per enforcer that reads it. */
+const DECIMAL_LIMIT_READINGS = {
+  /** validateTransaction (float) and the on-chain sync (wei). */
+  maxValuePerTxEth: [floatReading(), fixedReading(18)],
+  /** x402 and escrow budgets: `evaluateUsdcSpend` (micro-USD). */
+  maxValuePerTxUsd: [fixedReading(6)],
+  /** §5-6 `judgeOutflowCap` (micro-USD); NULL ("not configured") blocks every outflow — the most restrictive value. */
+  maxOutflowPerTxUsd: [fixedReading(6, { nullIsBlocked: true })],
+  /** "0" = no daily limit for every enforcer: the float ones (transactions, legacy jobs) and the micro-USD ones (x402, escrow). */
+  maxDailyVolumeUsd: [floatReading({ zeroIsUnlimited: true }), fixedReading(6, { zeroIsUnlimited: true })],
+} as const satisfies Record<string, readonly Reading[]>;
+
+type DecimalLimitField = keyof typeof DECIMAL_LIMIT_READINGS;
+
+/** A decimal limit loosens when any of its enforcers reads the patched value as more permissive than the current one. */
+function decimalLimitLoosens(field: DecimalLimitField, current: AgentPolicy | null, next: string | null): boolean {
+  const currentRaw = current ? (current[field] as string | null | undefined) : undefined;
+  return DECIMAL_LIMIT_READINGS[field].some((read) => isLooser(read(next, true), read(currentRaw, current !== null)));
 }
 
 /** Cooldowns <= 0 are not enforced, so they are equivalent to 0. */
@@ -105,9 +167,12 @@ function whitelistLoosens(current: readonly string[], next: readonly string[]): 
 /**
  * Classifies a patch against the current policy (`null` = no policy row yet).
  *
- * A field LOOSENS when:
+ * A field LOOSENS when (decimal limits: as ANY of their enforcers reads them —
+ * float, micro-USD or wei, see DECIMAL_LIMIT_READINGS):
  *   - `maxValuePerTxEth` or `maxValuePerTxUsd` increases (a non-decimal value is unlimited,
  *     so it loosens any limit)
+ *   - `maxOutflowPerTxUsd` increases, where NULL ("not configured", every ordinary outflow
+ *     blocked) is the most restrictive value: setting any value from NULL loosens
  *   - `maxDailyVolumeUsd` increases (`"0"` means *no limit* and therefore loosens any positive limit)
  *   - `allowedContracts` / `allowedRecipients` / `allowedTokens` go from non-empty to empty, or
  *     gain an address not in the current list (compared case-insensitively)
@@ -125,27 +190,12 @@ export function classifyPolicyChange(
 ): PolicyChangeClassification {
   const loosenedFields: PolicyPatchField[] = [];
 
-  if (
-    patch.maxValuePerTxEth !== undefined &&
-    effectiveMaxValuePerTx(patch.maxValuePerTxEth) > effectiveMaxValuePerTx(current?.maxValuePerTxEth)
-  ) {
-    loosenedFields.push('maxValuePerTxEth');
-  }
-
-  // Q8: same reading as usdc-spend-policy.ts (non-decimal = unlimited). With
-  // no policy row the baseline is "no restrictions", so any value tightens.
-  if (
-    patch.maxValuePerTxUsd !== undefined &&
-    effectiveMaxValuePerTx(patch.maxValuePerTxUsd) > effectiveMaxValuePerTx(current?.maxValuePerTxUsd)
-  ) {
-    loosenedFields.push('maxValuePerTxUsd');
-  }
-
-  if (
-    patch.maxDailyVolumeUsd !== undefined &&
-    effectiveDailyLimit(patch.maxDailyVolumeUsd) > effectiveDailyLimit(current?.maxDailyVolumeUsd)
-  ) {
-    loosenedFields.push('maxDailyVolumeUsd');
+  // Decimal limits, in canonical order (#185 review: every enforcer's reading,
+  // see DECIMAL_LIMIT_READINGS). With no policy row the baseline is "no
+  // restrictions", so any value tightens.
+  for (const field of ['maxValuePerTxEth', 'maxValuePerTxUsd', 'maxOutflowPerTxUsd', 'maxDailyVolumeUsd'] as const) {
+    const next = patch[field];
+    if (next !== undefined && decimalLimitLoosens(field, current, next)) loosenedFields.push(field);
   }
 
   if (

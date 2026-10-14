@@ -17,6 +17,16 @@ export const POLICY_DECIMAL_PATTERN = /^\d+(\.\d+)?$/;
 /** Human-readable form of the pattern for zod / OpenAPI error messages. */
 export const POLICY_DECIMAL_MESSAGE = 'must be a plain decimal string such as "0.5" or "10000"';
 
+/**
+ * USD limits (`maxValuePerTxUsd`, `maxOutflowPerTxUsd`, `maxDailyVolumeUsd`):
+ * at most 6 decimals — micro-USD, the unit every USD enforcer counts in. A
+ * finer value meant different things to different checks (a daily limit
+ * below one micro-dollar was "no limit" to x402 / escrow and a blocking limit
+ * to the transaction checks), so the API refuses it.
+ */
+export const POLICY_USD_DECIMAL_PATTERN = /^\d+(\.\d{1,6})?$/;
+export const POLICY_USD_DECIMAL_MESSAGE = 'must be a plain decimal string with at most 6 decimals (micro-USD), such as "0.5" or "10000"';
+
 /** True when `raw` is a well-formed policy decimal (see `POLICY_DECIMAL_PATTERN`). */
 export function isPolicyDecimal(raw: unknown): raw is string {
   return typeof raw === 'string' && POLICY_DECIMAL_PATTERN.test(raw);

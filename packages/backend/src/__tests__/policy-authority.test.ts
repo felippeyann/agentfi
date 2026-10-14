@@ -46,6 +46,7 @@ function basePolicy(overrides: Partial<AgentPolicy> = {}): AgentPolicy {
     active: true,
     maxValuePerTxEth: '1.0',
     maxValuePerTxUsd: '1.0',
+    maxOutflowPerTxUsd: null,
     maxValueForAutoApprovalEth: '0.1',
     maxDailyVolumeUsd: '10000',
     allowedContracts: [UNISWAP_ROUTER],
@@ -196,6 +197,93 @@ describe('classifyPolicyChange', () => {
       expect(result.loosenedFields).toEqual(['maxValuePerTxUsd']);
       // A current non-decimal (unlimited) USD cap can be tightened to a real one.
       expect(classifyPolicyChange(basePolicy({ maxValuePerTxUsd: 'unlimited' }), { maxValuePerTxUsd: '1000' }).tightens).toBe(true);
+    });
+  });
+
+  describe('#185 review: limits compared in each enforcer\'s representation, never as JS numbers alone', () => {
+    // 2^33 + one fixed-point unit: `Number` cannot tell these apart (float
+    // spacing there is ~1.9e-6), the micro-USD / wei enforcers can.
+    const BIG_USD_A = '8589934592.000001';
+    const BIG_USD_B = '8589934592.000002';
+    const BIG_ETH_A = '8589934592.000000000000000001';
+    const BIG_ETH_B = '8589934592.000000000000000002';
+
+    it('the float blind spot is real (sanity)', () => {
+      expect(Number(BIG_USD_A)).toBe(Number(BIG_USD_B));
+      expect(Number(BIG_ETH_A)).toBe(Number(BIG_ETH_B));
+    });
+
+    it.each([
+      ['maxOutflowPerTxUsd', BIG_USD_A, BIG_USD_B],
+      ['maxValuePerTxUsd', BIG_USD_A, BIG_USD_B],
+      ['maxDailyVolumeUsd', BIG_USD_A, BIG_USD_B],
+      ['maxValuePerTxEth', BIG_ETH_A, BIG_ETH_B],
+    ] as const)('%s: raising by one fixed-point unit below the float spacing loosens (the enforcer sees a looser limit)', (field, current, patch) => {
+      expect(classifyPolicyChange(basePolicy({ [field]: current }), { [field]: patch })).toEqual({ tightens: false, loosenedFields: [field] });
+      // …and lowering by the same unit tightens.
+      expect(classifyPolicyChange(basePolicy({ [field]: patch }), { [field]: current })).toEqual({ tightens: true, loosenedFields: [] });
+    });
+
+    it('maxDailyVolumeUsd: a positive limit below one micro-dollar reads as NO limit for the micro-USD enforcers (x402, escrow) — setting it loosens', () => {
+      expect(classifyPolicyChange(basePolicy({ maxDailyVolumeUsd: '100' }), { maxDailyVolumeUsd: '0.0000001' })).toEqual({
+        tightens: false,
+        loosenedFields: ['maxDailyVolumeUsd'],
+      });
+    });
+
+    it('maxDailyVolumeUsd: leaving a sub-micro limit for any real one loosens for the float enforcers (they read 1e-7 as a limit)', () => {
+      expect(classifyPolicyChange(basePolicy({ maxDailyVolumeUsd: '0.0000001' }), { maxDailyVolumeUsd: '100' }).loosenedFields).toEqual(['maxDailyVolumeUsd']);
+    });
+
+    it('digits no enforcer reads change nothing: 1 → 1.0000000000000000001 ETH and 25 → 25.0000001 USD (outflow cap) are neutral', () => {
+      expect(classifyPolicyChange(basePolicy({ maxValuePerTxEth: '1' }), { maxValuePerTxEth: '1.0000000000000000001' }).tightens).toBe(true);
+      expect(classifyPolicyChange(basePolicy({ maxOutflowPerTxUsd: '25' }), { maxOutflowPerTxUsd: '25.0000001' }).tightens).toBe(true);
+    });
+
+    it('a sub-micro increase the float enforcer of the daily limit DOES see is a loosening (1000 → 1000.0000001)', () => {
+      expect(classifyPolicyChange(basePolicy({ maxDailyVolumeUsd: '1000' }), { maxDailyVolumeUsd: '1000.0000001' }).loosenedFields).toEqual(['maxDailyVolumeUsd']);
+    });
+  });
+
+  describe('maxOutflowPerTxUsd (§5-6: NULL = not configured = most restrictive)', () => {
+    it('setting ANY value from NULL loosens (operator only) — even "0"', () => {
+      for (const value of ['0', '0.01', '25', '1000000']) {
+        expect(classifyPolicyChange(basePolicy({ maxOutflowPerTxUsd: null }), { maxOutflowPerTxUsd: value })).toEqual({
+          tightens: false,
+          loosenedFields: ['maxOutflowPerTxUsd'],
+        });
+      }
+    });
+
+    it('NULL → NULL is neutral; a value → NULL tightens (blocks again)', () => {
+      expect(classifyPolicyChange(basePolicy({ maxOutflowPerTxUsd: null }), { maxOutflowPerTxUsd: null }).tightens).toBe(true);
+      expect(classifyPolicyChange(basePolicy({ maxOutflowPerTxUsd: '25' }), { maxOutflowPerTxUsd: null })).toEqual({ tightens: true, loosenedFields: [] });
+    });
+
+    it('with a value: lowering tightens (the agent may), raising loosens, equal is neutral', () => {
+      const current = basePolicy({ maxOutflowPerTxUsd: '25' });
+      expect(classifyPolicyChange(current, { maxOutflowPerTxUsd: '10' })).toEqual({ tightens: true, loosenedFields: [] });
+      expect(classifyPolicyChange(current, { maxOutflowPerTxUsd: '25.0' }).tightens).toBe(true);
+      expect(classifyPolicyChange(current, { maxOutflowPerTxUsd: '25.01' })).toEqual({ tightens: false, loosenedFields: ['maxOutflowPerTxUsd'] });
+    });
+
+    it.each(UNPARSABLE_LIMITS)('a non-decimal value %j is unlimited, so it always loosens', (raw) => {
+      expect(classifyPolicyChange(basePolicy({ maxOutflowPerTxUsd: '25' }), { maxOutflowPerTxUsd: raw }).loosenedFields).toEqual(['maxOutflowPerTxUsd']);
+      expect(classifyPolicyChange(basePolicy({ maxOutflowPerTxUsd: null }), { maxOutflowPerTxUsd: raw }).loosenedFields).toEqual(['maxOutflowPerTxUsd']);
+    });
+
+    it('with no policy row (no restrictions) any value — NULL included — tightens', () => {
+      expect(classifyPolicyChange(null, { maxOutflowPerTxUsd: '1000000' }).tightens).toBe(true);
+      expect(classifyPolicyChange(null, { maxOutflowPerTxUsd: null }).tightens).toBe(true);
+    });
+
+    it('is independent of maxValuePerTxEth and maxValuePerTxUsd (no unit cross-reading)', () => {
+      const result = classifyPolicyChange(basePolicy({ maxOutflowPerTxUsd: null }), { maxValuePerTxEth: '0.1', maxValuePerTxUsd: '0.5', maxOutflowPerTxUsd: '10' });
+      expect(result.loosenedFields).toEqual(['maxOutflowPerTxUsd']);
+    });
+
+    it('an omitted field never loosens', () => {
+      expect(classifyPolicyChange(basePolicy({ maxOutflowPerTxUsd: null }), { cooldownSeconds: 120 }).tightens).toBe(true);
     });
   });
 

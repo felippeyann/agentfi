@@ -50,6 +50,7 @@ function row(overrides: Partial<AgentPolicy> = {}): AgentPolicy {
     active: true,
     maxValuePerTxEth: '1.0',
     maxValuePerTxUsd: '1.0',
+    maxOutflowPerTxUsd: null,
     maxValueForAutoApprovalEth: '1.0',
     maxDailyVolumeUsd: '0',
     allowedContracts: [],

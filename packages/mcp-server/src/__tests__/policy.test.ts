@@ -59,6 +59,7 @@ describe('update_policy (Q8 fields)', () => {
     expect(apiMock.patch).toHaveBeenCalledWith(`/v1/agents/${AGENT_ID}/policy`, {
       maxValuePerTxEth: undefined,
       maxValuePerTxUsd: '5',
+      maxOutflowPerTxUsd: undefined,
       allowedTokens: undefined,
       allowedContracts: undefined,
       allowedRecipients: [PAYEE],
@@ -70,6 +71,7 @@ describe('update_policy (Q8 fields)', () => {
   it.each([
     [{ max_value_per_tx_usd: '1e3' }, 'max_value_per_tx_usd'],
     [{ max_value_per_tx_usd: '' }, 'max_value_per_tx_usd'],
+    [{ max_value_per_tx_usd: '5.0000001' }, 'max_value_per_tx_usd'], // USD: at most 6 decimals
     [{ allowed_recipients: ['payee'] }, 'allowed_recipients'],
   ])('refuses %j before calling the backend (INVALID_INPUT)', async (input, path) => {
     const result = await callTool('update_policy', { ...input, reason: 'x' }, { log });
@@ -78,6 +80,41 @@ describe('update_policy (Q8 fields)', () => {
     expect(JSON.stringify(payloadOf(result))).toContain(path);
     expect(apiMock.get).not.toHaveBeenCalled();
     expect(apiMock.patch).not.toHaveBeenCalled();
+  });
+});
+
+describe('update_policy — max_outflow_per_tx_usd (§5-6)', () => {
+  it('advertises it, says null blocks outflows and only the operator configures it', () => {
+    const tool = listTools().find((t) => t.name === 'update_policy')!;
+    const properties = (tool.inputSchema as { properties: Record<string, unknown> }).properties;
+    expect(Object.keys(properties)).toContain('max_outflow_per_tx_usd');
+    expect(tool.description).toMatch(/max_outflow_per_tx_usd/);
+    expect(tool.description).toMatch(/USD_CAP_NOT_CONFIGURED/);
+    expect(tool.description).toMatch(/operator/);
+  });
+
+  it.each([
+    ['100', '100'],
+    [null, null],
+  ])('sends %j as maxOutflowPerTxUsd', async (input, sent) => {
+    apiMock.get.mockResolvedValue({ id: AGENT_ID });
+    apiMock.patch.mockResolvedValue({ maxOutflowPerTxUsd: sent });
+    const result = await callTool('update_policy', { max_outflow_per_tx_usd: input, reason: 'lower the outflow cap' }, { log });
+    expect(result.isError).toBeFalsy();
+    expect(apiMock.patch.mock.calls[0]![1]).toMatchObject({ maxOutflowPerTxUsd: sent });
+  });
+
+  it.each(['1e3', '', 'unlimited', '1.0000001'])('refuses %j before calling the backend (INVALID_INPUT)', async (raw) => {
+    const result = await callTool('update_policy', { max_outflow_per_tx_usd: raw, reason: 'x' }, { log });
+    expect(result.isError).toBe(true);
+    expect(payloadOf(result)).toMatchObject({ code: 'INVALID_INPUT' });
+    expect(apiMock.patch).not.toHaveBeenCalled();
+  });
+
+  it('get_policy shows a null (not configured) cap as null', async () => {
+    apiMock.get.mockResolvedValue({ policy: { maxValuePerTxEth: '1.0', maxValuePerTxUsd: '1.0', maxOutflowPerTxUsd: null }, tier: 'FREE', billing: null });
+    const payload = payloadOf(await callTool('get_policy', {}, { log }));
+    expect(payload['policy']).toMatchObject({ maxOutflowPerTxUsd: null });
   });
 });
 

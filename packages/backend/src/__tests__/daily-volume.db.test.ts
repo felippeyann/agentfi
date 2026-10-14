@@ -227,6 +227,8 @@ async function mkAgent(policy: Record<string, unknown> = {}) {
           maxValueForAutoApprovalEth: '10',
           maxDailyVolumeUsd: '1000',
           cooldownSeconds: 0,
+          // §5-6: a configured outflow cap out of the way (this suite tests other rules).
+          maxOutflowPerTxUsd: '1000000',
           ...policy,
         },
       },
@@ -841,9 +843,12 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     expect(await volume(agent.id)).toBeCloseTo(40, 6);
   });
 
-  it('native value without a trusted price is refused while a daily limit applies (fail closed), and reserves nothing without one', async () => {
+  it('native value without a trusted price is refused while a daily limit applies (fail closed), and reserves nothing without one (no daily limit, no outflow cap)', async () => {
     const limited = await mkAgent({ maxDailyVolumeUsd: '1000' });
-    const unlimited = await mkAgent({ maxDailyVolumeUsd: '0' });
+    // §5-6: with a configured outflow cap an unpriced outflow is refused even
+    // without a daily limit (outflow-cap.routes.db.test.ts); a non-decimal
+    // stored cap reads as unlimited, which isolates the daily-limit rule here.
+    const unlimited = await mkAgent({ maxDailyVolumeUsd: '0', maxOutflowPerTxUsd: 'unlimited' });
     // Q9: on 84532 native value is priced only by a configured synthetic price.
     process.env['SYNTHETIC_TEST_PRICES_USD'] = h.syntheticPrices.tokensOnly;
     const refused = await transfer(await app(limited.id), '0.01');

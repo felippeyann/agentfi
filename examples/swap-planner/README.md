@@ -8,6 +8,7 @@ Runs cleanly on the zero-credential dev stack. Graduates to real execution by sw
 
 1. Registers an agent on **Base Mainnet** with a strict policy:
    - `maxValuePerTxEth: 0.5`
+   - `maxOutflowPerTxUsd: 250` — the USD cap per ordinary outflow (a swap's input, a transfer, a deposit…). Without it every outflow is refused with `USD_CAP_NOT_CONFIGURED`; only the operator can set it, which this registration does (operator credential)
    - `maxDailyVolumeUsd: 1000`
    - Only Uniswap V3 router is allowed
    - `allowedRecipients: []` — required next to a non-empty `allowedContracts`; `[]` means no recipient restriction (the planner never pays anyone)
@@ -59,7 +60,7 @@ node examples/swap-planner/index.mjs
 [2] Inspect the agent record (policy lives in DB, checked off-chain)
        chains:           [ 8453 ]
        tier:             FREE
-       policy:           { maxValuePerTxEth: '0.5', ... }
+       policy:           { maxValuePerTxEth: '0.5', maxOutflowPerTxUsd: '250', ... }
        allowedContracts: [ '0x2626...e481' ]
        allowedTokens:    [ '0x8335...2913', '0x4200...0006' ]
 [3] Simulate swap: 10 USDC → WETH on Base via Uniswap V3

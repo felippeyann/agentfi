@@ -153,7 +153,9 @@ paths:
         `PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR`).
 
         The initial policy is forced to the server defaults
-        (`maxValuePerTxEth=1.0`, `maxValuePerTxUsd=1.0`, `maxDailyVolumeUsd=10000`,
+        (`maxValuePerTxEth=1.0`, `maxValuePerTxUsd=1.0`, `maxOutflowPerTxUsd`
+        not configured (`null`: ordinary outflows are refused with
+        `USD_CAP_NOT_CONFIGURED` until the operator sets it), `maxDailyVolumeUsd=10000`,
         empty whitelists — contracts, recipients, tokens — and `cooldownSeconds=60`).
         Any `policy` in the request body is **ignored**
         — an unauthenticated caller cannot choose its own limits; loosening
@@ -411,23 +413,36 @@ paths:
         transaction on `/v1/transactions/*` (synced on-chain by the operator sync). `maxValuePerTxUsd`
         caps each spend denominated in USD — USDC x402 payments
         (`pay-resource`) and ERC-8183 escrow budgets (`POST /v1/jobs`); it does
-        not apply to `/v1/transactions/*` (extending it there is an open plan
-        item). `allowedContracts` is the call target (`tx.to`) of ordinary
+        not apply to `/v1/transactions/*`. `maxOutflowPerTxUsd` (§5-6) caps each
+        ordinary outflow at its priced USD value (transfers, swap / Curve
+        inputs, deposits, GMX collateral, batches, the legacy A2A payment);
+        `null` = not configured, which blocks those outflows until the
+        operator sets it. `allowedContracts` is the call target (`tx.to`) of ordinary
         transactions, as `AgentPolicyModule` enforces on-chain.
         `allowedRecipients` lists every address that may **receive** value from
         the agent: a transfer's `to` (native or ERC-20), the x402 `payTo`, the
         escrow job's provider wallet, the legacy A2A payee, and the `to` of a
         batch action carrying native value; DeFi operations (swap, deposits,
         GMX…) pay the agent's own position and are not recipient-checked. Empty
-        lists are unrestricted. `maxValuePerTxUsd` and `allowedRecipients` are
-        **off-chain only**: the on-chain sync never carries them (the answer lists
-        them in `onChainSync.offChainOnlyFields`).
+        lists are unrestricted. `maxValuePerTxUsd`, `maxOutflowPerTxUsd` and
+        `allowedRecipients` are **off-chain only**: the on-chain sync never
+        carries them (the answer lists them in `onChainSync.offChainOnlyFields`).
 
         A field **loosens** when:
         - `maxValuePerTxEth` or `maxValuePerTxUsd` increases (a stored value that is
           not a plain decimal is unlimited, so replacing it never loosens);
+        - `maxOutflowPerTxUsd` increases, where `null` (not configured, every
+          ordinary outflow blocked) is the most restrictive value: setting any
+          value from `null` loosens (operator only); lowering it or setting it
+          back to `null` tightens;
         - `maxDailyVolumeUsd` increases — `"0"` means *no daily limit* and therefore
-          loosens any positive limit;
+          loosens any positive limit, and so does a positive limit below one
+          micro-dollar (the x402 / escrow enforcers read it as no limit);
+        - decimal limits are compared as every enforcer of the limit reads them,
+          never as floating-point numbers alone: micro-USD for the USD limits,
+          wei (18 decimals) and the transaction check's number for
+          `maxValuePerTxEth` — a raise by one micro-dollar or one wei loosens at
+          any magnitude, digits no enforcer reads are neutral;
         - `allowedContracts` / `allowedRecipients` / `allowedTokens` go from non-empty
           to empty, or gain an address not in the current list (compared
           case-insensitively);
@@ -446,9 +461,12 @@ paths:
         policy rejects transactions after that timestamp. `expiresAt: null` clears
         the expiry (operator only once an expiry exists).
 
-        `maxValuePerTxEth` / `maxValuePerTxUsd` / `maxDailyVolumeUsd` must be plain
-        decimal strings (`^\d+(\.\d+)?$`); anything else — empty, whitespace,
-        exponent, hex, words — is `400` for every caller. `allowedRecipients`
+        `maxValuePerTxEth` / `maxValuePerTxUsd` / `maxOutflowPerTxUsd` (or `null`)
+        / `maxDailyVolumeUsd` must be plain
+        decimal strings (`^\d+(\.\d+)?$`), the three USD limits with at most 6
+        decimals (`^\d+(\.\d{1,6})?$`, micro-USD — what every USD check counts
+        in); anything else — empty, whitespace, exponent, hex, words, a 7th USD
+        decimal — is `400` for every caller. `allowedRecipients`
         entries must be `0x` addresses. An optional `reason` is written to the
         audit log line and is not stored.
       security:
@@ -596,8 +614,10 @@ paths:
         too (before Q8 an ERC-20 recipient was never checked). The call target
         is checked against `allowedContracts` as before: `to` itself for a
         native transfer, the token contract for an ERC-20 transfer. The value
-        is capped by `maxValuePerTxEth` (native) and counted against the daily
-        limit; `maxValuePerTxUsd` does not apply here.
+        is capped by `maxValuePerTxEth` (native) and, at its priced USD value, by
+        `maxOutflowPerTxUsd` (§5-6; not configured → `403
+        USD_CAP_NOT_CONFIGURED`), and counted against the daily limit;
+        `maxValuePerTxUsd` does not apply here.
 
         `token` is `"ETH"` — the chain's native asset, which is POL on Polygon
         (137) — or a contract address; the route does not resolve symbols.
@@ -2143,7 +2163,16 @@ components:
     PolicyViolation:
       description: |
         Action blocked by the agent's operational policy (`{ "error": … }`).
-        On `POST /v1/transactions/batch` while the agent has a daily volume limit
+        §5-6, every ordinary outflow (transfer, swap / Curve input, deposit, GMX
+        collateral, batch native value + ERC-20 transfers): `code:
+        "USD_CAP_NOT_CONFIGURED"` (`rule: "maxOutflowPerTxUsd"`) when the
+        policy has no `maxOutflowPerTxUsd` — the operator must set it; `code:
+        "POLICY_VIOLATION"` (`rule: "maxOutflowPerTxUsd"`, `limit`) when the
+        outflow's priced USD value exceeds it. Both before anything is
+        simulated or reserved.
+        On `POST /v1/transactions/batch` the ERC-20 transfer checks below apply
+        whenever the agent has a policy (§5-6: the batch is one outflow); while
+        the agent has a daily volume limit
         (Q9) a refusal can also carry `code: "UNACCOUNTED_CALL"` (`rule:
         "unaccountedCall"`, `actionIndex`, `selector`): an action's calldata is
         neither a call to the agent's own AgentPolicyModule nor an exact ERC-20
@@ -2188,7 +2217,9 @@ components:
         otherwise count as 0, so it is refused before anything is simulated or
         reserved (`{ "error": "…", "code": "PRICE_UNAVAILABLE" }`, plus
         `actionIndex` on a batch). Without a daily limit the request proceeds and
-        counts nothing.
+        counts nothing — unless it is an ordinary outflow under a configured
+        `maxOutflowPerTxUsd` (§5-6): a cap that cannot be checked refuses it the
+        same way (`rule: "maxOutflowPerTxUsd"`, `limit`).
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -2271,6 +2302,7 @@ components:
                 enum:
                   - maxValuePerTxEth
                   - maxValuePerTxUsd
+                  - maxOutflowPerTxUsd
                   - maxDailyVolumeUsd
                   - allowedContracts
                   - allowedRecipients
@@ -2447,21 +2479,50 @@ components:
             string. Empty, whitespace, exponent, hex or non-numeric values are rejected (400).
         maxValuePerTxUsd:
           type: string
-          pattern: '^\d+(\.\d+)?$'
+          pattern: '^\d+(\.\d{1,6})?$'
           example: "1.0"
           description: |
             Q8. Per-spend cap in USD for spends denominated in USD: USDC x402 payments
             (`pay-resource`) and ERC-8183 escrow budgets (`POST /v1/jobs`, USDC at 1.00).
-            Not applied to `/v1/transactions/*` (open plan item). Off-chain only.
+            Never applied to `/v1/transactions/*` (ordinary outflows have their own
+            cap, `maxOutflowPerTxUsd`). Off-chain only.
             Default `"1.0"` at creation when omitted — never derived from
             `maxValuePerTxEth`. Policies that existed before migration 0021 were
             backfilled with their `maxValuePerTxEth` text (the number USDC spends
-            already obeyed). Same validation as `maxValuePerTxEth`.
+            already obeyed). Plain decimal with at most 6 decimals (micro-USD,
+            what every USD check counts in); anything else is 400.
+        maxOutflowPerTxUsd:
+          type: string
+          nullable: true
+          pattern: '^\d+(\.\d{1,6})?$'
+          example: "250"
+          description: |
+            §5-6 (migration 0025). Per-transaction cap in USD on ORDINARY outflows,
+            each compared at its priced USD value: transfers (native and ERC-20), the
+            input of a Uniswap or Curve swap, Aave / Compound / ERC-4626 deposits, GMX
+            collateral, a batch's native value plus its recognised ERC-20 transfers,
+            and the legacy A2A payment (also checked when its paid job is created).
+            Withdrawals and a GMX close are not outflows. `null` = **not configured**:
+            those outflows are refused with `403 USD_CAP_NOT_CONFIGURED` until the
+            operator sets it — every policy that existed before migration 0025 is
+            `null`, and so is every new policy that does not set it (public
+            self-registration included); nothing is inferred from `maxValuePerTxEth`
+            or `maxValuePerTxUsd`. With a value, an outflow above it is `403
+            POLICY_VIOLATION` (`rule: maxOutflowPerTxUsd`, `limit`) and one without a
+            trusted price is `503 PRICE_UNAVAILABLE` (D15), daily limit or not.
+            Authority: `null` is the most restrictive value — setting any value from
+            `null` is loosening (operator credential); the agent may lower a value or
+            set it back to `null`. Off-chain only. Plain decimal with at most 6
+            decimals (micro-USD), or `null`; anything else is 400.
         maxDailyVolumeUsd:
           type: string
-          pattern: '^\d+(\.\d+)?$'
+          pattern: '^\d+(\.\d{1,6})?$'
           example: "10000"
-          description: Plain decimal string; `"0"` means no daily limit. Same validation as `maxValuePerTxEth`.
+          description: |
+            Plain decimal string with at most 6 decimals (micro-USD, what every
+            daily-limit check counts in); `"0"` means no daily limit. A finer value
+            is 400: a limit below one micro-dollar used to mean "no limit" to the
+            x402 / escrow checks and a blocking limit to the transaction checks.
         allowedContracts:
           type: array
           items: { type: string }
@@ -2536,7 +2597,8 @@ components:
           type: array
           description: |
             Policy fields the module has no slot for; only the backend enforces
-            them (Q8: `maxValuePerTxUsd`, `allowedRecipients`; and `maxDailyVolumeUsd`).
+            them (Q8: `maxValuePerTxUsd`, `allowedRecipients`; §5-6:
+            `maxOutflowPerTxUsd`; and `maxDailyVolumeUsd`).
           items: { type: string }
         notice: { type: string }
 

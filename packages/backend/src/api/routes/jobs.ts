@@ -270,6 +270,17 @@ export async function jobRoutes(fastify: FastifyInstance) {
             error: 'Escrow reservation failed',
             code: 'PRICE_UNAVAILABLE',
             reason: reservation.reason,
+            ...(reservation.rule ? { rule: reservation.rule } : {}),
+          });
+        }
+        // §5-6: the reward, paid later as an ordinary outflow, cannot pass
+        // maxOutflowPerTxUsd (not configured, or above it): 403, no job.
+        if (reservation.code === 'USD_CAP_NOT_CONFIGURED' || reservation.code === 'POLICY_VIOLATION') {
+          return reply.code(403).send({
+            error: reservation.reason,
+            code: reservation.code,
+            ...(reservation.rule ? { rule: reservation.rule } : {}),
+            ...(reservation.limit !== undefined ? { limit: reservation.limit } : {}),
           });
         }
         return reply.code(400).send({

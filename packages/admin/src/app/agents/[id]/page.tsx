@@ -14,6 +14,8 @@ interface AgentDetail {
   maxValuePerTxEth: string;
   /** Q8: USDC x402 payments and escrow budgets (off-chain only). */
   maxValuePerTxUsd: string;
+  /** §5-6: USD cap on ordinary outflows (off-chain only); null = not configured, outflows blocked. */
+  maxOutflowPerTxUsd?: string | null;
   maxValueForAutoApprovalEth: string;
   maxDailyVolumeUsd: string;
   allowedContracts: string[];
@@ -145,6 +147,18 @@ export default async function AgentDetailPage({ params }: { params: { id: string
               </p>
               <p className="text-xs text-gray-300" title="USDC x402 payments and escrowed job budgets. Enforced by the backend only (not synced on-chain).">
                 Max USD/spend: <span className="text-white">${agent.policy.maxValuePerTxUsd}</span>{' '}
+                <span className="text-gray-500">(off-chain)</span>
+              </p>
+              <p
+                className="text-xs text-gray-300"
+                title="USD cap per ordinary outflow (transfers, swap inputs, deposits, GMX collateral, batches, A2A payments). Not configured = those outflows are refused until the operator sets it (PATCH /v1/agents/:id/policy with the operator credential). Enforced by the backend only."
+              >
+                Max USD/outflow:{' '}
+                {agent.policy.maxOutflowPerTxUsd ? (
+                  <span className="text-white">${agent.policy.maxOutflowPerTxUsd}</span>
+                ) : (
+                  <span className="text-brand-red font-bold">not configured — ordinary outflows blocked</span>
+                )}{' '}
                 <span className="text-gray-500">(off-chain)</span>
               </p>
               <p className="text-xs text-brand-purple">

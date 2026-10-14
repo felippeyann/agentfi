@@ -47,6 +47,7 @@ import {
 } from './spend-pricing.js';
 import { resourcePaymentSpentToday, utcDay } from '../payments/resource-payment-ledger.js';
 import { parsePolicyDecimal } from './policy-numbers.js';
+import { judgeOutflowCap } from './outflow-cap.js';
 import {
   evaluateUsdcSpend,
   formatMicroUsd,
@@ -64,8 +65,15 @@ interface RewardSpec {
 interface ReservationResult {
   success: boolean;
   reason?: string;
-  /** Q9: `PRICE_UNAVAILABLE` when the reward has no trusted price while a daily limit applies (the route answers 503). */
-  code?: 'PRICE_UNAVAILABLE';
+  /**
+   * Q9: `PRICE_UNAVAILABLE` when the reward has no trusted price while a daily
+   * limit — or the outflow cap — applies (the route answers 503). §5-6:
+   * `USD_CAP_NOT_CONFIGURED` / `POLICY_VIOLATION` (rule `maxOutflowPerTxUsd`)
+   * when the reward, paid later as an ordinary outflow, cannot pass the cap (403).
+   */
+  code?: 'PRICE_UNAVAILABLE' | 'USD_CAP_NOT_CONFIGURED' | 'POLICY_VIOLATION';
+  rule?: string;
+  limit?: string;
   /** USD added to the requester's DailyVolume ("0" when no daily limit applied). Stored as `Job.reservedValueUsd`. */
   reservedValueUsd?: string;
   /** Q9: price source of `reservedValueUsd` (`Job.reservedValueSource`); null when nothing was reserved. */
@@ -177,6 +185,20 @@ export async function reserveJobEscrow(params: {
   // 3. Price the reward (Q9 rules: trusted prices only).
   const pricing = await priceReward(params.reward);
   const valueUsdNum = pricing.status === 'priced' ? parseFloat(pricing.usd) : 0;
+
+  // §5-6: the reward is paid later as an ordinary outflow (the legacy A2A
+  // payment, judged there again — the binding check). Refuse now what that
+  // payment would be refused for, before the provider does any work.
+  const outflowCap = judgeOutflowCap(policy, pricing);
+  if (!outflowCap.allowed) {
+    return {
+      success: false,
+      code: outflowCap.code,
+      rule: outflowCap.rule,
+      reason: outflowCap.reason,
+      ...(outflowCap.limit !== undefined ? { limit: outflowCap.limit } : {}),
+    };
+  }
 
   if (pricing.status === 'unpriced') {
     if (dailyLimitUsd > 0) {

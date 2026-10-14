@@ -121,7 +121,7 @@ Open self-registration for autonomous agents. No operator `API_SECRET` required.
 - **Auth**: none
 - **Rate limit**: `PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR` per IP (default 5/hour; operator-configurable; set to 0 to disable)
 - **Tier**: forced to `FREE` regardless of request body
-- **Policy**: forced to the server defaults — `maxValuePerTxEth=1.0`, `maxValuePerTxUsd=1.0`, `maxDailyVolumeUsd=10000`, empty whitelists (contracts, recipients, tokens), `cooldownSeconds=60`. Any `policy` in the request body is **ignored**: an unauthenticated caller cannot pick its own limits. Loosening afterwards requires the operator credential on `PATCH /v1/agents/:id/policy`.
+- **Policy**: forced to the server defaults — `maxValuePerTxEth=1.0`, `maxValuePerTxUsd=1.0`, `maxOutflowPerTxUsd` not configured (`null`: ordinary outflows are refused with `USD_CAP_NOT_CONFIGURED` until the operator sets it), `maxDailyVolumeUsd=10000`, empty whitelists (contracts, recipients, tokens), `cooldownSeconds=60`. Any `policy` in the request body is **ignored**: an unauthenticated caller cannot pick its own limits. Loosening afterwards requires the operator credential on `PATCH /v1/agents/:id/policy`.
 
 ```json
 // Request (no auth headers)
@@ -159,6 +159,7 @@ an ENS identity. See `.env.example` for configuration details.
 {
   "maxValuePerTxEth": "0.5",
   "maxValuePerTxUsd": "25",
+  "maxOutflowPerTxUsd": "250",
   "maxDailyVolumeUsd": "5000",
   "allowedContracts": ["0x..."],
   "allowedRecipients": ["0x..."],
@@ -173,7 +174,8 @@ an ENS identity. See `.env.example` for configuration details.
 | Field | Meaning | Enforced on |
 |-------|---------|-------------|
 | `maxValuePerTxEth` | native ETH per transaction | `/v1/transactions/*` (and on-chain once the operator syncs it, see below) |
-| `maxValuePerTxUsd` | USD per spend denominated in USD (USDC at 1.00) | x402 `pay-resource` payments and ERC-8183 escrow budgets (`POST /v1/jobs`). **Not** `/v1/transactions/*` — extending it there is an open plan item. Off-chain only |
+| `maxValuePerTxUsd` | USD per spend denominated in USD (USDC at 1.00) | x402 `pay-resource` payments and ERC-8183 escrow budgets (`POST /v1/jobs`). **Not** `/v1/transactions/*` (see the next row). Off-chain only |
+| `maxOutflowPerTxUsd` (§5-6, migration 0025) | USD per ordinary outflow, at its priced value (D15 pricing); `null` = **not configured** | transfers (native and ERC-20), the input of a Uniswap / Curve swap, Aave / Compound / ERC-4626 deposits, GMX collateral, a batch's native value plus its recognised ERC-20 transfers, the legacy A2A payment (and its paid-job creation). Not withdrawals, not a GMX close. `null` → `403 USD_CAP_NOT_CONFIGURED`; above it → `403 POLICY_VIOLATION` (`rule: maxOutflowPerTxUsd`, `limit`); no trusted price → `503 PRICE_UNAVAILABLE`, daily limit or not — all before anything is simulated or reserved. Off-chain only |
 | `allowedContracts` | call targets (`tx.to`) of ordinary transactions | `/v1/transactions/*` (and on-chain once the operator syncs it); a native transfer's call target is its recipient |
 | `allowedRecipients` | addresses that may **receive** value from the agent | a transfer's `to` (native **and ERC-20**), the x402 `payTo`, the escrow job's provider wallet, the legacy A2A payee, the `to` of a batch action with native `value`. DeFi operations (swap, deposits, GMX…) pay the agent's own position and are not recipient-checked. Off-chain only |
 
@@ -198,8 +200,19 @@ non-decimal value that means "no limit"), so those verdicts did not change. The
 one narrowing: an ERC-20 transfer whose recipient is not in a non-empty copied
 list is now refused — its recipient was never checked before.
 
+**`maxOutflowPerTxUsd` is never inferred (§5-6).** Migration 0025 leaves it
+`null` on every existing policy — not converted from `maxValuePerTxEth` (no ETH
+price is assumed) nor copied from `maxValuePerTxUsd` — and a new policy that
+does not set it is `null` too, public self-registration included. Until the
+operator sets it, every ordinary outflow of that agent is refused with a
+diagnostic naming the field. `null` is the most restrictive value: setting any
+value from `null` is a loosening (operator credential); the agent may lower it
+or set it back to `null`. With no policy row at all nothing is restricted (as
+for every limit).
+
 **No silent widening at creation.** `POST /v1/agents` with an omitted
-`maxValuePerTxUsd` stores the default `"1.0"` (never the ETH number). A
+`maxValuePerTxUsd` stores the default `"1.0"` (never the ETH number), and an
+omitted `maxOutflowPerTxUsd` stores `null`. A
 non-empty `allowedContracts` without `allowedRecipients` is `400`
 (`details[].path` = `["policy","allowedRecipients"]`): send the recipient list,
 or `[]` for no recipient restriction. The same applies to a `PATCH` that creates
@@ -217,9 +230,16 @@ rejected so a compromised or prompt-injected agent cannot raise its own limits:
 }
 ```
 
-A field loosens when: `maxValuePerTxEth`, `maxValuePerTxUsd` or
-`maxDailyVolumeUsd` increases (`maxDailyVolumeUsd: "0"` means *no daily limit*,
-so it loosens any positive limit); `allowedContracts` / `allowedRecipients` /
+A field loosens when: `maxValuePerTxEth`, `maxValuePerTxUsd`,
+`maxOutflowPerTxUsd` or `maxDailyVolumeUsd` increases (`maxOutflowPerTxUsd:
+null` is the lowest value, so any value set from `null` loosens;
+`maxDailyVolumeUsd: "0"` means *no daily limit*,
+so it loosens any positive limit — as does a positive limit below one
+micro-dollar, which the x402 / escrow checks read as no limit). Decimal limits
+are compared the way every check that enforces them reads them — micro-USD for
+the USD limits, wei and the transaction check's number for `maxValuePerTxEth`
+— so a raise by one micro-dollar or one wei loosens at any magnitude, and
+digits no check reads are neutral; `allowedContracts` / `allowedRecipients` /
 `allowedTokens` go from non-empty to empty or gain an address not already in
 the list (case-insensitive); `cooldownSeconds`
 decreases; `active` goes `false → true`; `expiresAt` is cleared or moved later
@@ -231,8 +251,12 @@ any policy on any agent (returns `404` for an unknown agent id). Every policy
 write is logged with the agent id, caller kind (`agent` / `operator`) and the
 changed fields.
 
-`maxValuePerTxEth`, `maxValuePerTxUsd` and `maxDailyVolumeUsd` must be plain
-decimal strings (`^\d+(\.\d+)?$` — e.g. `"0.5"`, `"10000"`). Empty strings,
+`maxValuePerTxEth`, `maxValuePerTxUsd`, `maxOutflowPerTxUsd` (or `null`) and
+`maxDailyVolumeUsd` must be plain
+decimal strings (`^\d+(\.\d+)?$` — e.g. `"0.5"`, `"10000"`); the three USD
+limits take at most 6 decimals (micro-USD, what every USD check counts in), so
+a daily limit below one micro-dollar — "no limit" to x402 / escrow, a blocking
+limit to the transaction checks — can no longer be written. Empty strings,
 whitespace, exponents (`"1e3"`), hex (`"0x10"`) and words are rejected with
 `400`, for both callers, so a value can never mean "0" to the tighten-only
 check and "no limit" to enforcement. `allowedRecipients` entries must be `0x`

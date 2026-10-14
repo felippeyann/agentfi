@@ -163,6 +163,8 @@ async function mkAgent() {
           maxValuePerTxEth: '10',
           maxValueForAutoApprovalEth: '10',
           maxDailyVolumeUsd: '1000',
+          // A configured USD cap on ordinary outflows: NULL blocks them (§5-6, item 4).
+          maxOutflowPerTxUsd: '1000000',
           cooldownSeconds: 0,
         },
       },

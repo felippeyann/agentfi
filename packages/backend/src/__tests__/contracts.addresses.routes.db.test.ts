@@ -274,6 +274,8 @@ async function mkAgent(chainIds: number[]) {
           maxValueForAutoApprovalEth: '10',
           maxDailyVolumeUsd: '100000',
           cooldownSeconds: 0,
+          // §5-6: a configured outflow cap out of the way (this suite tests other rules).
+          maxOutflowPerTxUsd: '1000000',
         },
       },
     },

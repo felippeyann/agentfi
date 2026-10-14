@@ -89,6 +89,7 @@ function basePolicy(overrides: Partial<AgentPolicy> = {}): AgentPolicy {
     active: true,
     maxValuePerTxEth: '1.0',
     maxValuePerTxUsd: '1.0',
+    maxOutflowPerTxUsd: null,
     maxValueForAutoApprovalEth: '0.1',
     maxDailyVolumeUsd: '10000',
     allowedContracts: [UNISWAP_ROUTER],
@@ -302,6 +303,70 @@ describe('PATCH /v1/agents/:id/policy — operator caller', () => {
 
 // ── Q8: maxValuePerTxUsd and allowedRecipients ─────────────────────────────
 
+// ── §5-6: maxOutflowPerTxUsd ────────────────────────────────────────────────
+
+describe('PATCH /v1/agents/:id/policy — maxOutflowPerTxUsd (§5-6)', () => {
+  it('agent: setting it while NULL (not configured) is 403 loosening — the operator configures it', async () => {
+    mockDb.agentPolicy.findUnique.mockResolvedValue(basePolicy({ maxOutflowPerTxUsd: null }));
+    const app = await buildApp({ agentId: 'agent-1' });
+    const res = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxOutflowPerTxUsd: '0.01' } });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ error: LOOSENING_ERROR, loosenedFields: ['maxOutflowPerTxUsd'] });
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('operator: sets it from NULL', async () => {
+    mockDb.agentPolicy.findUnique.mockResolvedValue(basePolicy({ maxOutflowPerTxUsd: null }));
+    const app = await buildApp({ isOperator: true });
+    const res = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxOutflowPerTxUsd: '250' } });
+    expect(res.statusCode).toBe(200);
+    expect(mockDb.agentPolicy.upsert.mock.calls[0][0].update).toEqual({ maxOutflowPerTxUsd: '250' });
+    await app.close();
+  });
+
+  it('agent: may lower an existing value or set it back to null; may not raise it', async () => {
+    mockDb.agentPolicy.findUnique.mockResolvedValue(basePolicy({ maxOutflowPerTxUsd: '250' }));
+    const app = await buildApp({ agentId: 'agent-1' });
+    const lower = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxOutflowPerTxUsd: '100' } });
+    expect(lower.statusCode).toBe(200);
+    const block = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxOutflowPerTxUsd: null } });
+    expect(block.statusCode).toBe(200);
+    expect(mockDb.agentPolicy.upsert.mock.calls.map((c: any[]) => c[0].update)).toEqual([{ maxOutflowPerTxUsd: '100' }, { maxOutflowPerTxUsd: null }]);
+    const raise = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxOutflowPerTxUsd: '251' } });
+    expect(raise.statusCode).toBe(403);
+    expect(raise.json().loosenedFields).toEqual(['maxOutflowPerTxUsd']);
+    await app.close();
+  });
+
+  it('USD limits take at most 6 decimals (micro-USD, what every enforcer reads): 7 decimals is 400 for every caller, 6 is accepted', async () => {
+    const app = await buildApp({ isOperator: true });
+    for (const field of ['maxValuePerTxUsd', 'maxOutflowPerTxUsd', 'maxDailyVolumeUsd'] as const) {
+      const res = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { [field]: '100.0000001' } });
+      expect(res.statusCode, field).toBe(400);
+      expect(JSON.stringify(res.json()), field).toMatch(/6 decimals/);
+    }
+    // A daily limit below one micro-dollar read as "no limit" by x402 / escrow: unwritable.
+    expect((await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxDailyVolumeUsd: '0.0000001' } })).statusCode).toBe(400);
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
+    const ok = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxOutflowPerTxUsd: '0.000001', maxDailyVolumeUsd: '1000.000001' } });
+    expect(ok.statusCode).toBe(200);
+    // The ETH cap keeps its own precision (wei): more than 6 decimals is fine there.
+    expect((await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxValuePerTxEth: '0.0000001' } })).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('a non-decimal value is 400 (never stored)', async () => {
+    const app = await buildApp({ isOperator: true });
+    for (const payload of [{ maxOutflowPerTxUsd: 'unlimited' }, { maxOutflowPerTxUsd: '' }, { maxOutflowPerTxUsd: 25 }]) {
+      const res = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload });
+      expect(res.statusCode).toBe(400);
+    }
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+});
+
 describe('PATCH /v1/agents/:id/policy — Q8 fields', () => {
   it('agent: raising maxValuePerTxUsd or adding a recipient is 403; lowering / narrowing applies', async () => {
     const app = await buildApp({ agentId: 'agent-1' });
@@ -397,8 +462,8 @@ describe('PATCH /v1/agents/:id/policy — Q8 fields', () => {
       expect(res.statusCode).toBe(200);
       const sync = res.json().onChainSync;
       expect(sync.status).toBe('operator-sync-required');
-      expect(sync.offChainOnlyFields).toEqual(['maxValuePerTxUsd', 'allowedRecipients', 'maxDailyVolumeUsd']);
-      expect(sync.notice).toMatch(/enforced off-chain only\): maxValuePerTxUsd, allowedRecipients/);
+      expect(sync.offChainOnlyFields).toEqual(['maxValuePerTxUsd', 'maxOutflowPerTxUsd', 'allowedRecipients', 'maxDailyVolumeUsd']);
+      expect(sync.notice).toMatch(/enforced off-chain only\): maxValuePerTxUsd, maxOutflowPerTxUsd, allowedRecipients/);
       expect(sync.notice).toMatch(/POST \/admin\/agents\/:id\/policy\/sync/);
       // The old answer's `actions` told the caller to run module calls through
       // execute_batch, where the executor is msg.sender: they always reverted.

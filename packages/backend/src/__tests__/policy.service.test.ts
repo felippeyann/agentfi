@@ -11,7 +11,7 @@
  *  - cooldown
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { PolicyService, USD_PER_TX_CAP_APPLIES_TO_TRANSACTIONS } from '../services/policy/policy.service.js';
+import { PolicyService } from '../services/policy/policy.service.js';
 import type { PrismaClient, AgentPolicy } from '@prisma/client';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
@@ -27,6 +27,7 @@ function basePolicy(overrides: Partial<AgentPolicy> = {}): AgentPolicy {
     active: true,
     maxValuePerTxEth: '1.0',
     maxValuePerTxUsd: '1.0',
+    maxOutflowPerTxUsd: null,
     maxValueForAutoApprovalEth: '0.1',
     cooldownSeconds: 0,
     allowedContracts: [],
@@ -277,11 +278,74 @@ describe('PolicyService.validateTransaction', () => {
     ).resolves.toMatchObject({ allowed: false });
   });
 
-  it('Q8 seam: maxValuePerTxUsd is NOT applied to ordinary transactions (open owner question)', async () => {
-    expect(USD_PER_TX_CAP_APPLIES_TO_TRANSACTIONS).toBe(false);
-    const svc = new PolicyService(makeMockDb(basePolicy({ maxValuePerTxUsd: '0', maxValuePerTxEth: '10' })));
+  // §5-6 — maxOutflowPerTxUsd (replaces the Q8 seam USD_PER_TX_CAP_APPLIES_TO_TRANSACTIONS)
+
+  const priced = (usd: string) => ({ status: 'priced' as const, usd, source: 'oracle' as const });
+
+  it('§5-6: maxValuePerTxUsd (the USDC x402 / escrow cap) never caps an ordinary outflow', async () => {
+    const svc = new PolicyService(makeMockDb(basePolicy({ maxValuePerTxUsd: '0', maxValuePerTxEth: '10', maxOutflowPerTxUsd: '5000' })));
     await expect(
-      svc.validateTransaction({ agentId: 'agent-1', targetContract: UNISWAP_ROUTER, valueEth: '1', valueUsd: '2500' }),
+      svc.validateTransaction({ agentId: 'agent-1', targetContract: UNISWAP_ROUTER, valueEth: '1', valueUsd: '2500', pricing: priced('2500.000000'), outflow: true }),
+    ).resolves.toMatchObject({ allowed: true });
+  });
+
+  it('§5-6: an outflow with maxOutflowPerTxUsd NULL → USD_CAP_NOT_CONFIGURED with a diagnostic naming the field', async () => {
+    const svc = new PolicyService(makeMockDb(basePolicy({ maxValuePerTxEth: '10', maxOutflowPerTxUsd: null })));
+    const result = await svc.validateTransaction({ agentId: 'agent-1', targetContract: UNISWAP_ROUTER, valueEth: '1', pricing: priced('2000.000000'), outflow: true });
+    expect(result).toMatchObject({ allowed: false, code: 'USD_CAP_NOT_CONFIGURED', rule: 'maxOutflowPerTxUsd' });
+    expect(result.reason).toMatch(/maxOutflowPerTxUsd/);
+    expect(result.reason).toMatch(/operator/);
+  });
+
+  it('§5-6: the cap compares the priced USD: equal passes, one micro-dollar above is refused (rule + limit)', async () => {
+    const svc = new PolicyService(makeMockDb(basePolicy({ maxValuePerTxEth: '10', maxOutflowPerTxUsd: '25' })));
+    await expect(
+      svc.validateTransaction({ agentId: 'agent-1', targetContract: UNISWAP_ROUTER, valueEth: '0', pricing: priced('25.000000'), outflow: true }),
+    ).resolves.toMatchObject({ allowed: true });
+    await expect(
+      svc.validateTransaction({ agentId: 'agent-1', targetContract: UNISWAP_ROUTER, valueEth: '0', pricing: priced('25.000001'), outflow: true }),
+    ).resolves.toMatchObject({ allowed: false, code: 'POLICY_VIOLATION', rule: 'maxOutflowPerTxUsd', limit: '25' });
+  });
+
+  it('§5-6: with the cap set, an unpriced outflow is refused (PRICE_UNAVAILABLE) even without a daily limit', async () => {
+    const svc = new PolicyService(makeMockDb(basePolicy({ maxValuePerTxEth: '10', maxDailyVolumeUsd: '0', maxOutflowPerTxUsd: '100' })));
+    await expect(
+      svc.validateTransaction({
+        agentId: 'agent-1',
+        targetContract: UNISWAP_ROUTER,
+        valueEth: '0',
+        pricing: { status: 'unpriced', reason: 'Token X has no trusted price source' },
+        outflow: true,
+      }),
+    ).resolves.toMatchObject({ allowed: false, code: 'PRICE_UNAVAILABLE', rule: 'maxOutflowPerTxUsd' });
+    // No pricing at all counts as unpriced.
+    await expect(
+      svc.validateTransaction({ agentId: 'agent-1', targetContract: UNISWAP_ROUTER, valueEth: '0', outflow: true }),
+    ).resolves.toMatchObject({ allowed: false, code: 'PRICE_UNAVAILABLE' });
+  });
+
+  it('§5-6: nothing flows out (pricing zero) → no cap, even when NULL', async () => {
+    const svc = new PolicyService(makeMockDb(basePolicy({ maxOutflowPerTxUsd: null })));
+    await expect(
+      svc.validateTransaction({ agentId: 'agent-1', targetContract: UNISWAP_ROUTER, valueEth: '0', pricing: { status: 'zero' }, outflow: true }),
+    ).resolves.toMatchObject({ allowed: true });
+  });
+
+  it('§5-6: what is not marked an outflow (a withdrawal, a GMX close) is never capped, even when NULL', async () => {
+    const svc = new PolicyService(makeMockDb(basePolicy({ maxOutflowPerTxUsd: null })));
+    await expect(
+      svc.validateTransaction({ agentId: 'agent-1', targetContract: UNISWAP_ROUTER, valueEth: '0', pricing: priced('99999.000000') }),
+    ).resolves.toMatchObject({ allowed: true });
+  });
+
+  it('§5-6: a non-decimal stored cap reads as unlimited (same reading as every limit and the classifier); no policy row = no restrictions', async () => {
+    const svc = new PolicyService(makeMockDb(basePolicy({ maxOutflowPerTxUsd: 'unlimited' })));
+    await expect(
+      svc.validateTransaction({ agentId: 'agent-1', targetContract: UNISWAP_ROUTER, valueEth: '0', pricing: priced('1000000.000000'), outflow: true }),
+    ).resolves.toMatchObject({ allowed: true });
+    const none = new PolicyService(makeMockDb(null));
+    await expect(
+      none.validateTransaction({ agentId: 'agent-1', targetContract: UNISWAP_ROUTER, valueEth: '0', pricing: priced('1000000.000000'), outflow: true }),
     ).resolves.toMatchObject({ allowed: true });
   });
 

@@ -77,7 +77,7 @@ Reputation stays at 0 on first run — scores are recomputed by the daily cron (
 
 ## Taking it further
 
-- **Add a reward**: pass `reward: { amount: '0.01', token: 'ETH', chainId: 8453 }` to `createJob()` and you'll get an atomic on-chain payment when the job completes. Requires `WALLET_PROVIDER=turnkey` + real `ALCHEMY_API_KEY` on the backend.
+- **Add a reward**: pass `reward: { amount: '0.01', token: 'ETH', chainId: 8453 }` to `createJob()` and you'll get an atomic on-chain payment when the job completes. Requires `WALLET_PROVIDER=turnkey` + real `ALCHEMY_API_KEY` on the backend. The example registers its agents without a policy (no restrictions); a paying agent that has one also needs `maxOutflowPerTxUsd` (the USD cap per ordinary outflow, set by the operator), otherwise the payment is refused with `USD_CAP_NOT_CONFIGURED`.
 - **Chain it**: once Alice completes, have her hire a sub-agent (Charlie) for a deeper analysis, paying from the reward she just earned. That's the self-sustaining loop described in [`VISION.md`](../../VISION.md).
 - **Wrap it in MCP**: this script talks to the REST API directly. The same flow via MCP tools lives in [`packages/mcp-server`](../../packages/mcp-server).
 
