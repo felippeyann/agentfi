@@ -1,29 +1,26 @@
 /**
- * S9 — Safe mode and the policy module's authority, on an Anvil FORK of
- * Base Sepolia (the real Safe v1.4.1 singleton / factory deployed there).
+ * S9 + Safe mode, on an Anvil FORK of Base Sepolia (the real Safe v1.4.1
+ * singleton / factory deployed there), with the real `SafeService` and
+ * protocol-kit.
  *
- * `SafeService.deploySafeForAgent` (real code, real protocol-kit) deploys a
- * 1/1 Safe owned by the agent's EOA, then enables `POLICY_MODULE_ADDRESS` as
- * a Safe MODULE — and a Safe module may move everything the Safe holds
- * (`execTransactionFromModule`), with no owner signature. The address is
- * never verified, so whatever it points at would get that power over every
- * new agent Safe.
+ * `deploySafeForAgent` deploys a 1/1 Safe owned by the agent's EOA, then
+ * enables `POLICY_MODULE_ADDRESS` as a Safe MODULE — and a Safe module may move
+ * everything the Safe holds (`execTransactionFromModule`) with no owner
+ * signature.
+ *  1. S9 gate: a configured module that is not this build's (a rogue contract
+ *     answering `operator()` like a policy module) → refused BEFORE anything
+ *     is deployed (no orphaned Safe, no module).
+ *  2. With our verified module the gate passes — and the enablement still
+ *     fails: it is signed by the deployer, who is not an owner (protocol-kit:
+ *     "Transactions can only be signed by Safe owners"); the Safe stays
+ *     deployed and orphaned, the agent falls back to its EOA. This is why Safe
+ *     mode is refused in production / staging (env-guards `safeModeVerdict`).
+ *  3. What the gate prevents: once enabled by the owner, a rogue module
+ *     drains the Safe.
  *
- * What actually happens today (first test): the enablement is signed with
- * the DEPLOYER key, which is not an owner; protocol-kit refuses
- * ("Transactions can only be signed by Safe owners"), `provisionAgent`
- * catches it and falls back to the agent's EOA. The Safe stays deployed,
- * orphaned, without the module — Safe mode never comes up.
- *
- * What a corrected enablement (signed by the owner — the only way it can
- * succeed) would do with a wrong address (second test): a rogue module that
- * answers `operator()` like an AgentPolicyModule is enabled and drains the
- * Safe.
- *
- * Demonstrations of the CURRENT behaviour. Skipped unless
- * `E2E_ANVIL_FORK_URL` (e.g. https://sepolia.base.org — read-only) is set;
- * `E2E_ANVIL_FORK_BLOCK_NUMBER` pins the fork. Anvil: `anvilTestPort(4)`
- * (default 8749), chain id 84532.
+ * Skipped unless `E2E_ANVIL_FORK_URL` (e.g. https://sepolia.base.org,
+ * read-only) is set; `E2E_ANVIL_FORK_BLOCK_NUMBER` pins the fork. Anvil:
+ * `anvilTestPort(4)` (default 8749), chain id 84532.
  */
 import { vi } from 'vitest';
 
@@ -51,11 +48,22 @@ vi.mock('../api/middleware/logger.js', () => {
   logger['child'] = () => logger;
   return { logger };
 });
+vi.mock('../services/notification.service.js', () => ({ notificationService: { notify: async () => undefined } }));
+// Hermetic reads: only the fork (no fallback to the public Base Sepolia RPC behind the override).
+vi.mock('../config/chains.js', async () => {
+  const actual = await vi.importActual<typeof import('../config/chains.js')>('../config/chains.js');
+  const { createPublicClient, http } = await import('viem');
+  return {
+    ...actual,
+    createChainPublicClient: (chainId: number) =>
+      createPublicClient({ chain: actual.getChain(chainId), transport: http(process.env[`RPC_URL_${chainId}`], { retryCount: 0 }) }),
+  };
+});
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import * as SafeModule from '@safe-global/protocol-kit';
 import { encodeFunctionData, getAddress, parseEther, type Address } from 'viem';
-import { ANVIL_KEYS, anvilAccount, anvilTestPort, readArtifact, startLocalChain, type LocalChain } from './helpers/anvil-contracts.js';
+import { ANVIL_KEYS, anvilAccount, anvilTestPort, deployPolicyStack, readArtifact, startLocalChain, type LocalChain } from './helpers/anvil-contracts.js';
 
 const FORK_URL = process.env['E2E_ANVIL_FORK_URL'];
 const describeFork = FORK_URL ? describe : describe.skip;
@@ -80,23 +88,19 @@ const operator = anvilAccount(1).address;
 const ownerKey = ANVIL_KEYS[2];
 const owner = anvilAccount(2).address;
 const thief = anvilAccount(3);
-/** Where the drained funds go: an address with no code on the fork. */
+/** Where drained funds go: an address with no code (the well-known Anvil accounts are EIP-7702-delegated to sweepers on public testnets). */
 const LOOT = getAddress('0x00000000000000000000000000000000005a0107');
 
 let chain: LocalChain;
 let rogue: Address;
+let policyModule: Address;
+let executor: Address;
 
 beforeAll(async () => {
   if (!FORK_URL) return;
-  chain = await startLocalChain({
-    port: anvilTestPort(4),
-    chainId: CHAIN_ID,
-    forkUrl: FORK_URL,
-    forkBlockNumber: process.env['E2E_ANVIL_FORK_BLOCK_NUMBER'],
-  });
+  chain = await startLocalChain({ port: anvilTestPort(4), chainId: CHAIN_ID, forkUrl: FORK_URL, forkBlockNumber: process.env['E2E_ANVIL_FORK_BLOCK_NUMBER'] });
   rogue = await chain.deploy(anvilAccount(0), ROGUE, [operator]);
-  // What a mistyped / hostile POLICY_MODULE_ADDRESS_84532 would point at.
-  process.env['POLICY_MODULE_ADDRESS_84532'] = rogue;
+  ({ policyModule, executor } = await deployPolicyStack(chain, { deployer: anvilAccount(0), operator, feeWallet: getAddress(process.env['OPERATOR_FEE_WALLET']!) }));
   process.env['RPC_URL_84532'] = chain.rpcUrl;
 }, 180_000);
 
@@ -104,49 +108,64 @@ afterAll(() => {
   chain?.stop();
 });
 
-describeFork('S9 — Safe mode and the policy module address (Anvil fork of Base Sepolia, real Safe contracts)', () => {
+/** A fresh process configured with POLICY_MODULE_ADDRESS_84532 = `module`, after its S9 boot check. */
+async function processWith(module: Address) {
+  process.env['POLICY_MODULE_ADDRESS_84532'] = module;
+  process.env['EXECUTOR_ADDRESS_84532'] = executor;
+  process.env['POLICY_OPERATOR_ADDRESS_84532'] = operator;
+  vi.resetModules();
+  const boot = await import('../config/policy-stack-boot.runtime.js');
+  const verdict = await boot.runPolicyStackBootCheck('api');
+  boot.__stopPolicyStackRecheckForTests();
+  const { SafeService } = await import('../services/wallet/safe.service.js');
+  return { verdict, safeService: new SafeService() };
+}
+
+async function predictedSafe(): Promise<Address> {
+  const kit = await Safe.init({ provider: chain.rpcUrl, signer: deployerKey, predictedSafe: { safeAccountConfig: { owners: [owner], threshold: 1 } } });
+  return getAddress(await kit.getAddress());
+}
+
+describeFork('S9 + Safe mode (Anvil fork of Base Sepolia, real Safe contracts)', () => {
   let safe: Address;
 
-  it('today: deploySafeForAgent deploys the Safe, then the module enablement fails (deployer is not an owner) — the agent falls back to its EOA', async () => {
-    const { SafeService } = await import('../services/wallet/safe.service.js');
-    await expect(
-      new SafeService().deploySafeForAgent({ ownerAddress: owner, chainId: CHAIN_ID, signerPrivateKey: deployerKey }),
-    ).rejects.toThrow(/can only be signed by Safe owners/);
+  it('a configured module that is not this build’s (rogue) → the S9 gate refuses BEFORE anything is deployed', async () => {
+    const { verdict, safeService } = await processWith(rogue);
+    expect(verdict!.verified).toEqual([]);
+    await expect(safeService.deploySafeForAgent({ ownerAddress: owner, chainId: CHAIN_ID, signerPrivateKey: deployerKey })).rejects.toThrow(
+      /Safe not deployed: the AgentPolicyModule of chain 84532 is not verified against this build \(mismatch\)/,
+    );
+    safe = await predictedSafe();
+    expect(await chain.publicClient.getCode({ address: safe })).toBeUndefined(); // no orphaned Safe
+  }, 180_000);
 
-    // The Safe itself was deployed (deployer paid) and is owned by the agent — orphaned, no module.
-    const predicted = await Safe.init({
-      provider: chain.rpcUrl,
-      signer: deployerKey,
-      predictedSafe: { safeAccountConfig: { owners: [owner], threshold: 1 } },
-    });
-    safe = getAddress(await predicted.getAddress());
+  it('our verified module passes the gate — and the enablement still fails (the deployer is not an owner): why Safe mode is refused in production', async () => {
+    const { verdict, safeService } = await processWith(policyModule);
+    expect(verdict).toMatchObject({ fatal: null, verified: [CHAIN_ID] });
+    await expect(safeService.deploySafeForAgent({ ownerAddress: owner, chainId: CHAIN_ID, signerPrivateKey: deployerKey })).rejects.toThrow(
+      /can only be signed by Safe owners/,
+    );
+    // The Safe was deployed (deployer paid) and is owned by the agent — orphaned, no module.
     expect((await chain.publicClient.getCode({ address: safe }))?.length ?? 0).toBeGreaterThan(2);
     const kit = await Safe.init({ provider: chain.rpcUrl, signer: ownerKey, safeAddress: safe });
     expect((await kit.getOwners()).map((o) => getAddress(o))).toEqual([owner]);
-    expect(await kit.isModuleEnabled(rogue)).toBe(false);
+    expect(await kit.isModuleEnabled(policyModule)).toBe(false);
   }, 180_000);
 
-  it('once the enablement is signed by the owner, the configured address — here a rogue module that answers operator() — drains the Safe', async () => {
-    expect(safe).toBeDefined();
+  it('what the gate prevents: once enabled by the owner, a rogue module (answering operator()) drains the Safe', async () => {
     await chain.setBalance(owner, parseEther('1'));
     await chain.setBalance(safe, parseEther('5'));
-
-    // The rogue module looks like a policy module to a view check.
     expect(getAddress((await chain.publicClient.readContract({ address: rogue, abi: ROGUE.abi, functionName: 'operator' })) as string)).toBe(getAddress(operator));
 
     const kit = await Safe.init({ provider: chain.rpcUrl, signer: ownerKey, safeAddress: safe });
-    const enable = await kit.createEnableModuleTx(rogue);
-    const result = await kit.executeTransaction(await kit.signTransaction(enable));
+    const result = await kit.executeTransaction(await kit.signTransaction(await kit.createEnableModuleTx(rogue)));
     await chain.publicClient.waitForTransactionReceipt({ hash: result.hash as `0x${string}` });
     expect(await kit.isModuleEnabled(rogue)).toBe(true);
 
-    // Anyone can call drain(); the funds go to an address with no code (the well-known Anvil
-    // accounts are EIP-7702-delegated to sweepers on public testnets, so they are not used as payee).
     expect(await chain.publicClient.getCode({ address: LOOT })).toBeUndefined();
     const drain = encodeFunctionData({ abi: ROGUE.abi, functionName: 'drain', args: [safe, LOOT] });
     const hash = await chain.wallet(thief).sendTransaction({ to: rogue, data: drain, account: thief, chain: null });
-    const receipt = await chain.publicClient.waitForTransactionReceipt({ hash });
-    expect(receipt.status).toBe('success');
+    expect((await chain.publicClient.waitForTransactionReceipt({ hash })).status).toBe('success');
     expect(await chain.publicClient.getBalance({ address: safe })).toBe(0n);
     expect(await chain.publicClient.getBalance({ address: LOOT })).toBe(parseEther('5'));
   }, 180_000);

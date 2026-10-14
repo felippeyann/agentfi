@@ -7,6 +7,7 @@ import {
   PRODUCTION_LIKE,
   escrowVerificationIntervalProblem,
   policyOperatorMissingProblem,
+  safeModeVerdict,
   evaluationDelayUnsetProblem,
   nodeEnvUnsetVerdict,
   placeholderKeys,
@@ -490,6 +491,14 @@ if (verificationIntervalProblem) {
   console.error(verificationIntervalProblem);
   process.exit(1);
 }
+
+// Owner decision 2026-10-14: Safe mode refused in production / staging (see env-guards safeModeVerdict).
+const safeMode = safeModeVerdict(process.env, parsed.data.NODE_ENV);
+if (safeMode.fatal) {
+  console.error(safeMode.fatal);
+  process.exit(1);
+}
+if (safeMode.warning) console.warn(safeMode.warning);
 
 // S9: a configured policy module's expected operator must be explicit in production / staging.
 const policyOperatorProblem = policyOperatorMissingProblem(process.env, parsed.data.NODE_ENV, ESCROW_CHAIN_IDS);
