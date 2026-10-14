@@ -210,13 +210,21 @@ function executorFromEnv(chainId: number): Address | undefined {
  * (`quoteExactInputSingle`); without a quote it builds the swap with
  * `amountOutMinimum = 0`. [UNI] "QuoterV2" rows. Base used a second wrong
  * address (…B136aa68…, no code) until S7, so every Base swap had no slippage
- * floor. No Base Sepolia entry (unchanged; see the S7 PR).
+ * floor; Base Sepolia had no entry until the #183 review follow-up, so every
+ * swap on the C5 chain had none either.
  */
 export const UNISWAP_V3_QUOTER_V2: Readonly<Record<number, Address>> = {
   1: '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
   8453: '0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a',
   42161: '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
   137: '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
+  // [UNI] v3-base-deployments.mdx, "Base Sepolia Address" column (same
+  // contract as uniswapV3Quoter for 84532 below). Read-only JSON-RPC to
+  // https://sepolia.base.org on 2026-10-14 (block ≈48,121,370): 8,273 bytes
+  // of code; factory() = UniswapV3Factory 0x4752ba5D…C372aD24 and WETH9() =
+  // 0x4200…0006, both as on that page; it quotes WETH → USDC at 500 / 3000 /
+  // 10000.
+  84532: '0xC5290058841028F1614F3A6F0F5816cAd0df5E27',
 };
 
 export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {

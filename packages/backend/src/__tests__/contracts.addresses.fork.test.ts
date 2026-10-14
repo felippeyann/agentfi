@@ -8,6 +8,9 @@
  *   S7_FORK_RPC_8453=http://127.0.0.1:8556 S7_FORK_RPC_42161=http://127.0.0.1:8557 \
  *     npx vitest run src/__tests__/contracts.addresses.fork.test.ts
  *
+ * `S7_FORK_RPC_84532` (e.g. https://sepolia.base.org, read-only views only)
+ * adds the Base Sepolia QuoterV2 checks.
+ *
  * It reads the addresses the backend actually uses (`getContracts`,
  * `UNISWAP_V3_QUOTER_V2`, `GMX_CONTRACTS`, `GMX_MARKETS`) and checks more than
  * "there is code": each contract answers a view that binds it to its
@@ -25,13 +28,17 @@ import { TransactionBuilder } from '../services/transaction/builder.service.js';
 
 const BASE_RPC = process.env['S7_FORK_RPC_8453'];
 const ARB_RPC = process.env['S7_FORK_RPC_42161'];
+// Base Sepolia: a fork or the public RPC itself (https://sepolia.base.org) — this block only reads.
+const BASE_SEPOLIA_RPC = process.env['S7_FORK_RPC_84532'];
 
 const describeBase = BASE_RPC ? describe : describe.skip;
 const describeArb = ARB_RPC ? describe : describe.skip;
+const describeBaseSepolia = BASE_SEPOLIA_RPC ? describe : describe.skip;
 
 // Third-party references the checks compare against (sources: config/contracts.ts).
 const BASE_AAVE_POOL = '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5'; // aave-address-book AaveV3Base.POOL
 const BASE_UNISWAP_V3_FACTORY = '0x33128a8fC17869897dcE68Ed026d694621f6FDfD'; // docs.uniswap.org Base deployments
+const BASE_SEPOLIA_UNISWAP_V3_FACTORY = '0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24'; // same page, Base Sepolia column
 const WETH_BASE = '0x4200000000000000000000000000000000000006';
 const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 const GMX_ROLE_STORE = '0x3c3d99FD298f679DBC2CEcd132b4eC4d0F5e6e72'; // gmx-synthetics deployments/arbitrum/RoleStore.json
@@ -86,6 +93,24 @@ describeBase('S7 on a Base mainnet fork', () => {
     });
     // A live market quote (any sane ETH price): more than 100 USDC for 1 WETH.
     expect(result[0]).toBeGreaterThan(100_000_000n);
+  });
+});
+
+describeBaseSepolia('Base Sepolia QuoterV2 (review of #183)', () => {
+  const client = createPublicClient({ transport: http(BASE_SEPOLIA_RPC ?? 'http://127.0.0.1:1') });
+  const quoters = (contracts as Record<string, unknown>)['UNISWAP_V3_QUOTER_V2'] as Record<number, Address> | undefined;
+
+  it('is Base Sepolia (chain 84532)', async () => {
+    expect(await client.getChainId()).toBe(84532);
+  });
+
+  it('the swap route\'s QuoterV2 has code, and its factory() / WETH9() are Uniswap V3 Base Sepolia\'s', async () => {
+    const quoter = quoters?.[84532] as Address;
+    expect(quoter).toBe(contracts.getContracts(84532).uniswapV3Quoter);
+    expect(((await client.getCode({ address: quoter })) ?? '0x').length).toBeGreaterThan(2);
+    const views = parseAbi(['function factory() view returns (address)', 'function WETH9() view returns (address)']);
+    expect(await client.readContract({ address: quoter, abi: views, functionName: 'factory' })).toBe(BASE_SEPOLIA_UNISWAP_V3_FACTORY);
+    expect(await client.readContract({ address: quoter, abi: views, functionName: 'WETH9' })).toBe(WETH_BASE);
   });
 });
 

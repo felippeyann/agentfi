@@ -1,26 +1,34 @@
 import { z } from 'zod';
 import { api } from '../api-client.js';
-import { resolveAssetToken, resolveTransferToken } from './token-map.js';
+import { addressSchema } from '../addresses.js';
+import { invalidInput } from '../input-error.js';
+import { isNativeEthLiteral, nativeEthRefusal, resolveAssetToken, resolveTransferToken } from './token-map.js';
 
 export const defiTools = [
   {
     name: 'transfer_token',
     description:
       'Transfers ETH or an ERC-20 token to any Ethereum address. ' +
-      'Use "ETH" as the token identifier to send native ETH, or provide a contract address for ERC-20.',
+      'Use "ETH" as the token identifier to send native ETH, or provide a contract address for ERC-20. ' +
+      'Native "ETH" is refused on chains whose native asset is not ETH (Polygon 137: POL) — use WETH there.',
     inputSchema: z.object({
       token: z
         .string()
         .describe(
-          'Token to transfer. Use "ETH" for native ETH, or the ERC-20 contract address.',
+          'Token to transfer. Use "ETH" for native ETH (not on Polygon 137), or the ERC-20 contract address.',
         ),
-      to: z.string().describe('Destination Ethereum address (checksummed).'),
+      to: addressSchema(
+        'Destination address: EIP-55 checksummed or all-lowercase (a mixed-case address with a wrong checksum is refused).',
+      ),
       amount: z
         .string()
         .describe('Amount in human-readable units. Example: "100" for 100 USDC.'),
       chain_id: z.number().default(1).describe('Chain ID. Default: 1 (Ethereum mainnet).'),
     }),
     handler: async (input: { token: string; to: string; amount: string; chain_id: number }) => {
+      // The route reads "ETH" as the chain's native asset: POL on Polygon.
+      const nativeRefusal = isNativeEthLiteral(input.token) ? nativeEthRefusal(input.chain_id) : undefined;
+      if (nativeRefusal !== undefined) throw invalidInput('token', nativeRefusal);
       const token = resolveTransferToken(input.token, input.chain_id);
 
       const result = await api.post<{ transactionId: string; status: string }>(

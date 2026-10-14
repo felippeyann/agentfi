@@ -58,7 +58,43 @@
 import { Prisma, type PrismaClient, type Transaction } from '@prisma/client';
 import { parsePolicyDecimal } from './policy-numbers.js';
 import type { SpendPriceSource } from './spend-pricing.js';
+import { policyDecimalToMicro, usdTextToMicroCeil } from './usdc-spend-policy.js';
 import { resourcePaymentSpentToday, utcDay } from '../payments/resource-payment-ledger.js';
+
+/**
+ * Why a row reserved nothing (#178 review): `metadata.volumeAccounting`.
+ *   zero      the spend moves no counted value — a zero-value call, a GMX
+ *             close, a proven "max" withdrawal (value comes back to the agent)
+ *   unpriced  a component had no trusted price while no daily limit applied
+ *             (Q9: refused under a daily limit, so nothing was counted)
+ * Written by `createTransactionWithVolume` on every row it creates without a
+ * reservation; `approvePendingTransaction` refuses only `unpriced` (and,
+ * conservatively, a row without the marker) once a daily limit applies.
+ */
+export type VolumeAccounting = 'zero' | 'unpriced';
+export const VOLUME_ACCOUNTING_KEY = 'volumeAccounting';
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function withVolumeAccounting(data: Prisma.TransactionUncheckedCreateInput, accounting: VolumeAccounting): Prisma.TransactionUncheckedCreateInput {
+  const base = isPlainObject(data.metadata) ? (data.metadata as Prisma.InputJsonObject) : {};
+  return { ...data, metadata: { ...base, [VOLUME_ACCOUNTING_KEY]: accounting } };
+}
+
+/** The marker of a stored row, or null when absent (rows created before it existed). */
+export function volumeAccountingOf(metadata: Prisma.JsonValue | null): VolumeAccounting | null {
+  if (!isPlainObject(metadata)) return null;
+  const value = metadata[VOLUME_ACCOUNTING_KEY];
+  return value === 'zero' || value === 'unpriced' ? value : null;
+}
+
+/** Micro-USD as a 6-decimal string. */
+function microToUsd6(micro: bigint): string {
+  const whole = micro / 1_000_000n;
+  return `${whole}.${(micro % 1_000_000n).toString().padStart(6, '0')}`;
+}
 
 export type VolumeDb = Pick<PrismaClient, '$transaction' | 'transaction'>;
 
@@ -137,7 +173,8 @@ export async function createTransactionWithVolume(
   const unpriced = params.unpricedReason !== undefined;
   const needsLock = usd > 0 || unpriced || Boolean(params.data.idempotencyKey);
   if (!needsLock) {
-    return { ok: true, transaction: await db.transaction.create({ data: params.data }), replayed: false };
+    // Nothing priced, nothing unpriced: counted as zero (#178 review marker).
+    return { ok: true, transaction: await db.transaction.create({ data: withVolumeAccounting(params.data, 'zero') }), replayed: false };
   }
 
   const now = params.now ?? new Date();
@@ -176,7 +213,10 @@ export async function createTransactionWithVolume(
       }
 
       if (usd === 0) {
-        return { ok: true as const, transaction: await tx.transaction.create({ data: params.data }), replayed: false };
+        // Nothing reserved: record whether it was zero on purpose or unpriced
+        // (no daily limit applied) — the approval tells them apart (#178 review).
+        const accounting: VolumeAccounting = unpriced ? 'unpriced' : 'zero';
+        return { ok: true as const, transaction: await tx.transaction.create({ data: withVolumeAccounting(params.data, accounting) }), replayed: false };
       }
 
       const [row] = await tx.$queryRaw<[{ volumeUsd: string }]>`
@@ -273,8 +313,10 @@ function isLegacyA2APayment(metadata: Prisma.JsonValue | null): boolean {
  *  1. the row must still be PENDING_APPROVAL;
  *  2. the agent must be active and its policy active and unexpired (the
  *     pre-submit guard's rules, checked here so the operator is told now);
- *  3. a daily limit applies but the spend reserved nothing (unpriced when no
- *     limit applied — D15: never counted as 0) → refused; the legacy A2A
+ *  3. a daily limit applies but the spend reserved nothing because it was
+ *     unpriced when no limit applied (D15: never counted as 0) → refused;
+ *     a spend recorded as zero on purpose (`metadata.volumeAccounting`) is
+ *     not, a row without the record is (conservative); the legacy A2A
  *     payment is exempt (its spend is the Job's reservation, see below);
  *  4. PENDING_APPROVAL → QUEUED, conditional (a rejection takes no agent lock;
  *     whichever writes first wins, the other matches nothing);
@@ -282,7 +324,8 @@ function isLegacyA2APayment(metadata: Prisma.JsonValue | null): boolean {
  *     (A6b: it executes then; counted on its creation day the approval day's
  *     limit would hand the agent a full fresh budget on top of it);
  *  6. the approval day's DailyVolume — this reservation included — plus its
- *     counted x402 payments must stay within `maxDailyVolumeUsd`; on the
+ *     counted x402 payments must stay within `maxDailyVolumeUsd`, compared
+ *     exactly in micro-USD; on the
  *     creation day too (the total there includes it already: only a limit
  *     lowered since the request can refuse it).
  * Any refusal throws inside the transaction: the status, the move and the
@@ -338,11 +381,21 @@ export async function approvePendingTransaction(
         row.volumeState === 'RESERVED' && row.volumeReservedUsd && row.volumeReservedDate
           ? { usd: row.volumeReservedUsd, day: row.volumeReservedDate }
           : null;
-      if (!reserved && limit > 0 && !isLegacyA2APayment(row.metadata)) {
+      // #178 review: only a spend that was UNPRICED is refused; one counted as
+      // zero on purpose (a GMX close whose execution fee needs approval, a
+      // zero-value call) has nothing to check. A row without the marker
+      // (created before it existed) cannot be told apart from an unpriced
+      // one, so it is refused too — the conservative reading.
+      const accounting = volumeAccountingOf(row.metadata);
+      if (!reserved && limit > 0 && !isLegacyA2APayment(row.metadata) && accounting !== 'zero') {
         refuseApproval(
           'APPROVAL_UNCOUNTED_SPEND',
-          `This spend reserved nothing in the daily volume (it could not be priced when no daily limit applied), and the daily volume ` +
-            `limit of ${policy?.maxDailyVolumeUsd} USD applies now, so it cannot be checked. Reject it; the agent can request it again.`,
+          (accounting === 'unpriced'
+            ? 'This spend reserved nothing in the daily volume (it could not be priced when no daily limit applied)'
+            : 'This spend reserved nothing in the daily volume and its row does not record whether it was counted as zero or ' +
+              'could not be priced (it predates that record)') +
+            `, and the daily volume limit of ${policy?.maxDailyVolumeUsd} USD applies now, so it cannot be checked. ` +
+            'Reject it; the agent can request it again.',
         );
       }
 
@@ -384,18 +437,25 @@ export async function approvePendingTransaction(
         dayVolumeUsd = current?.volumeUsd ?? reserved.usd;
       }
 
-      if (limit > 0) {
-        const x402Usd = Number(await resourcePaymentSpentToday(tx, agentId, now)) / 1e6;
-        const projected = Number.parseFloat(dayVolumeUsd) + x402Usd;
-        if (projected > limit) {
-          const requested = Number.parseFloat(reserved.usd);
-          const committed = Math.max(0, projected - requested);
+      // #178 review: exact comparison in micro-USD (bigints) — DailyVolume is
+      // numeric text with 6 decimals, x402 is USDC base units, the limit a
+      // policy decimal (rounded down). Floats refused a spend that filled the
+      // limit exactly (0.2 + 0.1 > 0.3) and could round a small excess away.
+      const limitMicro = limit > 0 ? policyDecimalToMicro(policy?.maxDailyVolumeUsd) : null;
+      if (limitMicro !== null) {
+        const x402Micro = await resourcePaymentSpentToday(tx, agentId, now);
+        const projectedMicro = usdTextToMicroCeil(dayVolumeUsd) + x402Micro;
+        if (projectedMicro > limitMicro) {
+          const requestedMicro = usdTextToMicroCeil(reserved.usd);
+          const committedMicro = projectedMicro > requestedMicro ? projectedMicro - requestedMicro : 0n;
+          const committed = microToUsd6(committedMicro);
+          const requested = microToUsd6(requestedMicro);
           refuseApproval(
             'APPROVAL_DAILY_LIMIT',
             `Approving it on ${day} would exceed the daily volume limit of ${policy?.maxDailyVolumeUsd} USD: ` +
-              `${committed.toFixed(2)} USD already committed that day, ${requested.toFixed(2)} USD requested. ` +
+              `${committed} USD already committed that day, ${requested} USD requested. ` +
               'An approval never exceeds the daily limit; it stays PENDING_APPROVAL (approve it when the day has room, or reject it).',
-            { day, limitUsd: policy?.maxDailyVolumeUsd ?? String(limit), committedUsd: committed.toFixed(6), requestedUsd: requested.toFixed(6) },
+            { day, limitUsd: policy?.maxDailyVolumeUsd ?? String(limit), committedUsd: committed, requestedUsd: requested },
           );
         }
       }

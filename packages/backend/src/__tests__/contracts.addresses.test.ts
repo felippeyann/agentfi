@@ -18,7 +18,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getAddress, isAddress } from 'viem';
 import * as contracts from '../config/contracts.js';
 import { GMX_CONTRACTS, GMX_MARKETS } from '../services/defi/gmx.service.js';
@@ -44,17 +44,63 @@ function expectChecksummed(entries: Array<[string, string]>) {
   expect(bad, `invalid EIP-55: ${JSON.stringify(bad)}`).toEqual([]);
 }
 
+type ContractsModule = typeof contracts;
+
+/**
+ * Fields of `CONTRACT_ADDRESSES` read from the per-chain env overrides
+ * (`ENV_OVERRIDES` below), not written in the file. An operator may set them
+ * in lowercase (config/env.ts accepts it; viem accepts it), so they are not
+ * part of the hard-coded EIP-55 check (review of #183). Their defaults that
+ * ARE literals (`DEFAULT_IDENTITY_REGISTRIES`) are checked on their own; the
+ * test below proves every excluded field follows the env.
+ */
+const ENV_BACKED_FIELDS: ReadonlySet<string> = new Set([
+  'policyModule',
+  'executor',
+  'escrowModule',
+  'agentJobEscrow',
+  'reputationHook',
+  'identityRegistry',
+]);
+
+/** `CONTRACT_ADDRESSES` without the env-backed fields: the third-party literals only. */
+function hardCodedChainTables(mod: ContractsModule): Record<string, Record<string, unknown>> {
+  return Object.fromEntries(
+    Object.entries(mod.CONTRACT_ADDRESSES).map(([chainId, table]) => [
+      chainId,
+      Object.fromEntries(Object.entries(table).filter(([field]) => !ENV_BACKED_FIELDS.has(field))),
+    ]),
+  );
+}
+
+/** The addresses written in config/contracts.ts, with a path each. */
+function hardCodedContractAddresses(mod: ContractsModule): Array<[string, string]> {
+  return [
+    ...addressesIn(hardCodedChainTables(mod), 'CONTRACT_ADDRESSES'),
+    ...addressesIn(mod.DEFAULT_IDENTITY_REGISTRIES, 'DEFAULT_IDENTITY_REGISTRIES'),
+    ...addressesIn(mod.DEFAULT_REPUTATION_REGISTRIES, 'DEFAULT_REPUTATION_REGISTRIES'),
+    ...addressesIn(mod.LEGACY_CONTRACT_ADDRESSES, 'LEGACY_CONTRACT_ADDRESSES'),
+    ...addressesIn((mod as Record<string, unknown>)['UNISWAP_V3_QUOTER_V2'], 'UNISWAP_V3_QUOTER_V2'),
+  ];
+}
+
+/** The per-chain env overrides `CONTRACT_ADDRESSES` reads (`<NAME>_<chainId>`). */
+const ENV_OVERRIDES = [
+  'POLICY_MODULE_ADDRESS',
+  'EXECUTOR_ADDRESS',
+  'ESCROW_MODULE_ADDRESS',
+  'AGENT_JOB_ESCROW_ADDRESS',
+  'REPUTATION_HOOK_ADDRESS',
+  'IDENTITY_REGISTRY_ADDRESS',
+];
+/** A valid address, all-lowercase — the env schema (config/env.ts) accepts it for every override above. */
+const LOWERCASE_OVERRIDE = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
+
 describe('S7 — hard-coded addresses are EIP-55', () => {
   it('config/contracts.ts: every chain table, registry default, legacy deployment and quoter', () => {
     const quoters = (contracts as Record<string, unknown>)['UNISWAP_V3_QUOTER_V2'];
     expect(quoters, 'UNISWAP_V3_QUOTER_V2 is exported from config/contracts.ts').toBeDefined();
-    expectChecksummed([
-      ...addressesIn(contracts.CONTRACT_ADDRESSES, 'CONTRACT_ADDRESSES'),
-      ...addressesIn(contracts.DEFAULT_IDENTITY_REGISTRIES, 'DEFAULT_IDENTITY_REGISTRIES'),
-      ...addressesIn(contracts.DEFAULT_REPUTATION_REGISTRIES, 'DEFAULT_REPUTATION_REGISTRIES'),
-      ...addressesIn(contracts.LEGACY_CONTRACT_ADDRESSES, 'LEGACY_CONTRACT_ADDRESSES'),
-      ...addressesIn(quoters, 'UNISWAP_V3_QUOTER_V2'),
-    ]);
+    expectChecksummed(hardCodedContractAddresses(contracts));
   });
 
   it('services/defi/gmx.service.ts: contracts and markets', () => {
@@ -91,6 +137,43 @@ describe('S7 — hard-coded addresses are EIP-55', () => {
   });
 });
 
+describe('an operator configuration does not fail the hard-coded-address check (review of #183)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it('every per-chain override set to a valid all-lowercase address: the hard-coded literals are still EIP-55', async () => {
+    for (const chainId of Object.keys(contracts.CONTRACT_ADDRESSES)) {
+      for (const name of ENV_OVERRIDES) vi.stubEnv(`${name}_${chainId}`, LOWERCASE_OVERRIDE);
+    }
+    vi.resetModules();
+    const fresh = (await import('../config/contracts.js')) as ContractsModule;
+    // The overrides are in force in the freshly loaded table.
+    expect(fresh.getContracts(84532).policyModule).toBe(LOWERCASE_OVERRIDE);
+    expect(fresh.getContracts(84532).agentJobEscrow).toBe(LOWERCASE_OVERRIDE);
+
+    expectChecksummed(hardCodedContractAddresses(fresh));
+  });
+
+  it('the fields left out of that check are exactly the env-driven ones (no literal hides behind the exclusion)', async () => {
+    for (const chainId of Object.keys(contracts.CONTRACT_ADDRESSES)) {
+      for (const name of ENV_OVERRIDES) vi.stubEnv(`${name}_${chainId}`, LOWERCASE_OVERRIDE);
+    }
+    vi.resetModules();
+    const fresh = (await import('../config/contracts.js')) as ContractsModule;
+    for (const [chainId, table] of Object.entries(fresh.CONTRACT_ADDRESSES)) {
+      for (const field of ENV_BACKED_FIELDS) {
+        expect((table as unknown as Record<string, unknown>)[field], `${chainId}.${field}`).toBe(LOWERCASE_OVERRIDE);
+      }
+    }
+    // ...and the check still covers every other field, e.g. the quoters and routers.
+    const covered = hardCodedContractAddresses(fresh).map(([path]) => path);
+    expect(covered).toContain('CONTRACT_ADDRESSES.84532.uniswapV3Quoter');
+    expect(covered).toContain('CONTRACT_ADDRESSES.42161.gmxOrderVault');
+  });
+});
+
 describe('S7 — the corrected addresses are the official deployments', () => {
   it('Base: Aave V3 PoolAddressesProvider and Uniswap QuoterV2', () => {
     const base = contracts.getContracts(8453);
@@ -99,6 +182,13 @@ describe('S7 — the corrected addresses are the official deployments', () => {
     const quoters = (contracts as Record<string, unknown>)['UNISWAP_V3_QUOTER_V2'] as Record<number, string> | undefined;
     // The swap route's quoter is the same contract (it used to be a second, different wrong address).
     expect(quoters?.[8453]).toBe('0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a');
+  });
+
+  it('Base Sepolia (the C5 chain): the swap route has the official QuoterV2, the same as config uniswapV3Quoter', () => {
+    // docs.uniswap.org (Uniswap/docs@1c7597d) Base deployments, "Base Sepolia Address" column.
+    const quoters = (contracts as Record<string, unknown>)['UNISWAP_V3_QUOTER_V2'] as Record<number, string> | undefined;
+    expect(quoters?.[84532]).toBe('0xC5290058841028F1614F3A6F0F5816cAd0df5E27');
+    expect(quoters?.[84532]).toBe(contracts.getContracts(84532).uniswapV3Quoter);
   });
 
   it('Arbitrum: GMX OrderVault and Router, the same in config/contracts.ts and gmx.service.ts', () => {

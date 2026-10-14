@@ -13,12 +13,15 @@ git submodule update --init --recursive          # packages/contracts/lib/forge-
 docker compose -f docker-compose.dev.yml up -d postgres redis
 ```
 
-Use a **database of your own** (never `agentfi`, the dev stack's — the E2E and `agent.search.test.ts` empty tables):
+Use a **database of your own** (never `agentfi`, the dev stack's — the E2E and `agent.search.test.ts` empty tables), and a second one for the suites that empty their whole database on every run (rows 8 and 9 below — they migrate it themselves):
 
 ```bash
 docker exec agentfi-postgres-1 psql -U agentfi -d postgres -c "CREATE DATABASE agentfi_<you>"
+docker exec agentfi-postgres-1 psql -U agentfi -d postgres -c "CREATE DATABASE agentfi_<you>_e2e"
 (cd packages/backend && DATABASE_URL=postgresql://agentfi:agentfi@localhost:5432/agentfi_<you> npx prisma migrate deploy)
 ```
+
+Without `E2E_DATABASE_URL` the E2E suites fall back to shared defaults — `agentfi` (the dev stack's) for row 8, `agentfi_e2e_escrow` for row 9 (created on the fly by `prisma migrate deploy`) — which another run on the machine may be emptying at the same time: always pass yours.
 
 The backend test environment (the CI "Backend Tests" job, with your own database and Redis index):
 
@@ -42,8 +45,8 @@ export ALCHEMY_API_KEY=test TURNKEY_API_PUBLIC_KEY=test TURNKEY_API_PRIVATE_KEY=
 | 5 | Backend DB | `cd packages/backend && npx vitest run --config vitest.config.db.ts` | routes and services on **real Postgres** (and Redis where named): reservations, races, migrations against pre-existing rows | anything on a chain |
 | 6 | MCP | `cd packages/mcp-server && npx vitest run` | tool schemas, dispatch, error sanitising; bodies checked against the OpenAPI spec where a test says so | the backend's behaviour |
 | 7 | Admin | `cd packages/admin && npx vitest run` | dashboard units | — |
-| 8 | E2E on Anvil | `cd packages/backend && E2E_DATABASE_URL=… E2E_REDIS_URL=redis://localhost:6379/<m> npx vitest run --config vitest.config.e2e.ts` (Foundry on `PATH`) | the queue → submitter → monitor → accounting pipeline against **real local contracts** | real networks, Turnkey |
-| 9 | ERC-8183 fork rehearsal | `cd packages/backend && E2E_ANVIL_FORK_URL=https://sepolia.base.org npm run test:e2e:escrow-fork` (unset `DATABASE_URL`; ≈ 3–5 min) | the escrow flow against the real Base Sepolia USDC / ERC-8004 registries on a fork | a real testnet run (C5) |
+| 8 | E2E on Anvil | `cd packages/backend && E2E_DATABASE_URL=postgresql://agentfi:agentfi@localhost:5432/agentfi_<you>_e2e E2E_REDIS_URL=redis://localhost:6379/<m> npx vitest run --config vitest.config.e2e.ts` (Foundry on `PATH`) | the queue → submitter → monitor → accounting pipeline against **real local contracts** | real networks, Turnkey |
+| 9 | ERC-8183 fork rehearsal | `cd packages/backend && E2E_DATABASE_URL=postgresql://agentfi:agentfi@localhost:5432/agentfi_<you>_e2e E2E_ESCROW_REDIS_URL=redis://localhost:6379/<m> E2E_ANVIL_FORK_URL=https://sepolia.base.org npm run test:e2e:escrow-fork` (unset `DATABASE_URL`; ≈ 3–5 min; not at the same time as row 8 — both empty `agentfi_<you>_e2e`) | the escrow flow against the real Base Sepolia USDC / ERC-8004 registries on a fork | a real testnet run (C5) |
 | 10 | Dev stack | `docker compose -f docker-compose.dev.yml up --build` then `npm run smoke:dev` ([dev-quickstart.md](../dev-quickstart.md)) | the images boot; two agents register, a no-reward A2A job completes, trust and P&L read back | anything paid or on-chain |
 
 Order matters locally: run `forge build` (or `forge test`) **before** step 4 — a stale `packages/contracts/out` fails `abi.erc8183.test.ts`. Run steps 4 and 5 against your own database, and not at the same time as another run on it (`agent.search.test.ts` empties tables).
@@ -91,6 +94,8 @@ Seven more `disconnect` runs (from PowerShell, with Node's report flags, and of 
 DATABASE_URL=postgresql://agentfi:agentfi@localhost:5432/agentfi_<you> \
   node scripts/repro-prisma-worker-thread-crash.mjs 40 disconnect   # exit 139 / 0xC0000005 in about half the runs
 ```
+
+Exit 0 with "all workers completed" means every lifecycle ended as its mode expects. Exit 1 with entries marked `!` means one did not (a child process that failed or was killed, a thread that exited with an unexpected code or timed out — `T!`): not a clean run, and not the crash either; read the child's error above the line.
 
 **Classification:**
 

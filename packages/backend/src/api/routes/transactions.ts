@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { Prisma, type Transaction } from '@prisma/client';
-import { getAddress, parseUnits, maxUint256, zeroAddress } from 'viem';
+import { getAddress, isAddress, parseUnits, maxUint256, zeroAddress } from 'viem';
 import { db } from '../../db/client.js';
 import { TransactionBuilder } from '../../services/transaction/builder.service.js';
 import { SimulatorService } from '../../services/transaction/simulator.service.js';
@@ -28,6 +28,7 @@ import {
 import { classifyBatchCalldata } from '../../services/policy/batch-calldata.js';
 import { MAX_AMOUNT_UNPRICED, maxWithdrawalPricing } from '../../services/policy/max-withdrawal-proof.js';
 import { judgeOutflowCap } from '../../services/policy/outflow-cap.js';
+import { getWalletService } from '../../services/wallet/index.js';
 import { parsePolicyDecimal } from '../../services/policy/policy-numbers.js';
 import { getKnownTokenDecimals } from '../../services/transaction/token-registry.js';
 import { cacheSimulation, getSimulation } from '../../services/transaction/simulation-cache.js';
@@ -152,9 +153,22 @@ const executeSwapSchema = simulateSwapSchema.extend({
   idempotencyKey: z.string().optional(),
 });
 
+/**
+ * An address as viem's strict `isAddress` reads it: all-lowercase, or mixed
+ * case with a valid EIP-55 checksum. `getAddress` alone is not enough: it
+ * checks the hex shape only and re-checksums a mixed-case address whose
+ * checksum is wrong (a typo) instead of refusing it (review of #181).
+ */
+const STRICT_ADDRESS_MESSAGE = 'must be a 0x-prefixed 20-byte address, all-lowercase or with a valid EIP-55 checksum';
+const isStrictAddress = (value: string) => isAddress(value, { strict: true });
+
 const transferSchema = z.object({
-  token: z.string(), // "ETH" or token address
-  to: z.string(),
+  // "ETH" (the chain's native asset, any case) or an ERC-20 contract address.
+  token: z.string().refine((value) => value.toUpperCase() === 'ETH' || isStrictAddress(value), {
+    message:
+      'must be "ETH" or an ERC-20 contract address (all-lowercase or with a valid EIP-55 checksum); symbols are not resolved',
+  }),
+  to: z.string().refine(isStrictAddress, { message: STRICT_ADDRESS_MESSAGE }),
   amount: z.string(),
   chainId: z.number().default(1),
   idempotencyKey: z.string().optional(),
@@ -778,7 +792,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     // pool (`max-withdrawal-proof.ts`); otherwise unpriced (refused while a
     // daily limit applies).
     const maxWithdrawal = amountWei === maxUint256
-      ? await maxWithdrawalPricing({ chainId: body.chainId, from: getAddress(agent.safeAddress), tx: withdrawTx })
+      ? await maxWithdrawalPricing({ chainId: body.chainId, agentWallet: getAddress(agent.safeAddress), signer: await signingAddressOf(agent.walletId), tx: withdrawTx })
       : null;
     const pricing = maxWithdrawal
       ? maxWithdrawal.pricing
@@ -1025,7 +1039,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     // §5-7: outside the outflow count only on proof (see the Aave route).
     const maxWithdrawal =
       body.amount === 'max'
-        ? await maxWithdrawalPricing({ chainId: body.chainId, from: getAddress(agent.safeAddress), tx: withdrawTx })
+        ? await maxWithdrawalPricing({ chainId: body.chainId, agentWallet: getAddress(agent.safeAddress), signer: await signingAddressOf(agent.walletId), tx: withdrawTx })
         : null;
     const pricing = maxWithdrawal
       ? maxWithdrawal.pricing
@@ -2216,6 +2230,21 @@ function withoutVolumeBookkeeping<T>(tx: T): T {
   const copy = { ...(tx as Record<string, unknown>) };
   for (const field of VOLUME_BOOKKEEPING_FIELDS) delete copy[field];
   return copy as T;
+}
+
+/**
+ * #180 review: the address that signs the agent's transactions — the wallet
+ * provider's address for `walletId`, the EVM `msg.sender` (in Safe mode the
+ * Safe's owner EOA, not `safeAddress`). Null when it cannot be resolved (the
+ * caller then grants nothing that depends on it).
+ */
+async function signingAddressOf(walletId: string): Promise<string | null> {
+  try {
+    return await getWalletService().getWalletAddress(walletId);
+  } catch (err) {
+    logger.warn({ walletId, err: (err as Error)?.message ?? String(err) }, 'Could not resolve the signing address of a wallet');
+    return null;
+  }
 }
 
 async function getAgent(agentId: string) {

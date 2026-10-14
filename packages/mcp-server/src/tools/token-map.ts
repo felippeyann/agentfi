@@ -2,8 +2,9 @@ type ChainTokenMap = Record<string, string>;
 
 /**
  * The MCP server's token registry: symbol → ERC-20 contract per chain. `ETH`
- * is the wrapped-native alias the swap / Aave tools need; `pay_agent` and
- * `transfer_token` read `ETH` as native ETH instead. Every symbol the
+ * is the WETH alias the swap / Aave tools need; `pay_agent` and
+ * `transfer_token` read `ETH` as native ETH instead, and refuse it where the
+ * native asset is not ETH (`nativeEthRefusal`). Every symbol the
  * backend's registry (`packages/backend/src/services/transaction/
  * token-registry.ts`) also knows must resolve to the same address
  * (`packages/backend/src/__tests__/mcp.token-map.sync.test.ts`).
@@ -57,6 +58,40 @@ function normalizeToken(token: string): string {
   return token.trim().toUpperCase();
 }
 
+/**
+ * Chains whose native asset is ETH. The transfer route reads token `"ETH"`
+ * as the chain's NATIVE asset, so native `"ETH"` is only meaningful here:
+ * on Polygon (137) the native asset is POL — a transfer asked for in ETH
+ * would send POL (review of #181). Any chain not listed is refused too: its
+ * native asset is not known to this server.
+ */
+const NATIVE_ETH_CHAIN_IDS: ReadonlySet<number> = new Set([1, 8453, 84532, 42161]);
+
+/** Native asset of the chains this server knows whose native asset is not ETH. */
+const NON_ETH_NATIVE_ASSETS: Readonly<Record<number, string>> = { 137: 'POL' };
+
+/** True when `token` is the native-ETH literal (`"ETH"`, any case, surrounding spaces ignored). */
+export function isNativeEthLiteral(token: string): boolean {
+  return normalizeToken(token) === 'ETH';
+}
+
+/**
+ * Why native `"ETH"` is refused on `chainId`, or undefined where the native
+ * asset is ETH. The message names the chain's native asset when known and
+ * the ERC-20 alternative (the chain's WETH) when the registry has one.
+ */
+export function nativeEthRefusal(chainId: number): string | undefined {
+  if (NATIVE_ETH_CHAIN_IDS.has(chainId)) return undefined;
+  const native = NON_ETH_NATIVE_ASSETS[chainId];
+  const weth = TOKENS_BY_CHAIN[chainId]?.['WETH'];
+  return (
+    `"ETH" means the chain's native asset, and the native asset of chain ${chainId} is ` +
+    `${native ?? 'not known to be ETH'}${native ? ', not ETH: the transfer would send ' + native : ''}. ` +
+    `Native "ETH" is accepted on chains ${[...NATIVE_ETH_CHAIN_IDS].join(', ')} only.` +
+    (weth ? ` To move ETH on chain ${chainId}, use WETH (the ERC-20 ${weth}).` : '')
+  );
+}
+
 export function resolveSwapToken(token: string, chainId: number): string {
   if (token.startsWith('0x')) return token;
   const symbol = normalizeToken(token);
@@ -68,8 +103,17 @@ export function resolveSwapToken(token: string, chainId: number): string {
   return resolved;
 }
 
+/**
+ * A `transfer_token` token: `"ETH"` (native — only where the native asset is
+ * ETH; the tool reports `nativeEthRefusal` as INVALID_INPUT first, this throw
+ * is the backstop), a symbol of the chain's registry, or an address as given.
+ */
 export function resolveTransferToken(token: string, chainId: number): string {
-  if (token.toUpperCase() === 'ETH') return 'ETH';
+  if (isNativeEthLiteral(token)) {
+    const refusal = nativeEthRefusal(chainId);
+    if (refusal) throw new Error(refusal);
+    return 'ETH';
+  }
   return resolveSwapToken(token, chainId);
 }
 
@@ -79,20 +123,23 @@ export function resolveAssetToken(token: string, chainId: number): string {
 
 /**
  * A payment token as `POST /v1/transactions/transfer` takes it, from a symbol
- * only: `"ETH"` (native) or the registry's contract address for the symbol on
+ * only: `"ETH"` (native, only on a chain whose native asset is ETH — see
+ * `nativeEthRefusal`) or the registry's contract address for the symbol on
  * that chain. Undefined for anything else — an unknown symbol, a symbol of
- * another chain, an address — so the caller refuses instead of guessing.
+ * another chain, an address, `"ETH"` on Polygon — so the caller refuses
+ * instead of guessing (never the registry's `ETH` → WETH swap alias).
  */
 export function resolvePaymentToken(symbol: string, chainId: number): string | undefined {
   const normalized = normalizeToken(symbol);
-  if (normalized === 'ETH') return 'ETH';
+  if (normalized === 'ETH') return nativeEthRefusal(chainId) === undefined ? 'ETH' : undefined;
   const byChain = TOKENS_BY_CHAIN[chainId];
   return byChain && Object.hasOwn(byChain, normalized) ? byChain[normalized] : undefined;
 }
 
-/** The symbols `resolvePaymentToken` accepts on `chainId`, sorted (ETH is always native). */
+/** The symbols `resolvePaymentToken` accepts on `chainId`, sorted (ETH only where it is the native asset). */
 export function paymentTokenSymbols(chainId: number): string[] {
-  return [...new Set(['ETH', ...Object.keys(TOKENS_BY_CHAIN[chainId] ?? {})])].sort();
+  const erc20 = Object.keys(TOKENS_BY_CHAIN[chainId] ?? {}).filter((symbol) => symbol !== 'ETH');
+  return [...new Set([...(nativeEthRefusal(chainId) === undefined ? ['ETH'] : []), ...erc20])].sort();
 }
 
 /** Every (chain, symbol, address) entry, for the registry consistency test. */
