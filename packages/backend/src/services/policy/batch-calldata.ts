@@ -16,6 +16,14 @@
  *                    target, the amount is priced like any other spend and
  *                    counted, `to` is checked against `allowedRecipients` and
  *                    the token against `allowedTokens`;
+ *   non-canonical-erc20
+ *                    the `transfer` / `transferFrom` selector with calldata
+ *                    that fails the strict decoding (trailing bytes, dirty
+ *                    padding, truncated): refused whatever `allowedContracts`
+ *                    says (`NON_CANONICAL_ERC20_CALL`, G1 review P3-4) — a
+ *                    token decodes it leniently and moves the amount, so as
+ *                    "other" it passed uncounted and without the recipient
+ *                    check whenever the token was an allowed contract;
  *   other            anything else, `approve` and unknown selectors included:
  *                    allowed only when `allowedContracts` is non-empty AND
  *                    lists the target (the operator authorised that contract;
@@ -32,6 +40,7 @@ export type BatchCalldataClass =
   | { kind: 'none' }
   | { kind: 'policy-sync' }
   | { kind: 'erc20-transfer'; fn: 'transfer' | 'transferFrom'; token: Address; to: Address; amount: bigint; from?: Address }
+  | { kind: 'non-canonical-erc20'; fn: 'transfer' | 'transferFrom'; selector: Hex }
   | { kind: 'other'; selector: Hex };
 
 export const ERC20_TRANSFER_SELECTOR = toFunctionSelector('transfer(address,uint256)');
@@ -78,5 +87,10 @@ export function classifyBatchCalldata(
       ? { kind: 'erc20-transfer', fn: 'transfer', token: getAddress(action.to), to: transfer.to, amount: transfer.amount }
       : { kind: 'erc20-transfer', fn: 'transferFrom', token: getAddress(action.to), to: transfer.to, amount: transfer.amount, from: transfer.from };
   }
-  return { kind: 'other', selector: data.slice(0, 10).toLowerCase() as Hex };
+  const selector = data.slice(0, 10).toLowerCase() as Hex;
+  // G1 review P3-4: a recognised ERC-20 move that is not in its one canonical
+  // encoding is never "other" (uncounted, recipient unchecked).
+  if (selector === ERC20_TRANSFER_SELECTOR) return { kind: 'non-canonical-erc20', fn: 'transfer', selector };
+  if (selector === ERC20_TRANSFER_FROM_SELECTOR) return { kind: 'non-canonical-erc20', fn: 'transferFrom', selector };
+  return { kind: 'other', selector };
 }
