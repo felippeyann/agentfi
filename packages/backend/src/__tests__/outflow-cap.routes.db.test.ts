@@ -52,6 +52,8 @@ const h = vi.hoisted(() => {
   process.env['SYNTHETIC_TEST_PRICES_USD'] = prices.all;
   return {
     prices,
+    /** S9: whether this process verified the executor (the gate's verdict). */
+    contractsVerified: true,
     queued: [] as Array<{ name: string; data: Record<string, unknown> }>,
     simulations: 0,
     simulationOwner: '',
@@ -100,6 +102,15 @@ vi.mock('../services/transaction/simulation-cache.js', () => ({
 }));
 vi.mock('../services/notification.service.js', () => ({
   notificationService: { notify: async () => undefined },
+}));
+// S9: the executor this suite routes batches through counts as verified unless a
+// test says otherwise (the identity check against real deployments runs on Anvil,
+// contract-identity.*.anvil.ts).
+vi.mock('../config/policy-stack-verification.runtime.js', () => ({
+  policyStackGate: (chainId: number) =>
+    h.contractsVerified
+      ? { allowed: true, chainId, verifiedAt: new Date(), validUntil: new Date(Date.now() + 600_000) }
+      : { allowed: false, chainId, block: 'unverified', reason: 'the chain could not be read: rpc down', retryAfterSeconds: 120 },
 }));
 vi.mock('../services/wallet/index.js', () => ({ getWalletService: () => ({}) }));
 vi.mock('../services/job/escrow-erc8183.runtime.js', () => ({
@@ -321,7 +332,35 @@ describeDb('§5-6 — USD cap on ordinary outflows (maxOutflowPerTxUsd), on Post
   beforeEach(() => {
     h.queued.length = 0;
     h.simulations = 0;
+    h.contractsVerified = true;
     process.env['SYNTHETIC_TEST_PRICES_USD'] = h.prices.all;
+  });
+
+  // ── Order against the S9 identity gate (#182) ──────────────────────────────
+
+  it('batch with the executor unverified: the cap answers first (NULL → 403, above → 403); only a batch within the cap reaches 503 CONTRACTS_UNVERIFIED; nothing reserved, written or queued', async () => {
+    h.contractsVerified = false;
+    const batch = { actions: [{ to: RECIPIENT, value: '10000000000000000' }] }; // 20 USD
+    const notConfigured = await mkAgent();
+    const above = await mkAgent({ maxOutflowPerTxUsd: '10' });
+    const within = await mkAgent({ maxOutflowPerTxUsd: '25' });
+
+    const r1 = await post(await app(notConfigured.id), '/v1/transactions/batch', batch);
+    expect(r1.statusCode, r1.body).toBe(403);
+    expect(r1.json()).toMatchObject({ code: 'USD_CAP_NOT_CONFIGURED' });
+    const r2 = await post(await app(above.id), '/v1/transactions/batch', batch);
+    expect(r2.statusCode, r2.body).toBe(403);
+    expect(r2.json()).toMatchObject({ code: 'POLICY_VIOLATION', rule: 'maxOutflowPerTxUsd' });
+    const r3 = await post(await app(within.id), '/v1/transactions/batch', batch);
+    expect(r3.statusCode, r3.body).toBe(503);
+    expect(r3.json()).toMatchObject({ code: 'CONTRACTS_UNVERIFIED' });
+
+    for (const agent of [notConfigured, above, within]) {
+      expect(await rows(agent.id)).toHaveLength(0);
+      expect(await volume(agent.id)).toBe(0);
+    }
+    expect(h.simulations).toBe(0);
+    expect(h.queued).toHaveLength(0);
   });
 
   // ── Not configured (every policy before migration 0025) ────────────────────
