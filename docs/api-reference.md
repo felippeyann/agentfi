@@ -471,7 +471,7 @@ All admin routes require `x-admin-secret` header. Local-only by default.
 | GET | `/admin/agents/:id` | Agent detail |
 | GET | `/admin/agents/:id/transactions` | Agent transaction history |
 | GET | `/admin/transactions` | Global transaction log |
-| POST | `/admin/transactions/batch` | Operator batch execution |
+| POST | `/admin/transactions/batch` | Operator batch execution, signed by the named agent's wallet and executed from its Safe. Body `{ agentId, chainId, actions: [{ to, value, data }] }`; `agentId` is required (`400` without it, `404` when unknown) — there is no fallback agent |
 | POST | `/admin/agents/:id/pause` | Emergency kill switch (toggle). Off-chain only; already-queued txs are rejected by the worker. Pausing deactivates the DB policy and records that the pause did it; when the toggle resumes, it behaves like `/resume` below. Body `{ "syncOnChain": true }` returns `emergencyPause`/`resume` calldata in `onChainSync` for the operator to broadcast |
 | POST | `/admin/agents/:id/resume` | Idempotent resume. Sets `agent.active = true` and re-activates the DB policy **only if the pause deactivated it** (`AgentPolicy.pausedByOperatorAt`); a policy that was inactive before the pause stays inactive. Response: `{ active: true, agentReactivated, policyReactivated, policyNote, onChainSync }`. Body `{ "syncOnChain": true }` returns `resume(safe)` calldata |
 | POST | `/admin/jobs/:id/reconcile` | Force a legacy payment job `COMPLETED` / `PAYMENT_FAILED` (`{ action, reason }`). Refuses an ERC-8183 job whose funds may still be on-chain (`409 USE_RESOLVE`) |

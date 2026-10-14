@@ -58,7 +58,10 @@ const batchAdminSchema = z.object({
     value: z.string().default('0'),
     data:  z.string().regex(/^0x[0-9a-fA-F]*$/).default('0x'),
   })).min(1).max(20),
-  agentId: z.string().optional(), // If provided, executes AS this agent
+  // Required (G1 review): the batch is signed by this agent's wallet and runs
+  // from its Safe. There is no fallback agent — an unnamed batch used to run
+  // as whatever agent the database returned first.
+  agentId: z.string().min(1),
 });
 
 const pauseAgentSchema = z.object({
@@ -142,7 +145,7 @@ async function buildKillSwitchOnChainSync(
     to: policyModule,
     chainId,
     actions: [{ to: policyModule, value: '0', data }],
-    notice: `Broadcast via POST /admin/transactions/batch to ${pause ? 'pause' : 'resume'} the on-chain policy. The backend has NOT broadcast this.`,
+    notice: `Broadcast via POST /admin/transactions/batch with agentId "${agent.id}" to ${pause ? 'pause' : 'resume'} the on-chain policy. The backend has NOT broadcast this.`,
   };
 }
 
@@ -192,14 +195,15 @@ export async function adminRoutes(fastify: FastifyInstance) {
   fastify.post('/admin/transactions/batch', async (request, reply) => {
     if (!requireAdmin(request, reply)) return;
 
-    const body = batchAdminSchema.parse(request.body);
-    
-    // Find agent context (policy sync is per-agent)
-    const agent = body.agentId 
-      ? await db.agent.findUnique({ where: { id: body.agentId } })
-      : await db.agent.findFirst(); // Fallback to first agent for global maintenance if needed
+    const parsed = batchAdminSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Validation failed', details: parsed.error.errors });
+    }
+    const body = parsed.data;
 
-    if (!agent) return reply.code(404).send({ error: 'Agent not found for context.' });
+    // The batch runs AS this agent (its wallet signs, its Safe executes).
+    const agent = await db.agent.findUnique({ where: { id: body.agentId } });
+    if (!agent) return reply.code(404).send({ error: `Agent ${body.agentId} not found.` });
 
     const { getContracts } = await import('../../config/contracts.js');
     const contracts = getContracts(body.chainId);
