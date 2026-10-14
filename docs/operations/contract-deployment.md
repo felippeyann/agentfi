@@ -602,6 +602,19 @@ Foundry's `--broadcast` flag creates a transaction log in `packages/contracts/br
 
 ### Emergency pause
 
+`AgentPolicyModule` accepts `setPolicy`, the whitelist updates, `emergencyPause`
+and `resume` only from its `operator` (set at deploy, `OPERATOR_ADDRESS`) or from
+`msg.sender == safe`. Never send them through `AgentExecutor` or
+`POST /admin/transactions/batch`: there the executor is `msg.sender` and the module
+answers `Unauthorized` (S8, reproduced on Anvil). Two paths work:
+
+- From the backend: `POST /admin/agents/<id>/pause` with `{"syncOnChain": true}`
+  (or `POST /admin/agents/<id>/policy/sync` for any policy change) has the agent's
+  own wallet send the module calls derived from the stored policy — valid for an
+  agent whose `safeAddress` is its EOA. `GET /admin/agents/<id>/policy/onchain`
+  shows the stored and the on-chain policy side by side.
+- Out of band, with the operator key (any agent, also Safe mode):
+
 If an agent is compromised or behaving unexpectedly:
 
 ```bash

@@ -534,11 +534,12 @@ describeDb('Q9 — trusted prices on the real routes (Postgres)', () => {
       process.env['SYNTHETIC_TEST_PRICES_USD'] = SYNTHETIC_ALL;
     });
 
-    it("a call to the agent's own AgentPolicyModule (policy sync) is allowed and counts nothing", async () => {
+    it("S8: a call to the chain's AgentPolicyModule is refused (403 POLICY_MODULE_TARGET) — no more uncounted \"policy sync\" exemption", async () => {
       const agent = await mkAgent([TESTNET]);
       const res = await batch(agent.id, [{ to: POLICY_MODULE, value: '0', data: '0xdeadbeef' }]);
-      expect(res.statusCode, res.body).toBe(202);
-      expect(await onlyRow(agent.id)).toMatchObject({ volumeState: null });
+      expect(res.statusCode, res.body).toBe(403);
+      expect(res.json()).toMatchObject({ code: 'POLICY_MODULE_TARGET', actionIndex: 0 });
+      expect(await rows(agent.id)).toEqual([]);
     });
 
     it('an ERC-20 transfer is priced and counted together with the native value; source synthetic', async () => {

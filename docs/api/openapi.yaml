@@ -408,7 +408,7 @@ paths:
           including loosening. The agent-ownership check does not apply to the operator.
 
         **Units and lists (Q8).** `maxValuePerTxEth` caps native ETH per
-        transaction on `/v1/transactions/*` (synced on-chain). `maxValuePerTxUsd`
+        transaction on `/v1/transactions/*` (synced on-chain by the operator sync). `maxValuePerTxUsd`
         caps each spend denominated in USD — USDC x402 payments
         (`pay-resource`) and ERC-8183 escrow budgets (`POST /v1/jobs`); it does
         not apply to `/v1/transactions/*` (extending it there is an open plan
@@ -420,7 +420,7 @@ paths:
         batch action carrying native value; DeFi operations (swap, deposits,
         GMX…) pay the agent's own position and are not recipient-checked. Empty
         lists are unrestricted. `maxValuePerTxUsd` and `allowedRecipients` are
-        **off-chain only**: `syncOnChain` never carries them (the answer lists
+        **off-chain only**: the on-chain sync never carries them (the answer lists
         them in `onChainSync.offChainOnlyFields`).
 
         A field **loosens** when:
@@ -461,7 +461,7 @@ paths:
             schema: { $ref: '#/components/schemas/UpdatePolicyRequest' }
       responses:
         '200':
-          description: Updated policy. When `syncOnChain=true`, also returns calldata for on-chain sync.
+          description: Updated policy. When `syncOnChain=true`, `onChainSync` says how the operator syncs the module (no calldata; S8).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/UpdatePolicyResponse' }
@@ -744,6 +744,12 @@ paths:
     post:
       tags: [Transactions]
       summary: Execute up to 20 actions atomically via the AgentExecutor
+      description: >-
+        An action may not target the chain's AgentPolicyModule (403
+        `POLICY_MODULE_TARGET`, S8): through the executor its admin calls
+        always revert, and its unauthenticated `validateTransaction` would only
+        restart a wallet's on-chain cooldown. The on-chain policy is synced by
+        the operator.
       requestBody:
         required: true
         content:
@@ -1495,10 +1501,12 @@ paths:
         `POST /admin/agents/{id}/resume`: the DB policy is re-activated only
         if the operator pause deactivated it, and the response says what
         happened (`policyReactivated`, `policyNote`).
-        The backend performs NO on-chain call. Pass `syncOnChain: true` to
-        receive `AgentPolicyModule.emergencyPause(safe)` (or `resume(safe)`)
-        calldata in `onChainSync` for the operator to broadcast via
-        `POST /admin/transactions/batch`.
+        On-chain (S8): only with `syncOnChain: true`. After the DB change the
+        stored policy is synced exactly as by
+        `POST /admin/agents/{id}/policy/sync` (the agent's own wallet, straight
+        to `AgentPolicyModule`; the worker signs it although the agent is
+        paused) and `onChainSync` reports what was queued or why not. A
+        refusal never undoes the DB pause.
       security:
         - adminSecret: []
       requestBody:
@@ -1512,7 +1520,7 @@ paths:
             Pause toggled. `{ active: false, onChainSync }` when the agent was
             paused; the `ResumeAgentResponse` shape when it was resumed. When
             `syncOnChain=true` and the agent's chain has a policy module,
-            `onChainSync` carries the calldata.
+            `onChainSync` is the sync outcome.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PauseAgentResponse' }
@@ -1533,10 +1541,9 @@ paths:
         that predates the marker — stays inactive and `policyNote` says to use
         `PATCH /v1/agents/{id}/policy`. Calling it on an agent that is not
         paused is a no-op (`agentReactivated: false`).
-        The backend performs NO on-chain call. Pass `syncOnChain: true` to
-        receive `AgentPolicyModule.resume(safe)` calldata in `onChainSync` for
-        the operator to broadcast via `POST /admin/transactions/batch`
-        (returned even on a no-op, so the chain can be re-synced on its own).
+        With `syncOnChain: true` the stored policy is then synced on-chain like
+        the pause route does (also on a no-op, so the chain can be re-synced on
+        its own).
       security:
         - adminSecret: []
       requestBody:
@@ -1551,6 +1558,81 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ResumeAgentResponse' }
         '404': { description: Agent not found. }
+
+  /admin/agents/{id}/policy/onchain:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdPath'
+    get:
+      tags: [Admin]
+      summary: Stored policy vs on-chain AgentPolicyModule (S8)
+      description: >-
+        Read-only. Reads the agent chain's `AgentPolicyModule` (policy, raw
+        whitelist membership of every address the DB lists or an earlier sync
+        sent, whitelist counts) and compares it with the stored policy, so the
+        operator sees both while a sync is pending or after it failed.
+      security:
+        - adminSecret: []
+      responses:
+        '200':
+          description: The view.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PolicySyncView' }
+        '401': { description: Missing or wrong admin secret. }
+        '404': { description: Agent not found. }
+
+  /admin/agents/{id}/policy/sync:
+    parameters:
+      - $ref: '#/components/parameters/AgentIdPath'
+    post:
+      tags: [Admin]
+      summary: Push the stored policy to the on-chain AgentPolicyModule (S8)
+      description: >-
+        No request body: nothing caller-supplied is signed. The module calls
+        (`setPolicy`, or only `emergencyPause` / `resume` when only the active
+        flag differs; `updateContractWhitelist` / `updateTokenWhitelist`, adding
+        AND removing entries) are derived from the stored policy and the
+        module's current state, queued as transactions signed by the agent's
+        own wallet and sent straight to the module — `msg.sender == safe` for
+        an agent whose `safeAddress` is its EOA. Never through AgentExecutor:
+        there the executor is `msg.sender` and the module answers
+        `Unauthorized`. Before signing, the worker re-derives each call from
+        the policy stored at that moment and fails it as superseded when the
+        DB moved on. Identical calls already in flight are reused.
+      security:
+        - adminSecret: []
+      responses:
+        '200':
+          description: Already in sync; nothing queued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PolicySyncResult' }
+        '202':
+          description: "Calls queued (`status: pending`)."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PolicySyncResult' }
+        '401': { description: Missing or wrong admin secret. }
+        '404': { description: Agent not found. }
+        '409':
+          description: >-
+            POLICY_MODULE_NOT_CONFIGURED, NO_DB_POLICY, POLICY_MODULE_MISMATCH,
+            POLICY_SYNC_UNKNOWN_ENTRIES, or POLICY_SYNC_WALLET_MODE (Safe mode:
+            the agent's key does not sign as its `safeAddress`; use the module's
+            operator key).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PolicySyncResult' }
+        '422':
+          description: POLICY_NOT_REPRESENTABLE (e.g. `maxValuePerTxEth` "0", more than 18 decimals, a list entry that is not an address).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PolicySyncResult' }
+        '503':
+          description: ONCHAIN_POLICY_UNREADABLE (RPC unreachable), or some calls could not be queued (`enqueueError`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PolicySyncResult' }
 
   /admin/jobs/{id}/resolve:
     parameters:
@@ -1690,9 +1772,13 @@ paths:
       tags: [Admin]
       summary: Operator batch execution
       description: >-
-        Queues an operator batch (policy sync, kill-switch calldata, maintenance)
-        signed by the named agent's wallet and executed from its Safe through
-        the AgentExecutor. `agentId` is required: there is no fallback agent.
+        Queues an operator maintenance batch signed by the named agent's wallet
+        and run through the AgentExecutor. `agentId` is required: there is no
+        fallback agent. Not for the on-chain policy (S8): inside the executor
+        the executor is `msg.sender` and `AgentPolicyModule` answers
+        `Unauthorized`, so an action targeting the chain's policy module is
+        refused (403 `POLICY_MODULE_TARGET`) — use
+        `POST /admin/agents/{id}/policy/sync`.
       security:
         - adminSecret: []
       requestBody:
@@ -1722,6 +1808,7 @@ paths:
       responses:
         '202': { description: Batch queued. }
         '400': { description: Invalid body — including a missing or empty `agentId`. }
+        '403': { description: "`POLICY_MODULE_TARGET`: an action targets the chain's AgentPolicyModule." }
         '404': { description: No agent with that `agentId`. }
 
   /admin/transactions/{id}/approve:
@@ -2354,7 +2441,11 @@ components:
             syncOnChain:
               type: boolean
               default: false
-              description: If true, response includes calldata for on-chain policy sync.
+              description: |
+                If true, the answer's `onChainSync` says how the on-chain
+                `AgentPolicyModule` is synced. This route never changes the module
+                and returns no calldata (S8): the operator pushes the stored policy
+                with `POST /admin/agents/{id}/policy/sync`.
             reason:
               type: string
               maxLength: 500
@@ -2366,25 +2457,22 @@ components:
     OnChainSync:
       type: object
       nullable: true
-      description: Calldata for the operator to broadcast. The backend never broadcasts it.
+      description: |
+        Answer to `syncOnChain` on `PATCH /v1/agents/{id}/policy` (null when the
+        agent's chain has no policy module). S8: no calldata any more — the old
+        `actions` were meant for `execute_batch`, i.e. AgentExecutor, where the
+        executor is `msg.sender` and `AgentPolicyModule` answers `Unauthorized`.
       properties:
-        to: { type: string }
+        status:
+          type: string
+          enum: [operator-sync-required]
+        to: { type: string, description: The chain's AgentPolicyModule. }
         chainId: { type: integer }
-        actions:
-          type: array
-          items:
-            type: object
-            properties:
-              to: { type: string }
-              value: { type: string }
-              data: { type: string }
         offChainOnlyFields:
           type: array
           description: |
-            Policy fields the calldata never carries because `AgentPolicyModule` has
-            no slot for them; only the backend enforces them (Q8:
-            `maxValuePerTxUsd`, `allowedRecipients`; and `maxDailyVolumeUsd`).
-            Present on `PATCH /v1/agents/{id}/policy` answers.
+            Policy fields the module has no slot for; only the backend enforces
+            them (Q8: `maxValuePerTxUsd`, `allowedRecipients`; and `maxDailyVolumeUsd`).
           items: { type: string }
         notice: { type: string }
 
@@ -2396,13 +2484,137 @@ components:
             onChainSync:
               $ref: '#/components/schemas/OnChainSync'
 
+    PolicySyncView:
+      type: object
+      description: |
+        S8 — the stored policy and what the agent chain's `AgentPolicyModule`
+        holds, side by side (`GET /admin/agents/{id}/policy/onchain`).
+      properties:
+        agentId: { type: string }
+        chainId: { type: integer }
+        policyModule: { type: string, nullable: true }
+        safe: { type: string, description: "The agent's `safeAddress` — the module's `safe` key." }
+        walletMode:
+          type: string
+          enum: [eoa, safe, unknown]
+          description: "`eoa` when the agent's wallet signs as `safe` (the sync can be sent); `safe` otherwise (refused)."
+        status:
+          type: string
+          enum: [in-sync, pending, failed, out-of-sync, not-configured, no-db-policy, not-representable, unreadable, mismatch]
+          description: |
+            `pending`: sync transactions queued or awaiting a receipt. `failed`: the
+            chain differs and the latest sync attempt failed or reverted.
+            `out-of-sync`: differs, never synced or the DB changed since.
+            `not-representable`: e.g. `maxValuePerTxEth` "0" (the module reverts
+            `InvalidPolicy` for 0; never rounded). `unreadable`: RPC unreachable.
+            `mismatch`: the configured module address did not answer as an
+            AgentPolicyModule.
+        reason: { type: string, nullable: true }
+        db:
+          type: object
+          nullable: true
+          description: The stored policy as the module would hold it.
+          properties:
+            maxValuePerTxEth: { type: string }
+            maxValuePerTxWei: { type: string }
+            cooldownSeconds: { type: integer }
+            active: { type: boolean, description: "`agent.active && policy.active`." }
+            expiresAt: { type: integer, description: "Unix seconds, 0 = none." }
+            allowedContracts: { type: array, items: { type: string } }
+            allowedTokens: { type: array, items: { type: string } }
+        onChain:
+          type: object
+          nullable: true
+          description: What the module holds now (null when it could not be read).
+          properties:
+            hasPolicy: { type: boolean }
+            maxValuePerTxWei: { type: string, nullable: true }
+            cooldownSeconds: { type: integer, nullable: true }
+            active: { type: boolean, nullable: true }
+            expiresAt: { type: integer, nullable: true }
+            contracts:
+              type: object
+              properties:
+                count: { type: string, nullable: true }
+                whitelisted: { type: array, items: { type: string } }
+            tokens:
+              type: object
+              properties:
+                count: { type: string, nullable: true }
+                whitelisted: { type: array, items: { type: string } }
+        differences: { type: array, items: { type: string } }
+        pending:
+          type: array
+          items: { $ref: '#/components/schemas/PolicySyncTransaction' }
+        lastFailure:
+          type: object
+          nullable: true
+          description: The latest failed / reverted sync transaction, when newer than the latest confirmed one.
+          properties:
+            transactionId: { type: string }
+            call: { type: string }
+            status: { type: string }
+            txHash: { type: string, nullable: true }
+            error: { type: string, nullable: true }
+            createdAt: { type: string, format: date-time }
+        offChainOnlyFields: { type: array, items: { type: string } }
+        warnings: { type: array, items: { type: string } }
+
+    PolicySyncTransaction:
+      type: object
+      properties:
+        transactionId: { type: string }
+        call:
+          type: string
+          enum: [setPolicy, emergencyPause, resume, updateContractWhitelist, updateTokenWhitelist, unknown]
+        status: { type: string }
+        txHash: { type: string, nullable: true }
+        error: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    PolicySyncResult:
+      type: object
+      nullable: true
+      description: |
+        S8 — outcome of an on-chain policy sync (`POST /admin/agents/{id}/policy/sync`,
+        and `onChainSync` of the kill switch with `syncOnChain: true`, where it is
+        null when the agent's chain has no policy module).
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [pending, in-sync, refused]
+        transactions:
+          type: array
+          description: The queued calls (signed by the agent's own wallet, sent straight to the module). `reused` = an identical call was already in flight.
+          items:
+            type: object
+            properties:
+              transactionId: { type: string }
+              call: { type: string, enum: [setPolicy, emergencyPause, resume, updateContractWhitelist, updateTokenWhitelist] }
+              reused: { type: boolean }
+        differences: { type: array, items: { type: string } }
+        unknownExtras:
+          type: object
+          description: Whitelisted on-chain entries the backend cannot name (written out of band); never removed automatically.
+          properties:
+            contracts: { type: string }
+            tokens: { type: string }
+        enqueueError: { type: string, description: Some rows could not be queued (they are FAILED). }
+        notice: { type: string }
+        code:
+          type: string
+          description: On a refusal — POLICY_MODULE_NOT_CONFIGURED, NO_DB_POLICY, POLICY_NOT_REPRESENTABLE, ONCHAIN_POLICY_UNREADABLE, POLICY_MODULE_MISMATCH, POLICY_SYNC_WALLET_MODE, POLICY_SYNC_UNKNOWN_ENTRIES, POLICY_SYNC_ERROR.
+        error: { type: string }
+        view: { $ref: '#/components/schemas/PolicySyncView' }
+
     PauseAgentRequest:
       type: object
       properties:
         syncOnChain:
           type: boolean
           default: false
-          description: If true, response includes `emergencyPause(safe)` / `resume(safe)` calldata for on-chain sync.
+          description: If true, the stored policy is synced on-chain after the DB change (S8) — same path as `POST /admin/agents/{id}/policy/sync`.
 
     PausedAgentResponse:
       type: object
@@ -2413,7 +2625,7 @@ components:
           enum: [false]
           description: Always `false` — the toggle paused the agent.
         onChainSync:
-          $ref: '#/components/schemas/OnChainSync'
+          $ref: '#/components/schemas/PolicySyncResult'
 
     ResumeAgentResponse:
       type: object
@@ -2433,7 +2645,7 @@ components:
           type: string
           description: Why the policy was or was not re-activated (already active, no policy row, or deactivated independently of the pause — use `PATCH /v1/agents/{id}/policy`).
         onChainSync:
-          $ref: '#/components/schemas/OnChainSync'
+          $ref: '#/components/schemas/PolicySyncResult'
 
     PauseAgentResponse:
       description: "`PausedAgentResponse` when the toggle paused the agent, `ResumeAgentResponse` when it resumed it."

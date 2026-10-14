@@ -6,9 +6,6 @@
  * policy has a daily limit, every action carrying calldata must be one the
  * backend can account for, or one the operator explicitly authorised:
  *
- *   policy-sync      the target is the agent chain's own `AgentPolicyModule`
- *                    (the admin SyncPolicyButton's on-chain policy sync):
- *                    allowed, nothing counted;
  *   erc20-transfer   the calldata is EXACTLY `transfer(to, amount)` or
  *                    `transferFrom(from, to, amount)` — selector plus a strict
  *                    canonical ABI encoding (length and every padding byte
@@ -33,12 +30,19 @@
  *
  * Without a daily limit none of this applies (nothing to count) and the batch
  * behaves as before. Native value keeps A6's rule in the route.
+ *
+ * S8: there is no "policy-sync" class any more. It exempted actions targeting
+ * the chain's `AgentPolicyModule` (the old admin "Sync policy" path) from all
+ * of the above — but through the executor those calls can only revert
+ * Unauthorized, or call the unauthenticated `validateTransaction` and restart
+ * a wallet's on-chain cooldown, and a mistyped POLICY_MODULE_ADDRESS turned
+ * the exemption into an uncounted, recipient-unchecked target. The route now
+ * refuses the module as a batch target outright (403 `POLICY_MODULE_TARGET`).
  */
 import { decodeFunctionData, encodeFunctionData, erc20Abi, getAddress, toFunctionSelector, type Address, type Hex } from 'viem';
 
 export type BatchCalldataClass =
   | { kind: 'none' }
-  | { kind: 'policy-sync' }
   | { kind: 'erc20-transfer'; fn: 'transfer' | 'transferFrom'; token: Address; to: Address; amount: bigint; from?: Address }
   | { kind: 'non-canonical-erc20'; fn: 'transfer' | 'transferFrom'; selector: Hex }
   | { kind: 'other'; selector: Hex };
@@ -74,13 +78,9 @@ export function decodeStrictErc20Transfer(
   }
 }
 
-export function classifyBatchCalldata(
-  action: { to: string; data: string },
-  ctx: { policyModule?: string | undefined },
-): BatchCalldataClass {
+export function classifyBatchCalldata(action: { to: string; data: string }): BatchCalldataClass {
   const data = action.data as Hex;
   if (data.length <= 2) return { kind: 'none' };
-  if (ctx.policyModule && action.to.toLowerCase() === ctx.policyModule.toLowerCase()) return { kind: 'policy-sync' };
   const transfer = decodeStrictErc20Transfer(data);
   if (transfer) {
     return transfer.fn === 'transfer'

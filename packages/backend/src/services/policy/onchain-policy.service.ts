@@ -1,74 +1,22 @@
 import { getAddress, type Address, encodeFunctionData, parseUnits } from 'viem';
-import { createChainPublicClient } from '../../config/chains.js';
-import { getContracts } from '../../config/contracts.js';
-import { logger } from '../../api/middleware/logger.js';
+import { AGENT_POLICY_MODULE_ABI_FULL } from '../../abi/AgentPolicyModule.abi.js';
 
-export const AGENT_POLICY_MODULE_ABI = [
-  {
-    name: 'setPolicy',
-    type: 'function',
-    stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'safe', type: 'address' },
-      {
-        name: 'params',
-        type: 'tuple',
-        components: [
-          { name: 'maxValuePerTx', type: 'uint256' },
-          { name: 'cooldownBetweenTx', type: 'uint256' },
-          { name: 'active', type: 'bool' },
-        ],
-      },
-      { name: 'expiresAt', type: 'uint256' },
-    ],
-    outputs: [],
-  },
-  {
-    name: 'updateContractWhitelist',
-    type: 'function',
-    stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'safe', type: 'address' },
-      { name: 'targets', type: 'address[]' },
-      { name: 'allowed', type: 'bool[]' },
-    ],
-    outputs: [],
-  },
-  {
-    name: 'updateTokenWhitelist',
-    type: 'function',
-    stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'safe', type: 'address' },
-      { name: 'tokens', type: 'address[]' },
-      { name: 'allowed', type: 'bool[]' },
-    ],
-    outputs: [],
-  },
-  {
-    name: 'emergencyPause',
-    type: 'function',
-    stateMutability: 'nonpayable',
-    inputs: [{ name: 'safe', type: 'address' }],
-    outputs: [],
-  },
-  {
-    name: 'resume',
-    type: 'function',
-    stateMutability: 'nonpayable',
-    inputs: [{ name: 'safe', type: 'address' }],
-    outputs: [],
-  },
-] as const;
+/** `AgentPolicyModule` ABI, generated from the Solidity source (`npm run abi:policy`). */
+export const AGENT_POLICY_MODULE_ABI = AGENT_POLICY_MODULE_ABI_FULL;
 
+/**
+ * Encode-only helpers for `AgentPolicyModule` calls.
+ *
+ * Who may SEND them (S8): the module accepts `setPolicy`, the whitelist
+ * updates, `emergencyPause` and `resume` only from its immutable `operator` or
+ * from `msg.sender == safe`. Never through `AgentExecutor` — there the
+ * executor is `msg.sender` and every one of these reverts `Unauthorized`
+ * (reproduced on Anvil in `policy-sync.contracts.anvil.ts`). The backend's
+ * own sync (`policy-sync.service.ts`, `POST /admin/agents/:id/policy/sync`)
+ * derives its calls from the stored policy in `policy-sync.ts`; these helpers
+ * remain for callers that hand calldata to the operator key out of band.
+ */
 export class OnChainPolicyService {
-  /**
-   * Syncs an Agent's policy to the on-chain AgentPolicyModule.
-   * This is called by the operator or when a policy is updated in the DB.
-   *
-   * Note: The caller must be the operator (for direct calls) or the Safe (via execTransaction).
-   * In our backend, we typically broadcast these from the operator wallet or via Safe multisig.
-   */
   async buildSyncPolicyCalldata(params: {
     safeAddress: Address;
     maxValuePerTxEth: string;
@@ -94,14 +42,7 @@ export class OnChainPolicyService {
     });
   }
 
-  /**
-   * Builds calldata for `AgentPolicyModule.emergencyPause(safe)` — the
-   * on-chain kill switch. Flips the Safe's policy to `active = false` without
-   * touching limits, expiry or whitelists.
-   *
-   * Like `buildSyncPolicyCalldata`, this only encodes; the operator (or the
-   * Safe via execTransaction) must broadcast it. The backend never does.
-   */
+  /** `AgentPolicyModule.emergencyPause(safe)` — flips the policy to `active = false`. Encode-only. */
   async buildEmergencyPauseCalldata(params: { safeAddress: Address }): Promise<`0x${string}`> {
     return encodeFunctionData({
       abi: AGENT_POLICY_MODULE_ABI,
@@ -110,10 +51,7 @@ export class OnChainPolicyService {
     });
   }
 
-  /**
-   * Builds calldata for `AgentPolicyModule.resume(safe)` — undoes
-   * `emergencyPause` by setting `active = true`. Encode-only, see above.
-   */
+  /** `AgentPolicyModule.resume(safe)` — undoes `emergencyPause`. Encode-only. */
   async buildResumeCalldata(params: { safeAddress: Address }): Promise<`0x${string}`> {
     return encodeFunctionData({
       abi: AGENT_POLICY_MODULE_ABI,

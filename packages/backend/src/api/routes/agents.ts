@@ -218,9 +218,9 @@ async function provisionAgent(
 }
 
 /**
- * Patchable policy fields `AgentPolicyModule` has no slot for, so the
- * `syncOnChain` calldata never carries them and only the backend enforces
- * them: the two Q8 fields, and the daily limit (off-chain since before Q8).
+ * Patchable policy fields `AgentPolicyModule` has no slot for, so the on-chain
+ * sync never carries them and only the backend enforces them: the two Q8
+ * fields, and the daily limit (off-chain since before Q8).
  */
 const OFF_CHAIN_ONLY_POLICY_FIELDS = ['maxValuePerTxUsd', 'allowedRecipients', 'maxDailyVolumeUsd'] as const;
 
@@ -235,7 +235,7 @@ const updatePolicySchema = z.object({
   active: z.boolean().optional(),
   /// ISO 8601 timestamp — sets a temporary policy that expires automatically (null clears expiry)
   expiresAt: z.string().datetime().nullish(),
-  /// If true, returns calldata to sync this policy to the on-chain module
+  /// If true, the answer's `onChainSync` says how the on-chain module is synced (by the operator; S8). No calldata.
   syncOnChain: z.boolean().default(false),
   /// Free-text justification. Written to the policy audit log line only — never stored.
   reason: z.string().max(500).optional(),
@@ -490,60 +490,35 @@ export async function agentRoutes(fastify: FastifyInstance) {
     const policy = await policyService.setPolicy(agentId, patch);
     logger.info(audit, 'Policy updated');
 
+    // S8: this route never changes the on-chain AgentPolicyModule and no
+    // longer hands out calldata for it. The old answer told the caller to run
+    // the module calls through `execute_batch` — i.e. AgentExecutor, where the
+    // executor is msg.sender and the module answers Unauthorized: it could
+    // never work. The operator pushes the STORED policy with
+    // POST /admin/agents/:id/policy/sync (admin credential).
     let onChainSync = null;
     if (syncOnChain) {
       const agent = await db.agent.findUniqueOrThrow({
         where: { id: agentId },
-        select: { safeAddress: true, chainIds: true },
+        select: { chainIds: true },
       });
       const chainId = agent.chainIds[0] ?? 1;
       const { getContracts } = await import('../../config/contracts.js');
       const contracts = getContracts(chainId);
 
       if (contracts.policyModule) {
-        const actions: { to: string; value: string; data: string }[] = [];
-        
-        // 1. Sync core policy
-        const coreCalldata = await policyService.onChain.buildSyncPolicyCalldata({
-          safeAddress: agent.safeAddress as `0x${string}`,
-          maxValuePerTxEth: policy.maxValuePerTxEth,
-          cooldownSeconds: policy.cooldownSeconds,
-          active: policy.active,
-          expiresAt: policy.expiresAt,
-        });
-        actions.push({ to: contracts.policyModule, value: '0', data: coreCalldata });
-
-        // 2. Sync whitelists if they were updated
-        if (patch.allowedContracts) {
-          const contractCalldata = await policyService.onChain.buildUpdateWhitelistCalldata({
-            type: 'contract',
-            safeAddress: agent.safeAddress as `0x${string}`,
-            addresses: patch.allowedContracts,
-            allowed: new Array(patch.allowedContracts.length).fill(true),
-          });
-          actions.push({ to: contracts.policyModule, value: '0', data: contractCalldata });
-        }
-
-        if (patch.allowedTokens) {
-          const tokenCalldata = await policyService.onChain.buildUpdateWhitelistCalldata({
-            type: 'token',
-            safeAddress: agent.safeAddress as `0x${string}`,
-            addresses: patch.allowedTokens,
-            allowed: new Array(patch.allowedTokens.length).fill(true),
-          });
-          actions.push({ to: contracts.policyModule, value: '0', data: tokenCalldata });
-        }
-
         onChainSync = {
+          status: 'operator-sync-required' as const,
           to: contracts.policyModule,
           chainId,
-          actions,
           // Q8: these fields have no on-chain counterpart in AgentPolicyModule;
           // the backend enforces them, the module never sees them.
           offChainOnlyFields: OFF_CHAIN_ONLY_POLICY_FIELDS,
           notice:
-            "Execute these actions via 'execute_batch' to sync your policy on-chain. " +
-            `Not synced (enforced off-chain by the backend only): ${OFF_CHAIN_ONLY_POLICY_FIELDS.join(', ')}.`,
+            'The policy is stored and enforced by the backend now. The on-chain AgentPolicyModule was NOT changed: the operator ' +
+            'syncs the stored policy with POST /admin/agents/:id/policy/sync (admin credential) and compares both sides with ' +
+            'GET /admin/agents/:id/policy/onchain. Module calls sent through execute_batch always revert (the executor is not ' +
+            `authorised). Never synced (enforced off-chain only): ${OFF_CHAIN_ONLY_POLICY_FIELDS.join(', ')}.`,
         };
       }
     }

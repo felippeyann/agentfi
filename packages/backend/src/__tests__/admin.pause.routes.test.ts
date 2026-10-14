@@ -12,8 +12,11 @@
  *  - policy inactive before pause → resume leaves it inactive and says so
  *  - resume of an unpaused agent → no-op with a clear response
  *  - no policy row / expired     → resume reports it / restores the expired state
- *  - syncOnChain                 → emergencyPause(safe) / resume(safe) calldata
- *                                  decodes against the AgentPolicyModule ABI
+ *  - syncOnChain (S8)            → after the DB change, the stored policy is
+ *                                  synced by the policy-sync service (stubbed
+ *                                  here; end to end on Anvil + Postgres in
+ *                                  policy-sync.routes.anvil.ts); no calldata
+ *  - /admin/agents/:id/policy/*  → admin credential, 404, outcome → HTTP status
  */
 import { vi } from 'vitest';
 
@@ -41,13 +44,21 @@ vi.hoisted(() => {
   delete process.env['POLICY_MODULE_ADDRESS_42161'];
 });
 
-const { mockDb, finalizeMock } = vi.hoisted(() => ({
+const { mockDb, finalizeMock, syncMock, viewMock } = vi.hoisted(() => ({
   mockDb: {
     agent: { findUnique: vi.fn(), update: vi.fn() },
     agentPolicy: { findUnique: vi.fn(), updateMany: vi.fn() },
     transaction: { findUnique: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
   } as any,
   finalizeMock: vi.fn(),
+  syncMock: vi.fn(),
+  viewMock: vi.fn(),
+}));
+
+// S8: the sync itself (chain reads, rows, queue) runs for real in
+// policy-sync.routes.anvil.ts; here only the routes' use of it is checked.
+vi.mock('../services/policy/policy-sync.service.js', () => ({
+  PolicySyncService: vi.fn().mockImplementation(() => ({ sync: syncMock, view: viewMock })),
 }));
 
 vi.mock('@prisma/client', () => ({
@@ -81,11 +92,9 @@ vi.mock('../services/policy/daily-volume.js', () => ({
 import Fastify, { type FastifyInstance } from 'fastify';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
-import { decodeFunctionData, toFunctionSelector } from 'viem';
 
 type AdminModule = typeof import('../api/routes/admin.js');
 type GuardModule = typeof import('../services/transaction/pre-submit-guard.js');
-type OnChainModule = typeof import('../services/policy/onchain-policy.service.js');
 type PolicyModule = typeof import('../services/policy/policy.service.js');
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
@@ -137,7 +146,6 @@ let RESUME_POLICY_NOTES: AdminModule['RESUME_POLICY_NOTES'];
 let preSubmitGuard: GuardModule['preSubmitGuard'];
 let PAUSED_BEFORE_SUBMISSION: GuardModule['PAUSED_BEFORE_SUBMISSION'];
 let POLICY_EXPIRED_BEFORE_SUBMISSION: GuardModule['POLICY_EXPIRED_BEFORE_SUBMISSION'];
-let AGENT_POLICY_MODULE_ABI: OnChainModule['AGENT_POLICY_MODULE_ABI'];
 let PolicyService: PolicyModule['PolicyService'];
 
 beforeAll(async () => {
@@ -145,9 +153,16 @@ beforeAll(async () => {
   ({ preSubmitGuard, PAUSED_BEFORE_SUBMISSION, POLICY_EXPIRED_BEFORE_SUBMISSION } = await import(
     '../services/transaction/pre-submit-guard.js'
   ));
-  ({ AGENT_POLICY_MODULE_ABI } = await import('../services/policy/onchain-policy.service.js'));
   ({ PolicyService } = await import('../services/policy/policy.service.js'));
 });
+
+/** A queued outcome of the policy-sync service. */
+const QUEUED = {
+  kind: 'queued',
+  transactions: [{ transactionId: 'sync-1', call: 'emergencyPause', reused: false }],
+  differences: ['active: DB false, on-chain true'],
+  unknownExtras: { contracts: '0', tokens: '0' },
+} as const;
 
 async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
@@ -208,6 +223,7 @@ beforeEach(() => {
   // The guard's FAILED write is conditional on QUEUED + no hash (A6).
   mockDb.transaction.updateMany.mockResolvedValue({ count: 1 });
   finalizeMock.mockResolvedValue(undefined);
+  syncMock.mockResolvedValue(QUEUED);
 });
 
 // ── Pause half of the toggle (contract unchanged by A3b) ───────────────────
@@ -244,23 +260,58 @@ describe('POST /admin/agents/:id/pause — pausing', () => {
     await app.close();
   });
 
-  it('syncOnChain returns emergencyPause(safe) calldata for the policy module of the primary chain', async () => {
+  it('S8: syncOnChain syncs the stored policy AFTER the DB pause and reports what was queued — no calldata to broadcast', async () => {
+    let agentActiveWhenSynced: boolean | undefined;
+    let policyActiveWhenSynced: boolean | undefined;
+    syncMock.mockImplementation(async () => {
+      agentActiveWhenSynced = state.agent!.active;
+      policyActiveWhenSynced = state.policy!.active;
+      return QUEUED;
+    });
     const app = await buildApp();
 
     const body = (await post(app, PAUSE, { syncOnChain: true })).json();
 
     expect(body.active).toBe(false);
-    expect(body.onChainSync).toMatchObject({ to: POLICY_MODULE, chainId: 8453 });
-    expect(body.onChainSync.actions).toHaveLength(1);
-    const { to, value, data } = body.onChainSync.actions[0];
-    expect(to).toBe(POLICY_MODULE);
-    expect(value).toBe('0');
-    expect(data.slice(0, 10)).toBe(toFunctionSelector('emergencyPause(address)'));
-    expect(decodeFunctionData({ abi: AGENT_POLICY_MODULE_ABI, data })).toEqual({
-      functionName: 'emergencyPause',
-      args: [SAFE],
-    });
-    expect(body.onChainSync.notice).toMatch(/pause the on-chain policy/);
+    expect(syncMock).toHaveBeenCalledWith(AGENT_ID, 'kill-switch-pause');
+    expect(agentActiveWhenSynced).toBe(false);
+    expect(policyActiveWhenSynced).toBe(false);
+    expect(body.onChainSync).toMatchObject({ status: 'pending', transactions: QUEUED.transactions });
+    expect(body.onChainSync).not.toHaveProperty('actions');
+    await app.close();
+  });
+
+  it('S8: a refused on-chain sync (e.g. Safe mode) is reported and never undoes the DB pause', async () => {
+    syncMock.mockResolvedValue({ kind: 'refused', httpStatus: 409, code: 'POLICY_SYNC_WALLET_MODE', error: 'safe mode', view: { status: 'out-of-sync' } });
+    const app = await buildApp();
+
+    const res = await post(app, PAUSE, { syncOnChain: true });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ active: false, onChainSync: { status: 'refused', code: 'POLICY_SYNC_WALLET_MODE' } });
+    expect(state.agent!.active).toBe(false);
+    expect(state.policy!.active).toBe(false);
+    await app.close();
+  });
+
+  it('S8: a sync that throws is reported as refused (sanitized), the DB pause stands', async () => {
+    syncMock.mockRejectedValue(new Error('connect ECONNREFUSED https://base-sepolia.g.alchemy.com/v2/k3yAbCdEfGh1jKlMnOpQr5tUv'));
+    const app = await buildApp();
+
+    const res = await post(app, PAUSE, { syncOnChain: true });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.onChainSync).toMatchObject({ status: 'refused', code: 'POLICY_SYNC_ERROR' });
+    expect(JSON.stringify(body)).not.toContain('k3yAbCdEfGh1jKlMnOpQr5tUv');
+    expect(state.agent!.active).toBe(false);
+    await app.close();
+  });
+
+  it('without syncOnChain the sync service is never called', async () => {
+    const app = await buildApp();
+    await post(app, PAUSE);
+    expect(syncMock).not.toHaveBeenCalled();
     await app.close();
   });
 });
@@ -423,42 +474,40 @@ describe('resume after an operator pause', () => {
   });
 });
 
-// ── On-chain calldata (encode-only; the backend never broadcasts) ──────────
+// ── On-chain sync (S8: the stored policy, pushed by the policy-sync service) ─
 
 describe('resume — syncOnChain', () => {
-  it('returns resume(safe) calldata that decodes against the AgentPolicyModule ABI', async () => {
+  it('syncs the stored policy after the DB resume and reports what was queued', async () => {
     const app = await buildApp();
     await post(app, PAUSE);
+    let policyActiveWhenSynced: boolean | undefined;
+    syncMock.mockImplementation(async () => {
+      policyActiveWhenSynced = state.policy!.active;
+      return { ...QUEUED, transactions: [{ transactionId: 'sync-2', call: 'resume', reused: false }] };
+    });
 
     const body = (await post(app, RESUME, { syncOnChain: true })).json();
 
     expect(body).toMatchObject({ active: true, agentReactivated: true, policyReactivated: true });
-    expect(body.onChainSync).toMatchObject({ to: POLICY_MODULE, chainId: 8453 });
-    expect(body.onChainSync.actions).toEqual([
-      { to: POLICY_MODULE, value: '0', data: expect.stringMatching(/^0x[0-9a-f]+$/) },
-    ]);
-    const { data } = body.onChainSync.actions[0];
-    expect(data.slice(0, 10)).toBe(toFunctionSelector('resume(address)'));
-    expect(decodeFunctionData({ abi: AGENT_POLICY_MODULE_ABI, data })).toEqual({
-      functionName: 'resume',
-      args: [SAFE],
-    });
-    expect(body.onChainSync.notice).toMatch(/resume the on-chain policy/);
-    expect(body.onChainSync.notice).toMatch(/has NOT broadcast/);
+    expect(syncMock).toHaveBeenCalledWith(AGENT_ID, 'kill-switch-resume');
+    expect(policyActiveWhenSynced).toBe(true);
+    expect(body.onChainSync).toMatchObject({ status: 'pending', transactions: [{ call: 'resume' }] });
     await app.close();
   });
 
-  it('is returned even on a no-op resume, so the chain can be re-synced on its own', async () => {
+  it('runs even on a no-op resume, so the chain can be re-synced on its own', async () => {
+    syncMock.mockResolvedValue({ kind: 'in-sync', view: { status: 'in-sync' } });
     const app = await buildApp();
 
     const body = (await post(app, RESUME, { syncOnChain: true })).json();
 
     expect(body.agentReactivated).toBe(false);
-    expect(body.onChainSync.actions[0].data.slice(0, 10)).toBe(toFunctionSelector('resume(address)'));
+    expect(body.onChainSync).toMatchObject({ status: 'in-sync', transactions: [] });
     await app.close();
   });
 
   it('is null when the agent primary chain has no policy module configured', async () => {
+    syncMock.mockResolvedValue({ kind: 'refused', httpStatus: 409, code: 'POLICY_MODULE_NOT_CONFIGURED', error: 'none', view: {} });
     state.agent = agentRow({ chainIds: [42161] });
     const app = await buildApp();
     await post(app, PAUSE);
@@ -502,6 +551,64 @@ describe('resume — auth and lookup', () => {
 
     expect(res.statusCode).toBe(401);
     expect(mockDb.agent.findUnique).not.toHaveBeenCalled();
+    await app.close();
+  });
+});
+
+// ── S8: GET /admin/agents/:id/policy/onchain, POST /admin/agents/:id/policy/sync ─
+
+describe('S8 — policy sync routes', () => {
+  const SYNC = `/admin/agents/${AGENT_ID}/policy/sync`;
+  const VIEW = `/admin/agents/${AGENT_ID}/policy/onchain`;
+
+  it('both answer 401 without the admin secret and never reach the service', async () => {
+    const app = await buildApp();
+    expect((await post(app, SYNC, undefined, 'wrong')).statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: VIEW, headers: { 'x-admin-secret': 'wrong' } })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: VIEW })).statusCode).toBe(401);
+    expect(syncMock).not.toHaveBeenCalled();
+    expect(viewMock).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('the sync takes no body: whatever is posted, only the agent id reaches the service', async () => {
+    const app = await buildApp();
+    const res = await post(app, SYNC, { actions: [{ to: POLICY_MODULE, data: '0xdeadbeef' }], calls: ['setPolicy'] });
+    expect(res.statusCode).toBe(202);
+    expect(syncMock).toHaveBeenCalledTimes(1);
+    expect(syncMock).toHaveBeenCalledWith(AGENT_ID, 'admin-sync');
+    expect(res.json()).toMatchObject({ status: 'pending', transactions: QUEUED.transactions });
+    await app.close();
+  });
+
+  it('maps the outcome to the HTTP status: in-sync 200, refusals keep their status and code, unknown agent 404', async () => {
+    const app = await buildApp();
+    syncMock.mockResolvedValueOnce({ kind: 'in-sync', view: { status: 'in-sync' } });
+    expect((await post(app, SYNC)).statusCode).toBe(200);
+
+    syncMock.mockResolvedValueOnce({ kind: 'refused', httpStatus: 422, code: 'POLICY_NOT_REPRESENTABLE', error: 'zero', view: { status: 'not-representable' } });
+    const refused = await post(app, SYNC);
+    expect(refused.statusCode).toBe(422);
+    expect(refused.json()).toMatchObject({ status: 'refused', code: 'POLICY_NOT_REPRESENTABLE', view: { status: 'not-representable' } });
+
+    syncMock.mockResolvedValueOnce({ kind: 'not-found' });
+    expect((await post(app, SYNC)).statusCode).toBe(404);
+
+    syncMock.mockResolvedValueOnce({ ...QUEUED, enqueueError: 'redis down' });
+    expect((await post(app, SYNC)).statusCode).toBe(503);
+    await app.close();
+  });
+
+  it('GET returns the service view, 404 for an unknown agent', async () => {
+    const app = await buildApp();
+    viewMock.mockResolvedValueOnce({ agentId: AGENT_ID, status: 'pending', db: {}, onChain: {} });
+    const ok = await app.inject({ method: 'GET', url: VIEW, headers: { 'x-admin-secret': ADMIN_SECRET } });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toMatchObject({ status: 'pending' });
+
+    viewMock.mockResolvedValueOnce(null);
+    const missing = await app.inject({ method: 'GET', url: VIEW, headers: { 'x-admin-secret': ADMIN_SECRET } });
+    expect(missing.statusCode).toBe(404);
     await app.close();
   });
 });

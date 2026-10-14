@@ -19,6 +19,13 @@ import { finalizeA2APaymentJob } from '../job/payment-finalizer.service.js';
 import { onEscrowTxOutcome, vetBindBeforeBroadcast } from '../job/escrow-erc8183.runtime.js';
 import { settleVolumeAfterFailure, stopStampedTransaction } from '../policy/daily-volume.js';
 import { escrowConfigGate } from '../../config/escrow-verification.runtime.js';
+import { getContracts } from '../../config/contracts.js';
+import {
+  desiredOnChainPolicy,
+  policySyncMetadataOf,
+  supersededReason,
+  type PolicySyncMetadata,
+} from '../policy/policy-sync.js';
 
 export const PAUSED_BEFORE_SUBMISSION = 'Agent paused before submission';
 export const POLICY_EXPIRED_BEFORE_SUBMISSION = 'Agent policy expired before submission';
@@ -29,6 +36,8 @@ export const PAYMENT_OUTCOME_UNKNOWN =
   'an earlier attempt was stamped for broadcast without a recorded hash: the payment may still be mined, so the job is left PAYMENT_PENDING (not refunded) for reconciliation';
 /** C3d: prefix of the error of a `setProviderAgentId` the guard did not broadcast. */
 export const BIND_SKIPPED_BEFORE_SUBMISSION = 'setProviderAgentId skipped before submission';
+/** S8: prefix of the error of an on-chain policy-sync call the stored policy no longer matches. */
+export const POLICY_SYNC_SUPERSEDED = 'Policy sync superseded before submission';
 
 export type PreSubmitDecision =
   /** Transaction is still QUEUED and agent + policy are live — submit it. */
@@ -80,6 +89,55 @@ function resolveBlockReason(agent: AgentSnapshot, now: Date): string | null {
 }
 
 /**
+ * S8 — an on-chain policy-sync call (`metadata.policySync`, queued only by the
+ * admin sync / kill switch, sent from the agent's own wallet straight to the
+ * module). It is NOT blocked by a pause or an expiry: pushing the pause to the
+ * chain is the point of the kill switch. Instead it is re-derived from the
+ * policy stored NOW and refused when the DB moved on after it was queued (a
+ * later change, a resume after a pause, another module configured), so what
+ * is signed always moves the module towards the current stored policy and a
+ * stale call never undoes a newer one.
+ */
+async function policySyncBlockReason(
+  db: PrismaClient,
+  transactionId: string,
+  chainId: number,
+  sync: PolicySyncMetadata,
+): Promise<string | null> {
+  const row = await db.transaction.findUnique({
+    where: { id: transactionId },
+    select: {
+      agent: {
+        select: {
+          safeAddress: true,
+          active: true,
+          policy: {
+            select: { maxValuePerTxEth: true, cooldownSeconds: true, active: true, expiresAt: true, allowedContracts: true, allowedTokens: true },
+          },
+        },
+      },
+    },
+  });
+  const agent = row?.agent;
+  if (!agent?.policy) return `${POLICY_SYNC_SUPERSEDED}: the agent has no stored policy any more`;
+  let configured: string | undefined;
+  try {
+    configured = getContracts(chainId).policyModule;
+  } catch {
+    configured = undefined;
+  }
+  if (!configured || configured.toLowerCase() !== sync.module.toLowerCase()) {
+    return `${POLICY_SYNC_SUPERSEDED}: queued for module ${sync.module}, the configured module is now ${configured ?? 'none'}`;
+  }
+  const derived = desiredOnChainPolicy({ safeAddress: agent.safeAddress, agentActive: agent.active, policy: agent.policy });
+  if (!derived.ok) {
+    return `${POLICY_SYNC_SUPERSEDED}: the stored policy can no longer be held by the module (${derived.problems.join('; ')})`;
+  }
+  const why = supersededReason(sync, derived.desired);
+  return why ? `${POLICY_SYNC_SUPERSEDED}: ${why}` : null;
+}
+
+/**
  * Re-reads the transaction, its agent and the agent's policy in a single
  * Prisma query and decides whether the worker may sign and broadcast.
  *
@@ -99,6 +157,10 @@ function resolveBlockReason(agent: AgentSnapshot, now: Date): string | null {
  * decision is `skip` — and nothing is settled or finalized here; the receipt
  * (or the re-poll's drop) decides. 6d (C3e): ERC-8183 / ERC-8004 steps are
  * handed to the chain the same way (they used to keep the FAILED path).
+ *
+ * S8: an on-chain policy-sync call (`metadata.policySync`) is not blocked by
+ * a pause or an expiry; it is re-derived from the stored policy instead and
+ * FAILED as superseded when the DB moved on (`policySyncBlockReason`).
  */
 export async function preSubmitGuard(
   db: PrismaClient,
@@ -131,7 +193,12 @@ export async function preSubmitGuard(
     return { action: 'skip', reason: `Transaction is ${tx.status}${hashNote}` };
   }
 
-  const reason = resolveBlockReason(tx.agent, new Date());
+  // S8: a policy-sync call is judged against the stored policy, not the pause.
+  const sync = policySyncMetadataOf(tx.metadata);
+  const reason = sync
+    ? await policySyncBlockReason(db, transactionId, tx.chainId, sync)
+    : resolveBlockReason(tx.agent, new Date());
+  if (!reason && sync) return { action: 'proceed' };
   if (!reason) {
     // Q7: an escrow-dependent step waits while its chain is unverified.
     const deferred = escrowConfigDeferral(tx);

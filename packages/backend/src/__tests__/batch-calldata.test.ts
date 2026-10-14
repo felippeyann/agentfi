@@ -50,31 +50,29 @@ describe('decodeStrictErc20Transfer', () => {
 
 describe('classifyBatchCalldata', () => {
   it('no calldata → none', () => {
-    expect(classifyBatchCalldata({ to: TOKEN, data: '0x' }, { policyModule: POLICY_MODULE })).toEqual({ kind: 'none' });
+    expect(classifyBatchCalldata({ to: TOKEN, data: '0x' })).toEqual({ kind: 'none' });
   });
 
-  it("the chain's own AgentPolicyModule → policy-sync (any calldata, case-insensitive target)", () => {
-    expect(classifyBatchCalldata({ to: POLICY_MODULE.toLowerCase(), data: '0xdeadbeef' }, { policyModule: POLICY_MODULE })).toEqual({
-      kind: 'policy-sync',
-    });
-    // Without a configured policy module nothing is a policy sync.
-    expect(classifyBatchCalldata({ to: POLICY_MODULE, data: '0xdeadbeef' }, { policyModule: undefined })).toMatchObject({ kind: 'other' });
+  it('S8: the policy module gets no exemption class any more (the route refuses it as a target before classifying)', () => {
+    expect(classifyBatchCalldata({ to: POLICY_MODULE.toLowerCase(), data: '0xdeadbeef' })).toEqual({ kind: 'other', selector: '0xdeadbeef' });
+    // A non-canonical transfer encoding sent to it is not laundered as a "sync" either.
+    expect(classifyBatchCalldata({ to: POLICY_MODULE, data: `${transfer}00` })).toMatchObject({ kind: 'non-canonical-erc20' });
   });
 
   it('an ERC-20 transfer: the token is the target', () => {
-    expect(classifyBatchCalldata({ to: TOKEN.toLowerCase(), data: transfer }, {})).toEqual({
+    expect(classifyBatchCalldata({ to: TOKEN.toLowerCase(), data: transfer })).toEqual({
       kind: 'erc20-transfer',
       fn: 'transfer',
       token: TOKEN,
       to: getAddress(TO),
       amount: 25_000_000n,
     });
-    expect(classifyBatchCalldata({ to: TOKEN, data: transferFrom }, {})).toMatchObject({ kind: 'erc20-transfer', fn: 'transferFrom', amount: 7n });
+    expect(classifyBatchCalldata({ to: TOKEN, data: transferFrom })).toMatchObject({ kind: 'erc20-transfer', fn: 'transferFrom', amount: 7n });
   });
 
   it('approve / unknown → other, with the selector', () => {
-    expect(classifyBatchCalldata({ to: TOKEN, data: approve }, {})).toEqual({ kind: 'other', selector: '0x095ea7b3' });
-    expect(classifyBatchCalldata({ to: TOKEN, data: '0x12345678abcd' }, {})).toEqual({ kind: 'other', selector: '0x12345678' });
+    expect(classifyBatchCalldata({ to: TOKEN, data: approve })).toEqual({ kind: 'other', selector: '0x095ea7b3' });
+    expect(classifyBatchCalldata({ to: TOKEN, data: '0x12345678abcd' })).toEqual({ kind: 'other', selector: '0x12345678' });
   });
 
   it('G1 review P3-4: a transfer / transferFrom selector that fails strict decoding is non-canonical — never "other" (it would pass uncounted)', () => {
@@ -90,15 +88,13 @@ describe('classifyBatchCalldata', () => {
       [`${transfer.toUpperCase().replace('0X', '0x')}00` as Hex, 'transfer'], // case does not hide it
     ];
     for (const [data, fn] of cases) {
-      expect(classifyBatchCalldata({ to: TOKEN, data }, {}), data).toEqual({
+      expect(classifyBatchCalldata({ to: TOKEN, data }), data).toEqual({
         kind: 'non-canonical-erc20',
         fn,
         selector: fn === 'transfer' ? ERC20_TRANSFER_SELECTOR : ERC20_TRANSFER_FROM_SELECTOR,
       });
     }
-    // A call to the agent's own AgentPolicyModule stays a policy sync whatever its calldata.
-    expect(classifyBatchCalldata({ to: POLICY_MODULE, data: `${transfer}00` }, { policyModule: POLICY_MODULE })).toEqual({ kind: 'policy-sync' });
     // The canonical encodings are unchanged.
-    expect(classifyBatchCalldata({ to: TOKEN, data: transfer }, {})).toMatchObject({ kind: 'erc20-transfer' });
+    expect(classifyBatchCalldata({ to: TOKEN, data: transfer })).toMatchObject({ kind: 'erc20-transfer' });
   });
 });

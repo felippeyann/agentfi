@@ -27,6 +27,7 @@ vi.hoisted(() => {
   }
   // config/contracts.ts reads the executor address at module load.
   process.env['EXECUTOR_ADDRESS_1'] = '0x00000000000000000000000000000000000000E1';
+  process.env['POLICY_MODULE_ADDRESS_1'] = '0x00000000000000000000000000000000000000A9';
 });
 
 const { mockDb, queueAddMock, validateMock, getPolicyMock, simulateMock } = vi.hoisted(() => ({
@@ -242,6 +243,30 @@ describe('POST /v1/transactions/batch — caller-declared token', () => {
     expect(res.json()).toMatchObject({ error: 'Validation failed' });
     expect(validateMock).not.toHaveBeenCalled();
 
+    await app.close();
+  });
+});
+
+describe('POST /v1/transactions/batch — S8: the policy module is never a batch target', () => {
+  it.each([
+    ['setPolicy selector', '0xb35d9751'],
+    ['validateTransaction (no caller check on-chain: would restart a cooldown)', '0xb9c4687c'],
+    ['no calldata', '0x'],
+  ])('%s → 403 POLICY_MODULE_TARGET, nothing simulated or queued (any case of the address)', async (_label, data) => {
+    getPolicyMock.mockResolvedValue(null);
+    const app = await buildApp();
+
+    const res = await app.inject(
+      batch([
+        { to: TARGET, data: '0x' },
+        { to: '0x00000000000000000000000000000000000000a9', data },
+      ]),
+    );
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ code: 'POLICY_MODULE_TARGET', actionIndex: 1 });
+    expect(simulateMock).not.toHaveBeenCalled();
+    expect(queueAddMock).not.toHaveBeenCalled();
     await app.close();
   });
 });
