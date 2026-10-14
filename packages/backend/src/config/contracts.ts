@@ -36,6 +36,7 @@ function erc8183FromEnv(chainId: number): Pick<ChainContracts, 'agentJobEscrow' 
  * Official ERC-8004 Identity Registry deployments (CREATE2, UUPS proxies), the
  * same defaults `script/DeployEscrow.s.sol` wires into `ReputationHook`.
  * Verified 2026-10-07 — see docs/architecture/erc-8004-integration.md §2.
+ * Re-checked on-chain 2026-10-14 (S7): `name()` = "AgentIdentity" on both.
  */
 export const DEFAULT_IDENTITY_REGISTRIES: Readonly<Record<number, Address>> = {
   8453: '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432',
@@ -59,6 +60,8 @@ export function resolveIdentityRegistry(chainId: number, source: ContractEnvSour
  * `script/DeployEscrow.s.sol` wires into `ReputationHook`
  * (docs/architecture/erc-8004-integration.md §1). The backend never writes to
  * it (the hook does); C3d's boot check compares it with `hook.reputationRegistry()`.
+ * Re-checked on-chain 2026-10-14 (S7): `getIdentityRegistry()` = the chain's
+ * default identity registry above.
  */
 export const DEFAULT_REPUTATION_REGISTRIES: Readonly<Record<number, Address>> = {
   8453: '0x8004BAa17C55a88189AE136b182e5fdA19dE9b63',
@@ -100,6 +103,8 @@ export interface LegacyContractAddress {
  * legacy executor is bound to and Deploy.s.sol always ships a fresh pair.
  * Redeploy from `packages/contracts/src` and update the `*_ADDRESS_<chainId>`
  * env vars. See docs/operations/contract-deployment.md ("ABI versioning").
+ * Source: the maintainer's own deployments (no third-party record); code
+ * present at each address on 2026-10-14 (S7 check).
  */
 export const LEGACY_CONTRACT_ADDRESSES: readonly LegacyContractAddress[] = [
   // Base Mainnet — maintainer deployment, 2026-03
@@ -168,6 +173,52 @@ function executorFromEnv(chainId: number): Address | undefined {
   return resolveExecutorAddress(chainId).address ?? undefined;
 }
 
+// ---------------------------------------------------------------------------
+// Third-party deployments (S7, verified 2026-10-14)
+// ---------------------------------------------------------------------------
+// Every hard-coded address below comes from the protocol's own deployment
+// record, pinned to a commit, and was checked on-chain with read-only
+// JSON-RPC (eth_getCode plus a view that binds it to its protocol, e.g. the
+// provider's getPool(), the quoter's factory(), a GMX contract's roleStore()).
+// `__tests__/contracts.addresses.test.ts` keeps them EIP-55 and pins the S7
+// corrections; `__tests__/contracts.addresses.fork.test.ts` re-runs the
+// identity checks on mainnet forks.
+//
+// Sources:
+//   [AAVE] aave-dao/aave-address-book@6463b76862f4e2ea79764a02e0f1971c3fedb7fe
+//          src/AaveV3{Ethereum,Base,Arbitrum,Polygon}.sol POOL_ADDRESSES_PROVIDER
+//   [UNI]  Uniswap/docs@1c7597d73be0e9a3a4e44aa75b8fb212b40ea136
+//          content/protocols/v3/deployments/v3-{ethereum,base,arbitrum,polygon}-deployments.mdx
+//          (docs.uniswap.org; the Base page lists Base and Base Sepolia)
+//   [COMP] compound-finance/comet@f766f51583c23acc33b2a7824654ef2029a96804
+//          deployments/{mainnet,base,arbitrum,polygon}/usdc/roots.json "comet"
+//   [GMX]  gmx-io/gmx-synthetics@a85ea3491c19c93bb4b5a002d9b358fb769b7849
+//          deployments/arbitrum/{Router,OrderVault}.json, and the live UI config
+//          gmx-io/gmx-interface@8974a1f3d0bdebdf28945a169d745f88b6e7fa72
+//          sdk/src/configs/contracts.ts (SyntheticsRouter, OrderVault)
+//
+// S7: four entries were not casing slips but wrong addresses with NO code on
+// their chain — Base aavePoolAddressProvider (…ad64B, official …ad64D), Base
+// uniswapV3Quoter (…B136CFc5…, official QuoterV2 …B871ab26…), Arbitrum
+// gmxRouter (…8006Ce12…, official …afC8c83d…) and gmxOrderVault (…deDA89C0…,
+// official …EE9A1809…). viem refused them (invalid EIP-55), so those paths
+// answered 500; correcting only the casing would have targeted empty
+// addresses.
+
+/**
+ * Uniswap V3 QuoterV2 per chain — what the swap route quotes with
+ * (`quoteExactInputSingle`); without a quote it builds the swap with
+ * `amountOutMinimum = 0`. [UNI] "QuoterV2" rows. Base used a second wrong
+ * address (…B136aa68…, no code) until S7, so every Base swap had no slippage
+ * floor. No Base Sepolia entry (unchanged; see the S7 PR).
+ */
+export const UNISWAP_V3_QUOTER_V2: Readonly<Record<number, Address>> = {
+  1: '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
+  8453: '0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a',
+  42161: '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
+  137: '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
+};
+
 export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
   // Ethereum Mainnet
   1: {
@@ -176,10 +227,10 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
     escrowModule: (process.env['ESCROW_MODULE_ADDRESS_1'] as Address) || undefined,
     ...erc8183FromEnv(1),
     identityRegistry: resolveIdentityRegistry(1),
-    uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
-    uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
-    aavePoolAddressProvider: '0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e',
-    compoundCometUsdc: '0xc3d688B66703497DAA19211EEdff47f25384cdc3',
+    uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564', // [UNI] SwapRouter (V1 ABI, with deadline)
+    uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6', // [UNI] Quoter (V1); not read by the routes
+    aavePoolAddressProvider: '0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e', // [AAVE] AaveV3Ethereum
+    compoundCometUsdc: '0xc3d688B66703497DAA19211EEdff47f25384cdc3', // [COMP] mainnet/usdc
   },
   // Base
   8453: {
@@ -188,10 +239,15 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
     escrowModule: (process.env['ESCROW_MODULE_ADDRESS_8453'] as Address) || undefined,
     ...erc8183FromEnv(8453),
     identityRegistry: resolveIdentityRegistry(8453),
-    uniswapV3Router: '0x2626664c2603336E57B271c5C0b26F421741e481',
-    uniswapV3Quoter: '0x3d4e44Eb1374240CE5F1B136CFc5b5e8b4e1b2f7',
-    aavePoolAddressProvider: '0xe20fCBdBfFC4Dd138cE8b2E6FBb6CB49777ad64B',
-    compoundCometUsdc: '0xb125E6687d4313864e53df431d5425969c15Eb2F',
+    uniswapV3Router: '0x2626664c2603336E57B271c5C0b26F421741e481', // [UNI] SwapRouter02
+    // S7: was 0x3d4e44eb1374240ce5f1b136cfc5b5e8b4e1b2f7 (no code). [UNI] Base
+    // QuoterV2; on-chain factory() = UniswapV3Factory 0x33128a8f…6FDfD.
+    uniswapV3Quoter: '0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a',
+    // S7: was 0xe20fcbdbffc4dd138ce8b2e6fbb6cb49777ad64b (no code). [AAVE]
+    // AaveV3Base; on-chain getPool() = 0xA238Dd80…98d1c5 (AaveV3Base.POOL),
+    // whose ADDRESSES_PROVIDER() is this address; getMarketId() "Aave V3 BASE Market".
+    aavePoolAddressProvider: '0xe20fCBdBfFC4Dd138cE8b2E6FBb6CB49777ad64D',
+    compoundCometUsdc: '0xb125E6687d4313864e53df431d5425969c15Eb2F', // [COMP] base/usdc
   },
   // Arbitrum One
   42161: {
@@ -200,13 +256,25 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
     escrowModule: (process.env['ESCROW_MODULE_ADDRESS_42161'] as Address) || undefined,
     ...erc8183FromEnv(42161),
     identityRegistry: resolveIdentityRegistry(42161),
-    uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
-    uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
-    aavePoolAddressProvider: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb',
-    compoundCometUsdc: '0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf',
+    uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564', // [UNI] SwapRouter (V1 ABI, with deadline)
+    uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6', // [UNI] Quoter (V1); not read by the routes
+    aavePoolAddressProvider: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb', // [AAVE] AaveV3Arbitrum
+    compoundCometUsdc: '0x9c4ec768c28520B50860ea7a15bd7213a9fF58bf', // [COMP] arbitrum/usdc
+    // A 2023 GMX ExchangeRouter, superseded: on 2026-10-14 it holds neither
+    // CONTROLLER nor ROUTER_PLUGIN in GMX's RoleStore, so its sendTokens /
+    // createOrder revert (GMX orders fail closed at simulation). The live one
+    // ([GMX] interface config) is 0x7dE39FF2e232A2203196788d37e234cF8F1b83f1,
+    // with a newer CreateOrderParams than builder.service.ts encodes — an
+    // integration update, not an address fix (S7 PR, open question).
     gmxExchangeRouter: '0x7C68C7866A64FA2160F78EEaE12217FFbf871fa8',
-    gmxRouter: '0x7452c558d45f8006Ce12C56010796DCe2eB24afb',
-    gmxOrderVault: '0x31eF83a530Fde1B38deDA89C0A6c72a85b35CDf6',
+    // S7: was 0x7452c558d45f8006ce12c56010796dce2eb24afb (no code). [GMX]
+    // Router.json / SyntheticsRouter; on-chain roleStore() = GMX RoleStore
+    // 0x3c3d99FD…5e6e72, and the ExchangeRouter above reports it as router().
+    gmxRouter: '0x7452c558d45f8afC8c83dAe62C3f8A5BE19c71f6',
+    // S7: was 0x31ef83a530fde1b38deda89c0a6c72a85b35cdf6 (no code). [GMX]
+    // OrderVault.json; on-chain roleStore() = GMX RoleStore, dataStore() =
+    // GMX DataStore 0xFD70de6b…b992d8.
+    gmxOrderVault: '0x31eF83a530Fde1B38EE9A18093A333D8Bbbc40D5',
   },
   // Base Sepolia (testnet)
   // No hard-coded defaults: the former testnet pair (policy 0x771444Ff…7203,
@@ -219,8 +287,8 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
     escrowModule: (process.env['ESCROW_MODULE_ADDRESS_84532'] as Address) || undefined,
     ...erc8183FromEnv(84532),
     identityRegistry: resolveIdentityRegistry(84532),
-    uniswapV3Router: '0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4',
-    uniswapV3Quoter: '0xC5290058841028F1614F3A6F0F5816cAd0df5E27',
+    uniswapV3Router: '0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4', // [UNI] Base Sepolia SwapRouter02
+    uniswapV3Quoter: '0xC5290058841028F1614F3A6F0F5816cAd0df5E27', // [UNI] Base Sepolia QuoterV2
     aavePoolAddressProvider: '0x0000000000000000000000000000000000000000', // not deployed on testnet
   },
   // Polygon
@@ -230,10 +298,10 @@ export const CONTRACT_ADDRESSES: Record<number, ChainContracts> = {
     escrowModule: (process.env['ESCROW_MODULE_ADDRESS_137'] as Address) || undefined,
     ...erc8183FromEnv(137),
     identityRegistry: resolveIdentityRegistry(137),
-    uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564',
-    uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6',
-    aavePoolAddressProvider: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb',
-    compoundCometUsdc: '0xF25212E676D1F7F89Cd72fFEe66158f541246445',
+    uniswapV3Router: '0xE592427A0AEce92De3Edee1F18E0157C05861564', // [UNI] SwapRouter (V1 ABI, with deadline)
+    uniswapV3Quoter: '0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6', // [UNI] Quoter (V1); not read by the routes
+    aavePoolAddressProvider: '0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb', // [AAVE] AaveV3Polygon
+    compoundCometUsdc: '0xF25212E676D1F7F89Cd72fFEe66158f541246445', // [COMP] polygon/usdc
   },
 };
 
