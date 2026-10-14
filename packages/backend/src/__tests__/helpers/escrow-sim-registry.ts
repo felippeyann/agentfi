@@ -10,6 +10,25 @@
  */
 
 import type { Erc8183Config, Erc8183Deps } from '../../services/job/escrow-erc8183.service.js';
+import type { EscrowGateVerdict } from '../../config/escrow-verification.js';
+
+/**
+ * Q7: the suite's per-process verification state (the real runtime is
+ * mocked with `simGate`). Verified unless a test sets a reason.
+ */
+let unverifiedReason: string | null = null;
+
+export function setSimConfigUnverified(reason: string | null): void {
+  unverifiedReason = reason;
+}
+
+export const SIM_GATE_RETRY_SECONDS = 120;
+
+export function simGate(chainId: number): EscrowGateVerdict {
+  return unverifiedReason === null
+    ? { allowed: true, chainId, verifiedAt: new Date(), validUntil: new Date(Date.now() + 600_000) }
+    : { allowed: false, chainId, block: 'unverified', reason: unverifiedReason, retryAfterSeconds: SIM_GATE_RETRY_SECONDS };
+}
 
 let current: Erc8183Deps | null = null;
 

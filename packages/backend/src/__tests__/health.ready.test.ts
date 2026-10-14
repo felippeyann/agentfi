@@ -138,3 +138,24 @@ describe('InProcessWindowLimiter', () => {
     expect(limiter.hit('b')).toBeNull();
   });
 });
+
+describe('GET /health/ready — Q7 escrow configuration (diagnostic only)', () => {
+  it('shows each escrow chain\'s verification state without reasons and never changes the readiness status', async () => {
+    const { checks } = fakeChecks();
+    clock = 1_000_000;
+    const app = Fastify({ logger: false });
+    const views = [{ chainId: 84532, state: 'unverified' as const, allowed: false, verifiedAt: null, validUntil: null, since: '2026-10-14T10:00:00.000Z' }];
+    await app.register(healthRoutes, { checks, now: () => clock, escrowConfig: () => views });
+    apps.push(app);
+    const res = await ready(app);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ status: 'ready', escrowConfig: views });
+    expect(JSON.stringify(res.json())).not.toContain('reason');
+  });
+
+  it('the default view comes from the process state: no escrow configured here → an empty list', async () => {
+    const { checks } = fakeChecks();
+    const app = await build(checks);
+    expect((await ready(app)).json().escrowConfig).toEqual([]);
+  });
+});
