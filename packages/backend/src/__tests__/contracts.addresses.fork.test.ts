@@ -43,7 +43,8 @@ const USDC_ARB = '0xaf88d065e77c8cC2239327C5EDb3A432268e5831';
 const ROUTER_PLUGIN = '0xc82e6cc76072f8edb32d42796e58e13ab6e145524eb6b36c073be82f20d410f3';
 
 describeBase('S7 on a Base mainnet fork', () => {
-  const client = createPublicClient({ transport: http(BASE_RPC) });
+  // describe.skip still runs this body to collect the tests: no client without a URL.
+  const client = createPublicClient({ transport: http(BASE_RPC ?? 'http://127.0.0.1:1') });
   const base = contracts.getContracts(8453);
 
   it('is a fork of Base (chain 8453)', async () => {
@@ -89,7 +90,7 @@ describeBase('S7 on a Base mainnet fork', () => {
 });
 
 describeArb('S7 on an Arbitrum One fork', () => {
-  const client = createPublicClient({ transport: http(ARB_RPC) });
+  const client = createPublicClient({ transport: http(ARB_RPC ?? 'http://127.0.0.1:1') });
   const arb = contracts.getContracts(42161);
   const bank = parseAbi(['function roleStore() view returns (address)', 'function dataStore() view returns (address)']);
 
