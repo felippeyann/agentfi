@@ -286,7 +286,9 @@ export interface EscrowAlert {
     | 'review-expiring'
     | 'review-expired'
     | 'review-overridden'
-    | 'settlement-failed';
+    | 'settlement-failed'
+    /** G1 review P2-1: past expiresAt, a delivery accepted in time is waiting for its submit / settlement — not refunded. */
+    | 'delivery-held';
   message: string;
   jobId?: string;
   chainId?: number | null;
@@ -316,6 +318,17 @@ export interface Erc8183Deps {
    * runtime always wires it).
    */
   configGate?(chainId: number): EscrowGateVerdict;
+  /**
+   * G1 review P3-1: whether ANY RPC node of `chainId` knows the transaction
+   * (pending or mined) — every candidate asked with its own client
+   * (`services/transaction/tx-known.ts`); false only when every node answered
+   * "not found", and throws when it cannot tell (no node knows it and one
+   * errored) — callers treat the throw as "may still mine". `publicClient`
+   * is a fallback transport that stops at the first node that answers, and
+   * "not found" is an answer. Absent (unit tests) → the single
+   * `publicClient(chainId).getTransaction`.
+   */
+  isKnownTransaction?(chainId: number, hash: Hex): Promise<boolean>;
 }
 
 /** The slice of a BullMQ job the settlement processor reads — a plain object satisfies it in tests. */
@@ -1334,12 +1347,16 @@ async function noSettlementInFlight(
   deps: Erc8183Deps,
   job: Pick<EscrowJobRow, 'settleTxHash' | 'escrowChainId' | 'settleAttemptAt'>,
 ): Promise<{ ok: boolean; reason?: string }> {
-  // C3e item 2: a settlement was stamped for broadcast and its hash never
-  // recorded (the write failed, or the process died): it may still mine.
+  // C3e item 2 / G1 review P3-2: an evaluator send is stamped (with its
+  // signed hash) before it leaves and the stamp is cleared once the send is
+  // resolved; a stamp still set means a send in progress, or a process that
+  // died mid-send: it may still mine.
   if (job.settleAttemptAt) {
     return {
       ok: false,
-      reason: `a settlement was broadcast at ${job.settleAttemptAt.toISOString()} and its transaction hash was not recorded; it may still mine`,
+      reason:
+        `a settlement was being sent at ${job.settleAttemptAt.toISOString()} ` +
+        `(transaction ${job.settleTxHash ?? 'not recorded'}) and its send is not resolved yet; it may still mine`,
     };
   }
   if (!job.settleTxHash) return { ok: true };
@@ -1382,6 +1399,19 @@ export async function contestEscrowJob(deps: Erc8183Deps, params: { jobId: strin
   if (!job) return { outcome: 'refused', reason: 'not an ERC-8183 escrow job' };
   if (job.status !== 'PAYMENT_PENDING' || job.onChainStatus !== 'SUBMITTED' || job.contestedAt !== null) {
     return { outcome: 'refused', reason: 'A job can only be contested while PAYMENT_PENDING, SUBMITTED on-chain, not contested yet and before settlement' };
+  }
+  // G1 review P2-1: the contest window (the evaluation delay) is clamped to
+  // end at `expiresAt − margin`, where the settlement is due. A contest after
+  // that point could only meet a settlement that was delayed (Q7 deferral,
+  // failures) and, as an unresolved contest at expiry, turn a delivery made in
+  // time into a full refund — the requester keeping the deliverable.
+  if (job.expiresAt && nowOf(deps).getTime() >= job.expiresAt.getTime() - expiryMarginMs(deps.config)) {
+    return {
+      outcome: 'refused',
+      reason:
+        `The contest window has closed: the escrow expires at ${job.expiresAt.toISOString()} and the settlement of a delivery is due ` +
+        'before expiresAt (minus the expiry margin). Ask the operator to review the job.',
+    };
   }
   let chain: ChainJob;
   try {
@@ -1922,12 +1952,33 @@ function errorNamed(err: unknown, name: string): boolean {
 }
 
 /**
+ * G1 review P3-1: does any RPC node know `hash` (pending or mined)? Every
+ * candidate is asked (`deps.isKnownTransaction`); throws when none could be.
+ * Without that dep (unit tests): the single read client — null when it has no
+ * `getTransaction` (nothing can be told).
+ */
+async function isEvaluatorTxKnown(deps: Erc8183Deps, chainId: number, hash: Hex): Promise<boolean | null> {
+  if (deps.isKnownTransaction) return deps.isKnownTransaction(chainId, hash);
+  const client = deps.publicClient(chainId);
+  if (!client.getTransaction) return null;
+  try {
+    await client.getTransaction({ hash });
+    return true;
+  } catch (err) {
+    if (errorNamed(err, 'TransactionNotFoundError')) return false;
+    throw err;
+  }
+}
+
+/**
  * C3e item 1: refuses (`SettlementStillPendingError`) while the job's last
  * evaluator transaction is still pending. Mined (any status) → a new attempt
  * is safe (a success would have made the chain terminal, which the caller read
- * first; a revert changed nothing). Unknown to the node (dropped) → safe, the
- * new transaction replaces it. Unreadable → refused (retried later). A client
- * without `getTransaction` cannot tell pending from dropped: allowed, as before.
+ * first; a revert changed nothing). Unknown to every node (dropped, or never
+ * sent) → safe, the new transaction replaces it. Unreadable → refused
+ * (retried later). G1 review P3-1: "unknown" is asked of every RPC node, not
+ * only the first one that answers. Without any transaction lookup (unit-test
+ * clients) pending cannot be told from dropped: allowed, as before.
  */
 async function assertNoPendingSettlement(deps: Erc8183Deps, job: Pick<EscrowJobRow, 'settleTxHash' | 'escrowChainId'>): Promise<void> {
   if (!job.settleTxHash || job.escrowChainId === null) return;
@@ -1939,40 +1990,132 @@ async function assertNoPendingSettlement(deps: Erc8183Deps, job: Pick<EscrowJobR
   } catch (err) {
     if (!errorNamed(err, 'TransactionReceiptNotFoundError')) throw new SettlementStillPendingError(hash, 'its receipt could not be read');
   }
-  if (!client.getTransaction) return;
+  let known: boolean | null;
   try {
-    await client.getTransaction({ hash });
-  } catch (err) {
-    if (errorNamed(err, 'TransactionNotFoundError')) return;
-    throw new SettlementStillPendingError(hash, 'the node could not be asked about it');
+    known = await isEvaluatorTxKnown(deps, job.escrowChainId, hash);
+  } catch {
+    throw new SettlementStillPendingError(hash, 'the RPC nodes cannot tell whether it is known (a node could not be asked)');
   }
-  throw new SettlementStillPendingError(hash, 'no receipt yet and the node still knows it');
+  if (known) throw new SettlementStillPendingError(hash, 'no receipt yet and an RPC node still knows it');
+}
+
+/**
+ * G1 review P3-2: thrown from the broadcast hook — nothing is sent — when the
+ * conditional write of the signed hash finds the job changed since it was
+ * read: another attempt recorded its own transaction, or (for a claimed
+ * settlement) the row is no longer SETTLING. Retried like any failure; the
+ * retry reads the job again.
+ */
+export class SettlementSupersededError extends Error {
+  constructor(readonly jobId: string) {
+    super(`ERC-8183 settlement of job ${jobId} not sent: the job changed since it was read (another attempt, or the claim was handed back)`);
+    this.name = 'SettlementSupersededError';
+  }
 }
 
 /**
  * Every evaluator transaction goes through here: Q7 gate, no second broadcast
  * while the job's previous one may still mine (C3e item 1), balance check,
- * sign + broadcast, and the hash recorded on the job.
+ * then sign → record → send.
+ *
+ * G1 review P3-2 (replaces C3e item 2's stamp-then-hash): the evaluator signs
+ * locally, so the signed hash is recorded in `settleTxHash` together with the
+ * `settleAttemptAt` stamp BEFORE anything is sent — a conditional write on
+ * the hash as read (and on SETTLING for a claimed settlement), so two
+ * attempts cannot both send. Then the send:
+ *  - it succeeds → the stamp is cleared; the recorded hash keeps contest /
+ *    resolve refusing and a retry waiting (`assertNoPendingSettlement`) while
+ *    it may mine — a lost write after the send cannot open a second one;
+ *  - it throws (node refused it, out of gas, lost answer) → the nodes are
+ *    asked about that hash: every node answered "not found" → it never left:
+ *    the hash slot is given back (the previous hash) and the stamp cleared, so
+ *    a contest and a new decision are allowed again; a node knows it → in
+ *    flight: the hash is kept, the stamp cleared; uncertain (no node knows it
+ *    and one could not be asked — it may be the one that took it) → both
+ *    kept.
+ * A call that reverts in simulation never reaches the hook: it stamps nothing.
+ * A signer that does not call the hook (test doubles) gets its hash recorded
+ * after the send, as before.
  */
 async function sendEvaluatorTx(
   deps: Erc8183Deps,
   job: Pick<EscrowJobRow, 'id' | 'escrowChainId' | 'settleTxHash'>,
   params: EvaluatorWriteParams,
+  opts: { claimed?: boolean } = {},
 ): Promise<{ signer: EvaluatorSigner; txHash: Hex }> {
   const chainId = job.escrowChainId!;
   assertEscrowConfigVerified(deps, chainId);
   await assertNoPendingSettlement(deps, job);
   await checkEvaluatorBalance(deps, chainId);
   const signer = deps.evaluatorSigner(chainId);
-  // C3e item 2: stamped BEFORE the send (after the simulation): if the hash
-  // write below is lost, the stamp keeps contest / resolve refusing.
-  const txHash = await signer.writeContract(params, {
-    onBeforeBroadcast: async () => {
-      await deps.db.job.update({ where: { id: job.id }, data: { settleAttemptAt: nowOf(deps) } });
-    },
-  });
-  await deps.db.job.update({ where: { id: job.id }, data: { settleTxHash: txHash, settleAttemptAt: null } });
-  return { signer, txHash };
+  const previous = (job.settleTxHash as Hex | null) ?? null;
+  // Assigned by the broadcast hook (a closure): typed so the checks below are not narrowed away.
+  let recorded = null as Hex | null;
+  let txHash: Hex;
+  try {
+    txHash = await signer.writeContract(params, {
+      onBeforeBroadcast: async (signedTxHash: Hex) => {
+        const stamped = await deps.db.job.updateMany({
+          where: { id: job.id, settleTxHash: previous, ...(opts.claimed ? { onChainStatus: 'SETTLING' } : {}) },
+          data: { settleTxHash: signedTxHash, settleAttemptAt: nowOf(deps) },
+        });
+        if (stamped.count === 0) throw new SettlementSupersededError(job.id);
+        recorded = signedTxHash;
+      },
+    });
+  } catch (err) {
+    if (recorded !== null) await resolveFailedSend(deps, { jobId: job.id, chainId, hash: recorded, previous, err });
+    throw err;
+  }
+  try {
+    if (recorded === null) {
+      await deps.db.job.update({ where: { id: job.id }, data: { settleTxHash: txHash, settleAttemptAt: null } });
+    } else {
+      await deps.db.job.updateMany({ where: { id: job.id, settleTxHash: recorded }, data: { settleAttemptAt: null } });
+    }
+  } catch (err) {
+    if (recorded === null) throw err;
+    // The hash was recorded before the send: a lost stamp clear only keeps
+    // contest / resolve refusing until the outcome is recorded.
+    deps.logger.warn({ jobId: job.id, txHash, err: errorMessage(err) }, 'ERC-8183 settle-attempt stamp not cleared after the send — the recorded hash stands');
+  }
+  return { signer, txHash: recorded ?? txHash };
+}
+
+/** P3-2: the send of a recorded settlement threw — decide from the nodes whether it may still mine. */
+async function resolveFailedSend(
+  deps: Erc8183Deps,
+  failure: { jobId: string; chainId: number; hash: Hex; previous: Hex | null; err: unknown },
+): Promise<void> {
+  const { jobId, chainId, hash, previous } = failure;
+  let known: boolean | null;
+  try {
+    known = await isEvaluatorTxKnown(deps, chainId, hash);
+  } catch {
+    known = null;
+  }
+  try {
+    if (known === false) {
+      await deps.db.job.updateMany({ where: { id: jobId, settleTxHash: hash }, data: { settleTxHash: previous, settleAttemptAt: null } });
+      deps.logger.warn(
+        { jobId, txHash: hash, err: publicErrorMessage(failure.err) },
+        'ERC-8183 settlement send failed and no RPC node knows the transaction — never sent: settle-attempt stamp cleared',
+      );
+    } else if (known === true) {
+      await deps.db.job.updateMany({ where: { id: jobId, settleTxHash: hash }, data: { settleAttemptAt: null } });
+      deps.logger.warn(
+        { jobId, txHash: hash, err: publicErrorMessage(failure.err) },
+        'ERC-8183 settlement send reported an error but a node knows the transaction — in flight, hash kept',
+      );
+    } else {
+      deps.logger.error(
+        { jobId, txHash: hash, err: publicErrorMessage(failure.err) },
+        'ERC-8183 settlement send failed and the RPC nodes cannot tell whether it left (a node could not be asked) — hash and stamp kept (may still mine)',
+      );
+    }
+  } catch (dbErr) {
+    deps.logger.error({ jobId, txHash: hash, err: errorMessage(dbErr) }, 'ERC-8183 settlement send failed and its record could not be updated — hash and stamp kept');
+  }
 }
 
 /**
@@ -2053,7 +2196,15 @@ async function settle(deps: Erc8183Deps, job: EscrowJobRow, chainStatus: number)
   // Q7: checked BEFORE the claim too, so a settlement deferred for an
   // unverified configuration leaves the job SUBMITTED / CONTESTED (still
   // contestable, still resolvable) instead of parking it in SETTLING.
-  assertEscrowConfigVerified(deps, job.escrowChainId!);
+  // G1 review P3-3: an operator decision is claimed (SETTLING) by
+  // `resolveEscrowJob` in the API process, and an earlier attempt may have
+  // claimed the row too: a deferral hands such a row back to its hold.
+  try {
+    assertEscrowConfigVerified(deps, job.escrowChainId!);
+  } catch (err) {
+    if (err instanceof EscrowConfigUnverifiedError) await handBackDeferredClaim(deps, job.id);
+    throw err;
+  }
 
   // Claim the settlement (→ SETTLING). The automatic branch only takes an
   // uncontested PAYMENT_PENDING job without a decision: a contest claims the
@@ -2083,7 +2234,46 @@ async function settle(deps: Erc8183Deps, job: EscrowJobRow, chainStatus: number)
   // without one (pre-C3d contested rows are moved to CONTESTED by migration
   // 0019 — review P3-3).
   const decision = (fresh.resolution as ReviewDecision | null) ?? 'pay';
-  return executeDecision(deps, fresh, decision);
+  try {
+    return await executeDecision(deps, fresh, decision);
+  } catch (err) {
+    // The gate closed between the claim and the send (sendEvaluatorTx checks
+    // it again first, before anything is stamped): back to the hold.
+    if (err instanceof EscrowConfigUnverifiedError) await handBackDeferredClaim(deps, job.id);
+    throw err;
+  }
+}
+
+/**
+ * G1 review P3-3: a settlement deferred by the Q7 gate after its row was
+ * claimed (SETTLING — by `resolveEscrowJob` for an operator decision, or by
+ * an earlier attempt) goes back to its hold before the deferral: CONTESTED
+ * for a contested job (the recorded decision stays), SUBMITTED otherwise.
+ * Parked in SETTLING for the whole outage, the operator could not change the
+ * decision (resolve refuses SETTLING) and the expiry sweep skipped the job.
+ * Conditional on no evaluator send having been stamped: a deferral happens
+ * before any stamp, and a row another attempt is sending stays SETTLING.
+ */
+async function handBackDeferredClaim(deps: Erc8183Deps, jobId: string): Promise<void> {
+  try {
+    const contested = await deps.db.job.updateMany({
+      where: { id: jobId, onChainStatus: 'SETTLING', settleAttemptAt: null, contestedAt: { not: null } },
+      data: { onChainStatus: 'CONTESTED' },
+    });
+    const submitted = await deps.db.job.updateMany({
+      where: { id: jobId, onChainStatus: 'SETTLING', settleAttemptAt: null, contestedAt: null },
+      data: { onChainStatus: 'SUBMITTED' },
+    });
+    if (contested.count + submitted.count > 0) {
+      deps.logger.warn(
+        { jobId, onChainStatus: contested.count > 0 ? 'CONTESTED' : 'SUBMITTED' },
+        'ERC-8183 settlement deferred (on-chain configuration unverified) — claimed job handed back to its hold',
+      );
+    }
+  } catch (err) {
+    // The deferral still happens; the job stays SETTLING until the next attempt.
+    deps.logger.error({ jobId, err: errorMessage(err) }, 'ERC-8183 deferred settlement could not be handed back to its hold');
+  }
 }
 
 interface SettlementPlan {
@@ -2141,12 +2331,18 @@ async function executeDecision(deps: Erc8183Deps, job: EscrowJobRow, decision: R
   }
 
   const escrow = getAddress(job.escrowContract!);
-  const { signer, txHash } = await sendEvaluatorTx(deps, job, {
-    address: escrow,
-    abi: AGENT_JOB_ESCROW_ABI,
-    functionName: plan.functionName,
-    args: [BigInt(job.onChainJobId!), plan.reason, optParams],
-  });
+  const { signer, txHash } = await sendEvaluatorTx(
+    deps,
+    job,
+    {
+      address: escrow,
+      abi: AGENT_JOB_ESCROW_ABI,
+      functionName: plan.functionName,
+      args: [BigInt(job.onChainJobId!), plan.reason, optParams],
+    },
+    // The job was claimed (SETTLING): the hash is recorded only while it still is.
+    { claimed: true },
+  );
   deps.logger.info({ jobId: job.id, action: plan.functionName, decision, resolution: job.resolution, txHash }, 'ERC-8183 settlement sent');
 
   const receipt = await signer.waitForTransactionReceipt(txHash);
@@ -2161,6 +2357,7 @@ async function executeDecision(deps: Erc8183Deps, job: EscrowJobRow, decision: R
     data: {
       onChainStatus,
       settleTxHash: txHash,
+      settleAttemptAt: null,
       platformFeeAmount: parsed.platformFee !== null ? parsed.platformFee.toString() : null,
       feedbackStatus: parsed.feedbackStatus,
       ...(ratedAgentId ? { ratedAgentId } : {}),
@@ -2283,6 +2480,7 @@ async function rejectForCancellation(
     data: {
       onChainStatus: 'REJECTED',
       settleTxHash: txHash,
+      settleAttemptAt: null,
       feedbackStatus: parsed.feedbackStatus,
       escrowError: null,
       // A "0x" reject commits no feedback file (C3d: only a mined complete / verdict publishes one).
@@ -2304,6 +2502,14 @@ async function claimRefund(deps: Erc8183Deps, job: EscrowJobRow, chainStatus: nu
     }
     return { outcome: 'noop', reason: 'on-chain job is Open — nothing to claim' };
   }
+  // G1 review P2-1: a claim enqueued before the job was held (an earlier
+  // sweep, an older process) or that races the delivery re-checks the hold
+  // here, right before signing.
+  const hold = await deliveryHoldReason(deps, job);
+  if (hold) {
+    deps.logger.warn({ jobId: job.id, reason: hold }, 'ERC-8183 claimRefund dropped — a delivery accepted in time is held for its submit / settlement');
+    return { outcome: 'noop', reason: `delivery accepted in time is held: ${hold}` };
+  }
   const before = reviewSnapshot(job);
   const escrow = getAddress(job.escrowContract!);
   const { signer, txHash } = await sendEvaluatorTx(deps, job, {
@@ -2318,7 +2524,13 @@ async function claimRefund(deps: Erc8183Deps, job: EscrowJobRow, chainStatus: nu
   await deps.db.job.update({
     where: { id: job.id },
     // claimRefund carries no feedback params: a file an earlier, unmined settlement generated was never committed.
-    data: { onChainStatus: 'EXPIRED', settleTxHash: txHash, escrowError: null, ...(job.feedbackFile != null ? { feedbackFile: Prisma.DbNull } : {}) },
+    data: {
+      onChainStatus: 'EXPIRED',
+      settleTxHash: txHash,
+      settleAttemptAt: null,
+      escrowError: null,
+      ...(job.feedbackFile != null ? { feedbackFile: Prisma.DbNull } : {}),
+    },
   });
   await finalizeAfterRefund(deps, job, `Expired on-chain — budget refunded in tx ${txHash}`);
   await alertReviewExpired(deps, job, before);
@@ -2540,6 +2752,86 @@ export async function handleFailedSettlementJob(deps: Erc8183Deps, jobLike: Sett
 export const EXPIRY_SWEEP_LIMIT = 50;
 
 /**
+ * `onChainStatus` of a delivery accepted in time that may still be waiting
+ * for its submit (FUNDED) or for its automatic settlement (SUBMITTED).
+ */
+const DELIVERY_PENDING_ON_CHAIN = ['FUNDED', 'SUBMITTED'] as const;
+
+type DeliveryHoldJob = Pick<EscrowJobRow, 'id' | 'status' | 'contestedAt' | 'resolution' | 'onChainStatus' | 'deferredSubmitAt'>;
+
+/**
+ * G1 review P2-1: why the backend must NOT claim the refund of this expired
+ * job, or null. The provider delivered through the API in time — `PATCH
+ * COMPLETED` passed the expiry-margin check, so the job is PAYMENT_PENDING
+ * with its result readable by the requester — it is not contested, no
+ * operator decision other than "pay" is recorded (a "pay" taken on a held
+ * delivery must not be overtaken by the sweep's refund), and the delivery is
+ * still on its way:
+ *  - FUNDED: its `submit` is in flight — deferred behind the ERC-8004 binding,
+ *    QUEUED (e.g. deferred by the Q7 gate, without limit), SUBMITTED without a
+ *    receipt, or CONFIRMED but not yet mirrored;
+ *  - SUBMITTED: the deliverable is on-chain and waits for its automatic
+ *    settlement (deferred by the Q7 gate, or failing).
+ * A refund then would leave the requester with the deliverable AND the
+ * budget, and the provider unpaid (`claimRefund` is allowed on a Funded or
+ * Submitted job once expired; `submit` has no expiry check and `complete` is
+ * allowed after `expiredAt` while Submitted, so the deferred submit and the
+ * refund race). Such a job is held for the operator: the submit lands and the
+ * settlement pays the provider (the clamp gives it no delay past expiresAt),
+ * or the operator decides (`POST /admin/jobs/:id/resolve` once Submitted).
+ * Unchanged: no delivery (PENDING / ACCEPTED), a delivery whose submit failed
+ * for good (the job is back to ACCEPTED), contested jobs and refund decisions
+ * (C3d: refunded at expiry, alerted), CANCELLED / FAILED jobs.
+ */
+async function deliveryHoldReason(deps: Erc8183Deps, job: DeliveryHoldJob): Promise<string | null> {
+  if (job.status !== 'PAYMENT_PENDING' || job.contestedAt !== null) return null;
+  if (job.resolution != null && job.resolution !== 'pay') return null;
+  if (job.onChainStatus === 'SUBMITTED') {
+    return job.resolution === 'pay'
+      ? 'its deliverable is Submitted on-chain and the operator decision "pay" has not settled yet'
+      : 'its deliverable is Submitted on-chain and its automatic settlement has not run yet';
+  }
+  if (job.onChainStatus !== 'FUNDED') return null;
+  if (job.deferredSubmitAt) return "its submit is deferred behind the provider's ERC-8004 binding";
+  const submit = await deps.db.transaction.findFirst({
+    where: { ...intentAttemptsFilter(escrowIntentId('submit', job.id)), status: { in: [...IN_FLIGHT_TX] as never } },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, status: true },
+  });
+  if (!submit) return null;
+  return `its submit transaction ${submit.id} is ${submit.status === 'QUEUED' ? 'QUEUED (not broadcast yet)' : submit.status === 'SUBMITTED' ? 'broadcast without a receipt' : submit.status}`;
+}
+
+/**
+ * P2-1: one operator alert per held job (the `reviewAlertedAt` claim, shared
+ * with the review-expiring reminder — a held delivery is never one of those
+ * jobs). A delivery the channel refuses releases the claim for the next tick.
+ */
+async function alertDeliveryHeld(
+  deps: Erc8183Deps,
+  job: DeliveryHoldJob & Pick<EscrowJobRow, 'expiresAt' | 'escrowChainId' | 'onChainJobId' | 'reviewAlertedAt'>,
+  reason: string,
+  now: Date,
+): Promise<void> {
+  if (job.reviewAlertedAt) return;
+  const claimed = await deps.db.job.updateMany({ where: { id: job.id, reviewAlertedAt: null }, data: { reviewAlertedAt: now } });
+  if (claimed.count === 0) return;
+  const delivered = await raiseAlert(deps, {
+    kind: 'delivery-held',
+    jobId: job.id,
+    chainId: job.escrowChainId,
+    message:
+      `Job ${job.id} passed expiresAt ${job.expiresAt?.toISOString() ?? '(unknown)'} with its provider's delivery accepted in time but not ` +
+      `settled: ${reason}. The backend does NOT claim the refund (the requester would keep the deliverable AND the budget): when the ` +
+      'submit lands the automatic settlement pays the provider, or decide with ' +
+      `POST /admin/jobs/${job.id}/resolve once the deliverable is Submitted on-chain. Residual: claimRefund is permissionless after ` +
+      'expiresAt — anyone (the requester included) can still refund it on-chain, which the reconciliation then mirrors.',
+    details: { status: job.status, onChainStatus: job.onChainStatus, expiresAt: job.expiresAt?.toISOString() ?? null, onChainJobId: job.onChainJobId },
+  });
+  if (!delivered) await deps.db.job.updateMany({ where: { id: job.id, reviewAlertedAt: now }, data: { reviewAlertedAt: null } });
+}
+
+/**
  * Enqueues `claimRefund` for every escrow job that exists on-chain, is past
  * `expiresAt` and is not final in the DB (C3c: whatever the DB thinks the
  * last step was — a `fund` whose monitor was lost leaves the DB at APPROVED
@@ -2547,28 +2839,81 @@ export const EXPIRY_SWEEP_LIMIT = 50;
  * Funded/Submitted → refund; Open → closed as EXPIRED_UNFUNDED; terminal →
  * mirrored. SETTLING is left to the settlement in flight. Least recently
  * touched first, so a job whose claim keeps failing cannot starve the rest.
- * Returns how many were enqueued.
+ *
+ * G1 review P2-1: a delivery accepted in time whose submit or settlement is
+ * still on its way is held instead (`deliveryHoldReason`) and alerted once;
+ * those candidates are read by a separate query, so held jobs never fill the
+ * refund batch. Returns how many refunds were enqueued.
  */
 export async function sweepExpiredEscrows(deps: Erc8183Deps): Promise<number> {
   const now = nowOf(deps);
-  const expired = await deps.db.job.findMany({
+  const expired = {
+    escrowKind: ESCROW_KIND,
+    onChainJobId: { not: null },
+    onChainStatus: { notIn: [...FINAL_ON_CHAIN_STATUSES, 'SETTLING'] },
+    expiresAt: { lt: now },
+  } satisfies Prisma.JobWhereInput;
+  const refundable = await deps.db.job.findMany({
     where: {
-      escrowKind: ESCROW_KIND,
-      onChainJobId: { not: null },
-      onChainStatus: { notIn: [...FINAL_ON_CHAIN_STATUSES, 'SETTLING'] },
-      expiresAt: { lt: now },
+      ...expired,
+      // Everything but an uncontested PAYMENT_PENDING job still FUNDED / SUBMITTED without a refund decision.
+      OR: [
+        { status: { not: 'PAYMENT_PENDING' } },
+        { contestedAt: { not: null } },
+        { resolution: { in: REVIEW_DECISIONS.filter((d) => d !== 'pay') } },
+        { onChainStatus: { notIn: [...DELIVERY_PENDING_ON_CHAIN] } },
+      ],
     },
     select: { id: true },
     take: EXPIRY_SWEEP_LIMIT,
     orderBy: { updatedAt: 'asc' },
   });
-  for (const job of expired) {
-    await deps.settlement.add({ jobId: job.id, action: 'claimRefund' });
+  const deliveries = await deps.db.job.findMany({
+    where: {
+      ...expired,
+      status: 'PAYMENT_PENDING',
+      contestedAt: null,
+      OR: [{ resolution: null }, { resolution: 'pay' }],
+      onChainStatus: { in: [...DELIVERY_PENDING_ON_CHAIN] },
+    },
+    select: {
+      id: true,
+      status: true,
+      contestedAt: true,
+      resolution: true,
+      onChainStatus: true,
+      deferredSubmitAt: true,
+      expiresAt: true,
+      escrowChainId: true,
+      onChainJobId: true,
+      reviewAlertedAt: true,
+    },
+    take: EXPIRY_SWEEP_LIMIT,
+    orderBy: { updatedAt: 'asc' },
+  });
+
+  const toRefund = refundable.map(({ id }) => id);
+  let held = 0;
+  for (const job of deliveries) {
+    const reason = await deliveryHoldReason(deps, job);
+    if (!reason) {
+      // PAYMENT_PENDING + FUNDED with no submit left in flight: the delivery failed for good.
+      toRefund.push(job.id);
+      continue;
+    }
+    held++;
+    await alertDeliveryHeld(deps, job, reason, now);
   }
-  if (expired.length > 0) {
-    deps.logger.warn({ count: expired.length }, 'ERC-8183 expiry sweep — claimRefund enqueued');
+  for (const jobId of toRefund) {
+    await deps.settlement.add({ jobId, action: 'claimRefund' });
   }
-  return expired.length;
+  if (toRefund.length > 0) {
+    deps.logger.warn({ count: toRefund.length }, 'ERC-8183 expiry sweep — claimRefund enqueued');
+  }
+  if (held > 0) {
+    deps.logger.warn({ held }, 'ERC-8183 expiry sweep — deliveries accepted in time held (no refund claimed): submit or settlement still on its way');
+  }
+  return toRefund.length;
 }
 
 export type Erc8183RecoveryOutcome =

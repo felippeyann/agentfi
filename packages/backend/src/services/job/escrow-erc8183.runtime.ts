@@ -21,6 +21,7 @@ import { getEvaluatorSigner } from '../escrow/evaluator-signer.js';
 import { releaseJobEscrow } from '../policy/escrow.service.js';
 import { notificationService } from '../notification.service.js';
 import { walletLaneLock } from '../transaction/wallet-lane.runtime.js';
+import { isTransactionKnownOnAnyRpc } from '../transaction/tx-known.js';
 import { finalizeA2APaymentJob } from './payment-finalizer.service.js';
 import { readHookReputation } from './hook-state.js';
 import * as identity from './erc8004-identity.service.js';
@@ -114,6 +115,8 @@ export function erc8183Deps(): Erc8183Deps {
     alert: sendEscrowAlert,
     // Q7: no evaluator signature while the chain's on-chain configuration is unverified in this process.
     configGate: (chainId) => escrowConfigGate(chainId),
+    // G1 review P3-1: "may this settlement still mine?" asks every RPC node, not the first that answers.
+    isKnownTransaction: (chainId, hash) => isTransactionKnownOnAnyRpc(chainId, hash),
   };
 }
 

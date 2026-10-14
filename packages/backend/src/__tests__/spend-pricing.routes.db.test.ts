@@ -579,6 +579,25 @@ describeDb('Q9 — trusted prices on the real routes (Postgres)', () => {
       expect(await onlyRow(authorised.id)).toMatchObject({ volumeState: null });
     });
 
+    it('G1 review P3-4: a non-canonical transfer / transferFrom is refused (403 NON_CANONICAL_ERC20_CALL) even when allowedContracts lists the token — never passed uncounted without the recipient check', async () => {
+      const authorised = await mkAgent([TESTNET], { allowedContracts: [USDC_84532], allowedRecipients: [LISTED] });
+      const canonical = transferData(RECIPIENT, 900_000_000n); // a recipient outside allowedRecipients
+      for (const data of [`${canonical}00`, `${canonical.slice(0, 10)}ff${canonical.slice(12)}`]) {
+        const res = await batch(authorised.id, [{ to: USDC_84532, value: '0', data }]);
+        expect(res.statusCode, res.body).toBe(403);
+        expect(res.json()).toMatchObject({ code: 'NON_CANONICAL_ERC20_CALL', rule: 'nonCanonicalErc20Call', actionIndex: 0, selector: '0xa9059cbb' });
+      }
+      const fromData = encodeFunctionData({ abi: erc20Abi, functionName: 'transferFrom', args: [RECIPIENT, RECIPIENT, 5n] });
+      const res = await batch(authorised.id, [{ to: USDC_84532, value: '0', data: `${fromData}ff` }]);
+      expect(res.statusCode, res.body).toBe(403);
+      expect(res.json()).toMatchObject({ code: 'NON_CANONICAL_ERC20_CALL', selector: '0x23b872dd' });
+      expect(await rows(authorised.id)).toHaveLength(0);
+      // Its canonical form is still checked like any transfer (here: the recipient is not allowed).
+      const plain = await batch(authorised.id, [{ to: USDC_84532, value: '0', data: canonical }]);
+      expect(plain.statusCode).toBe(403);
+      expect(plain.json()).toMatchObject({ rule: 'allowedRecipients' });
+    });
+
     it('without a daily limit the batch is unchanged: unknown calldata to any target is accepted, nothing counted', async () => {
       const agent = await mkAgent([TESTNET], { maxDailyVolumeUsd: '0' });
       const res = await batch(agent.id, [{ to: RECIPIENT, value: '0', data: '0x12345678' }]);

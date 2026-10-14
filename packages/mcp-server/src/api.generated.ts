@@ -2093,7 +2093,10 @@ export interface paths {
          *     `SUBMITTED` in the database and Submitted on-chain, the settlement has not
          *     been claimed and no evaluator settlement transaction of the job can
          *     still mine (`ESCROW_EVALUATION_DELAY_SECONDS` is the window). Contest
-         *     and settlement claim the same row conditionally: exactly one wins.
+         *     and settlement claim the same row conditionally: exactly one wins. The
+         *     window always closes at `escrow.expiresAt` minus the expiry margin
+         *     (2 minutes, or 10 % of the job TTL when shorter), where the settlement
+         *     is due: a contest after it is refused even if the settlement is late.
          */
         post: {
             parameters: {
@@ -2124,9 +2127,10 @@ export interface paths {
                 /**
                  * @description `NOT_ESCROW_JOB` (legacy job) or `CONTEST_NOT_ALLOWED` (not
                  *     `PAYMENT_PENDING` + `SUBMITTED`, already contested, settlement claimed,
-                 *     or a settlement transaction already broadcast / mined; `message`
-                 *     says which); the body carries the current `status`,
-                 *     `onChainStatus`, `contestedAt`.
+                 *     a settlement transaction already broadcast / mined, or the window
+                 *     closed at `expiresAt` minus the expiry margin; `message` says
+                 *     which); the body carries the current `status`, `onChainStatus`,
+                 *     `contestedAt`.
                  */
                 409: {
                     headers: {
@@ -3847,10 +3851,12 @@ export interface components {
          *     native value, its recipient checked against `allowedRecipients` and its
          *     token against `allowedTokens` (403 with `rule`); or a call to a target
          *     the operator listed in `allowedContracts` (allowed, not counted —
-         *     authorisation replaces accounting). Anything else is `403` with `code:
-         *     "UNACCOUNTED_CALL"`. A component without a trusted price is `503
-         *     PRICE_UNAVAILABLE` (with `actionIndex`). Without a daily limit none of
-         *     this applies.
+         *     authorisation replaces accounting). The `transfer` / `transferFrom`
+         *     selector with calldata that is not that exact encoding is `403` with
+         *     `code: "NON_CANONICAL_ERC20_CALL"` whatever `allowedContracts` lists.
+         *     Anything else is `403` with `code: "UNACCOUNTED_CALL"`. A component
+         *     without a trusted price is `503 PRICE_UNAVAILABLE` (with
+         *     `actionIndex`). Without a daily limit none of this applies.
          */
         BatchRequest: {
             /** @default 1 */
@@ -4442,9 +4448,13 @@ export interface components {
          *     "unaccountedCall"`, `actionIndex`, `selector`): an action's calldata is
          *     neither a call to the agent's own AgentPolicyModule nor an exact ERC-20
          *     `transfer` / `transferFrom`, and its target is not in `allowedContracts`
-         *     — list the contract (operator) to authorise it; or `rule:
-         *     "allowedRecipients"` / `"allowedTokens"` for a recognised ERC-20 transfer
-         *     whose recipient / token is not allowed.
+         *     — list the contract (operator) to authorise it; or `code:
+         *     "NON_CANONICAL_ERC20_CALL"` (`rule: "nonCanonicalErc20Call"`,
+         *     `actionIndex`, `selector`): the ERC-20 `transfer` / `transferFrom`
+         *     selector with calldata that is not its exact ABI encoding (trailing
+         *     bytes, dirty padding, truncated), refused whatever `allowedContracts`
+         *     lists; or `rule: "allowedRecipients"` / `"allowedTokens"` for a
+         *     recognised ERC-20 transfer whose recipient / token is not allowed.
          */
         PolicyViolation: {
             headers: {

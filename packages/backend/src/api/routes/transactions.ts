@@ -1904,6 +1904,21 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         const action = body.actions[i]!;
         const call = classifyBatchCalldata(action, { policyModule: contracts.policyModule });
         if (call.kind === 'none' || call.kind === 'policy-sync') continue;
+        if (call.kind === 'non-canonical-erc20') {
+          // G1 review P3-4: refused whatever allowedContracts says — a token
+          // decodes it leniently and moves the amount, so it cannot be "other"
+          // (uncounted, recipient unchecked).
+          return reply.code(403).send({
+            error:
+              `Action at index ${i} blocked by policy: its calldata uses the ERC-20 ${call.fn} selector (${call.selector}) but is ` +
+              'not its canonical ABI encoding (trailing bytes, dirty padding or a truncated payload), so its amount and recipient ' +
+              'cannot be checked. Send the exact encoding.',
+            code: 'NON_CANONICAL_ERC20_CALL',
+            rule: 'nonCanonicalErc20Call',
+            actionIndex: i,
+            selector: call.selector,
+          });
+        }
         if (call.kind === 'erc20-transfer') {
           if (policy.allowedRecipients.length > 0 && !inList(policy.allowedRecipients, call.to)) {
             return reply.code(403).send({

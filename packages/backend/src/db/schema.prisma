@@ -171,7 +171,7 @@ model Job {
   resolvedAt        DateTime?
   resolutionNote    String?
   reviewLog         Json?     // append-only [{ at, by, decision, note, status, onChainStatus }]
-  reviewAlertedAt   DateTime? // "job held for operator review close to expiresAt" alert sent (once)
+  reviewAlertedAt   DateTime? // "job held for operator review close to / past expiresAt" alert sent (once): review-expiring (C3d) or delivery-held (G1 review P2-1)
   ratedAgentId      String?   // ERC-8004 agent id the ReputationHook rated (canonicalAgentId[provider])
   // ERC-8004 identity binding (R2, migration 0015): the provider's ERC-8004
   // agent id attached to the on-chain job with `setProviderAgentId`, so the

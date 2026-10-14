@@ -211,12 +211,13 @@ describeDb('migration 0023 (C3e) on Postgres, against rows that existed before i
     }
   });
 
-  it('a stamp written after 0023 (a settlement broadcast whose hash was lost) makes the same decision a 409 SETTLEMENT_IN_PROGRESS', async () => {
+  it('a stamp written after 0023 (a settlement send not resolved yet) makes the same decision a 409 SETTLEMENT_IN_PROGRESS', async () => {
     await scratch.$executeRawUnsafe(`UPDATE "${SCHEMA}"."Job" SET "settleAttemptAt" = NOW() WHERE "id" = 'submitted-fresh'`);
     expect(await resolveEscrowJob(deps(), { jobId: 'submitted-fresh', decision: 'refund', note: 'c3e migration', operator: 'ops' })).toMatchObject({
       outcome: 'refused',
       code: 'SETTLEMENT_IN_PROGRESS',
-      message: expect.stringContaining('transaction hash was not recorded'),
+      // G1 review P3-2: the stamp now goes with the signed hash; the message says a send is not resolved yet.
+      message: expect.stringMatching(/settlement was being sent at .*it may still mine/),
     });
     expect((await scratch.job.findUniqueOrThrow({ where: { id: 'submitted-fresh' } })).resolution).toBeNull();
   });

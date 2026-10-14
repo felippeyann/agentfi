@@ -43,6 +43,7 @@ import {
 import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
 import { InMemoryLaneLock } from '../services/transaction/wallet-lane.js';
 import type { EvaluatorWriteParams } from '../services/escrow/evaluator-signer.js';
+import { TransactionLookupUnavailableError } from '../services/transaction/tx-known.js';
 import { REPUTATION_HOOK_ABI } from '../abi/ReputationHook.abi.js';
 import {
   ALERT_TEXT_MAX_CHARS,
@@ -80,6 +81,7 @@ import {
   toJobResponse,
   type Erc8183Config,
   type Erc8183Deps,
+  type EscrowAlert,
   type FeedbackFile,
 } from '../services/job/escrow-erc8183.service.js';
 
@@ -897,10 +899,36 @@ describe('processSettlementJob — reject (cancellation) and claimRefund (expiry
     expect(releaseJobEscrow).toHaveBeenCalledWith('job-1');
   });
 
-  it('claimRefund on a PAYMENT_PENDING (submitted) job → finalizer FAILED', async () => {
-    const { deps, finalize } = makeDeps([SUBMITTED_JOB()], { chainStatus: CHAIN_JOB_STATUS.Submitted, settleLogs: [makeLog(AGENT_JOB_ESCROW_ABI, 'JobExpired', { jobId: 7n }, ESCROW)] });
+  it('claimRefund on a PAYMENT_PENDING job held for review (contested, C3d) → finalizer FAILED', async () => {
+    const { deps, finalize } = makeDeps([SUBMITTED_JOB({ onChainStatus: 'CONTESTED', contestedAt: NOW })], {
+      chainStatus: CHAIN_JOB_STATUS.Submitted,
+      settleLogs: [makeLog(AGENT_JOB_ESCROW_ABI, 'JobExpired', { jobId: 7n }, ESCROW)],
+    });
     await processSettlementJob(deps, { data: { jobId: 'job-1', action: 'claimRefund' } });
     expect(finalize).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'job-1', outcome: 'FAILED', reason: expect.stringContaining('Expired') }));
+  });
+
+  it('G1 review P2-1: claimRefund on an uncontested delivery accepted in time (Submitted, or its submit in flight) is dropped — nothing signed, nothing finalized', async () => {
+    const submitted = makeDeps([SUBMITTED_JOB()], { chainStatus: CHAIN_JOB_STATUS.Submitted });
+    expect(await processSettlementJob(submitted.deps, { data: { jobId: 'job-1', action: 'claimRefund' } })).toMatchObject({
+      outcome: 'noop',
+      reason: expect.stringContaining('held'),
+    });
+    expect(submitted.signer.writeContract).not.toHaveBeenCalled();
+    expect(submitted.finalize).not.toHaveBeenCalled();
+
+    // FUNDED with the submit QUEUED (e.g. deferred by the Q7 gate): held; once it failed for good: refunded.
+    const queued = makeDeps([SUBMITTED_JOB({ onChainStatus: 'FUNDED' })], {
+      chainStatus: CHAIN_JOB_STATUS.Funded,
+      txs: [stepTx('submit', 'job-1', { status: 'QUEUED', txHash: null })],
+    });
+    expect(await processSettlementJob(queued.deps, { data: { jobId: 'job-1', action: 'claimRefund' } })).toMatchObject({ outcome: 'noop' });
+    expect(queued.signer.writeContract).not.toHaveBeenCalled();
+    const failed = makeDeps([SUBMITTED_JOB({ onChainStatus: 'FUNDED' })], {
+      chainStatus: CHAIN_JOB_STATUS.Funded,
+      txs: [stepTx('submit', 'job-1', { status: 'FAILED', txHash: null })],
+    });
+    expect(await processSettlementJob(failed.deps, { data: { jobId: 'job-1', action: 'claimRefund' } })).toMatchObject({ outcome: 'settled', action: 'claimRefund' });
   });
 });
 
@@ -944,6 +972,53 @@ describe('processSettlementJob — C3e item 1: a retry never signs over a pendin
     });
     await expect(processSettlementJob(deps, settleJob(2))).rejects.toBeInstanceOf(SettlementStillPendingError);
     expect(signer.writeContract).not.toHaveBeenCalled();
+  });
+
+  it('G1 review P3-1 (strict lookup): the multi-node check is uncertain (no node knows it, one errored) → refused, nothing signed — even if the read client says "not found"', async () => {
+    const { deps, signer, jobs } = withPrevious(async () => {
+      throw notFound('TransactionNotFoundError');
+    });
+    deps.isKnownTransaction = vi.fn(async () => Promise.reject(new TransactionLookupUnavailableError(PREV, 3, 1)));
+    const err = await processSettlementJob(deps, settleJob(2)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SettlementStillPendingError);
+    expect((err as Error).message).toMatch(/cannot tell whether it is known/);
+    expect(signer.writeContract).not.toHaveBeenCalled();
+    expect(jobs.get('job-1')!['settleTxHash']).toBe(PREV);
+  });
+});
+
+describe('sendEvaluatorTx — G1 review P3-2: a send that throws after the signed hash was recorded', () => {
+  const SIGNED = '0x5157000000000000000000000000000000000000000000000000000000000001' as Hex;
+
+  /** A signer that records the signed hash through the hook, then fails at send. */
+  function failingSend(known: () => Promise<boolean>) {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    ctx.signer.writeContract.mockImplementation((async (_params: EvaluatorWriteParams, opts?: { onBeforeBroadcast?: (h: Hex) => Promise<void> }) => {
+      await opts?.onBeforeBroadcast?.(SIGNED);
+      throw new Error('insufficient funds for gas * price + value');
+    }) as never);
+    ctx.deps.isKnownTransaction = vi.fn(known);
+    return ctx;
+  }
+
+  it('no node knows it (every node answered) → never sent: hash slot given back, stamp cleared', async () => {
+    const { deps, jobs } = failingSend(async () => false);
+    await expect(processSettlementJob(deps, settleJob())).rejects.toThrow(/insufficient funds/);
+    expect(jobs.get('job-1')).toMatchObject({ settleTxHash: null, settleAttemptAt: null });
+  });
+
+  it('a node knows it → in flight: hash kept, stamp cleared', async () => {
+    const { deps, jobs } = failingSend(async () => true);
+    await expect(processSettlementJob(deps, settleJob())).rejects.toThrow(/insufficient funds/);
+    expect(jobs.get('job-1')).toMatchObject({ settleTxHash: SIGNED, settleAttemptAt: null });
+  });
+
+  it('strict lookup uncertain (no node knows it, one errored) → hash AND stamp kept (may still mine): contest refused', async () => {
+    const { deps, jobs } = failingSend(async () => Promise.reject(new TransactionLookupUnavailableError(SIGNED, 2, 1)));
+    await expect(processSettlementJob(deps, settleJob())).rejects.toThrow(/insufficient funds/);
+    expect(jobs.get('job-1')).toMatchObject({ settleTxHash: SIGNED, settleAttemptAt: NOW });
+    jobs.get('job-1')!['onChainStatus'] = 'SUBMITTED'; // the failed handler's hand-back
+    expect(await contestEscrowJob(deps, { jobId: 'job-1', reason: null })).toMatchObject({ outcome: 'refused', reason: expect.stringMatching(/may still mine/) });
   });
 });
 
@@ -1036,6 +1111,61 @@ describe('sweepExpiredEscrows', () => {
       ['expired-approved', 'expired-failed', 'expired-funded', 'expired-submitted'].sort(),
     );
     expect(await sweepExpiredEscrows({ ...deps, now: () => new Date(0) })).toBe(0);
+  });
+
+  it('G1 review P2-1: a delivery accepted in time whose submit / settlement is still on its way is held (no claimRefund) and alerted once; the other expiry cases are unchanged', async () => {
+    const past = new Date(NOW.getTime() - 1000);
+    const delivered = { status: 'PAYMENT_PENDING', expiresAt: past, deliverableHash: `0x${'cd'.repeat(32)}` };
+    const { deps, settlement, alert, jobs } = makeDeps(
+      [
+        escrowJob({ id: 'held-queued', onChainJobId: '1', onChainStatus: 'FUNDED', ...delivered }),
+        escrowJob({ id: 'held-broadcast', onChainJobId: '2', onChainStatus: 'FUNDED', ...delivered }),
+        escrowJob({ id: 'held-binding', onChainJobId: '3', onChainStatus: 'FUNDED', deferredSubmitAt: past, ...delivered }),
+        escrowJob({ id: 'held-submitted', onChainJobId: '4', onChainStatus: 'SUBMITTED', ...delivered }),
+        // An operator "pay" on a held delivery is not overtaken by a refund.
+        escrowJob({ id: 'held-pay', onChainJobId: '9', onChainStatus: 'SUBMITTED', resolution: 'pay', ...delivered }),
+        // Unchanged: the submit failed for good (no attempt in flight), a contest, a refund decision, no delivery.
+        escrowJob({ id: 'failed-submit', onChainJobId: '5', onChainStatus: 'FUNDED', ...delivered }),
+        escrowJob({ id: 'contested', onChainJobId: '6', onChainStatus: 'CONTESTED', contestedAt: past, resolution: 'pay', ...delivered }),
+        escrowJob({ id: 'decided', onChainJobId: '7', onChainStatus: 'SUBMITTED', resolution: 'refund', ...delivered }),
+        escrowJob({ id: 'undelivered', onChainJobId: '8', onChainStatus: 'FUNDED', status: 'ACCEPTED', expiresAt: past }),
+      ],
+      {
+        txs: [
+          stepTx('submit', 'held-queued', { id: 'tx-q', status: 'QUEUED', txHash: null }),
+          stepTx('submit', 'held-broadcast', { id: 'tx-b', status: 'SUBMITTED' }),
+          stepTx('submit', 'failed-submit', { id: 'tx-f', status: 'FAILED', txHash: null }),
+        ],
+      },
+    );
+
+    expect(await sweepExpiredEscrows(deps)).toBe(4);
+    expect(settlement.add.mock.calls.map((call) => (call[0] as { jobId: string }).jobId).sort()).toEqual(
+      ['contested', 'decided', 'failed-submit', 'undelivered'].sort(),
+    );
+    const held = alert.mock.calls.map((call) => call[0] as EscrowAlert).filter((a) => a.kind === 'delivery-held');
+    expect(held.map((a) => a.jobId).sort()).toEqual(['held-binding', 'held-broadcast', 'held-pay', 'held-queued', 'held-submitted']);
+    expect(held.find((a) => a.jobId === 'held-pay')!.message).toMatch(/operator decision "pay" has not settled/);
+    expect(held.find((a) => a.jobId === 'held-queued')!.message).toMatch(/QUEUED.*claimRefund is permissionless/s);
+    expect(jobs.get('held-queued')!['reviewAlertedAt']).toEqual(NOW);
+
+    // A second tick: still held, not alerted again.
+    settlement.add.mockClear();
+    alert.mockClear();
+    await sweepExpiredEscrows(deps);
+    expect(settlement.add.mock.calls.map((call) => (call[0] as { jobId: string }).jobId)).not.toContain('held-queued');
+    expect(alert).not.toHaveBeenCalled();
+  });
+
+  it('P2-1: an undelivered alert releases its once-per-job claim for the next tick', async () => {
+    const past = new Date(NOW.getTime() - 1000);
+    const { deps, alert, jobs } = makeDeps([escrowJob({ id: 'held', onChainJobId: '1', onChainStatus: 'SUBMITTED', status: 'PAYMENT_PENDING', expiresAt: past })]);
+    alert.mockRejectedValueOnce(new Error('webhook down'));
+    await sweepExpiredEscrows(deps);
+    expect(jobs.get('held')!['reviewAlertedAt']).toBeNull();
+    await sweepExpiredEscrows(deps);
+    expect(alert).toHaveBeenCalledTimes(2);
+    expect(jobs.get('held')!['reviewAlertedAt']).toEqual(NOW);
   });
 });
 
@@ -1358,13 +1488,29 @@ describe('C3d — contestEscrowJob (race rule)', () => {
     });
   });
 
-  it('C3e item 2: a settle-attempt stamp without a hash (the hash write was lost) refuses the contest — it may still mine', async () => {
+  it('C3e item 2: a settle-attempt stamp (a send in progress, or crashed mid-send) refuses the contest — it may still mine', async () => {
     const { deps, dbMock } = makeDeps([SUBMITTED_JOB({ settleAttemptAt: new Date(NOW.getTime() - 60_000) })]);
     expect(await contestEscrowJob(deps, { jobId: 'job-1', reason: null })).toMatchObject({
       outcome: 'refused',
-      reason: expect.stringMatching(/transaction hash was not recorded; it may still mine/),
+      reason: expect.stringMatching(/settlement was being sent at .* it may still mine/),
     });
     expect(dbMock.job.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('G1 review P2-1: the contest window closes at expiresAt − margin (where the settlement is due): refused after it, nothing written', async () => {
+    const margin = expiryMarginMs(config);
+    const late = makeDeps([SUBMITTED_JOB({ expiresAt: new Date(NOW.getTime() + margin - 1) })]);
+    expect(await contestEscrowJob(late.deps, { jobId: 'job-1', reason: null })).toMatchObject({
+      outcome: 'refused',
+      reason: expect.stringContaining('contest window has closed'),
+    });
+    expect(late.dbMock.job.updateMany).not.toHaveBeenCalled();
+    expect(late.readContract).not.toHaveBeenCalled();
+    const expired = makeDeps([SUBMITTED_JOB({ expiresAt: new Date(NOW.getTime() - 1) })]);
+    expect(await contestEscrowJob(expired.deps, { jobId: 'job-1', reason: null })).toMatchObject({ outcome: 'refused' });
+    // Just before the margin: still contestable.
+    const inTime = makeDeps([SUBMITTED_JOB({ expiresAt: new Date(NOW.getTime() + margin + 1_000) })]);
+    expect(await contestEscrowJob(inTime.deps, { jobId: 'job-1', reason: null })).toMatchObject({ outcome: 'held' });
   });
 });
 

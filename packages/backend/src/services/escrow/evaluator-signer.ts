@@ -16,7 +16,9 @@
 import {
   createPublicClient,
   createWalletClient,
+  encodeFunctionData,
   http,
+  keccak256,
   type Abi,
   type Address,
   type Hex,
@@ -37,11 +39,14 @@ export interface EvaluatorSigner {
   readonly chainId: number;
   /**
    * Signs and broadcasts a contract call; resolves with the tx hash.
-   * `onBeforeBroadcast` (C3e) runs after the simulation and the gas estimate,
-   * right before the send: a call that reverts in simulation never reaches it,
-   * and a throw from it aborts the send.
+   * `onBeforeBroadcast` (C3e) runs after the simulation, the gas estimate and
+   * the (local) signature, right before the send, with the signed
+   * transaction's hash (G1 review P3-2): a call that reverts in simulation
+   * never reaches it, and a throw from it aborts the send. A rejection AFTER
+   * it does not say whether a node took the transaction (a lost answer, a
+   * refusal at send): the caller asks the nodes about that hash.
    */
-  writeContract(params: EvaluatorWriteParams, opts?: { onBeforeBroadcast?: () => Promise<void> }): Promise<Hex>;
+  writeContract(params: EvaluatorWriteParams, opts?: { onBeforeBroadcast?: (signedTxHash: Hex) => Promise<void> }): Promise<Hex>;
   /** Waits for the receipt of a tx this signer sent (status 'success' | 'reverted'). */
   waitForTransactionReceipt(hash: Hex): Promise<TransactionReceipt>;
 }
@@ -92,9 +97,9 @@ export function createEvaluatorSigner(chainId: number, privateKey: Hex): Evaluat
     chainId,
     async writeContract(params, opts) {
       // `simulateContract` first: a revert surfaces as a decoded error (e.g.
-      // InvalidStatus) before any gas is spent, and the same request object
-      // is then signed and broadcast — with an explicit gas limit, because the
-      // bare estimate starves the reputation hook (EVALUATOR_GAS_HEADROOM).
+      // InvalidStatus) before any gas is spent, and the same call is then
+      // signed and broadcast — with an explicit gas limit, because the bare
+      // estimate starves the reputation hook (EVALUATOR_GAS_HEADROOM).
       const call = {
         account,
         address: params.address,
@@ -102,10 +107,25 @@ export function createEvaluatorSigner(chainId: number, privateKey: Hex): Evaluat
         functionName: params.functionName,
         args: params.args as never,
       };
-      const { request } = await publicClient.simulateContract(call);
+      await publicClient.simulateContract(call);
       const estimate = await publicClient.estimateContractGas(call);
-      await opts?.onBeforeBroadcast?.();
-      return wallet.writeContract({ ...request, gas: evaluatorGasLimit(estimate) });
+      // G1 review P3-2: the evaluator is a local private-key account, so the
+      // transaction is signed here and its hash is known BEFORE anything is
+      // sent: the hook records it, then the raw transaction is broadcast. A
+      // send that throws after that is resolved by the caller from the hash
+      // (no node knows it → never sent; known → in flight).
+      const request = await wallet.prepareTransactionRequest({
+        account,
+        chain,
+        to: params.address,
+        data: encodeFunctionData({ abi: params.abi, functionName: params.functionName, args: params.args as never }),
+        gas: evaluatorGasLimit(estimate),
+      });
+      const serializedTransaction = await wallet.signTransaction(request as never);
+      const signedTxHash = keccak256(serializedTransaction);
+      await opts?.onBeforeBroadcast?.(signedTxHash);
+      await wallet.sendRawTransaction({ serializedTransaction });
+      return signedTxHash;
     },
     waitForTransactionReceipt(hash) {
       return publicClient.waitForTransactionReceipt({ hash, timeout: EVALUATOR_RECEIPT_TIMEOUT_MS });

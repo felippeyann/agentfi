@@ -404,14 +404,27 @@ export class FakeEscrowChain {
     return this.evaluatorPending.some((tx) => tx.hash === hash);
   }
 
-  /** The evaluator signer (operator key): simulates, then broadcasts; mined at once unless held (C3e). */
+  /**
+   * G1 review P3-2: the evaluator's send is refused before any node takes the
+   * transaction (out of gas for the fee, "replacement underpriced", a node
+   * rejecting it at send): `writeContract` throws after `onBeforeBroadcast`
+   * and nothing is broadcast. Sticky while set.
+   */
+  evaluatorSendFails: ((call: { functionName: string }) => boolean) | null = null;
+  /**
+   * G1 review P3-2: the evaluator's send reaches the node (pending or mined as
+   * usual) but its answer is lost: `writeContract` throws. One-shot.
+   */
+  evaluatorSendLostAnswer: ((call: { functionName: string }) => boolean) | null = null;
+
+  /** The evaluator signer (operator key): simulates, signs, then broadcasts; mined at once unless held (C3e). */
   evaluatorSigner(evaluator: Address) {
     return {
       address: evaluator,
       chainId: SIM_CHAIN_ID,
       writeContract: async (
         params: { address: Address; abi: Abi; functionName: string; args: readonly unknown[] },
-        opts?: { onBeforeBroadcast?: () => Promise<void> },
+        opts?: { onBeforeBroadcast?: (signedTxHash: Hex) => Promise<void> },
       ) => {
         const data = encodeFunctionData({ abi: params.abi, functionName: params.functionName, args: params.args } as never);
         // A real evaluator simulates first (against the latest state — a
@@ -421,8 +434,14 @@ export class FakeEscrowChain {
         const simulated = this.execute(evaluator, params.address, data, '0x' as Hex);
         this.restore(snapshot);
         if (simulated.status !== 'success') throw new Error(`simulation reverted: ${params.functionName}`);
-        await opts?.onBeforeBroadcast?.();
+        // Signed locally: the hash is known before the send (the hook receives it).
         const hash = `0x${(++this.evaluatorTxSeq).toString(16).padStart(64, 'e')}` as Hex;
+        await opts?.onBeforeBroadcast?.(hash);
+        if (this.evaluatorSendFails?.({ functionName: params.functionName })) {
+          throw new Error('insufficient funds for gas * price + value (the node refused the transaction; nothing was broadcast)');
+        }
+        const loseAnswer = this.evaluatorSendLostAnswer?.({ functionName: params.functionName }) ?? false;
+        if (loseAnswer) this.evaluatorSendLostAnswer = null;
         this.evaluatorCalls.push({
           functionName: params.functionName,
           jobId: params.args[0] as bigint,
@@ -433,11 +452,12 @@ export class FakeEscrowChain {
         if (this.evaluatorHold?.({ functionName: params.functionName }) || this.evaluatorPending.length > 0) {
           this.evaluatorPending.push({ hash, from: evaluator, to: params.address, data });
           this.evaluatorBroadcasts.push({ hash, functionName: params.functionName, outcome: 'pending' });
-          return hash;
+        } else {
+          const { status, logs } = this.execute(evaluator, params.address, data, hash);
+          this.receipts.set(hash, this.receipt(hash, status, logs));
+          this.evaluatorBroadcasts.push({ hash, functionName: params.functionName, outcome: status });
         }
-        const { status, logs } = this.execute(evaluator, params.address, data, hash);
-        this.receipts.set(hash, this.receipt(hash, status, logs));
-        this.evaluatorBroadcasts.push({ hash, functionName: params.functionName, outcome: status });
+        if (loseAnswer) throw new Error('socket hang up (the node took the evaluator transaction, the answer was lost)');
         return hash;
       },
       waitForTransactionReceipt: async (hash: Hex) => {

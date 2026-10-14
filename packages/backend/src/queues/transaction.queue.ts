@@ -8,11 +8,12 @@
  */
 
 import { Queue, Worker, type Job, type WorkerOptions } from 'bullmq';
-import { TransactionNotFoundError, TransactionReceiptNotFoundError, type Hex } from 'viem';
+import { TransactionReceiptNotFoundError, type Hex } from 'viem';
 import { db } from '../db/client.js';
 import { env } from '../config/env.js';
 import { createChainPublicClient } from '../config/chains.js';
 import { SubmitterService } from '../services/transaction/submitter.service.js';
+import { isTransactionKnownOnAnyRpc } from '../services/transaction/tx-known.js';
 import { MonitorService } from '../services/transaction/monitor.service.js';
 import { FeeService } from '../services/policy/fee.service.js';
 import { walletLaneLock, walletNonceStore } from '../services/transaction/wallet-lane.runtime.js';
@@ -81,20 +82,19 @@ function receiptClient(chainId: number) {
 }
 
 /**
- * Whether any RPC node knows the transaction (pending or mined); throws on RPC
- * errors. Used by the re-poll (drop detection) and, A6b, by the processor
- * before a retry signs again (an earlier signed attempt known to the chain is
- * adopted instead of sending a second transaction).
+ * Whether any RPC node knows the transaction (pending or mined); false only
+ * when every node answered "not found", and throws when it cannot tell (no
+ * node knows it and one errored — the re-poll then counts an error and never
+ * drops, the A6b check aborts before sending). Used by the re-poll (drop detection) and, A6b,
+ * by the processor before a retry signs again (an earlier signed attempt known
+ * to the chain is adopted instead of sending a second transaction).
+ *
+ * G1 review P3-1: every RPC candidate is asked with its own client. The
+ * fallback read client stopped at the first node that answered — `null` is an
+ * answer — so a transaction only the secondary node had was "unknown": the
+ * re-poll declared it dropped and a retry signed the next nonce.
  */
-async function isKnownTransaction(chainId: number, txHash: Hex): Promise<boolean> {
-  try {
-    await receiptClient(chainId).getTransaction({ hash: txHash });
-    return true;
-  } catch (err) {
-    if (err instanceof TransactionNotFoundError) return false;
-    throw err;
-  }
-}
+const isKnownTransaction = (chainId: number, txHash: Hex): Promise<boolean> => isTransactionKnownOnAnyRpc(chainId, txHash);
 
 /** Default re-poll knobs (seconds, env-overridable like the other recovery knobs). */
 export const TX_REPOLL_STALE_MS = parseInt(process.env['TX_REPOLL_STALE_SEC'] ?? '600', 10) * 1000;
