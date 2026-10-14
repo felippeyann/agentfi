@@ -35,7 +35,7 @@ const TOKENS_BY_CHAIN: Readonly<Record<number, Readonly<ChainTokenMap>>> = {
     USDC: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
     USDT: '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9',
     DAI: '0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1',
-    // Was mis-cased (…7aAB2e…, invalid EIP-55: viem refused it). Same address as
+    // Was mis-cased (…7aAB2e…, invalid EIP-55 checksum). Same address as
     // aave-dao/aave-address-book@6463b76 src/AaveV3Arbitrum.sol WBTC_UNDERLYING;
     // on-chain (2026-10-14): symbol WBTC, 8 decimals.
     WBTC: '0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f',
