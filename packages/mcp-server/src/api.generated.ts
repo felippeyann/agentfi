@@ -168,8 +168,9 @@ export interface paths {
          *     `PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR`).
          *
          *     The initial policy is forced to the server defaults
-         *     (`maxValuePerTxEth=1.0`, `maxDailyVolumeUsd=10000`, empty whitelists,
-         *     `cooldownSeconds=60`). Any `policy` in the request body is **ignored**
+         *     (`maxValuePerTxEth=1.0`, `maxValuePerTxUsd=1.0`, `maxDailyVolumeUsd=10000`,
+         *     empty whitelists — contracts, recipients, tokens — and `cooldownSeconds=60`).
+         *     Any `policy` in the request body is **ignored**
          *     — an unauthenticated caller cannot choose its own limits; loosening
          *     afterwards requires the operator credential on
          *     `PATCH /v1/agents/{id}/policy`.
@@ -637,27 +638,50 @@ export interface paths {
          *     - The operator (`x-api-key: <API_SECRET>`) may set any policy on any agent,
          *       including loosening. The agent-ownership check does not apply to the operator.
          *
+         *     **Units and lists (Q8).** `maxValuePerTxEth` caps native ETH per
+         *     transaction on `/v1/transactions/*` (synced on-chain). `maxValuePerTxUsd`
+         *     caps each spend denominated in USD — USDC x402 payments
+         *     (`pay-resource`) and ERC-8183 escrow budgets (`POST /v1/jobs`); it does
+         *     not apply to `/v1/transactions/*` (extending it there is an open plan
+         *     item). `allowedContracts` is the call target (`tx.to`) of ordinary
+         *     transactions, as `AgentPolicyModule` enforces on-chain.
+         *     `allowedRecipients` lists every address that may **receive** value from
+         *     the agent: a transfer's `to` (native or ERC-20), the x402 `payTo`, the
+         *     escrow job's provider wallet, the legacy A2A payee, and the `to` of a
+         *     batch action carrying native value; DeFi operations (swap, deposits,
+         *     GMX…) pay the agent's own position and are not recipient-checked. Empty
+         *     lists are unrestricted. `maxValuePerTxUsd` and `allowedRecipients` are
+         *     **off-chain only**: `syncOnChain` never carries them (the answer lists
+         *     them in `onChainSync.offChainOnlyFields`).
+         *
          *     A field **loosens** when:
-         *     - `maxValuePerTxEth` increases;
+         *     - `maxValuePerTxEth` or `maxValuePerTxUsd` increases (a stored value that is
+         *       not a plain decimal is unlimited, so replacing it never loosens);
          *     - `maxDailyVolumeUsd` increases — `"0"` means *no daily limit* and therefore
          *       loosens any positive limit;
-         *     - `allowedContracts` / `allowedTokens` go from non-empty to empty, or gain an
-         *       address not in the current list (compared case-insensitively);
+         *     - `allowedContracts` / `allowedRecipients` / `allowedTokens` go from non-empty
+         *       to empty, or gain an address not in the current list (compared
+         *       case-insensitively);
          *     - `cooldownSeconds` decreases;
          *     - `active` goes `false → true`;
          *     - `expiresAt` is cleared (`null`) or moved later while one existed.
          *
          *     When no policy exists yet, any patch that sets a limit counts as tightening
-         *     (`active: true` and `expiresAt: null` are neutral).
+         *     (`active: true` and `expiresAt: null` are neutral). A patch that creates the
+         *     policy row with a non-empty `allowedContracts` must also send
+         *     `allowedRecipients` (`[]` = no recipient restriction), otherwise `400` —
+         *     before Q8 that list also restricted payees, and an omission must not widen
+         *     anything. On an existing row an omitted field keeps its value.
          *
          *     Pass `expiresAt` (ISO 8601) to create a temporary task-scoped policy; the
          *     policy rejects transactions after that timestamp. `expiresAt: null` clears
          *     the expiry (operator only once an expiry exists).
          *
-         *     `maxValuePerTxEth` / `maxDailyVolumeUsd` must be plain decimal strings
-         *     (`^\d+(\.\d+)?$`); anything else — empty, whitespace, exponent, hex, words —
-         *     is `400` for every caller. An optional `reason` is written to the audit log
-         *     line and is not stored.
+         *     `maxValuePerTxEth` / `maxValuePerTxUsd` / `maxDailyVolumeUsd` must be plain
+         *     decimal strings (`^\d+(\.\d+)?$`); anything else — empty, whitespace,
+         *     exponent, hex, words — is `400` for every caller. `allowedRecipients`
+         *     entries must be `0x` addresses. An optional `reason` is written to the
+         *     audit log line and is not stored.
          */
         patch: {
             parameters: {
@@ -940,7 +964,16 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** ETH or ERC-20 transfer */
+        /**
+         * ETH or ERC-20 transfer
+         * @description Policy (Q8): `to` is the recipient and must be listed in
+         *     `allowedRecipients` when that list is non-empty — for ERC-20 transfers
+         *     too (before Q8 an ERC-20 recipient was never checked). The call target
+         *     is checked against `allowedContracts` as before: `to` itself for a
+         *     native transfer, the token contract for an ERC-20 transfer. The value
+         *     is capped by `maxValuePerTxEth` (native) and counted against the daily
+         *     limit; `maxValuePerTxUsd` does not apply here.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -1693,10 +1726,11 @@ export interface paths {
          *     readings of `pay-resource` (P6) and USDC priced at exactly 1.00 USD (no
          *     oracle): a paused / expired policy refuses (`403 POLICY_PAUSED`);
          *     `allowedTokens` (when non-empty) must list the escrow USDC;
-         *     `allowedContracts` (when non-empty) is the list of **payees** and must
-         *     list the provider's wallet (the escrow contract is the operator's
-         *     custody, not a payee); the budget must not exceed `maxValuePerTxEth`
-         *     read in USD (the default policy, 1.0, caps a job at 1 USDC); the daily
+         *     `allowedRecipients` (when non-empty, Q8) is the list of **payees** and
+         *     must list the provider's wallet (the escrow contract is the operator's
+         *     custody, not a payee; `allowedContracts` is not read); the budget must
+         *     not exceed `maxValuePerTxUsd` (Q8; the default, 1.0, caps a job at
+         *     1 USDC — `maxValuePerTxEth` is never read for USDC); the daily
          *     volume (`DailyVolume` + counted x402 payments + this budget) must stay
          *     within `maxDailyVolumeUsd` and is reserved atomically; the cooldown
          *     applies (the job is refused while the agent's last transaction is
@@ -1745,8 +1779,9 @@ export interface paths {
                 /**
                  * @description ERC-8183 chain only (C3d). `POLICY_PAUSED` (paused or expired
                  *     policy) or `POLICY_VIOLATION` with `rule` (`allowedTokens`,
-                 *     `allowedContracts` — the provider wallet is not a listed payee,
-                 *     `maxValuePerTx`, `maxDailyVolume`, `cooldown`), `limit`,
+                 *     `allowedRecipients` — the provider wallet is not a listed payee,
+                 *     `maxValuePerTxUsd`, `maxDailyVolume`, `cooldown`; Q8 renamed
+                 *     `allowedContracts` / `maxValuePerTx`), `limit`,
                  *     `spentToday` (`maxDailyVolume`), `amount` and `payee`.
                  */
                 403: {
@@ -2188,13 +2223,15 @@ export interface paths {
          *
          *     **Agent policy.** Under the same locks and before signing, the
          *     payment must pass the provider's policy (`403 POLICY_VIOLATION` with
-         *     `rule`): `maxValuePerTx` — the `maxValuePerTxEth` number read in USD
-         *     for USDC; `maxDailyVolume` — USD committed today through
+         *     `rule`): `maxValuePerTxUsd` — the per-payment cap in USD (Q8; until
+         *     Q8 the `maxValuePerTxEth` number was read in USD and the rule was
+         *     `maxValuePerTx`); `maxDailyVolume` — USD committed today through
          *     transactions (`DailyVolume`) plus today's counted pay-resource rows
          *     on all the agent's jobs, plus this price; `allowedTokens` — when
          *     non-empty it must list the job chain's USDC (checked before anything
-         *     is fetched); `allowedContracts` — when non-empty it must list the
-         *     402's `payTo` (the payee).
+         *     is fetched); `allowedRecipients` — when non-empty it must list the
+         *     402's `payTo` (the payee; Q8 — until Q8 `allowedContracts` was read
+         *     and the rule had that name).
          *
          *     **Outbound target policy.** Before anything is fetched, the URL's
          *     port must be allowed (production / staging: 80 and 443 unless
@@ -2317,8 +2354,8 @@ export interface paths {
                  * @description `NOT_PROVIDER` (only the provider pays), `AGENT_INACTIVE`,
                  *     `POLICY_PAUSED`, or `POLICY_VIOLATION` — the provider's policy
                  *     refused the payment before anything was signed: `rule` is
-                 *     `maxValuePerTx`, `maxDailyVolume` (with `spentToday`),
-                 *     `allowedTokens` or `allowedContracts` (the `payTo` is not listed);
+                 *     `maxValuePerTxUsd`, `maxDailyVolume` (with `spentToday`),
+                 *     `allowedTokens` or `allowedRecipients` (the `payTo` is not listed);
                  *     `limit` is the policy value, `price` the offered price in base
                  *     units.
                  */
@@ -3293,7 +3330,7 @@ export interface components {
              * @description Policy fields the agent tried to loosen. Only present when the rejection
              *     is a loosening attempt (not when the key belongs to another agent).
              */
-            loosenedFields?: ("maxValuePerTxEth" | "maxDailyVolumeUsd" | "allowedContracts" | "allowedTokens" | "cooldownSeconds" | "active" | "expiresAt")[];
+            loosenedFields?: ("maxValuePerTxEth" | "maxValuePerTxUsd" | "maxDailyVolumeUsd" | "allowedContracts" | "allowedRecipients" | "allowedTokens" | "cooldownSeconds" | "active" | "expiresAt")[];
         };
         HealthStatus: {
             /** @example ok */
@@ -3376,16 +3413,45 @@ export interface components {
         };
         Policy: {
             /**
-             * @description Plain decimal string. Empty, whitespace, exponent, hex or non-numeric values are rejected (400).
+             * @description Native ETH per transaction on `/v1/transactions/*` (synced on-chain as
+             *     `AgentPolicyModule.maxValuePerTx`). Never read as USD (Q8). Plain decimal
+             *     string. Empty, whitespace, exponent, hex or non-numeric values are rejected (400).
              * @example 1.0
              */
             maxValuePerTxEth?: string;
+            /**
+             * @description Q8. Per-spend cap in USD for spends denominated in USD: USDC x402 payments
+             *     (`pay-resource`) and ERC-8183 escrow budgets (`POST /v1/jobs`, USDC at 1.00).
+             *     Not applied to `/v1/transactions/*` (open plan item). Off-chain only.
+             *     Default `"1.0"` at creation when omitted — never derived from
+             *     `maxValuePerTxEth`. Policies that existed before migration 0021 were
+             *     backfilled with their `maxValuePerTxEth` text (the number USDC spends
+             *     already obeyed). Same validation as `maxValuePerTxEth`.
+             * @example 1.0
+             */
+            maxValuePerTxUsd?: string;
             /**
              * @description Plain decimal string; `"0"` means no daily limit. Same validation as `maxValuePerTxEth`.
              * @example 10000
              */
             maxDailyVolumeUsd?: string;
+            /**
+             * @description Call targets (`tx.to`) of ordinary transactions, as `AgentPolicyModule`
+             *     enforces on-chain (a native transfer's call target is its recipient).
+             *     Empty = unrestricted. Since Q8 it does not restrict payees of x402 or
+             *     escrow spends — see `allowedRecipients`.
+             */
             allowedContracts?: string[];
+            /**
+             * @description Q8. Every address that may RECEIVE value from the agent: a transfer's `to`
+             *     (native or ERC-20), the x402 `payTo`, the ERC-8183 escrow provider wallet,
+             *     the legacy A2A payee and the `to` of a batch action carrying native value.
+             *     DeFi operations (swap, deposits, GMX…) are not recipient-checked. Empty =
+             *     unrestricted. Off-chain only. At creation, required whenever
+             *     `allowedContracts` is non-empty (`[]` = no recipient restriction), else 400.
+             *     Backfilled from `allowedContracts` by migration 0021 for existing policies.
+             */
+            allowedRecipients?: string[];
             allowedTokens?: string[];
             /** @default 60 */
             cooldownSeconds: number;
@@ -3421,6 +3487,13 @@ export interface components {
                 value?: string;
                 data?: string;
             }[];
+            /**
+             * @description Policy fields the calldata never carries because `AgentPolicyModule` has
+             *     no slot for them; only the backend enforces them (Q8:
+             *     `maxValuePerTxUsd`, `allowedRecipients`; and `maxDailyVolumeUsd`).
+             *     Present on `PATCH /v1/agents/{id}/policy` answers.
+             */
+            offChainOnlyFields?: string[];
             notice?: string;
         } | null;
         UpdatePolicyResponse: components["schemas"]["Policy"] & {
@@ -3617,7 +3690,11 @@ export interface components {
             chainId: number;
             idempotencyKey?: string;
             actions: {
-                /** @description Target contract. Checked against the agent's `allowedContracts` whitelist. */
+                /**
+                 * @description Target contract. Checked against the agent's `allowedContracts` whitelist;
+                 *     when the action carries native `value`, also against `allowedRecipients`
+                 *     (Q8: it receives that value).
+                 */
                 to: string;
                 /** @default 0 */
                 value: string;
@@ -4104,11 +4181,11 @@ export interface components {
             /** @description The refused port (`INVALID_URL`, `refusal: port-not-allowed`). */
             port?: number;
             /**
-             * @description Policy rule that refused the payment (`POLICY_VIOLATION`).
+             * @description Policy rule that refused the payment (`POLICY_VIOLATION`). Q8 renamed `maxValuePerTx` → `maxValuePerTxUsd` and `allowedContracts` → `allowedRecipients`.
              * @enum {string}
              */
-            rule?: "maxValuePerTx" | "maxDailyVolume" | "allowedTokens" | "allowedContracts";
-            /** @description The policy value that refused it, as stored (`maxValuePerTx`: `maxValuePerTxEth` read in USD; `maxDailyVolume`: USD). */
+            rule?: "maxValuePerTxUsd" | "maxDailyVolume" | "allowedTokens" | "allowedRecipients";
+            /** @description The policy value that refused it, as stored (`maxValuePerTxUsd`: USD; `maxDailyVolume`: USD). */
             limit?: string;
             /** @description USD already committed today, without this payment (`POLICY_VIOLATION`, `rule: maxDailyVolume`). */
             spentToday?: string;
