@@ -39,9 +39,11 @@ export const ERC20_TRANSFER_FROM_SELECTOR = toFunctionSelector('transferFrom(add
 
 /** `transfer` / `transferFrom` calldata in its one canonical encoding, or null. */
 export function decodeStrictErc20Transfer(
-  data: Hex,
+  raw: Hex,
 ): { fn: 'transfer'; to: Address; amount: bigint } | { fn: 'transferFrom'; from: Address; to: Address; amount: bigint } | null {
-  const selector = data.slice(0, 10).toLowerCase();
+  // Hex case carries no meaning on-chain; decode the lowercase form.
+  const data = raw.toLowerCase() as Hex;
+  const selector = data.slice(0, 10);
   const expectedLength = selector === ERC20_TRANSFER_SELECTOR ? 2 + 8 + 64 * 2 : selector === ERC20_TRANSFER_FROM_SELECTOR ? 2 + 8 + 64 * 3 : -1;
   if (expectedLength < 0 || data.length !== expectedLength) return null;
   try {
@@ -51,7 +53,7 @@ export function decodeStrictErc20Transfer(
     // padding (viem reads the low 20 bytes only) or any other non-canonical
     // form is refused rather than guessed.
     const reencoded = encodeFunctionData({ abi: erc20Abi, functionName: decoded.functionName, args: decoded.args as never });
-    if (reencoded.toLowerCase() !== data.toLowerCase()) return null;
+    if (reencoded.toLowerCase() !== data) return null;
     if (decoded.functionName === 'transfer') {
       const [to, amount] = decoded.args as readonly [Address, bigint];
       return { fn: 'transfer', to: getAddress(to), amount };

@@ -255,6 +255,35 @@ describe('NODE_ENV unset (rule: WARN always; FATAL in a container with a product
   });
 });
 
+describe('SYNTHETIC_TEST_PRICES_USD (Q9): test prices never reach production', () => {
+  const VALID = '84532:native=2500,84532:0x036CbD53842c5426634e7929541eC2318f3dCF7e=1';
+
+  it.each(['production', 'staging'])('NODE_ENV=%s refuses to boot with the variable set at all', async (nodeEnv) => {
+    const res = await boot({ NODE_ENV: nodeEnv, SYNTHETIC_TEST_PRICES_USD: VALID });
+    expect(res.booted).toBe(false);
+    expect(res.errors).toMatch(/FATAL: SYNTHETIC_TEST_PRICES_USD is set, which cannot run with NODE_ENV=/);
+  });
+
+  it.each(['production', 'staging'])('NODE_ENV=%s boots when it is blank (dotenv "KEY=")', async (nodeEnv) => {
+    const res = await boot({ NODE_ENV: nodeEnv, SYNTHETIC_TEST_PRICES_USD: '' });
+    expect(res.errors).not.toMatch(/SYNTHETIC_TEST_PRICES_USD/);
+  });
+
+  it('development: a mainnet entry or a malformed value is FATAL; a valid testnet configuration boots with a loud warning', async () => {
+    const mainnet = await boot({ NODE_ENV: 'development', SYNTHETIC_TEST_PRICES_USD: '8453:native=2500' });
+    expect(mainnet.booted).toBe(false);
+    expect(mainnet.errors).toMatch(/SYNTHETIC_TEST_PRICES_USD is invalid: .*not a testnet chain/);
+
+    const lowercase = await boot({ NODE_ENV: 'development', SYNTHETIC_TEST_PRICES_USD: '84532:0x036cbd53842c5426634e7929541ec2318f3dcf7e=1' });
+    expect(lowercase.booted).toBe(false);
+    expect(lowercase.errors).toMatch(/EIP-55 checksummed/);
+
+    const ok = await boot({ NODE_ENV: 'development', SYNTHETIC_TEST_PRICES_USD: VALID });
+    expect(ok.booted).toBe(true);
+    expect(ok.warnings).toMatch(/SYNTHETIC test prices \(not market prices\)/);
+  });
+});
+
 describe('TRUST_PROXY', () => {
   it('defaults to false', async () => {
     expect((await boot({ NODE_ENV: 'development' })).trustProxy).toBe(false);
