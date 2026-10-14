@@ -33,6 +33,20 @@ describe('isTransactionKnownToAny', () => {
     expect(await isTransactionKnownToAny([down(), knows(), notFound()], HASH)).toBe(true);
   });
 
+  it('resolves true as soon as one node knows it — a hanging node is not waited for (the A6b check runs inside the wallet lane)', async () => {
+    const hanging: TxLookupClient = { getTransaction: vi.fn(() => new Promise<never>(() => undefined)) };
+    expect(await isTransactionKnownToAny([hanging, knows()], HASH)).toBe(true);
+  });
+
+  it('a client that throws synchronously counts as an errored node', async () => {
+    const broken: TxLookupClient = {
+      getTransaction: vi.fn(() => {
+        throw new Error('bad client');
+      }) as never,
+    };
+    expect(await isTransactionKnownToAny([broken, notFound()], HASH)).toBe(false);
+  });
+
   it('false when every node answered "not found"', async () => {
     expect(await isTransactionKnownToAny([notFound(), notFound(), notFound()], HASH)).toBe(false);
   });

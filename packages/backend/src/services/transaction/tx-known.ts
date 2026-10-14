@@ -51,27 +51,52 @@ export class TransactionLookupUnavailableError extends Error {
 }
 
 /**
- * Asks every client, in parallel, whether it knows `hash`. True as soon as
- * one does; false when none does and at least one answered; throws
+ * Asks every client, in parallel, whether it knows `hash`. Resolves true as
+ * soon as one does (without waiting for slower nodes); false when none does
+ * and at least one answered — that needs every node's answer; throws
  * `TransactionLookupUnavailableError` when every one errored.
  */
-export async function isTransactionKnownToAny(clients: readonly TxLookupClient[], hash: Hex): Promise<boolean> {
-  if (clients.length === 0) throw new TransactionLookupUnavailableError(hash, 0);
-  const answers = await Promise.all(
-    clients.map(async (client): Promise<'known' | 'unknown' | { error: unknown }> => {
-      try {
-        await client.getTransaction({ hash });
-        return 'known';
-      } catch (err) {
-        return isNotFound(err) ? 'unknown' : { error: err };
-      }
-    }),
-  );
-  if (answers.includes('known')) return true;
-  if (answers.includes('unknown')) return false;
-  const first = answers.find((a): a is { error: unknown } => typeof a === 'object');
-  throw new TransactionLookupUnavailableError(hash, clients.length, { cause: first?.error });
+export function isTransactionKnownToAny(clients: readonly TxLookupClient[], hash: Hex): Promise<boolean> {
+  if (clients.length === 0) return Promise.reject(new TransactionLookupUnavailableError(hash, 0));
+  return new Promise<boolean>((resolve, reject) => {
+    let pending = clients.length;
+    let answered = false;
+    let firstError: unknown;
+    let settled = false;
+    const done = () => {
+      if (settled || --pending > 0) return;
+      settled = true;
+      if (answered) resolve(false);
+      else reject(new TransactionLookupUnavailableError(hash, clients.length, { cause: firstError }));
+    };
+    for (const client of clients) {
+      Promise.resolve()
+        .then(() => client.getTransaction({ hash }))
+        .then(
+        () => {
+          if (!settled) {
+            settled = true;
+            resolve(true);
+          }
+        },
+        (err: unknown) => {
+          if (isNotFound(err)) answered = true;
+          else firstError ??= err;
+          done();
+        },
+      );
+    }
+  });
 }
+
+/**
+ * Per-node bound of a lookup: the A6b adoption check runs inside the wallet's
+ * broadcast lane (a Redis lock with a TTL), and a "not known" answer has to
+ * wait for every node — so a hanging node must not hold the lane for viem's
+ * default (10 s × 4 tries).
+ */
+export const TX_LOOKUP_TIMEOUT_MS = 8_000;
+export const TX_LOOKUP_RETRY_COUNT = 1;
 
 const candidateClients = new Map<number, { urls: string; clients: TxLookupClient[] }>();
 
@@ -82,7 +107,9 @@ export function rpcCandidateClients(chainId: number): TxLookupClient[] {
   const cached = candidateClients.get(chainId);
   if (cached && cached.urls === key) return cached.clients;
   const chain = getChain(chainId);
-  const clients = urls.map((url) => createPublicClient({ chain, transport: http(url) }));
+  const clients = urls.map((url) =>
+    createPublicClient({ chain, transport: http(url, { timeout: TX_LOOKUP_TIMEOUT_MS, retryCount: TX_LOOKUP_RETRY_COUNT }) }),
+  );
   candidateClients.set(chainId, { urls: key, clients });
   return clients;
 }
