@@ -56,6 +56,10 @@ const h = vi.hoisted(() => {
   for (const [k, v] of required) {
     if (!process.env[k]) process.env[k] = v;
   }
+  // Q9: the suite runs on Base Sepolia (84532), a testnet, where a spend is
+  // priced only with a configured synthetic test price — the values the price
+  // mock below always assumed (1 ETH = 2000 USD, USDC = 1 USD).
+  process.env['SYNTHETIC_TEST_PRICES_USD'] = '84532:native=2000,84532:0x036CbD53842c5426634e7929541eC2318f3dCF7e=1';
 
   type JobState = 'waiting' | 'active' | 'delayed' | 'completed' | 'failed';
   interface FakeJob {
