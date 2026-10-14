@@ -5,6 +5,8 @@
  * P1: the transfer route reads token "ETH" as the chain's NATIVE asset — POL
  * on Polygon (137) — so "ETH" is refused where the native asset is not ETH,
  * as `pay_agent` does (`pay-agent.test.ts`).
+ * P2: `to` is checked with the backend's address rule (viem strict
+ * `isAddress`): a mixed-case address with a bad EIP-55 checksum is refused.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
@@ -83,5 +85,34 @@ describe('transfer_token: native "ETH" only where the native asset is ETH (revie
     const result = await transfer({ token: 'ETH' });
     expect(result.isError, JSON.stringify(payloadOf(result))).toBeFalsy();
     expect(apiMock.post).toHaveBeenCalledWith('/v1/transactions/transfer', { token: 'ETH', to: TO, amount: '1', chainId: 1 });
+  });
+});
+
+describe('transfer_token: `to` is checked with the backend\'s address rule (review of #181, P2)', () => {
+  it('a mixed-case `to` with an invalid EIP-55 checksum is INVALID_INPUT, nothing sent', async () => {
+    const result = await transfer({ token: 'ETH', chain_id: 8453, to: '0x70997970c51812dc3A010C7d01b50e0d17dc79C8' });
+
+    expect(result.isError).toBe(true);
+    const payload = payloadOf(result);
+    expect(payload).toMatchObject({ code: 'INVALID_INPUT', tool: 'transfer_token' });
+    expect(payload['error']).toMatch(/to: .*checksum/);
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it('a `to` that is not an address is INVALID_INPUT, nothing sent', async () => {
+    const result = await transfer({ token: 'ETH', chain_id: 8453, to: 'agent-42' });
+    expect(payloadOf(result)).toMatchObject({ code: 'INVALID_INPUT' });
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it('an all-lowercase `to` is accepted and sent as given', async () => {
+    const result = await transfer({ token: 'ETH', chain_id: 8453, to: TO.toLowerCase() });
+    expect(result.isError, JSON.stringify(payloadOf(result))).toBeFalsy();
+    expect(apiMock.post).toHaveBeenCalledWith('/v1/transactions/transfer', {
+      token: 'ETH',
+      to: TO.toLowerCase(),
+      amount: '1',
+      chainId: 8453,
+    });
   });
 });

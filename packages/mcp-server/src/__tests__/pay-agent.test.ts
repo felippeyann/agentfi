@@ -215,6 +215,43 @@ describe('native "ETH" only where the native asset is ETH (review of #181, P1)',
   });
 });
 
+describe('recipient_address is checked with the backend\'s address rule (review of #181, P2)', () => {
+  // viem `isAddress(x, { strict: true })`, which the transfer route applies:
+  // all-lowercase (no checksum), or mixed case with a valid EIP-55 checksum.
+  // One letter's case flipped = a checksum that does not match (a typo).
+  const BAD_CHECKSUM = '0x70997970c51812dc3A010C7d01b50e0d17dc79C8';
+
+  it('a mixed-case address with an invalid EIP-55 checksum is INVALID_INPUT, nothing sent', async () => {
+    const result = await pay({ token_symbol: 'ETH', chain_id: BASE_SEPOLIA, recipient_address: BAD_CHECKSUM });
+
+    expect(result.isError).toBe(true);
+    const payload = payloadOf(result);
+    expect(payload).toMatchObject({ code: 'INVALID_INPUT', tool: 'pay_agent' });
+    expect(payload['error']).toMatch(/recipient_address: .*checksum/);
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it('an all-uppercase hex address is refused too (viem strict: it is not a valid checksum)', async () => {
+    const upper = `0x${RECIPIENT.slice(2).toUpperCase()}`;
+    const result = await pay({ token_symbol: 'ETH', chain_id: BASE_SEPOLIA, recipient_address: upper });
+    expect(payloadOf(result)).toMatchObject({ code: 'INVALID_INPUT' });
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it('an all-lowercase address (no checksum) is accepted and sent as given', async () => {
+    const lower = RECIPIENT.toLowerCase();
+    const result = await pay({ token_symbol: 'ETH', chain_id: BASE_SEPOLIA, recipient_address: lower });
+    expect(result.isError, JSON.stringify(payloadOf(result))).toBeFalsy();
+    expect(sent()[1]['to']).toBe(lower);
+  });
+
+  it('the checksummed address is accepted', async () => {
+    const result = await pay({ token_symbol: 'ETH', chain_id: BASE_SEPOLIA });
+    expect(result.isError, JSON.stringify(payloadOf(result))).toBeFalsy();
+    expect(sent()[1]['to']).toBe(RECIPIENT);
+  });
+});
+
 describe('pay_agent backend refusals', () => {
   it('a policy refusal comes back as a 403 tool error with the backend reason', async () => {
     // The transfer route answers a policy refusal as `403 { error }` (sendPolicyRefusal).
