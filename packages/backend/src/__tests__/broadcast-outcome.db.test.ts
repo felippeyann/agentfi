@@ -600,9 +600,13 @@ describeDb('A6b — outcomes after a broadcast attempt, on Postgres', () => {
     await runJob(data, { broadcast: 'fail-after-broadcast', attempts: 3 });
     expect(await jobRow(job.id)).toEqual({ status: 'PAYMENT_PENDING', reservationStatus: 'PENDING' });
 
+    // Cut-offs below zero: the hand-over stamps `updatedAt` with Postgres's
+    // NOW(), and a database clock a few ms ahead of this process's would make
+    // the row's age negative (still "within the grace") with 0 / 0 — a flake
+    // seen in a full local run (G1 review), not a behaviour under test.
     await m.processor.repollSubmittedTransactions(
       { db: m.db, feeService: noFees, logger: quietLogger, getReceipt: async () => null, isKnownTransaction: async () => false },
-      { olderThanMs: 0, dropAfterMs: 0, limit: 500 },
+      { olderThanMs: -60_000, dropAfterMs: -60_000, limit: 500 },
     );
     expect((await txRow(data.transactionId))?.status).toBe('FAILED');
     expect(await jobRow(job.id)).toEqual({ status: 'PAYMENT_FAILED', reservationStatus: 'CANCELLED' });
