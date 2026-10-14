@@ -53,6 +53,7 @@ import {
   contestEscrowJob,
   deliverableHashOf,
   enqueueSubmit,
+  expiryMarginMs,
   escrowIntentId,
   feedbackHashOf,
   feedbackUriFor,
@@ -1632,6 +1633,23 @@ describe('C3d — evaluation delay vs expiresAt, committed feedback files', () =
     expect(settlementDelay(cfg, null, NOW)).toEqual({ delayMs: 3_600_000, clamped: false });
     // Short TTLs (tests): 10 % of the TTL instead of 2 minutes.
     expect(settlementDelay({ evaluationDelaySeconds: 20, jobTtlSeconds: 60 }, new Date(NOW.getTime() + 20_000), NOW)).toEqual({ delayMs: 14_000, clamped: true });
+  });
+
+  it('Q6: the 3600 s validation window against the default 7-day TTL — never clamped until the last hour + margin', () => {
+    const cfg = { evaluationDelaySeconds: 3600, jobTtlSeconds: 604_800 };
+    expect(expiryMarginMs(cfg)).toBe(120_000);
+    // Submitted right after funding, a day before expiry, and exactly at the edge: the full hour.
+    for (const leftMs of [604_800_000, 86_400_000, 3_600_000 + 120_000]) {
+      expect(settlementDelay(cfg, new Date(NOW.getTime() + leftMs), NOW)).toEqual({ delayMs: 3_600_000, clamped: false });
+    }
+    // Inside the last hour + margin: clamped to expiresAt − now − margin (never past expiresAt).
+    expect(settlementDelay(cfg, new Date(NOW.getTime() + 3_600_000), NOW)).toEqual({ delayMs: 3_480_000, clamped: true });
+    expect(settlementDelay(cfg, new Date(NOW.getTime() + 1_800_000), NOW)).toEqual({ delayMs: 1_680_000, clamped: true });
+    // A one-hour TTL with a one-hour window: margin = min(2 min, 10 % of the TTL) = 2 min.
+    expect(settlementDelay({ evaluationDelaySeconds: 3600, jobTtlSeconds: 3600 }, new Date(NOW.getTime() + 3_000_000), NOW)).toEqual({
+      delayMs: 2_880_000,
+      clamped: true,
+    });
   });
 
   it('submit confirmed close to expiry schedules the settlement with the clamped delay', async () => {

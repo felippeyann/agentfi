@@ -122,7 +122,7 @@ import { fileURLToPath } from 'node:url';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { PrismaClient } from '@prisma/client';
 import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { parseUnits, TransactionReceiptNotFoundError, type Hex } from 'viem';
 import { FakeEscrowChain, FakeWallets, JobStatus, SIM_ESCROW, SIM_USDC } from './helpers/fake-escrow-chain.js';
 import { setSimDeps, setSimRepoll, simConfig, SIM_EVALUATOR } from './helpers/escrow-sim-registry.js';
@@ -187,10 +187,14 @@ async function wipe(): Promise<void> {
 interface QueuedTx {
   data: TransactionJobData;
   attempts: number;
+  /** Simulated epoch ms before which the job is not picked (a deferral, Q7). */
+  notBefore?: number;
 }
 interface QueuedSettlement {
   data: EscrowSettlementJobData;
   attempts: number;
+  /** Simulated epoch ms before which the job is not picked (the evaluation delay, a deferral). */
+  notBefore?: number;
 }
 
 interface Sim {
@@ -251,10 +255,13 @@ function makeSim(opts: { lane?: boolean } = {}): Sim {
       }) as never,
     },
     settlement: {
-      async add(data) {
+      async add(data, opts) {
         if (s.settlementAddFails?.(data)) throw new Error('settlement queue unavailable (Redis outage)');
         const key = `${data.action}-${data.jobId}`;
-        if (!settlements.has(key)) settlements.set(key, { data, attempts: 0 });
+        // BullMQ dedupe: an entry already queued (delayed or not) is kept as is.
+        if (!settlements.has(key)) {
+          settlements.set(key, { data, attempts: 0, ...(opts?.delayMs ? { notBefore: s.now().getTime() + opts.delayMs } : {}) });
+        }
       },
     },
     publicClient: () => chain.publicClient as never,
@@ -353,26 +360,35 @@ function makeSim(opts: { lane?: boolean } = {}): Sim {
     } catch (err) {
       if (q.attempts < 3) {
         const key = `${q.data.action}-${q.data.jobId}`;
-        if (!settlements.has(key)) settlements.set(key, q);
+        // A retry runs as soon as it is picked again (backoff elided).
+        if (!settlements.has(key)) settlements.set(key, { ...q, notBefore: 0 });
         return;
       }
       await m.svc.handleFailedSettlementJob(deps, { data: q.data, attemptsMade: q.attempts, opts: { attempts: 3 } }, err as Error);
     }
   }
 
-  /** Runs worker rounds until the queues drain (or exactly `rounds` rounds when given). */
+  /**
+   * Runs worker rounds until the queues drain (or exactly `rounds` rounds when
+   * given). Entries delayed past the simulated now (`notBefore`: an evaluation
+   * delay, a Q7 deferral) stay queued and do not keep the loop going.
+   */
   s.drive = async (rounds?: number) => {
     const limit = rounds ?? 200;
     for (let round = 0; round < limit; round++) {
-      const txBatch = txQueue.splice(0);
-      const settleBatch = [...settlements.values()];
-      settlements.clear();
+      const nowMs = s.now().getTime();
+      const due = <T extends { notBefore?: number }>(q: T) => (q.notBefore ?? 0) <= nowMs;
+      const txBatch = txQueue.filter(due);
+      const waitingTx = txQueue.filter((q) => !due(q));
+      txQueue.splice(0, txQueue.length, ...waitingTx);
+      const settleBatch = [...settlements.entries()].filter(([, q]) => due(q));
+      for (const [key] of settleBatch) settlements.delete(key);
       if (txBatch.length === 0 && settleBatch.length === 0) return;
       // The worker processes a round concurrently (concurrency > 1).
       await Promise.all(txBatch.map(runTx));
       await Promise.all(monitors.splice(0));
       // One settlement at a time (the settlement worker's concurrency is 1).
-      for (const q of settleBatch) await runSettlement(q);
+      for (const [, q] of settleBatch) await runSettlement(q);
     }
     if (rounds === undefined) throw new Error('drive(): queues did not drain');
   };
@@ -1320,6 +1336,183 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       added.length = 0;
       expect(await m.svc.recoverErc8183Job(deps, { id: jobId, onChainStatus: 'SUBMITTED' })).toBe('resettled');
       expect(added).toEqual([{ data: { jobId, action: 'settle' }, delayMs: undefined }]);
+    });
+
+    // ── Q6 (owner, 2026-10-14): the 3600 s contest window of the validation configuration ──
+    describe('Q6 — contest window 3600 s (validation config) vs job expiry and operator review', () => {
+      const WINDOW_MS = 3_600_000;
+      const MIN = 60_000;
+      const saved = { evaluationDelaySeconds: simConfig.evaluationDelaySeconds, jobTtlSeconds: simConfig.jobTtlSeconds };
+
+      beforeEach(() => {
+        simConfig.evaluationDelaySeconds = 3600;
+        simConfig.jobTtlSeconds = 604_800; // the production default (7 days)
+      });
+      afterEach(() => {
+        simConfig.evaluationDelaySeconds = saved.evaluationDelaySeconds;
+        simConfig.jobTtlSeconds = saved.jobTtlSeconds;
+      });
+
+      /** Delivered job: the submit mined, the settle sits in the queue with its evaluation delay. */
+      async function deliveredInWindow() {
+        const { requester, provider, jobId } = await fundedJob();
+        expect((await patchJob(provider.id, jobId, { status: 'ACCEPTED' })).statusCode).toBe(200);
+        expect((await patchJob(provider.id, jobId, { status: 'COMPLETED', result: { answer: 42 } })).statusCode).toBe(200);
+        const before = sim.now().getTime();
+        await sim.drive(); // drains: only the delayed settle is left
+        expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED' });
+        const queued = sim.settlements.get(`settle-${jobId}`);
+        expect(queued).toBeDefined();
+        return { requester, provider, jobId, queued: queued!, submittedAt: before };
+      }
+
+      /** Money-relevant columns + the requester's DailyVolume rows: what "does nothing" must leave untouched. */
+      async function ledger(jobId: string, requesterId: string) {
+        const row = await job(jobId);
+        const volume = await m.db.dailyVolume.findMany({ where: { agentId: requesterId }, orderBy: { date: 'asc' } });
+        return {
+          job: {
+            status: row.status,
+            onChainStatus: row.onChainStatus,
+            reservationStatus: row.reservationStatus,
+            settleTxHash: row.settleTxHash,
+            feedbackStatus: row.feedbackStatus,
+            resolution: row.resolution,
+          },
+          volume: volume.map((v) => ({ date: v.date, volumeUsd: v.volumeUsd })),
+        };
+      }
+
+      it('TTL 7 days: the settle is scheduled the full 3600 s after the submit (not clamped); a contest at +30 min holds the job and the settle firing at +61 min sends nothing', async () => {
+        const { requester, provider, jobId, queued, submittedAt } = await deliveredInWindow();
+        const delay = queued.notBefore! - submittedAt;
+        expect(delay).toBeGreaterThan(WINDOW_MS - 30_000);
+        expect(delay).toBeLessThanOrEqual(WINDOW_MS + 5_000);
+        expect(sim.chain.evaluatorCalls).toHaveLength(0);
+
+        setNowOffset(30 * MIN);
+        const app = await sim.app(requester.id);
+        const res = await app.inject({ method: 'POST', url: `/v1/jobs/${jobId}/contest`, payload: { reason: 'wrong answer' } });
+        expect(res.statusCode).toBe(200);
+        expect(res.json().escrow).toMatchObject({ onChainStatus: 'CONTESTED' });
+
+        setNowOffset(61 * MIN);
+        await sim.drive(); // the delayed settle fires
+        await m.runPaymentRecoveryTick();
+        await sim.drive();
+        expect(sim.settlements.size).toBe(0);
+        expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'CONTESTED', resolution: null });
+        expect(onChain((await job(jobId)).onChainJobId).status).toBe(JobStatus.Submitted);
+        expect(sim.chain.evaluatorCalls).toHaveLength(0);
+        expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC);
+      });
+
+      it.each([
+        ['pay', true],
+        ['refund', true],
+        ['quality-rejected', true],
+        ['refund', false],
+      ] as const)(
+        'operator "%s" during the window (contested: %s) settles exactly once; the delayed settle that fires later changes nothing',
+        async (decision, contested) => {
+          const { requester, provider, jobId } = await deliveredInWindow();
+          setNowOffset(10 * MIN);
+          if (contested) {
+            const app = await sim.app(requester.id);
+            expect((await app.inject({ method: 'POST', url: `/v1/jobs/${jobId}/contest`, payload: { reason: 'q6' } })).statusCode).toBe(200);
+          }
+          setNowOffset(20 * MIN);
+          const outcome = await m.svc.resolveEscrowJob(sim.deps, { jobId, decision, note: `q6 ${decision}`, operator: 'ops@test' });
+          expect(outcome).toMatchObject({ outcome: 'scheduled', previousOnChainStatus: contested ? 'CONTESTED' : 'SUBMITTED' });
+          await sim.drive(); // the resolve settlement has no delay: it runs now, inside the window
+
+          const paid = decision === 'pay';
+          expect(sim.chain.evaluatorCalls).toEqual([expect.objectContaining({ functionName: paid ? 'complete' : 'reject' })]);
+          expect(await job(jobId)).toMatchObject(
+            paid
+              ? { status: 'COMPLETED', onChainStatus: 'COMPLETED', reservationStatus: 'RELEASED' }
+              : { status: 'PAYMENT_FAILED', onChainStatus: 'REJECTED', reservationStatus: 'CANCELLED' },
+          );
+          expect(sim.settlements.has(`settle-${jobId}`)).toBe(true); // still delayed
+          const afterDecision = await ledger(jobId, requester.id);
+          const providerUsdc = sim.chain.usdcOf(provider.safeAddress as Hex);
+          const requesterUsdc = sim.chain.usdcOf(requester.safeAddress as Hex);
+
+          setNowOffset(61 * MIN);
+          await sim.drive(); // the original delayed settle fires
+          await m.runPaymentRecoveryTick();
+          await sim.drive();
+
+          expect(sim.settlements.size).toBe(0); // the delayed settle did run
+          expect(sim.chain.evaluatorCalls).toHaveLength(1);
+          expect(await ledger(jobId, requester.id)).toEqual(afterDecision);
+          expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(providerUsdc);
+          expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(requesterUsdc);
+          expect(sim.alerts.map((a) => a.kind)).not.toContain('review-overridden');
+        },
+      );
+
+      it('a window that would cross expiresAt is clamped: the settle runs before expiresAt − margin, then a contest is refused', async () => {
+        simConfig.jobTtlSeconds = 3600; // expires one hour after createJob: shorter than window + margin
+        const { requester, provider, jobId, queued, submittedAt } = await deliveredInWindow();
+        const expiresAt = (await job(jobId)).expiresAt!.getTime();
+        const margin = m.svc.expiryMarginMs(simConfig);
+        expect(margin).toBe(120_000);
+        expect(queued.notBefore! - submittedAt).toBeLessThan(WINDOW_MS - margin);
+        expect(queued.notBefore!).toBeLessThanOrEqual(expiresAt - margin + 1_000);
+
+        setNowOffset(queued.notBefore! - Date.now() + 1_000);
+        expect(sim.now().getTime()).toBeLessThan(expiresAt);
+        await sim.drive();
+        expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED' });
+        expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - (BUDGET * 30n) / 10_000n);
+
+        const app = await sim.app(requester.id);
+        expect((await app.inject({ method: 'POST', url: `/v1/jobs/${jobId}/contest`, payload: {} })).statusCode).toBe(409);
+      });
+
+      it('accept / deliver inside the expiry margin is 409 ESCROW_EXPIRING with the window on; nothing is written or sent', async () => {
+        const { provider, jobId } = await fundedJob();
+        expect((await patchJob(provider.id, jobId, { status: 'ACCEPTED' })).statusCode).toBe(200);
+        // The route reads the wall clock: move expiresAt instead of the simulated clock.
+        await m.db.job.update({ where: { id: jobId }, data: { expiresAt: new Date(Date.now() + 60_000) } });
+        const res = await patchJob(provider.id, jobId, { status: 'COMPLETED', result: { late: true } });
+        expect(res.statusCode).toBe(409);
+        expect(res.json()).toMatchObject({ error: 'ESCROW_EXPIRING' });
+        expect(await job(jobId)).toMatchObject({ status: 'ACCEPTED', onChainStatus: 'FUNDED', deliverableHash: null });
+        expect(await stepRows(jobId, 'submit')).toHaveLength(0);
+      });
+
+      it('restart inside the window (the delayed settle is lost): the recovery tick restores it with the REMAINING time — no early settle, settles once after', async () => {
+        const { requester, jobId, submittedAt } = await deliveredInWindow();
+        sim.settlements.clear(); // Redis lost the delayed job (restart / flush)
+
+        setNowOffset(20 * MIN);
+        await m.runPaymentRecoveryTick();
+        const restored = sim.settlements.get(`settle-${jobId}`);
+        expect(restored?.notBefore).toBeDefined();
+        const remaining = restored!.notBefore! - sim.now().getTime();
+        expect(remaining).toBeGreaterThan(39 * MIN);
+        expect(remaining).toBeLessThanOrEqual(40 * MIN + 5_000);
+        expect(restored!.notBefore! - submittedAt).toBeLessThanOrEqual(WINDOW_MS + 5_000);
+        await sim.drive();
+        expect(sim.chain.evaluatorCalls).toHaveLength(0);
+
+        // Still contestable inside the restored window.
+        setNowOffset(50 * MIN);
+        await m.runPaymentRecoveryTick(); // the job is still in its window: no immediate settle is added
+        await sim.drive();
+        expect(sim.chain.evaluatorCalls).toHaveLength(0);
+        expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED' });
+
+        setNowOffset(61 * MIN);
+        await sim.drive();
+        await m.runPaymentRecoveryTick();
+        await sim.drive();
+        expect(sim.chain.evaluatorCalls).toEqual([expect.objectContaining({ functionName: 'complete' })]);
+        expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED' });
+        void requester;
+      });
     });
 
     it('review P3-3: migration 0019 moves pre-C3d contested rows (SUBMITTED or SETTLING, no decision) to CONTESTED — and nothing else', async () => {
