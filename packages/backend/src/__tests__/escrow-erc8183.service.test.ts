@@ -1344,7 +1344,7 @@ describe('C3d — contestEscrowJob (race rule)', () => {
     expect(down.jobs.get('job-1')!['onChainStatus']).toBe('SUBMITTED');
   });
 
-  it('the claim is conditional on the row it checked (incl. settleTxHash): a settlement claimed in between wins', async () => {
+  it('the claim is conditional on the row it checked (incl. settleTxHash and, C3e, no settle-attempt stamp): a settlement claimed in between wins', async () => {
     const { deps, jobs, dbMock } = makeDeps([SUBMITTED_JOB()]);
     // The settlement claims SUBMITTED → SETTLING right after the contest read the row.
     dbMock.job.updateMany.mockImplementationOnce(async () => {
@@ -1353,9 +1353,18 @@ describe('C3d — contestEscrowJob (race rule)', () => {
     });
     expect(await contestEscrowJob(deps, { jobId: 'job-1', reason: null })).toMatchObject({ outcome: 'refused' });
     expect(dbMock.job.updateMany).toHaveBeenCalledWith({
-      where: { id: 'job-1', status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', contestedAt: null, settleTxHash: null },
+      where: { id: 'job-1', status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', contestedAt: null, settleTxHash: null, settleAttemptAt: null },
       data: { onChainStatus: 'CONTESTED', contestedAt: NOW, contestReason: null, escrowError: null },
     });
+  });
+
+  it('C3e item 2: a settle-attempt stamp without a hash (the hash write was lost) refuses the contest — it may still mine', async () => {
+    const { deps, dbMock } = makeDeps([SUBMITTED_JOB({ settleAttemptAt: new Date(NOW.getTime() - 60_000) })]);
+    expect(await contestEscrowJob(deps, { jobId: 'job-1', reason: null })).toMatchObject({
+      outcome: 'refused',
+      reason: expect.stringMatching(/transaction hash was not recorded; it may still mine/),
+    });
+    expect(dbMock.job.updateMany).not.toHaveBeenCalled();
   });
 });
 
