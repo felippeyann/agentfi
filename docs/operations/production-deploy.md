@@ -227,7 +227,10 @@ This also keeps N API replicas from polling BullMQ marker keys (Redis request qu
 - handles stale `PAYMENT_PENDING` jobs (unchanged);
 - reconciles ERC-8183 jobs whose state has not moved for `ESCROW_RECONCILE_STALE_SEC` (default 600) **from the chain** (`getJob`): stalled funding steps resume, a lost cancellation refund is re-enqueued, a deliverable already Submitted on-chain is settled, a stuck ERC-8004 binding resumes. See [erc-8183-mapping.md §6.7](../architecture/erc-8183-mapping.md);
 - alerts the operator once about a job held for review (a contest, a `CANCELLED`/`FAILED` job Submitted on-chain) that gets within `ESCROW_REVIEW_ALERT_BEFORE_EXPIRY_SECONDS` (default 86400) of `expiresAt` (C3d); a contested job is never settled automatically;
-- settles daily-volume reservations still `RESERVED` on a `CONFIRMED` / `REVERTED` / `FAILED` transaction older than `VOLUME_SWEEP_STALE_SEC` (default 600) — a crash between the status write and the settlement (A6; see `docs/api-reference.md`, "How a transaction counts against `maxDailyVolumeUsd`").
+- settles daily-volume reservations still `RESERVED` on a `CONFIRMED` / `REVERTED` / `FAILED` transaction older than `VOLUME_SWEEP_STALE_SEC` (default 600) — a crash between the status write and the settlement (A6; see `docs/api-reference.md`, "How a transaction counts against `maxDailyVolumeUsd`");
+- recovers `QUEUED` transactions untouched for `TX_STRANDED_STALE_SEC` (default 600) whose BullMQ job is not live — a crash between the row's write and its enqueue (route, operator approval, A2A payment): it re-adds the job under the row's own id `tx-<id>` (BullMQ never adds a second job with an existing id), or settles the row like the failed handler when its job failed without the handler or an attempt was already stamped for broadcast (A6b: handed to the chain, never re-signed).
+
+**Migration 0024 before the A6b code (A6b).** The broadcast stamp writes `Transaction.broadcastTxHash`; a worker on this release against a database without migration 0024 aborts every broadcast before sending. `prisma migrate deploy` first (the column is nullable; older workers ignore it).
 
 Deploy the API and the workers from the same release: a worker older than A6 adds a confirmed transaction's value to the daily volume again, on top of the reservation the newer API made.
 
