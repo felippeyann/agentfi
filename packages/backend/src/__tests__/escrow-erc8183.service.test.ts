@@ -1051,6 +1051,40 @@ describe('processSettlementJob — Q7: no evaluator signature on an unverified c
     expect(signer.writeContract).toHaveBeenCalledTimes(1);
   });
 
+  it('#182 review: the gate closes AFTER the pre-checks, while the evaluator simulates / signs → refused in the broadcast hook: nothing stamped or sent, the claim handed back (SUBMITTED, contestable); settles once re-verified', async () => {
+    const { deps, jobs, signer, finalize, alert } = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    let closed = false;
+    deps.configGate = (chainId) => (closed ? refuse(chainId) : allow(chainId));
+    const sent: Hex[] = [];
+    // Like the real signer: simulation, gas estimate and signature, then the hook, then the send.
+    signer.writeContract.mockImplementation((async (_params: EvaluatorWriteParams, opts?: { onBeforeBroadcast?: (h: Hex) => Promise<void> }) => {
+      closed = true; // a failed re-check revokes the verification in this window (deterministic)
+      await opts?.onBeforeBroadcast?.(SETTLE_HASH);
+      sent.push(SETTLE_HASH);
+      return SETTLE_HASH;
+    }) as never);
+
+    const err = await processSettlementJob(deps, settleJob()).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(EscrowConfigUnverifiedError);
+    expect(err).toMatchObject({ chainId: CHAIN_ID, retryAfterMs: 120_000 });
+    expect(signer.writeContract).toHaveBeenCalledTimes(1); // the pre-checks passed
+    expect(sent).toEqual([]);
+    expect(jobs.get('job-1')).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', settleTxHash: null, settleAttemptAt: null, escrowError: null });
+    expect(finalize).not.toHaveBeenCalled();
+    expect(alert).not.toHaveBeenCalled();
+
+    // Verified again: the same job settles, through the same hook.
+    closed = false;
+    signer.writeContract.mockImplementation((async (_params: EvaluatorWriteParams, opts?: { onBeforeBroadcast?: (h: Hex) => Promise<void> }) => {
+      await opts?.onBeforeBroadcast?.(SETTLE_HASH);
+      sent.push(SETTLE_HASH);
+      return SETTLE_HASH;
+    }) as never);
+    expect(await processSettlementJob(deps, settleJob())).toMatchObject({ outcome: 'settled', onChainStatus: 'COMPLETED' });
+    expect(sent).toEqual([SETTLE_HASH]);
+  });
+
   it('an operator decision on a contested job: deferred, the job stays CONTESTED with its decision (still resolvable)', async () => {
     const { deps, jobs, signer } = makeDeps([CONTESTED_JOB({ resolution: 'refund' })], { settleLogs: rejectLogs() });
     deps.configGate = refuse;

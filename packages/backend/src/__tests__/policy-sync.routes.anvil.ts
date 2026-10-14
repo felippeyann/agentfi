@@ -77,7 +77,7 @@ vi.mock('../services/notification.service.js', () => ({
 import Fastify, { type FastifyInstance } from 'fastify';
 import { PrismaClient } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { getAddress, parseEther, type Address, type Hex } from 'viem';
 import {
   anvilAccount,
@@ -203,6 +203,11 @@ beforeEach(() => {
   caller = null;
 });
 
+// A test that revokes the verification and fails before restoring it must not cascade into 503s.
+afterEach(async () => {
+  if (DB_READY && m && !m.policyStackState.policyStackGate(CHAIN_ID).allowed) await m.policyStack.runPolicyStackBootCheck('api');
+});
+
 async function wipe(): Promise<void> {
   const agents = { name: { startsWith: NAME_PREFIX } };
   await m.db.transaction.deleteMany({ where: { agent: agents } });
@@ -259,7 +264,7 @@ async function requestSync(agentId: string) {
 
 /** Runs every captured transaction job through the real processor and waits for the receipts. */
 async function drain(
-  opts: { attemptsMade?: number; betweenGuardAndSigning?: () => Promise<void> } = {},
+  opts: { attemptsMade?: number; betweenGuardAndSigning?: () => Promise<void>; deferJob?: (delayMs: number) => Promise<void> } = {},
 ): Promise<Array<{ txHash: Hex | null; error?: string; outcome?: string }>> {
   const jobs = h.queued.splice(0);
   const monitors: Promise<void>[] = [];
@@ -288,6 +293,7 @@ async function drain(
         feeService: { incrementTxUsage: async () => undefined, recordFeeEvent: async () => undefined } as never,
         logger,
         trackMonitor: (p) => monitors.push(p),
+        ...(opts.deferJob ? { deferJob: opts.deferJob } : {}),
       });
       results.push({ txHash: out.txHash, ...('outcome' in out ? { outcome: out.outcome } : {}) });
     } catch (err) {
@@ -557,6 +563,44 @@ describeDb('S8 — DB vs on-chain while a sync is pending or failed', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ status: 'FAILED', txHash: null, broadcastAttemptedAt: null });
     expect(rows[0]!.error).toMatch(/superseded/i);
+  });
+
+  it('#182 review: the executor / module verification revoked AFTER the guard but before the signature → deferred inside the wallet lane: nothing stamped or sent, no attempt consumed; broadcast once re-verified', async () => {
+    const agent = await mkAgent({});
+    expect((await requestSync(agent.id)).statusCode).toBe(202); // the gate is open: verified at boot
+    const queued = [...h.queued];
+    const deferred: number[] = [];
+
+    const results = await drain({
+      // Deterministic: the guard has passed; a background re-check whose read
+      // failed revokes the verification (the real state machine) before the
+      // worker signs and broadcasts.
+      betweenGuardAndSigning: async () => {
+        m.policyStackState.recordPolicyStackChecks(
+          [{ chainId: CHAIN_ID, executor, policyModule, problems: [], notes: [], unreadable: 'test: re-check read failed between the guard and the signature' }],
+          m.policyStackState.policyStackExpectations(),
+        );
+        expect(m.policyStackState.policyStackGate(CHAIN_ID).allowed).toBe(false);
+      },
+      deferJob: async (delayMs) => {
+        deferred.push(delayMs);
+      },
+    });
+
+    expect(results).toEqual([expect.objectContaining({ txHash: null, outcome: 'deferred' })]);
+    expect(deferred).toHaveLength(1); // re-queued through deferJob: no attempt consumed
+    expect(await hasPolicy(agent.eoa)).toBe(false);
+    expect(await chain.publicClient.getTransactionCount({ address: agent.eoa, blockTag: 'pending' })).toBe(0); // nothing sent
+    const [row] = await m.db.transaction.findMany({ where: { agentId: agent.id } });
+    expect(row).toMatchObject({ status: 'QUEUED', txHash: null, broadcastAttemptedAt: null, broadcastTxHash: null, error: null });
+
+    // The real check verifies the deployment again; the deferred job comes back and goes out.
+    expect(await m.policyStack.runPolicyStackBootCheck('api')).toMatchObject({ fatal: null, verified: [CHAIN_ID] });
+    h.queued.push(...queued);
+    const again = await drain();
+    expect(again).toEqual([expect.objectContaining({ txHash: expect.stringMatching(/^0x[0-9a-f]{64}$/) })]);
+    expect(await hasPolicy(agent.eoa)).toBe(true);
+    expect(await m.db.transaction.findUnique({ where: { id: row!.id } })).toMatchObject({ status: 'CONFIRMED' });
   });
 
   it('a queued sync the DB has since superseded is not signed (the guard re-derives it from the current policy)', async () => {
