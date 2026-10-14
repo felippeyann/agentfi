@@ -2,7 +2,7 @@
 
 > Live pending tasks, credentials inventory, and working conventions. For _what the project is_, read [STATE.md](STATE.md). For _why_, read [VISION.md](VISION.md). This file is the shortest path from "resuming work" → "executing something useful."
 
-**Last updated**: 2026-10-11 · **main baseline verified** `79e7b40` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0, **reactivated in exploratory mode on 2026-10-06** after being archived 2026-05-17) · **Release**: [mcp-server-v0.5.0](https://github.com/felippeyann/agentfi/releases/tag/mcp-server-v0.5.0) · **npm**: [`@agent_fi/mcp-server@0.5.0`](https://www.npmjs.com/package/@agent_fi/mcp-server) (published 2026-05-15)
+**Last updated**: 2026-10-14 · **main baseline verified** `03a429d` · **Repo**: https://github.com/felippeyann/agentfi (public, Apache 2.0, **reactivated in exploratory mode on 2026-10-06** after being archived 2026-05-17) · **Release**: [mcp-server-v0.5.0](https://github.com/felippeyann/agentfi/releases/tag/mcp-server-v0.5.0) · **npm**: [`@agent_fi/mcp-server@0.5.0`](https://www.npmjs.com/package/@agent_fi/mcp-server) (published 2026-05-15)
 
 > **Resuming work?** Read, in order: [VISION.md](VISION.md) → [STATE.md](STATE.md) → [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md) (the live plan with task status) → this file. The review that led to reactivation is [docs/project/reactivation-2026-10.md](docs/project/reactivation-2026-10.md) and the market evidence is [docs/project/market-signals-2026-10.md](docs/project/market-signals-2026-10.md) (both in Portuguese).
 
@@ -78,7 +78,7 @@
 
 ### 3.2 Defects fixed and in flight
 
-The Week-0 defects A1, A2, A3 and S1 are merged (#132, #129, #130, #131) and were hardened by the first adversarial review (#139 backend, #140 contracts, #137 x402). The second adversarial review (2026-10-08) found 5 P1 and about 20 P2, none losing escrowed funds in the contracts; its fixes C2b (#159), C3c (#160), S6 (#157) and P6 (#158) are merged, and so are C3d (#162, contest → operator review, escrow policy, hook boot check), H14 (#161, runbooks and docs) and A6 (#163, daily volume counted once); every fix wave was reviewed line by line before merge, and C3d and A6 were each re-reviewed independently (no P1 found). The other open follow-ups are the `todo` rows of the plan (A4, A5, A6b, C3e, S3, T1, C3b, R2b, R4, P4, W1–W3). Real funds still wait for the Base Sepolia deploy (C4) and the testnet E2E (C5).
+The Week-0 defects A1, A2, A3 and S1 are merged (#132, #129, #130, #131) and were hardened by the first adversarial review (#139 backend, #140 contracts, #137 x402). The second adversarial review (2026-10-08) found 5 P1 and about 20 P2, none losing escrowed funds in the contracts; its fixes C2b (#159), C3c (#160), S6 (#157) and P6 (#158) are merged, and so are C3d (#162, contest → operator review, escrow policy, hook boot check), H14 (#161, runbooks and docs) and A6 (#163, daily volume counted once); every fix wave was reviewed line by line before merge, and C3d and A6 were each re-reviewed independently (no P1 found). The G1 closing round (2026-10-14, #170–#176) implemented the owner decisions D12–D15, fixed the C3e / A6b leftovers with a financial effect and the findings of an independent adversarial review of the round (no P1): **G1 met on `03a429d`**. The other open follow-ups are the `todo` rows of the plan (A4, A5, A6c, C3f, S3, S7, S8, S9, X5, T1, C3b, R2b, R4, P4, W1–W3). Real funds still wait for the Base Sepolia deploy (C4) and the testnet E2E (C5).
 
 ### 3.3 Blocked externally
 
@@ -217,7 +217,7 @@ Large features that were in the roadmap but had no external demand (GMX adapter,
 
 - Migrations are **never auto-generated** — write them manually in `packages/backend/src/db/migrations/NNNN_name/migration.sql`.
 - After editing `schema.prisma`, run `npx prisma generate --schema=packages/backend/src/db/schema.prisma`.
-- Latest migration (2026-10-11): `0020_a6_transaction_volume` (A6). The reactivation added 0014 (ERC-8183 job fields), 0015 (ERC-8004 identities), 0016 (ResourcePayment), 0017 (policy pause marker), 0018 (P6), 0019 (C3d contest review) and 0020. Apply them with `npx prisma migrate deploy` from `packages/backend` (it reads `DATABASE_URL` from `packages/backend/.env`).
+- Latest migration (2026-10-14): `0024_a6b_broadcast_tx_hash` (A6b). The reactivation added 0014 (ERC-8183 job fields), 0015 (ERC-8004 identities), 0016 (ResourcePayment), 0017 (policy pause marker), 0018 (P6), 0019 (C3d contest review), 0020 (A6), 0021 (Q8 policy units), 0022 (Q9 price source), 0023 (C3e settle attempt) and 0024. Deploy the API and every worker from the same release, after stopping the old processes.
 
 ### Dependency quirks
 

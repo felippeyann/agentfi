@@ -271,7 +271,7 @@ That is the full list the boot needs (`API_SECRET`, `ADMIN_SECRET`, `DATABASE_UR
 ```bash
 cd packages/backend
 npx prisma generate          # npm ci does not generate the client
-npx prisma migrate deploy    # applies every migration (0001…0020) to agentfi_c5
+npx prisma migrate deploy    # applies every migration (0001…0024) to agentfi_c5
 ```
 
 Both read `DATABASE_URL` from `packages/backend/.env`.
