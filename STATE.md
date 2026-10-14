@@ -3,7 +3,7 @@
 > **Read together with [VISION.md](VISION.md) (the _why_) and [HANDOFF.md](HANDOFF.md) (live pending tasks).**
 > This file is the **comprehensive, point-in-time snapshot** of what the project _is_ today — purpose, stack, capabilities, progress. Update it whenever the scope or architecture shifts.
 
-**Last updated**: 2026-10-11 · **main baseline verified** `79e7b40` · **npm** `@agent_fi/mcp-server@0.5.0` published 2026-05-15 (31 tools; 35 in source until 0.6.0, plan X3) · **Status**: reactivated in exploratory mode on 2026-10-06 (archived 2026-05-17 → 2026-10-06); live plan in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md)
+**Last updated**: 2026-10-14 · **main baseline verified** `03a429d` · **npm** `@agent_fi/mcp-server@0.5.0` published 2026-05-15 (31 tools; 35 in source until 0.6.0, plan X3) · **Status**: reactivated in exploratory mode on 2026-10-06 (archived 2026-05-17 → 2026-10-06); live plan in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md)
 
 ---
 
@@ -260,11 +260,12 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 
 ## 9. Current pending work
 
-All pending work is tracked task by task in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md). Where the reactivation (Q4 2026) stands on 2026-10-11:
+All pending work is tracked task by task in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md). Where the reactivation (Q4 2026) stands on 2026-10-14:
 
 - **Done:** the Week-0 fixes (A1 ABI, A2 no mock simulation in production, A3 re-validation before signing, S1 agents can only tighten their policy) and their hardening; `AgentJobEscrow` + `ReputationHook` (C2, R3, R3c gas guard, C2b fixes after the second adversarial review); the backend escrow driver with the chain as the source of truth (C3, C3c); ERC-8004 identities minted on the first funded job (R2); the x402 client and `pay_for_resource` with its money fixes (P1, P2, P6); MCP annotations, error sanitising and the escrow job tools (S2, X3a); security fixes S4, S5, S6; the fork rehearsal of C5 (C5a).
 - **Done on 2026-10-11:** C3d (#162: contest → operator review per D9, escrow spending policy, hook boot check) and A6 (#163: an ordinary transaction counted once in the daily volume and settled exactly once); H14 (#161) runbooks. Both were reviewed again independently: no P1.
-- **Open, owner decisions:** plan §5 questions 6–9 (contest window default, boot check with the RPC down, USDC policy readings, unpriced tokens).
+- **Done on 2026-10-14 (G1 closing round, #170–#176):** the owner decisions Q6–Q9 (D12–D15: contest window for validation, no escrow signature while the on-chain configuration is unverified, explicit USD cap and separate recipients, no spend counted as zero with synthetic test prices on testnet only), the C3e / A6b leftovers reproduced and fixed by financial effect, and the fixes from an independent adversarial review (no P1). **G1 met on `03a429d`.**
+- **Open, owner decisions:** plan §5 questions 6–9 (USD cap on ordinary transactions, "max" withdrawals under a daily limit, approval-day override, mainnet contest window).
 - **Next, owner-run:** C4 deploys the contracts on Base Sepolia ([runbook](docs/project/testnet-log.md), §2), C5 runs the two-agent E2E there with Turnkey wallets (D11, §5.4), demand interviews V1–V3. Then X1–X3 (example on testnet, screencast, mcp-server 0.6.0) and the C6 mainnet decision.
 - **Go/no-go:** 2027-01-05.
 
