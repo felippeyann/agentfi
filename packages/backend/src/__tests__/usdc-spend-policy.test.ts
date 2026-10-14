@@ -29,16 +29,16 @@ function policy(overrides: Partial<UsdcSpendPolicy> = {}): UsdcSpendPolicy {
   return {
     active: true,
     expiresAt: null,
-    maxValuePerTxEth: '1.0',
+    maxValuePerTxUsd: '1.0',
     maxDailyVolumeUsd: '10000',
     allowedTokens: [],
-    allowedContracts: [],
+    allowedRecipients: [],
     ...overrides,
   };
 }
 
 function spend(amount: bigint, spentTodayMicroUsd = 0n) {
-  return { amount, token: USDC, counterparty: SELLER, spentTodayMicroUsd, now: NOW };
+  return { amount, token: USDC, recipient: SELLER, spentTodayMicroUsd, now: NOW };
 }
 
 describe('evaluateUsdcSpend', () => {
@@ -55,7 +55,7 @@ describe('evaluateUsdcSpend', () => {
     expect(evaluateUsdcSpend(policy({ expiresAt: new Date('2026-10-08T12:00:01Z') }), spend(1n)).allowed).toBe(true);
   });
 
-  describe('per-transaction cap, read in USD for USDC', () => {
+  describe('per-transaction cap maxValuePerTxUsd (Q8)', () => {
     it.each([
       ['1.0', 1_000_000n, true],
       ['1.0', 1_000_001n, false],
@@ -65,14 +65,14 @@ describe('evaluateUsdcSpend', () => {
       ['0', 0n, true],
       // more than 6 decimals: the limit is rounded DOWN (stricter)
       ['0.4000009', 400_001n, false],
-    ])('maxValuePerTxEth %s vs %s base units → allowed %s', (limit, amount, allowed) => {
-      const verdict = evaluateUsdcSpend(policy({ maxValuePerTxEth: limit }), spend(amount));
+    ])('maxValuePerTxUsd %s vs %s base units → allowed %s', (limit, amount, allowed) => {
+      const verdict = evaluateUsdcSpend(policy({ maxValuePerTxUsd: limit }), spend(amount));
       expect(verdict.allowed).toBe(allowed);
-      if (!verdict.allowed) expect(verdict).toMatchObject({ rule: 'maxValuePerTx', limit });
+      if (!verdict.allowed) expect(verdict).toMatchObject({ rule: 'maxValuePerTxUsd', limit });
     });
 
     it.each(['', ' 1', '1e3', '0x10', 'abc'])('an unparsable stored limit %j is unlimited (policy-numbers semantics)', (raw) => {
-      const p = policy({ maxValuePerTxEth: raw, maxDailyVolumeUsd: '0' });
+      const p = policy({ maxValuePerTxUsd: raw, maxDailyVolumeUsd: '0' });
       expect(evaluateUsdcSpend(p, spend(10n ** 15n)).allowed).toBe(true);
     });
   });
@@ -101,12 +101,12 @@ describe('evaluateUsdcSpend', () => {
       });
     });
 
-    it('allowedContracts, when non-empty, must list the counterparty (the payTo), not the USDC contract', () => {
-      expect(evaluateUsdcSpend(policy({ allowedContracts: [SELLER.toUpperCase().replace('0X', '0x')] }), spend(1n)).allowed).toBe(
+    it('allowedRecipients, when non-empty, must list the recipient (the payTo), not the USDC contract (Q8)', () => {
+      expect(evaluateUsdcSpend(policy({ allowedRecipients: [SELLER.toUpperCase().replace('0X', '0x')] }), spend(1n)).allowed).toBe(
         true,
       );
-      const verdict = evaluateUsdcSpend(policy({ allowedContracts: [USDC] }), spend(1n));
-      expect(verdict).toMatchObject({ allowed: false, rule: 'allowedContracts' });
+      const verdict = evaluateUsdcSpend(policy({ allowedRecipients: [USDC] }), spend(1n));
+      expect(verdict).toMatchObject({ allowed: false, rule: 'allowedRecipients' });
       if (!verdict.allowed) expect(verdict.reason).toContain(SELLER);
     });
   });

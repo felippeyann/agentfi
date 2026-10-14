@@ -11,7 +11,7 @@
  *  - cooldown
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { PolicyService } from '../services/policy/policy.service.js';
+import { PolicyService, USD_PER_TX_CAP_APPLIES_TO_TRANSACTIONS } from '../services/policy/policy.service.js';
 import type { PrismaClient, AgentPolicy } from '@prisma/client';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
@@ -26,9 +26,11 @@ function basePolicy(overrides: Partial<AgentPolicy> = {}): AgentPolicy {
     agentId: 'agent-1',
     active: true,
     maxValuePerTxEth: '1.0',
+    maxValuePerTxUsd: '1.0',
     maxValueForAutoApprovalEth: '0.1',
     cooldownSeconds: 0,
     allowedContracts: [],
+    allowedRecipients: [],
     allowedTokens: [],
     maxDailyVolumeUsd: '0', // 0 = no daily limit
     expiresAt: null,
@@ -248,6 +250,39 @@ describe('PolicyService.validateTransaction', () => {
       valueEth: '0.1',
     });
     expect(result.allowed).toBe(true);
+  });
+
+  // ── recipient whitelist (Q8) ───────────────────────────────────────────
+
+  it('Q8: a recipient outside a non-empty allowedRecipients is refused; listed (any case) is allowed', async () => {
+    const recipient = '0x00000000000000000000000000000000000000b0';
+    const svc = new PolicyService(makeMockDb(basePolicy({ allowedRecipients: [recipient] })));
+    await expect(
+      svc.validateTransaction({ agentId: 'agent-1', targetContract: USDC, recipient: recipient.toUpperCase().replace('0X', '0x') as `0x${string}`, valueEth: '0' }),
+    ).resolves.toMatchObject({ allowed: true });
+    const refused = await svc.validateTransaction({
+      agentId: 'agent-1',
+      targetContract: USDC,
+      recipient: '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+      valueEth: '0',
+    });
+    expect(refused).toMatchObject({ allowed: false });
+    expect(refused.reason).toMatch(/allowed recipients whitelist/);
+  });
+
+  it('Q8: a malformed stored recipient entry never throws — it just does not match', async () => {
+    const svc = new PolicyService(makeMockDb(basePolicy({ allowedRecipients: ['not-an-address'] })));
+    await expect(
+      svc.validateTransaction({ agentId: 'agent-1', targetContract: USDC, recipient: '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef', valueEth: '0' }),
+    ).resolves.toMatchObject({ allowed: false });
+  });
+
+  it('Q8 seam: maxValuePerTxUsd is NOT applied to ordinary transactions (open owner question)', async () => {
+    expect(USD_PER_TX_CAP_APPLIES_TO_TRANSACTIONS).toBe(false);
+    const svc = new PolicyService(makeMockDb(basePolicy({ maxValuePerTxUsd: '0', maxValuePerTxEth: '10' })));
+    await expect(
+      svc.validateTransaction({ agentId: 'agent-1', targetContract: UNISWAP_ROUTER, valueEth: '1', valueUsd: '2500' }),
+    ).resolves.toMatchObject({ allowed: true });
   });
 
   // ── token whitelist ────────────────────────────────────────────────────

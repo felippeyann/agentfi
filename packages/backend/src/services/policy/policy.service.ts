@@ -10,6 +10,18 @@ export interface PolicyValidationResult {
   reason?: string;
 }
 
+/**
+ * Q8 seam — `maxValuePerTxUsd` on ordinary transactions (`/v1/transactions/*`).
+ *
+ * The USD per-spend cap applies to spends denominated in USD by definition
+ * (USDC x402 payments and ERC-8183 escrow budgets, `usdc-spend-policy.ts`).
+ * Whether it should ALSO cap ordinary transactions by their priced USD value
+ * is an open owner question (execution plan §5), so it is not enforced here:
+ * this flag is the one place to turn it on, and `validateTransaction` already
+ * receives the USD value it would compare (`valueUsd`). A test pins it off.
+ */
+export const USD_PER_TX_CAP_APPLIES_TO_TRANSACTIONS = false;
+
 /** What `PolicyService.resumeByOperator` did to the policy row. */
 export type OperatorResumeOutcome =
   /** The policy was inactive because the operator pause flipped it; it is active again. */
@@ -41,7 +53,16 @@ export class PolicyService {
    */
   async validateTransaction(params: {
     agentId: string;
+    /** The call target (`tx.to`) — judged against `allowedContracts`, as on-chain. */
     targetContract: Address;
+    /**
+     * The address that RECEIVES value from this transaction (Q8), judged
+     * against `allowedRecipients` when that list is non-empty: a native or
+     * ERC-20 transfer's `to`, the legacy A2A payee, a batch action carrying
+     * native value. Omitted for operations whose value goes to the agent's
+     * own position (swap, deposits, GMX…): no recipient check.
+     */
+    recipient?: Address;
     tokenAddress?: Address;
     valueEth: string; // as decimal string, e.g. "0.5"
     valueUsd?: string; // as decimal string, e.g. "150.00"
@@ -82,6 +103,19 @@ export class PolicyService {
       };
     }
 
+    // Q8 seam (off): the USD per-spend cap is not applied to ordinary
+    // transactions — see USD_PER_TX_CAP_APPLIES_TO_TRANSACTIONS.
+    if (USD_PER_TX_CAP_APPLIES_TO_TRANSACTIONS) {
+      const maxUsd = parsePolicyDecimal(policy.maxValuePerTxUsd);
+      const valueUsd = parseFloat(params.valueUsd ?? '0');
+      if (maxUsd !== null && valueUsd > maxUsd) {
+        return {
+          allowed: false,
+          reason: `Transaction value ${params.valueUsd} USD exceeds policy limit of ${policy.maxValuePerTxUsd} USD (maxValuePerTxUsd)`,
+        };
+      }
+    }
+
     // Check human-in-the-loop approval threshold
     let requiresApproval = false;
     const approvalThreshold = parsePolicyDecimal(policy.maxValueForAutoApprovalEth);
@@ -89,7 +123,8 @@ export class PolicyService {
       requiresApproval = true;
     }
 
-    // Check contract whitelist
+    // Check contract whitelist — the call target, as AgentPolicyModule
+    // enforces on-chain (a native transfer's call target is its recipient).
     if (policy.allowedContracts.length > 0) {
       const normalizedTarget = getAddress(params.targetContract);
       const normalizedWhitelist = policy.allowedContracts.map((a) => getAddress(a));
@@ -97,6 +132,19 @@ export class PolicyService {
         return {
           allowed: false,
           reason: `Contract ${params.targetContract} is not in the agent's allowed contracts whitelist`,
+        };
+      }
+    }
+
+    // Check recipient whitelist (Q8, off-chain only). Compared
+    // case-insensitively without checksumming, so a malformed stored entry
+    // can only fail to match — never throw.
+    if (params.recipient && (policy.allowedRecipients?.length ?? 0) > 0) {
+      const recipient = params.recipient.toLowerCase();
+      if (!policy.allowedRecipients.some((entry) => entry.trim().toLowerCase() === recipient)) {
+        return {
+          allowed: false,
+          reason: `Recipient ${params.recipient} is not in the agent's allowed recipients whitelist`,
         };
       }
     }

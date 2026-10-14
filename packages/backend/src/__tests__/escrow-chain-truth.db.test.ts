@@ -1404,7 +1404,7 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
 
     async function policy(agentId: string, data: Record<string, unknown>) {
       await m.db.agentPolicy.create({
-        data: { agentId, maxValuePerTxEth: '100', maxDailyVolumeUsd: '0', cooldownSeconds: 0, allowedContracts: [], allowedTokens: [], ...data },
+        data: { agentId, maxValuePerTxUsd: '100', maxDailyVolumeUsd: '0', cooldownSeconds: 0, allowedContracts: [], allowedRecipients: [], allowedTokens: [], ...data },
       });
     }
 
@@ -1417,29 +1417,31 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       });
     }
 
-    it('allowedContracts is the payee list: the provider wallet must be listed (the escrow contract alone is not enough)', async () => {
+    it('allowedRecipients is the payee list (Q8): the provider wallet must be listed (the escrow contract alone is not enough)', async () => {
       const requester = await sim.agent('requester');
       const provider = await sim.agent('provider');
-      await policy(requester.id, { allowedContracts: [SIM_ESCROW] });
+      // allowedContracts no longer restricts payees: listing the provider there does nothing for the escrow job.
+      await policy(requester.id, { allowedRecipients: [SIM_ESCROW], allowedContracts: [provider.safeAddress] });
       const refused = await postRaw(requester.id, provider.id, '5');
       expect(refused.statusCode).toBe(403);
-      expect(refused.json()).toMatchObject({ code: 'POLICY_VIOLATION', rule: 'allowedContracts', payee: provider.safeAddress });
+      expect(refused.json()).toMatchObject({ code: 'POLICY_VIOLATION', rule: 'allowedRecipients', payee: provider.safeAddress });
+      expect(refused.json().error).toMatch(/allowed recipients whitelist/);
       expect(await m.db.job.count({ where: { requesterId: requester.id } })).toBe(0);
 
-      await m.db.agentPolicy.update({ where: { agentId: requester.id }, data: { allowedContracts: [provider.safeAddress.toLowerCase()] } });
+      await m.db.agentPolicy.update({ where: { agentId: requester.id }, data: { allowedRecipients: [provider.safeAddress.toLowerCase()], allowedContracts: [SIM_ESCROW] } });
       expect((await postRaw(requester.id, provider.id, '5')).statusCode).toBe(201);
     });
 
-    it('allowedTokens must list the escrow USDC; the per-tx cap is read in USD for USDC', async () => {
+    it('allowedTokens must list the escrow USDC; the per-tx cap is maxValuePerTxUsd (Q8), never the ETH field', async () => {
       const requester = await sim.agent('requester');
       const provider = await sim.agent('provider');
-      await policy(requester.id, { allowedTokens: ['0x4200000000000000000000000000000000000006'], maxValuePerTxEth: '4' });
+      await policy(requester.id, { allowedTokens: ['0x4200000000000000000000000000000000000006'], maxValuePerTxUsd: '4', maxValuePerTxEth: '1000' });
       expect((await postRaw(requester.id, provider.id, '1')).json()).toMatchObject({ code: 'POLICY_VIOLATION', rule: 'allowedTokens' });
 
       await m.db.agentPolicy.update({ where: { agentId: requester.id }, data: { allowedTokens: [SIM_USDC] } });
       const capped = await postRaw(requester.id, provider.id, '5');
       expect(capped.statusCode).toBe(403);
-      expect(capped.json()).toMatchObject({ rule: 'maxValuePerTx', limit: '4' });
+      expect(capped.json()).toMatchObject({ rule: 'maxValuePerTxUsd', limit: '4' });
       expect((await postRaw(requester.id, provider.id, '4')).statusCode).toBe(201);
     });
 

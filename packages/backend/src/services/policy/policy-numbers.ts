@@ -1,6 +1,6 @@
 /**
  * Policy numeric limits — one parser for every place that reads
- * `AgentPolicy.maxValuePerTxEth` / `maxDailyVolumeUsd`.
+ * `AgentPolicy.maxValuePerTxEth` / `maxValuePerTxUsd` / `maxDailyVolumeUsd`.
  *
  * Both columns are decimal *strings*. Before this module existed the authority
  * classifier used `Number(raw)` and the enforcer used `parseFloat(raw)`, which

@@ -19,9 +19,9 @@
  *
  * Agent policy (P6, `services/policy/usdc-spend-policy.ts`): under the same
  * locks, before anything is signed, the payment must pass the provider's
- * policy — per-transaction cap (read in USD for USDC), daily volume (x402
- * rows + `DailyVolume`), `allowedTokens` (USDC) and `allowedContracts`
- * (the `payTo`) — or it is `403 POLICY_VIOLATION`.
+ * policy — per-payment cap `maxValuePerTxUsd` (Q8), daily volume (x402
+ * rows + `DailyVolume`), `allowedTokens` (USDC) and `allowedRecipients`
+ * (the `payTo`, Q8) — or it is `403 POLICY_VIOLATION`.
  *
  * State machine, durable in `ResourcePayment.status`:
  *
@@ -1032,7 +1032,7 @@ export class ResourcePaymentService {
           const verdict = evaluateUsdcSpend(policy, {
             amount: price,
             token: selected.asset,
-            counterparty: selected.payTo,
+            recipient: selected.payTo,
             spentTodayMicroUsd: spentToday,
             now,
           });

@@ -492,6 +492,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: isEthTransfer ? getAddress(body.to) : txData.to,
+      // Q8: `to` receives the value, native or ERC-20 (before Q8 an ERC-20
+      // transfer's recipient was never checked — only the token contract).
+      recipient: getAddress(body.to),
       ...(!isEthTransfer ? { tokenAddress: getAddress(body.token) } : {}),
       valueEth: isEthTransfer ? body.amount : '0',
       valueUsd: transferValueUsd,
@@ -1486,7 +1489,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
    *
    * Body: { chainId, actions: [{ to, value, token?, data }], idempotencyKey? }
    *   - to:    target contract address — checked against `allowedContracts`,
-   *            which is the BINDING policy control for raw calldata
+   *            which is the BINDING policy control for raw calldata; when the
+   *            action carries native value, also against `allowedRecipients`
+   *            (Q8: it receives that value)
    *   - value: ETH value in wei (as decimal string, e.g. "0" or "1000000000000000")
    *   - token: CALLER-DECLARED ERC-20 the action moves. The backend does not
    *            decode `data` to discover which token a call really touches;
@@ -1870,6 +1875,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       const policyResult = await policyService.validateTransaction({
         agentId: request.agentId,
         targetContract: getAddress(action.to),
+        // Q8: an action carrying native value pays its `to`. Value an action
+        // moves through calldata is not decoded (unchanged).
+        ...(valueWei > 0n ? { recipient: getAddress(action.to) } : {}),
         ...(declaredToken ? { tokenAddress: declaredToken } : {}),
         valueEth: weiToEthDecimalString(valueWei),
         ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
@@ -2336,6 +2344,8 @@ export async function executeA2APayment(params: {
     targetContract: isEthTransfer
       ? getAddress(params.providerSafeAddress)
       : txData.to,
+    // Q8: the provider receives the reward (native or ERC-20).
+    recipient: getAddress(params.providerSafeAddress),
     ...(!isEthTransfer ? { tokenAddress: getAddress(params.token) } : {}),
     valueEth: isEthTransfer ? params.amount : '0',
     valueUsd: transferValueUsd,

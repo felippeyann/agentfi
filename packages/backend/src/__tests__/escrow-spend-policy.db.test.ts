@@ -109,7 +109,7 @@ async function mkAgent(role: string, policy: Record<string, unknown> | null = {}
       safeAddress: `0x6061${randomBytes(18).toString('hex')}`,
       chainIds: [84532],
       ...(policy
-        ? { policy: { create: { maxValuePerTxEth: '100', maxDailyVolumeUsd: '0', cooldownSeconds: 0, allowedContracts: [], allowedTokens: [], ...policy } } }
+        ? { policy: { create: { maxValuePerTxUsd: '100', maxDailyVolumeUsd: '0', cooldownSeconds: 0, allowedContracts: [], allowedRecipients: [], allowedTokens: [], ...policy } } }
         : {}),
     },
   });
@@ -245,7 +245,7 @@ describeDb('escrow job reservation on Postgres (C3d review P2-3)', () => {
   });
 
   it('a failing Job insert rolls the DailyVolume increment back; a refusal leaves nothing behind', async () => {
-    const x = await mkAgent('rollback', { maxDailyVolumeUsd: '100', maxValuePerTxEth: '1000' });
+    const x = await mkAgent('rollback', { maxDailyVolumeUsd: '100', maxValuePerTxUsd: '1000' });
     const p = await mkAgent('rollback-p', null);
     await expect(
       reserveEscrowJobSpend({ requesterId: x.id, chainId: 84532, amount: '7', token: USDC, payee: p.safeAddress }, async () => {

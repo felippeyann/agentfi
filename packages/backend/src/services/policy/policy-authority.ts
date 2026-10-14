@@ -16,8 +16,10 @@ import { parsePolicyDecimal } from './policy-numbers.js';
 /** Fields of `AgentPolicy` an API caller may patch, in canonical order. */
 export const POLICY_PATCH_FIELDS = [
   'maxValuePerTxEth',
+  'maxValuePerTxUsd',
   'maxDailyVolumeUsd',
   'allowedContracts',
+  'allowedRecipients',
   'allowedTokens',
   'cooldownSeconds',
   'active',
@@ -49,7 +51,7 @@ export interface PolicyChangeClassification {
 // `undefined` means "no policy row exists", which PolicyService treats as
 // "no restrictions" — the fully open baseline.
 //
-// Both decimal limits go through `parsePolicyDecimal` — the SAME parser
+// Every decimal limit goes through `parsePolicyDecimal` — the SAME parser
 // PolicyService enforces with — so the classifier and the enforcer can never
 // disagree about what a string means. A value the parser rejects (`""`,
 // `"  "`, `"1e3"`, `"0x10"`, `"unlimited"`, …) is unlimited here, i.e. it
@@ -104,10 +106,11 @@ function whitelistLoosens(current: readonly string[], next: readonly string[]): 
  * Classifies a patch against the current policy (`null` = no policy row yet).
  *
  * A field LOOSENS when:
- *   - `maxValuePerTxEth` increases
+ *   - `maxValuePerTxEth` or `maxValuePerTxUsd` increases (a non-decimal value is unlimited,
+ *     so it loosens any limit)
  *   - `maxDailyVolumeUsd` increases (`"0"` means *no limit* and therefore loosens any positive limit)
- *   - `allowedContracts` / `allowedTokens` go from non-empty to empty, or gain an address
- *     not in the current list (compared case-insensitively)
+ *   - `allowedContracts` / `allowedRecipients` / `allowedTokens` go from non-empty to empty, or
+ *     gain an address not in the current list (compared case-insensitively)
  *   - `cooldownSeconds` decreases
  *   - `active` goes false → true
  *   - `expiresAt` is cleared (`null`) or moved later while one existed
@@ -129,6 +132,15 @@ export function classifyPolicyChange(
     loosenedFields.push('maxValuePerTxEth');
   }
 
+  // Q8: same reading as usdc-spend-policy.ts (non-decimal = unlimited). With
+  // no policy row the baseline is "no restrictions", so any value tightens.
+  if (
+    patch.maxValuePerTxUsd !== undefined &&
+    effectiveMaxValuePerTx(patch.maxValuePerTxUsd) > effectiveMaxValuePerTx(current?.maxValuePerTxUsd)
+  ) {
+    loosenedFields.push('maxValuePerTxUsd');
+  }
+
   if (
     patch.maxDailyVolumeUsd !== undefined &&
     effectiveDailyLimit(patch.maxDailyVolumeUsd) > effectiveDailyLimit(current?.maxDailyVolumeUsd)
@@ -141,6 +153,13 @@ export function classifyPolicyChange(
     whitelistLoosens(current?.allowedContracts ?? [], patch.allowedContracts)
   ) {
     loosenedFields.push('allowedContracts');
+  }
+
+  if (
+    patch.allowedRecipients !== undefined &&
+    whitelistLoosens(current?.allowedRecipients ?? [], patch.allowedRecipients)
+  ) {
+    loosenedFields.push('allowedRecipients');
   }
 
   if (

@@ -13,28 +13,30 @@
  * 1 USD (no oracle — a payment gate must not depend on one):
  *
  *   active / expiresAt   paused or expired policy refuses (as everywhere).
- *   maxValuePerTx        the per-transaction cap, read in USD for USDC: the
- *                        stored `maxValuePerTxEth` number is compared with
- *                        the USDC amount (1 USDC = 1 unit). There is no ETH
- *                        leg to price, and converting through an ETH/USD
- *                        oracle would make the gate fail whenever the oracle
- *                        does; reading the number as USD is never looser than
- *                        the ETH reading at any ETH price above 1 USD.
+ *   maxValuePerTxUsd     the per-spend cap in USD (Q8, migration 0021): the
+ *                        whole USDC amount (1 USDC = 1 USD) must not exceed
+ *                        it. Until Q8 this read the number stored in
+ *                        `maxValuePerTxEth` as USD; that field is now native
+ *                        ETH only and is never read here. Rows that existed
+ *                        before 0021 were backfilled with the ETH number, so
+ *                        their verdicts did not change.
  *   maxDailyVolume       `spentToday + amount ≤ maxDailyVolumeUsd`, where the
  *                        caller supplies everything the agent already
  *                        committed today in USD (DailyVolume + counted x402
  *                        rows for pay-resource). `"0"` = no daily limit.
  *   allowedTokens        when non-empty, the USDC contract must be listed.
- *   allowedContracts     when non-empty, the COUNTERPARTY — the address that
+ *   allowedRecipients    when non-empty, the RECIPIENT — the address that
  *                        receives the USDC (x402 `payTo`; for an ERC-8183
  *                        escrow job, C3d, the provider's wallet, where the
  *                        budget ends on `complete` — not the escrow contract,
  *                        which is the operator's own custody) — must be
- *                        listed. The agent never calls the USDC contract
- *                        itself in an x402 payment (the server's facilitator
- *                        submits the authorization), so the list is read as
- *                        "who this agent may send value to", like an ETH
- *                        transfer's recipient.
+ *                        listed (Q8). Until Q8 `allowedContracts` was read as
+ *                        this payee list; it is now only the call target of
+ *                        ordinary transactions and is never read here (the
+ *                        agent never calls the USDC contract itself in an
+ *                        x402 payment — the server's facilitator submits the
+ *                        authorization — and the escrow contract is fixed by
+ *                        the operator).
  *
  * Limits are parsed with `policy-numbers.ts` (S1): a value that is not a plain
  * decimal is unlimited — exactly what the authority classifier assumes, so
@@ -53,10 +55,10 @@ import { isPolicyDecimal } from './policy-numbers.js';
 export interface UsdcSpendPolicy {
   active: boolean;
   expiresAt: Date | null;
-  maxValuePerTxEth: string;
+  maxValuePerTxUsd: string;
   maxDailyVolumeUsd: string;
   allowedTokens: string[];
-  allowedContracts: string[];
+  allowedRecipients: string[];
 }
 
 export interface UsdcSpendRequest {
@@ -64,20 +66,21 @@ export interface UsdcSpendRequest {
   amount: bigint;
   /** USDC contract address. */
   token: string;
-  /** Address that receives the USDC (x402 `payTo`, or an escrow contract). */
-  counterparty: string;
+  /** Address that receives the USDC (x402 `payTo`, or the escrow job's provider wallet). */
+  recipient: string;
   /** USD the agent already committed today, in micro-USD, NOT including `amount`. */
   spentTodayMicroUsd: bigint;
   now?: Date;
 }
 
+/** Refusal rules; named after the policy field that refused (Q8 renamed `maxValuePerTx` / `allowedContracts`). */
 export type UsdcSpendRule =
   | 'policyPaused'
   | 'policyExpired'
-  | 'maxValuePerTx'
+  | 'maxValuePerTxUsd'
   | 'maxDailyVolume'
   | 'allowedTokens'
-  | 'allowedContracts';
+  | 'allowedRecipients';
 
 export type UsdcSpendVerdict =
   | { allowed: true }
@@ -85,7 +88,7 @@ export type UsdcSpendVerdict =
       allowed: false;
       rule: UsdcSpendRule;
       reason: string;
-      /** The policy value that refused, as stored (`maxValuePerTx`, `maxDailyVolume`). */
+      /** The policy value that refused, as stored (`maxValuePerTxUsd`, `maxDailyVolume`). */
       limit?: string;
     };
 
@@ -160,21 +163,21 @@ export function evaluateUsdcSpend(policy: UsdcSpendPolicy | null, request: UsdcS
     };
   }
 
-  if ((policy.allowedContracts?.length ?? 0) > 0 && !listed(policy.allowedContracts, request.counterparty)) {
+  if ((policy.allowedRecipients?.length ?? 0) > 0 && !listed(policy.allowedRecipients, request.recipient)) {
     return {
       allowed: false,
-      rule: 'allowedContracts',
-      reason: `Recipient ${request.counterparty} is not in the agent's allowed contracts whitelist`,
+      rule: 'allowedRecipients',
+      reason: `Recipient ${request.recipient} is not in the agent's allowed recipients whitelist`,
     };
   }
 
-  const perTx = policyDecimalToMicro(policy.maxValuePerTxEth);
+  const perTx = policyDecimalToMicro(policy.maxValuePerTxUsd);
   if (perTx !== null && request.amount > perTx) {
     return {
       allowed: false,
-      rule: 'maxValuePerTx',
-      reason: `Payment of ${amountUsd} USDC exceeds the policy's per-transaction limit of ${policy.maxValuePerTxEth} (read in USD for USDC)`,
-      limit: policy.maxValuePerTxEth,
+      rule: 'maxValuePerTxUsd',
+      reason: `Payment of ${amountUsd} USDC exceeds the policy's per-transaction limit of ${policy.maxValuePerTxUsd} USD (maxValuePerTxUsd)`,
+      limit: policy.maxValuePerTxUsd,
     };
   }
 
