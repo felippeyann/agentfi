@@ -977,11 +977,16 @@ export interface paths {
          *     is capped by `maxValuePerTxEth` (native) and counted against the daily
          *     limit; `maxValuePerTxUsd` does not apply here.
          *
-         *     `token` is `"ETH"` or a contract address — the route does not resolve
-         *     symbols. Keys the schema does not define (e.g. `recipient`, `reason`)
-         *     are dropped silently; a body without `to`, `token` or `amount` is
+         *     `token` is `"ETH"` — the chain's native asset, which is POL on Polygon
+         *     (137) — or a contract address; the route does not resolve symbols.
+         *     `to` and a `token` address must be all-lowercase or carry a valid
+         *     EIP-55 checksum (viem `isAddress` strict): a malformed value or a
+         *     mixed-case address with a wrong checksum is `400 VALIDATION_FAILED`.
+         *     Keys the schema does not define (e.g. `recipient`, `reason`) are
+         *     dropped silently; a body without `to`, `token` or `amount` is
          *     `400 VALIDATION_FAILED`. The MCP tool `pay_agent` resolves a symbol
-         *     through its token registry before calling this route.
+         *     through its token registry before calling this route, and the MCP
+         *     tools refuse native `"ETH"` where the native asset is not ETH.
          */
         post: {
             parameters: {
@@ -4152,9 +4157,9 @@ export interface components {
             idempotencyKey?: string;
         };
         TransferRequest: {
-            /** @description "ETH" (native) or an ERC-20 contract address. The route does not resolve symbols such as "USDC". */
+            /** @description "ETH" (any case: the chain's native asset — POL on Polygon 137) or an ERC-20 contract address, all-lowercase or with a valid EIP-55 checksum. The route does not resolve symbols such as "USDC"; anything else is 400 VALIDATION_FAILED. */
             token: string;
-            /** @description Recipient address (receives the ETH or the tokens). */
+            /** @description Recipient address (receives the native asset or the tokens), all-lowercase or with a valid EIP-55 checksum. A mixed-case address whose checksum does not match (a typo) is 400 VALIDATION_FAILED, never re-checksummed. */
             to: string;
             /** @description Human-readable decimal amount in whole-token units (e.g. "1.5"). */
             amount: string;

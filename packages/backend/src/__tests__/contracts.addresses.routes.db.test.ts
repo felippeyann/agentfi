@@ -219,7 +219,9 @@ const NAME_PREFIX = 's7-addresses';
 const RUN = randomBytes(3).toString('hex');
 const BASE = 8453;
 const ARBITRUM = 42161;
+const BASE_SEPOLIA = 84532;
 const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+const USDC_BASE_SEPOLIA = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 const WETH_BASE = '0x4200000000000000000000000000000000000006';
 const USDC_ARB = '0xaf88d065e77c8cC2239327C5EDb3A432268e5831';
 
@@ -227,6 +229,7 @@ const USDC_ARB = '0xaf88d065e77c8cC2239327C5EDb3A432268e5831';
 const AAVE_PROVIDER_BASE = '0xe20fCBdBfFC4Dd138cE8b2E6FBb6CB49777ad64D';
 const AAVE_POOL_BASE = '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5';
 const QUOTER_V2_BASE = '0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a';
+const QUOTER_V2_BASE_SEPOLIA = '0xC5290058841028F1614F3A6F0F5816cAd0df5E27';
 const GMX_ORDER_VAULT = '0x31eF83a530Fde1B38EE9A18093A333D8Bbbc40D5';
 const GMX_BTC_USD = '0x47c031236e19d024b42f8AE6780E44A573170703';
 const GMX_ETH_USD = '0x70d95587d40A2caf56bd97485aB3Eec10Bee6336';
@@ -433,5 +436,33 @@ describeDb('S7 — routes that read the corrected contract addresses (Postgres, 
     expect(res.statusCode, res.body).toBe(202);
     const calls = gmxInnerCalls(h.simulated[0]!.data);
     expect(calls[2]!.raw.toLowerCase()).toContain(GMX_BTC_USD.slice(2).toLowerCase());
+  });
+
+  it('a swap on Base Sepolia (the C5 chain) is quoted by the official Base Sepolia QuoterV2 and gets a slippage floor (was: no quoter, amountOutMinimum 0)', async () => {
+    // Base Sepolia spends are priced only with configured synthetic prices (Q9).
+    process.env['SYNTHETIC_TEST_PRICES_USD'] = `${BASE_SEPOLIA}:native=2000`;
+    try {
+      const agent = await mkAgent([BASE_SEPOLIA]);
+      const res = await (await app(agent.id)).inject({
+        method: 'POST',
+        url: '/v1/transactions/swap',
+        payload: { chainId: BASE_SEPOLIA, fromToken: WETH_BASE, toToken: USDC_BASE_SEPOLIA, amountIn: '1', slippageTolerance: 0.5, simulationId: 'sim-s7' },
+      });
+
+      expect(res.statusCode, res.body).toBe(202);
+      const swap = decodeFunctionData({ abi: SWAP_ABI, data: h.simulated[0]!.data as `0x${string}` });
+      const params = swap.args[0] as { fee: number; amountOutMinimum: bigint };
+      // Canned quote, best tier 0.05%: 2000 USDC minus 0.5% slippage (was: 0 — any price accepted).
+      expect(params.amountOutMinimum).toBe(1_990_000_000n);
+      expect(params.fee).toBe(500);
+      const quotes = h.ethCalls.filter((c) => c.selector === QUOTE_EXACT_INPUT_SINGLE);
+      expect(quotes.map((q) => [q.chainId, q.to])).toEqual([
+        [BASE_SEPOLIA, QUOTER_V2_BASE_SEPOLIA],
+        [BASE_SEPOLIA, QUOTER_V2_BASE_SEPOLIA],
+        [BASE_SEPOLIA, QUOTER_V2_BASE_SEPOLIA],
+      ]);
+    } finally {
+      delete process.env['SYNTHETIC_TEST_PRICES_USD'];
+    }
   });
 });
