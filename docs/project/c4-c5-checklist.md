@@ -67,7 +67,7 @@ Record it as a separate row.
 
 ## 3. Known behaviour to expect (not defects)
 
-- The default agent policy caps an escrow job at `maxValuePerTxEth` read as USD: **1 USDC** with the default `"1.0"`. Its 60 s cooldown also refuses a second job right after the first. The example registers its agents with a cap that covers the budget and no cooldown. Agents you register by hand need the same, set with the operator credential (owner decision pending: the plan's P6 open question).
+- The default agent policy caps an escrow job at `maxValuePerTxUsd` (Q8, migration 0021): **1 USDC** with the default `"1.0"`. Its 60 s cooldown also refuses a second job right after the first. The example registers its agents with a USD cap that covers the budget and no cooldown. Agents you register by hand need the same (`maxValuePerTxUsd`, not `maxValuePerTxEth`), set with the operator credential; an agent created with a non-empty `allowedContracts` must also name `allowedRecipients` (the provider wallets it may pay, or `[]`).
 - On Base Sepolia CoinGecko has no prices. Escrow jobs price USDC at exactly 1.00 (C3d), so the daily volume is counted. A legacy (non-escrow) reward without a price is refused when a daily limit is set.
 - The on-chain URIs point at `http://localhost:3000` (D10). Third parties cannot open them; the hashes and transactions are the evidence.
 

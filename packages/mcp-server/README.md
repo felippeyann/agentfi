@@ -76,7 +76,7 @@ Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) sta
 | `contest_job` | Dispute a submitted deliverable before the evaluator settles (requester only): the job is held for an operator decision — pay the provider or refund you |
 | `pay_agent` | Pay another agent directly (outside the job queue) |
 | `pay_for_resource` | Pay an HTTP 402 (x402) resource with the agent's own USDC, capped by the remaining budget of a job it is working on; idempotent per `payment_id` |
-| `update_policy` | Tighten the agent's own operational policy (applies immediately). Loosening is rejected by the backend — it requires the operator credential |
+| `update_policy` | Tighten the agent's own operational policy (applies immediately): `max_value_per_tx_eth` (native ETH), `max_value_per_tx_usd` (each USDC payment / escrowed job budget), `allowed_contracts`, `allowed_recipients` (who may receive value), `allowed_tokens`. Loosening is rejected by the backend — it requires the operator credential |
 | `sign_handshake` | Sign an A2A identity handshake: the EIP-712 envelope `AgentFiHandshake{agent, message, issuedAt}` (domain `AgentFi Handshake` v1), never the raw message |
 | `verify_handshake` | Verify a peer's handshake (`message`, `issued_at`, `signature`, `address`; ECDSA + EIP-1271 fallback) |
 

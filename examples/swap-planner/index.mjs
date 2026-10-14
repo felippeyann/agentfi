@@ -87,6 +87,10 @@ async function registerAgent(name) {
         maxDailyVolumeUsd: '1000',
         // Only Uniswap V3 router is allowed; arbitrary contracts are blocked
         allowedContracts: [UNISWAP_V3_ROUTER_BASE],
+        // Who may RECEIVE value from the agent (transfers, x402 payees, escrow providers).
+        // Required whenever allowedContracts is non-empty; [] = no recipient restriction —
+        // this planner only swaps into its own wallet, it never pays anyone.
+        allowedRecipients: [],
         allowedTokens: [USDC_BASE, WETH_BASE],
         cooldownSeconds: 0,
       },

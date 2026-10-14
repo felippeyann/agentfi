@@ -10,6 +10,7 @@ Runs cleanly on the zero-credential dev stack. Graduates to real execution by sw
    - `maxValuePerTxEth: 0.5`
    - `maxDailyVolumeUsd: 1000`
    - Only Uniswap V3 router is allowed
+   - `allowedRecipients: []` — required next to a non-empty `allowedContracts`; `[]` means no recipient restriction (the planner never pays anyone)
    - Only USDC + WETH are whitelisted tokens
 2. Inspects the agent record to show the policy is live in the DB
 3. Simulates a swap of **10 USDC → WETH** on Base via Uniswap V3

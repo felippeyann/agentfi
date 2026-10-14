@@ -110,9 +110,9 @@ async function registerAgent(backend: BackendHandle, fork: EscrowForkContext, na
   const res = await call<{ id: string; apiKey: string; safeAddress: string }>(backend.url, '/v1/agents', {
     method: 'POST',
     apiKey: fork.apiSecret,
-    // C3d: the requester's policy applies to escrow jobs — the default per-tx cap (1.0, read in
-    // USD for USDC) would refuse the 2.5 USDC budget, and the default 60 s cooldown counts a job.
-    body: { name, chainIds: [fork.chainId], policy: { maxValuePerTxEth: '10', cooldownSeconds: 0 } },
+    // C3d: the requester's policy applies to escrow jobs — the default USD cap (maxValuePerTxUsd
+    // 1.0, Q8) would refuse the 2.5 USDC budget, and the default 60 s cooldown counts a job.
+    body: { name, chainIds: [fork.chainId], policy: { maxValuePerTxUsd: '10', cooldownSeconds: 0 } },
   });
   expect(res.status, res.raw).toBe(201);
   return { id: res.body.id, name, apiKey: res.body.apiKey, address: getAddress(res.body.safeAddress) };
