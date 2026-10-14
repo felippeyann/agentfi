@@ -51,7 +51,12 @@ export ALCHEMY_API_KEY=test TURNKEY_API_PUBLIC_KEY=test TURNKEY_API_PRIVATE_KEY=
 
 Order matters locally: run `forge build` (or `forge test`) **before** step 4 — a stale `packages/contracts/out` fails `abi.erc8183.test.ts`. Run steps 4 and 5 against your own database, and not at the same time as another run on it (`agent.search.test.ts` empties tables).
 
-Opt-in suites that need public mainnet RPCs (read-only forks; not in CI): the S7 address checks (`contracts.addresses.fork.test.ts`, with #183) — start `anvil --fork-url https://mainnet.base.org --port <p1>` and `anvil --fork-url https://arb1.arbitrum.io/rpc --port <p2>` on free ports (8546 is the escrow rehearsal's default) and set `S7_FORK_RPC_8453=http://127.0.0.1:<p1>` / `S7_FORK_RPC_42161=http://127.0.0.1:<p2>`.
+Opt-in suites that read public RPCs (read-only: local forks or view calls, nothing is broadcast to a real network; not in CI). Skipped without their variables, so a green run of steps 3–5 does not cover them. The backend ones run from `packages/backend` with the test environment of §1:
+
+- **S7 addresses** (`contracts.addresses.fork.test.ts`, #183): start `anvil --fork-url https://mainnet.base.org --port <p1>` and `anvil --fork-url https://arb1.arbitrum.io/rpc --port <p2>` on free ports (8546 is the escrow rehearsal's default), then `cd packages/backend && S7_FORK_RPC_8453=http://127.0.0.1:<p1> S7_FORK_RPC_42161=http://127.0.0.1:<p2> S7_FORK_RPC_84532=https://sepolia.base.org npx vitest run src/__tests__/contracts.addresses.fork.test.ts --testTimeout=60000`. On a cold fork the GMX market check makes enough reads to pass vitest's default 5 s. The same two `S7_FORK_RPC_*` variables enable the fork cases of `contracts.addresses.routes.db.test.ts` (step 5).
+- **Max withdrawal** (`max-withdrawal.fork.test.ts`, #180): `cd packages/backend && MAX_WITHDRAWAL_FORK_URL=https://ethereum-rpc.publicnode.com MAX_WITHDRAWAL_FORK_BLOCK=<a recent block> npx vitest run src/__tests__/max-withdrawal.fork.test.ts`. A public non-archive RPC serves only recent state: an older pinned block (e.g. 26 192 600, used in #180) fails with "anvil did not start" unless the RPC is an archive node.
+- **S9 Safe mode** (`contract-identity.safe.anvil.ts`, #182): `cd packages/backend && E2E_ANVIL_FORK_URL=https://sepolia.base.org npm run test:anvil`, with the Anvil suites' `DATABASE_URL`.
+- **Foundry forks** (`Adversarial.fork.t.sol`, `ReputationHook.fork.t.sol`): `cd packages/contracts && BASE_SEPOLIA_FORK_URL=https://sepolia.base.org forge test --match-path 'test/*.fork.t.sol'` (block 47 822 000 unless `BASE_SEPOLIA_FORK_BLOCK` is set).
 
 ## 3. Known local quirks
 
