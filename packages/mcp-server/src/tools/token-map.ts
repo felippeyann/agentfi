@@ -1,6 +1,14 @@
 type ChainTokenMap = Record<string, string>;
 
-const TOKENS_BY_CHAIN: Record<number, ChainTokenMap> = {
+/**
+ * The MCP server's token registry: symbol → ERC-20 contract per chain. `ETH`
+ * is the wrapped-native alias the swap / Aave tools need; `pay_agent` and
+ * `transfer_token` read `ETH` as native ETH instead. Every symbol the
+ * backend's registry (`packages/backend/src/services/transaction/
+ * token-registry.ts`) also knows must resolve to the same address
+ * (`packages/backend/src/__tests__/mcp.token-map.sync.test.ts`).
+ */
+const TOKENS_BY_CHAIN: Readonly<Record<number, Readonly<ChainTokenMap>>> = {
   1: {
     ETH: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
     WETH: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
@@ -13,6 +21,13 @@ const TOKENS_BY_CHAIN: Record<number, ChainTokenMap> = {
     ETH: '0x4200000000000000000000000000000000000006',
     WETH: '0x4200000000000000000000000000000000000006',
     USDC: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+  },
+  // Base Sepolia — the backend registry's entries (USDC = Circle's testnet
+  // deployment, the ERC-8183 escrow token).
+  84532: {
+    ETH: '0x4200000000000000000000000000000000000006',
+    WETH: '0x4200000000000000000000000000000000000006',
+    USDC: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
   },
   42161: {
     ETH: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1',
@@ -54,4 +69,29 @@ export function resolveTransferToken(token: string, chainId: number): string {
 
 export function resolveAssetToken(token: string, chainId: number): string {
   return resolveSwapToken(token, chainId);
+}
+
+/**
+ * A payment token as `POST /v1/transactions/transfer` takes it, from a symbol
+ * only: `"ETH"` (native) or the registry's contract address for the symbol on
+ * that chain. Undefined for anything else — an unknown symbol, a symbol of
+ * another chain, an address — so the caller refuses instead of guessing.
+ */
+export function resolvePaymentToken(symbol: string, chainId: number): string | undefined {
+  const normalized = normalizeToken(symbol);
+  if (normalized === 'ETH') return 'ETH';
+  const byChain = TOKENS_BY_CHAIN[chainId];
+  return byChain && Object.hasOwn(byChain, normalized) ? byChain[normalized] : undefined;
+}
+
+/** The symbols `resolvePaymentToken` accepts on `chainId`, sorted (ETH is always native). */
+export function paymentTokenSymbols(chainId: number): string[] {
+  return [...new Set(['ETH', ...Object.keys(TOKENS_BY_CHAIN[chainId] ?? {})])].sort();
+}
+
+/** Every (chain, symbol, address) entry, for the registry consistency test. */
+export function tokenRegistryEntries(): Array<{ chainId: number; symbol: string; address: string }> {
+  return Object.entries(TOKENS_BY_CHAIN).flatMap(([chainId, tokens]) =>
+    Object.entries(tokens).map(([symbol, address]) => ({ chainId: Number(chainId), symbol, address })),
+  );
 }
