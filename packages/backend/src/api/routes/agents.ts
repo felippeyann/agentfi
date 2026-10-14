@@ -81,7 +81,8 @@ const initialPolicySchema = z
   .object({
     maxValuePerTxEth: policyDecimal.default('1.0'),
     maxValuePerTxUsd: policyDecimal.optional(),
-    maxOutflowPerTxUsd: policyDecimal.optional(),
+    // #185 review: `null` = "not configured", exactly like omitting it (the OpenAPI Policy is nullable).
+    maxOutflowPerTxUsd: policyDecimal.nullable().optional(),
     maxDailyVolumeUsd: policyDecimal.default('10000'),
     allowedContracts: z.array(z.string()).default([]),
     allowedRecipients: z.array(recipientAddress).optional(),
@@ -174,8 +175,8 @@ async function provisionAgent(
             maxValuePerTxEth: body.policy.maxValuePerTxEth,
             // Omitted → the column default "1.0" (Q8: never copied from the ETH field).
             ...(body.policy.maxValuePerTxUsd !== undefined ? { maxValuePerTxUsd: body.policy.maxValuePerTxUsd } : {}),
-            // §5-6: omitted → NULL (no column default; never inferred).
-            ...(body.policy.maxOutflowPerTxUsd !== undefined ? { maxOutflowPerTxUsd: body.policy.maxOutflowPerTxUsd } : {}),
+            // §5-6: omitted or null → NULL (no column default; never inferred).
+            ...(typeof body.policy.maxOutflowPerTxUsd === 'string' ? { maxOutflowPerTxUsd: body.policy.maxOutflowPerTxUsd } : {}),
             maxDailyVolumeUsd: body.policy.maxDailyVolumeUsd,
             allowedContracts: body.policy.allowedContracts,
             // Undefined only when allowedContracts is empty (the schema refuses otherwise).
