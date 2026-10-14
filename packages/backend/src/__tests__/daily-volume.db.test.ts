@@ -903,4 +903,67 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
     await runJob(jobOf(res.json().transactionId), { receipt: 'reverted' });
     expect(await volume(agent.id)).toBeCloseTo(0, 6);
   });
+
+  // ── Q8: allowedRecipients on the real routes (refused before anything is reserved) ──
+
+  describe('Q8 — allowedRecipients', () => {
+    const LISTED = '0x00000000000000000000000000000000000000b0';
+
+    it('an ERC-20 transfer to a recipient outside allowedRecipients is 403 with nothing created or reserved; a listed one passes', async () => {
+      // The token contract is an allowed CONTRACT (call target); the recipient is a separate list.
+      const agent = await mkAgent({ allowedContracts: [USDC], allowedRecipients: [LISTED] });
+      const a = await app(agent.id);
+
+      const refused = await transfer(a, '25', { token: USDC }); // to RECIPIENT (not listed)
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json().error).toMatch(/allowed recipients whitelist/);
+      expect(await m.db.transaction.count({ where: { agentId: agent.id } })).toBe(0);
+      expect(await volume(agent.id)).toBeCloseTo(0, 6);
+
+      const ok = await transfer(a, '25', { token: USDC, to: LISTED });
+      expect(ok.statusCode).toBe(202);
+      expect(await volume(agent.id)).toBeCloseTo(25, 6);
+    });
+
+    it('a native transfer needs its `to` in allowedContracts (unchanged) AND in allowedRecipients', async () => {
+      const contractsOnly = await mkAgent({ allowedContracts: [RECIPIENT], allowedRecipients: [LISTED] });
+      const refused = await transfer(await app(contractsOnly.id), '0.01');
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json().error).toMatch(/allowed recipients whitelist/);
+
+      const both = await mkAgent({ allowedContracts: [RECIPIENT], allowedRecipients: [RECIPIENT] });
+      expect((await transfer(await app(both.id), '0.01')).statusCode).toBe(202);
+    });
+
+    it('batch: an action carrying native value pays its `to` (checked); a zero-value calldata action is not a recipient', async () => {
+      const agent = await mkAgent({ allowedRecipients: [LISTED] });
+      const a = await app(agent.id);
+      const batch = (actions: unknown[]) => a.inject({ method: 'POST', url: '/v1/transactions/batch', payload: { chainId: CHAIN_ID, actions } });
+
+      const refused = await batch([{ to: LISTED, value: '1000000000000000' }, { to: RECIPIENT, value: '1000000000000000' }]);
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json()).toMatchObject({ actionIndex: 1 });
+      expect(refused.json().error).toMatch(/allowed recipients whitelist/);
+      expect(await volume(agent.id)).toBeCloseTo(0, 6);
+
+      const ok = await batch([{ to: LISTED, value: '1000000000000000' }, { to: RECIPIENT, value: '0', data: '0x12345678' }]);
+      expect(ok.statusCode).toBe(202);
+    });
+
+    it('legacy A2A payment: the provider is the recipient — refused before any row when it is not listed', async () => {
+      const requester = await mkAgent({ allowedRecipients: [LISTED] });
+      const provider = await mkAgent();
+      await expect(
+        m.executeA2APayment({
+          requesterId: requester.id,
+          providerSafeAddress: provider.safeAddress,
+          amount: '0.001',
+          token: 'ETH',
+          chainId: CHAIN_ID,
+          jobId: `q8-${RUN}`,
+        }),
+      ).rejects.toThrow(/Policy check failed: Recipient .* allowed recipients whitelist/);
+      expect(await m.db.transaction.count({ where: { agentId: requester.id } })).toBe(0);
+    });
+  });
 });

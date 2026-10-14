@@ -12,9 +12,13 @@ interface AgentDetail {
   chainIds: number[];
   policy: {
   maxValuePerTxEth: string;
+  /** Q8: USDC x402 payments and escrow budgets (off-chain only). */
+  maxValuePerTxUsd: string;
   maxValueForAutoApprovalEth: string;
   maxDailyVolumeUsd: string;
   allowedContracts: string[];
+  /** Q8: addresses that may receive value from the agent (off-chain only). */
+  allowedRecipients: string[];
   allowedTokens: string[];
   cooldownSeconds: number;
   active: boolean;
@@ -121,6 +125,10 @@ export default async function AgentDetailPage({ params }: { params: { id: string
               <p className="text-xs text-gray-300">
                 Max value/tx: <span className="text-white">{agent.policy.maxValuePerTxEth} ETH</span>
               </p>
+              <p className="text-xs text-gray-300" title="USDC x402 payments and escrowed job budgets. Enforced by the backend only (not synced on-chain).">
+                Max USD/spend: <span className="text-white">${agent.policy.maxValuePerTxUsd}</span>{' '}
+                <span className="text-gray-500">(off-chain)</span>
+              </p>
               <p className="text-xs text-brand-purple">
                 Auto-approve limit: <span className="font-bold">{agent.policy.maxValueForAutoApprovalEth} ETH</span>
               </p>
@@ -135,6 +143,13 @@ export default async function AgentDetailPage({ params }: { params: { id: string
                 <span className="text-white">
                   {agent.policy.allowedContracts.length === 0 ? 'all' : agent.policy.allowedContracts.length}
                 </span>
+              </p>
+              <p className="text-xs text-gray-300" title="Addresses that may receive value from the agent (transfer recipient, x402 payee, escrow provider). Enforced by the backend only.">
+                Allowed recipients:{' '}
+                <span className="text-white">
+                  {(agent.policy.allowedRecipients ?? []).length === 0 ? 'all' : agent.policy.allowedRecipients.length}
+                </span>{' '}
+                <span className="text-gray-500">(off-chain)</span>
               </p>
               <p className="text-xs text-gray-300">
                 Policy active:{' '}

@@ -244,9 +244,11 @@ model AgentPolicy {
   id                String  @id @default(cuid())
   agentId           String  @unique
   agent             Agent   @relation(fields: [agentId], references: [id])
-  maxValuePerTxEth  String  // BigInt como string
+  maxValuePerTxEth  String  // BigInt como string — ETH nativo por transação (nunca lido como USD)
+  maxValuePerTxUsd  String  // Q8 (2026-10): USD por gasto em USDC (x402, orçamento de escrow ERC-8183); só off-chain
   maxDailyVolumeUsd String
-  allowedContracts  String[]
+  allowedContracts  String[] // alvo da chamada (tx.to), como o AgentPolicyModule on-chain
+  allowedRecipients String[] // Q8: quem pode RECEBER valor (destinatário de transfer, payTo x402, provider do escrow); só off-chain
   allowedTokens     String[]
   cooldownSeconds   Int
   active            Boolean @default(true)

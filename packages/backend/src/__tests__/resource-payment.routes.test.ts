@@ -774,9 +774,11 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
         active: true,
         expiresAt: null,
         maxValuePerTxEth: '1.0',
+        maxValuePerTxUsd: '1.0',
         maxValueForAutoApprovalEth: '0.1',
         maxDailyVolumeUsd: '10000',
         allowedContracts: [],
+        allowedRecipients: [],
         allowedTokens: [],
         cooldownSeconds: 60,
         pausedByOperatorAt: null,
@@ -785,8 +787,9 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
       };
     }
 
-    it('per-transaction cap, read in USD for USDC: a price above it is 403 POLICY_VIOLATION, recorded failed_before_signing', async () => {
-      mockDb.agentPolicy.findUnique.mockResolvedValue(policyRow({ maxValuePerTxEth: '0.25' }));
+    it('per-payment cap maxValuePerTxUsd (Q8): a price above it is 403 POLICY_VIOLATION, recorded failed_before_signing', async () => {
+      // The ETH field is never read for a USDC payment (it would allow 1000 here).
+      mockDb.agentPolicy.findUnique.mockResolvedValue(policyRow({ maxValuePerTxUsd: '0.25', maxValuePerTxEth: '1000' }));
       const f = await fixture({ price: '$0.40' });
       const app = await buildApp({ base: f.base });
 
@@ -795,7 +798,7 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
       expect(res.statusCode).toBe(403);
       expect(res.json()).toMatchObject({
         code: 'POLICY_VIOLATION',
-        rule: 'maxValuePerTx',
+        rule: 'maxValuePerTxUsd',
         limit: '0.25',
         price: '400000',
         priceFormatted: '0.4',
@@ -805,8 +808,8 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
       expect(wallet.signatures).toBe(0);
       expect(f.counts).toEqual({ verify: 0, settle: 0, deliver: 0 });
 
-      // Within the cap it pays (the same row is retried).
-      mockDb.agentPolicy.findUnique.mockResolvedValue(policyRow({ maxValuePerTxEth: '0.40' }));
+      // Within the cap it pays (the same row is retried) — even with a tiny ETH cap.
+      mockDb.agentPolicy.findUnique.mockResolvedValue(policyRow({ maxValuePerTxUsd: '0.40', maxValuePerTxEth: '0.0001' }));
       const paid = await pay(app, { url: f.url, paymentId: PAYMENT_ID });
       expect(paid.statusCode).toBe(200);
       expect(paid.json().payment).toMatchObject({ status: 'settled', id: res.json().payment.id });
@@ -845,24 +848,33 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
       expect(ledger.all()).toHaveLength(0);
     });
 
-    it('allowedContracts is read as the payee allowlist: a payTo not listed is refused, a listed one pays', async () => {
+    it('allowedRecipients is the payee allowlist (Q8): a payTo not listed is refused, a listed one pays; allowedContracts is not read', async () => {
       const f = await fixture({ price: '$0.40' });
       mockDb.agent.findUnique.mockResolvedValue(
         agentRow({ policy: { active: true, expiresAt: null, allowedTokens: [USDC_BASE_SEPOLIA] } }),
       );
       mockDb.agentPolicy.findUnique.mockResolvedValue(
-        policyRow({ allowedTokens: [USDC_BASE_SEPOLIA], allowedContracts: ['0x00000000000000000000000000000000000000c1'] }),
+        policyRow({
+          allowedTokens: [USDC_BASE_SEPOLIA],
+          allowedRecipients: ['0x00000000000000000000000000000000000000c1'],
+          // Listing the seller as a CONTRACT no longer makes it a payee.
+          allowedContracts: [f.seller.address],
+        }),
       );
       const app = await buildApp({ base: f.base });
 
       const refused = await pay(app, { url: f.url });
       expect(refused.statusCode).toBe(403);
-      expect(refused.json()).toMatchObject({ code: 'POLICY_VIOLATION', rule: 'allowedContracts' });
+      expect(refused.json()).toMatchObject({ code: 'POLICY_VIOLATION', rule: 'allowedRecipients' });
       expect(refused.json().payTo.toLowerCase()).toBe(f.seller.address.toLowerCase());
       expect(wallet.signatures).toBe(0);
 
       mockDb.agentPolicy.findUnique.mockResolvedValue(
-        policyRow({ allowedTokens: [USDC_BASE_SEPOLIA], allowedContracts: [f.seller.address.toLowerCase()] }),
+        policyRow({
+          allowedTokens: [USDC_BASE_SEPOLIA],
+          allowedRecipients: [f.seller.address.toLowerCase()],
+          allowedContracts: ['0x00000000000000000000000000000000000000c1'],
+        }),
       );
       const paid = await pay(app, { url: f.url });
       expect(paid.statusCode).toBe(200);

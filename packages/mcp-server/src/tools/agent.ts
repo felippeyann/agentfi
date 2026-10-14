@@ -132,12 +132,18 @@ export const agentTools = [
   {
     name: 'update_policy',
     description:
-      'TIGHTENS the agent\'s own operational policy (lower max value per tx, narrower token/contract whitelists). ' +
+      'TIGHTENS the agent\'s own operational policy (lower per-transaction caps, narrower token/contract/recipient whitelists). ' +
       'The change applies IMMEDIATELY — there is no operator approval step. ' +
+      'Units: max_value_per_tx_eth caps native ETH on ordinary transactions; max_value_per_tx_usd caps each USDC ' +
+      'payment (pay_for_resource) and each escrowed job budget (post_job). Lists: allowed_contracts are the contracts ' +
+      'your transactions may call; allowed_recipients are the addresses that may RECEIVE value from you (transfer ' +
+      'recipient, x402 payee, escrow provider). The USD cap and the recipient list are enforced by the backend only ' +
+      '(not synced on-chain). ' +
       'This tool can ONLY tighten: the backend rejects any change that loosens the policy with 403 ' +
-      '(raising max_value_per_tx_eth; adding an address that is not already whitelisted, or clearing a whitelist). ' +
+      '(raising max_value_per_tx_eth or max_value_per_tx_usd; adding an address that is not already whitelisted, or ' +
+      'clearing a whitelist). ' +
       'Loosening requires the operator credential (API_SECRET) — if you need higher limits or new whitelisted ' +
-      'tokens/contracts to complete a mission, ask the operator instead of retrying. ' +
+      'tokens/contracts/recipients to complete a mission, ask the operator instead of retrying. ' +
       'Provide a `reason` for audit — the backend writes it to its policy audit log line (it is not stored ' +
       'and does not gate the change).',
     inputSchema: z.object({
@@ -148,6 +154,13 @@ export const agentTools = [
         .regex(/^\d+(\.\d+)?$/, 'must be a plain decimal string such as "0.5"')
         .optional()
         .describe('New max ETH per transaction as a plain decimal string (e.g. "0.5"). Must be <= the current limit.'),
+      max_value_per_tx_usd: z
+        .string()
+        .regex(/^\d+(\.\d+)?$/, 'must be a plain decimal string such as "5"')
+        .optional()
+        .describe(
+          'New max USD per USDC payment / escrowed job budget as a plain decimal string (e.g. "5"). Must be <= the current limit.',
+        ),
       allowed_tokens: z
         .array(z.string())
         .optional()
@@ -160,6 +173,12 @@ export const agentTools = [
         .describe(
           'Replacement contract whitelist. Must be a subset of the current whitelist; adding new contracts or clearing a non-empty whitelist requires the operator.',
         ),
+      allowed_recipients: z
+        .array(z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 0x-prefixed 20-byte hex address'))
+        .optional()
+        .describe(
+          'Replacement recipient whitelist (addresses that may receive value from you). Must be a subset of the current list; adding recipients or clearing a non-empty list requires the operator.',
+        ),
       reason: z
         .string()
         .max(500)
@@ -167,8 +186,10 @@ export const agentTools = [
     }),
     handler: async (input: {
       max_value_per_tx_eth?: string;
+      max_value_per_tx_usd?: string;
       allowed_tokens?: string[];
       allowed_contracts?: string[];
+      allowed_recipients?: string[];
       reason: string;
     }) => {
       // Get current agent ID first
@@ -176,8 +197,10 @@ export const agentTools = [
 
       const result = await api.patch(`/v1/agents/${me.id}/policy`, {
         maxValuePerTxEth: input.max_value_per_tx_eth,
+        maxValuePerTxUsd: input.max_value_per_tx_usd,
         allowedTokens: input.allowed_tokens,
         allowedContracts: input.allowed_contracts,
+        allowedRecipients: input.allowed_recipients,
         reason: input.reason,
       });
 

@@ -70,10 +70,13 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 type AgentsModule = typeof import('../api/routes/agents.js');
 
 const EOA = '0x1111111111111111111111111111111111111111';
+// `maxValuePerTxUsd` is absent on purpose: the column default ("1.0") applies
+// (Q8 — never derived from the ETH field).
 const DEFAULT_POLICY = {
   maxValuePerTxEth: '1.0',
   maxDailyVolumeUsd: '10000',
   allowedContracts: [],
+  allowedRecipients: [],
   allowedTokens: [],
   cooldownSeconds: 60,
 };
@@ -115,8 +118,9 @@ describe('POST /v1/public/agents — forced defaults', () => {
         tier: 'ENTERPRISE',
         policy: {
           maxValuePerTxEth: '1000000',
+          maxValuePerTxUsd: '1000000',
           maxDailyVolumeUsd: '0',
-          allowedContracts: [],
+          allowedContracts: ['0x2626664c2603336E57B271c5C0b26F421741e481'],
           allowedTokens: [],
           cooldownSeconds: 0,
         },
@@ -211,6 +215,97 @@ describe('POST /v1/agents — operator path keeps accepting an explicit (valid) 
 
     await app.close();
   });
+
+  it('Q8: maxValuePerTxUsd is stored as given; omitted, it is NOT derived from maxValuePerTxEth (column default)', async () => {
+    const app = await buildApp();
+
+    const withUsd = await app.inject({
+      method: 'POST',
+      url: '/v1/agents',
+      payload: { name: 'usd-cap', policy: { maxValuePerTxEth: '0.5', maxValuePerTxUsd: '25' } },
+    });
+    expect(withUsd.statusCode).toBe(201);
+    expect(mockDb.agent.create.mock.calls[0][0].data.policy.create).toMatchObject({ maxValuePerTxEth: '0.5', maxValuePerTxUsd: '25' });
+
+    const ethOnly = await app.inject({
+      method: 'POST',
+      url: '/v1/agents',
+      payload: { name: 'eth-only', policy: { maxValuePerTxEth: '50' } },
+    });
+    expect(ethOnly.statusCode).toBe(201);
+    expect(mockDb.agent.create.mock.calls[1][0].data.policy.create).not.toHaveProperty('maxValuePerTxUsd');
+
+    await app.close();
+  });
+
+  it('Q8: a non-empty allowedContracts without allowedRecipients is 400 before provisioning (no silent widening)', async () => {
+    const app = await buildApp();
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/agents',
+      payload: { name: 'contracts-only', policy: { allowedContracts: ['0x2626664c2603336E57B271c5C0b26F421741e481'] } },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({
+      error: 'Validation failed',
+      details: [expect.objectContaining({ path: ['policy', 'allowedRecipients'], message: expect.stringMatching(/allowedRecipients is required/) })],
+    });
+    expect(createWalletMock).not.toHaveBeenCalled();
+    expect(mockDb.agent.create).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it('Q8: an explicit allowedRecipients (including [] = no recipient restriction) is stored as given', async () => {
+    const app = await buildApp();
+    const router = '0x2626664c2603336E57B271c5C0b26F421741e481';
+    const payee = '0x00000000000000000000000000000000000000b0';
+
+    const open = await app.inject({
+      method: 'POST',
+      url: '/v1/agents',
+      payload: { name: 'open-recipients', policy: { allowedContracts: [router], allowedRecipients: [] } },
+    });
+    expect(open.statusCode).toBe(201);
+    expect(mockDb.agent.create.mock.calls[0][0].data.policy.create).toMatchObject({ allowedContracts: [router], allowedRecipients: [] });
+
+    const listed = await app.inject({
+      method: 'POST',
+      url: '/v1/agents',
+      payload: { name: 'listed-recipients', policy: { allowedRecipients: [payee] } },
+    });
+    expect(listed.statusCode).toBe(201);
+    expect(mockDb.agent.create.mock.calls[1][0].data.policy.create).toMatchObject({ allowedContracts: [], allowedRecipients: [payee] });
+
+    const bad = await app.inject({
+      method: 'POST',
+      url: '/v1/agents',
+      payload: { name: 'bad-recipient', policy: { allowedRecipients: ['not-an-address'] } },
+    });
+    expect(bad.statusCode).toBe(400);
+
+    await app.close();
+  });
+
+  it.each(['', '   ', '1e3', '0x10', '5abc', 'unlimited'])(
+    'rejects a malformed initial maxValuePerTxUsd %j with 400 before provisioning a wallet',
+    async (raw) => {
+      const app = await buildApp();
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/agents',
+        payload: { name: 'bad', policy: { maxValuePerTxUsd: raw } },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(createWalletMock).not.toHaveBeenCalled();
+
+      await app.close();
+    },
+  );
 
   it.each(['', '   ', '1e3', '0x10', '5abc', 'unlimited'])(
     'rejects a malformed initial limit %j with 400 before provisioning a wallet',

@@ -121,7 +121,7 @@ Open self-registration for autonomous agents. No operator `API_SECRET` required.
 - **Auth**: none
 - **Rate limit**: `PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR` per IP (default 5/hour; operator-configurable; set to 0 to disable)
 - **Tier**: forced to `FREE` regardless of request body
-- **Policy**: forced to the server defaults — `maxValuePerTxEth=1.0`, `maxDailyVolumeUsd=10000`, empty whitelists, `cooldownSeconds=60`. Any `policy` in the request body is **ignored**: an unauthenticated caller cannot pick its own limits. Loosening afterwards requires the operator credential on `PATCH /v1/agents/:id/policy`.
+- **Policy**: forced to the server defaults — `maxValuePerTxEth=1.0`, `maxValuePerTxUsd=1.0`, `maxDailyVolumeUsd=10000`, empty whitelists (contracts, recipients, tokens), `cooldownSeconds=60`. Any `policy` in the request body is **ignored**: an unauthenticated caller cannot pick its own limits. Loosening afterwards requires the operator credential on `PATCH /v1/agents/:id/policy`.
 
 ```json
 // Request (no auth headers)
@@ -158,13 +158,40 @@ an ENS identity. See `.env.example` for configuration details.
 // Request
 {
   "maxValuePerTxEth": "0.5",
+  "maxValuePerTxUsd": "25",
   "maxDailyVolumeUsd": "5000",
   "allowedContracts": ["0x..."],
+  "allowedRecipients": ["0x..."],
   "cooldownSeconds": 30,
   "active": true,
   "syncOnChain": true
 }
 ```
+
+**Units and lists (Q8, migration 0021).**
+
+| Field | Meaning | Enforced on |
+|-------|---------|-------------|
+| `maxValuePerTxEth` | native ETH per transaction | `/v1/transactions/*` (and on-chain via `syncOnChain`) |
+| `maxValuePerTxUsd` | USD per spend denominated in USD (USDC at 1.00) | x402 `pay-resource` payments and ERC-8183 escrow budgets (`POST /v1/jobs`). **Not** `/v1/transactions/*` — extending it there is an open plan item. Off-chain only |
+| `allowedContracts` | call targets (`tx.to`) of ordinary transactions | `/v1/transactions/*` (and on-chain via `syncOnChain`); a native transfer's call target is its recipient |
+| `allowedRecipients` | addresses that may **receive** value from the agent | a transfer's `to` (native **and ERC-20**), the x402 `payTo`, the escrow job's provider wallet, the legacy A2A payee, the `to` of a batch action with native `value`. DeFi operations (swap, deposits, GMX…) pay the agent's own position and are not recipient-checked. Off-chain only |
+
+Empty lists are unrestricted. `syncOnChain` never carries the two off-chain
+fields (`AgentPolicyModule` has no slot for them); the answer lists them in
+`onChainSync.offChainOnlyFields`. Before Q8 the ETH field was read as USD for
+USDC spends and `allowedContracts` was their payee list; migration 0021 copied
+both into the new fields for every existing policy (exact text, including a
+non-decimal value that means "no limit"), so those verdicts did not change. The
+one narrowing: an ERC-20 transfer whose recipient is not in a non-empty copied
+list is now refused — its recipient was never checked before.
+
+**No silent widening at creation.** `POST /v1/agents` with an omitted
+`maxValuePerTxUsd` stores the default `"1.0"` (never the ETH number). A
+non-empty `allowedContracts` without `allowedRecipients` is `400`
+(`details[].path` = `["policy","allowedRecipients"]`): send the recipient list,
+or `[]` for no recipient restriction. The same applies to a `PATCH` that creates
+the policy row; on an existing row an omitted field keeps its value.
 
 **Tighten-only for agents, operator may loosen.** With its own API key an
 agent can only make its policy *stricter*. A patch that loosens any field is
@@ -178,10 +205,11 @@ rejected so a compromised or prompt-injected agent cannot raise its own limits:
 }
 ```
 
-A field loosens when: `maxValuePerTxEth` or `maxDailyVolumeUsd` increases
-(`maxDailyVolumeUsd: "0"` means *no daily limit*, so it loosens any positive
-limit); `allowedContracts` / `allowedTokens` go from non-empty to empty or gain
-an address not already in the list (case-insensitive); `cooldownSeconds`
+A field loosens when: `maxValuePerTxEth`, `maxValuePerTxUsd` or
+`maxDailyVolumeUsd` increases (`maxDailyVolumeUsd: "0"` means *no daily limit*,
+so it loosens any positive limit); `allowedContracts` / `allowedRecipients` /
+`allowedTokens` go from non-empty to empty or gain an address not already in
+the list (case-insensitive); `cooldownSeconds`
 decreases; `active` goes `false → true`; `expiresAt` is cleared or moved later
 while one existed. With no policy row yet, any patch that sets a limit is a
 tightening.
@@ -191,11 +219,12 @@ any policy on any agent (returns `404` for an unknown agent id). Every policy
 write is logged with the agent id, caller kind (`agent` / `operator`) and the
 changed fields.
 
-`maxValuePerTxEth` and `maxDailyVolumeUsd` must be plain decimal strings
-(`^\d+(\.\d+)?$` — e.g. `"0.5"`, `"10000"`). Empty strings, whitespace,
-exponents (`"1e3"`), hex (`"0x10"`) and words are rejected with `400`, for both
-callers, so a value can never mean "0" to the tighten-only check and "no limit"
-to enforcement. An optional `reason` (string, max 500 chars) is appended to the
+`maxValuePerTxEth`, `maxValuePerTxUsd` and `maxDailyVolumeUsd` must be plain
+decimal strings (`^\d+(\.\d+)?$` — e.g. `"0.5"`, `"10000"`). Empty strings,
+whitespace, exponents (`"1e3"`), hex (`"0x10"`) and words are rejected with
+`400`, for both callers, so a value can never mean "0" to the tighten-only
+check and "no limit" to enforcement. `allowedRecipients` entries must be `0x`
+addresses. An optional `reason` (string, max 500 chars) is appended to the
 audit log line; it is not stored and does not gate the change.
 
 **How a transaction counts against `maxDailyVolumeUsd`.** The USD value the
@@ -238,7 +267,9 @@ cannot be checked); without a daily limit it proceeds and counts nothing.
 ### POST /v1/transactions/transfer
 
 ```json
-// Request
+// Request — `to` is the recipient: listed in `allowedRecipients` when that
+// list is non-empty (native and ERC-20, Q8); the call target (`to` for ETH,
+// the token contract for ERC-20) is checked against `allowedContracts`.
 { "to": "0x...", "token": "ETH", "amount": "0.01", "chainId": 8453 }
 
 // Response 202
@@ -291,7 +322,7 @@ cannot be checked); without a daily limit it proceeds and counts nothing.
 
 **Reward**: a paid job sends `reward: { amount, token, chainId }` and must name both `token` and `chainId` — there is no Ethereum-mainnet / ETH default (a missing one is `400 VALIDATION_FAILED`). On a chain with the ERC-8183 escrow configured the token must be USDC (`400 ERC8183_USDC_ONLY` otherwise) and the budget is escrowed on-chain; the job's `escrow` object reports the progress. Contest a submitted deliverable with `POST /v1/jobs/:id/contest` (requester only): the job is then **held for operator review** (`escrow.onChainStatus = CONTESTED`, decision D9) — nothing is refunded or paid automatically; the operator pays the provider, refunds the requester, or refunds with an explicit quality verdict (the only case that writes a negative ERC-8004 rating); unresolved at `escrow.expiresAt`, the requester is refunded without a rating. `escrow.resolution` / `resolvedAt` report the decision, `escrow.ratedAgentId` the ERC-8004 id the hook rated. Details: [OpenAPI](api/openapi.yaml), [erc-8183-mapping.md §6.8](architecture/erc-8183-mapping.md#68-contest--operator-review-escrow-policy-boot-checks-c3d).
 
-**Spending policy on escrow jobs (C3d)**: an escrow job is a spend of the requester and its policy applies before anything is reserved, with USDC counted at exactly 1.00 USD (no price oracle): paused / expired → `403 POLICY_PAUSED`; otherwise `403 POLICY_VIOLATION` with `rule` — `allowedTokens` (must list the escrow USDC when non-empty), `allowedContracts` (read as the list of **payees**: the provider's wallet must be listed when non-empty), `maxValuePerTx` (`maxValuePerTxEth` read in USD for the USDC budget — the default policy, `1.0`, caps an escrow job at 1 USDC), `maxDailyVolume` (`DailyVolume` + counted x402 payments + this budget; `spentToday` in the body), `cooldown`. `PATCH` `ACCEPTED` / `COMPLETED` within 2 minutes of `escrow.expiresAt` is `409 ESCROW_EXPIRING`. `GET /v1/jobs/:id/feedback.json` is `immutable` only once the settlement that committed it is mined (`no-store` before).
+**Spending policy on escrow jobs (C3d)**: an escrow job is a spend of the requester and its policy applies before anything is reserved, with USDC counted at exactly 1.00 USD (no price oracle): paused / expired → `403 POLICY_PAUSED`; otherwise `403 POLICY_VIOLATION` with `rule` — `allowedTokens` (must list the escrow USDC when non-empty), `allowedRecipients` (Q8 — the list of **payees**: the provider's wallet must be listed when non-empty; `allowedContracts` is not read), `maxValuePerTxUsd` (Q8 — the USDC budget in USD; the default, `1.0`, caps an escrow job at 1 USDC; `maxValuePerTxEth` is never read for USDC), `maxDailyVolume` (`DailyVolume` + counted x402 payments + this budget; `spentToday` in the body), `cooldown`. `PATCH` `ACCEPTED` / `COMPLETED` within 2 minutes of `escrow.expiresAt` is `409 ESCROW_EXPIRING`. `GET /v1/jobs/:id/feedback.json` is `immutable` only once the settlement that committed it is mined (`no-store` before).
 
 **Escrow (v2)**: When a job is created with a `reward`, the requester's USD equivalent is committed to their daily volume atomically. Fields on the Job model:
 
@@ -328,10 +359,10 @@ Agent policy: before signing, the payment must also pass the provider's policy, 
 
 | `rule` | Applied as |
 |--------|-----------|
-| `maxValuePerTx` | the `maxValuePerTxEth` number read **in USD for USDC** (`"1.0"` caps each x402 payment at 1 USDC); no ETH price is involved |
+| `maxValuePerTxUsd` | `maxValuePerTxUsd` (Q8) — USD per payment, USDC at 1.00 (`"1.0"` caps each x402 payment at 1 USDC); no price oracle is involved. Before Q8 the `maxValuePerTxEth` number was read in USD and the rule was named `maxValuePerTx` |
 | `maxDailyVolume` | USD committed today (UTC) through transactions (`DailyVolume`) + today's counted pay-resource payments on all the agent's jobs + this price ≤ `maxDailyVolumeUsd` (`"0"` = no limit). `spentToday` is returned. Transactions count today's pay-resource payments against the same limit |
 | `allowedTokens` | when non-empty, must list the job chain's USDC (checked before anything is fetched) |
-| `allowedContracts` | when non-empty, must list the 402's `payTo` — for an x402 payment the list is the set of payees the agent may pay (it never calls the USDC contract itself; the server's facilitator submits the authorization) |
+| `allowedRecipients` | when non-empty, must list the 402's `payTo` — the set of addresses the agent may pay (Q8; before Q8 `allowedContracts` was read and the rule had that name — the agent never calls the USDC contract itself, the server's facilitator submits the authorization) |
 
 `maxValueForAutoApprovalEth` and `cooldownSeconds` are not applied to pay-resource (an x402 payment cannot wait for a human, and an agent pays several resources in a row).
 
@@ -361,7 +392,7 @@ Terminal states never change; `unknown → settled` is reserved for the reconcil
 | 402 | `BUDGET_EXCEEDED` | refused before signing: `price`, `remaining`, `cap` (base units), `payment` (`failed_before_signing`) |
 | 402 | `PAYMENT_REFUSED` | the server answered the signed payment without reporting a settlement (verification rejected, settlement failed, any 4xx/5xx): `reason`, `responseStatus`, `authorization { method, nonce, validAfter, validBefore }`, `countedUntil`, `payment` (`refused`). The server still holds the authorization, so the amount stays counted and its payee blocked until `countedUntil` |
 | 403 | `NOT_PROVIDER`, `AGENT_INACTIVE`, `POLICY_PAUSED` | |
-| 403 | `POLICY_VIOLATION` | the provider's policy refused the payment before anything was signed: `rule` (`maxValuePerTx` \| `maxDailyVolume` \| `allowedTokens` \| `allowedContracts`), `limit`, `price`, `payTo`, `spentToday` (daily volume); `payment` (`failed_before_signing`) when a 402 was read, `null` for the token allowlist (refused before fetching) |
+| 403 | `POLICY_VIOLATION` | the provider's policy refused the payment before anything was signed: `rule` (`maxValuePerTxUsd` \| `maxDailyVolume` \| `allowedTokens` \| `allowedRecipients`), `limit`, `price`, `payTo`, `spentToday` (daily volume); `payment` (`failed_before_signing`) when a 402 was read, `null` for the token allowlist (refused before fetching) |
 | 404 | `JOB_NOT_FOUND` | |
 | 409 | `JOB_NOT_ACTIVE`, `PAYMENT_IN_PROGRESS`, `PAYMENT_ID_CONFLICT` | `PAYMENT_IN_PROGRESS` also answers a concurrent retry of the same `paymentId` (only one of them signs) |
 | 409 | `OUTSTANDING_AUTHORIZATION` | a payment to the same `payTo` on this job was refused after signing and its authorization is still live: `payTo`, `outstandingPaymentId`, `validBefore` (retry after it). Nothing was signed; with the same `paymentId` nothing was fetched either |

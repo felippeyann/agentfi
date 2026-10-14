@@ -3,8 +3,10 @@
  *
  * `classifyPolicyChange` is pure. These tests pin down every loosening rule
  * plus the "no policy row yet" baseline so the route guard cannot regress:
- *  - maxValuePerTxEth / maxDailyVolumeUsd increase (incl. "0" = no daily limit)
- *  - whitelist cleared or gains an unknown address (case-insensitive)
+ *  - maxValuePerTxEth / maxValuePerTxUsd (Q8) / maxDailyVolumeUsd increase
+ *    (incl. "0" = no daily limit, a non-decimal value = unlimited)
+ *  - whitelist (contracts, recipients — Q8 —, tokens) cleared or gains an
+ *    unknown address (case-insensitive)
  *  - cooldownSeconds decrease
  *  - active false → true
  *  - expiresAt cleared or moved later
@@ -30,6 +32,8 @@ const UNISWAP_ROUTER = '0xE592427A0AEce92De3Edee1F18E0157C05861564';
 const AAVE_POOL = '0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2';
 const USDC = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
 const WETH = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
+const SELLER = '0x00000000000000000000000000000000000000b0';
+const PROVIDER = '0x00000000000000000000000000000000000000c1';
 
 const EXPIRY = new Date('2026-12-01T00:00:00Z');
 const EARLIER = new Date('2026-11-01T00:00:00Z');
@@ -41,9 +45,11 @@ function basePolicy(overrides: Partial<AgentPolicy> = {}): AgentPolicy {
     agentId: 'agent-1',
     active: true,
     maxValuePerTxEth: '1.0',
+    maxValuePerTxUsd: '1.0',
     maxValueForAutoApprovalEth: '0.1',
     maxDailyVolumeUsd: '10000',
     allowedContracts: [UNISWAP_ROUTER],
+    allowedRecipients: [SELLER],
     allowedTokens: [USDC],
     cooldownSeconds: 60,
     expiresAt: null,
@@ -167,6 +173,64 @@ describe('classifyPolicyChange', () => {
     });
   });
 
+  describe('maxValuePerTxUsd (Q8)', () => {
+    it('loosens when the USD cap increases, tightens when it decreases, neutral when equal', () => {
+      expect(classifyPolicyChange(basePolicy(), { maxValuePerTxUsd: '5' })).toEqual({
+        tightens: false,
+        loosenedFields: ['maxValuePerTxUsd'],
+      });
+      expect(classifyPolicyChange(basePolicy(), { maxValuePerTxUsd: '0.5' })).toEqual({ tightens: true, loosenedFields: [] });
+      expect(classifyPolicyChange(basePolicy(), { maxValuePerTxUsd: '1.00' }).tightens).toBe(true);
+    });
+
+    it.each(UNPARSABLE_LIMITS)('a non-decimal value %j is unlimited, so it always loosens', (raw) => {
+      expect(classifyPolicyChange(basePolicy(), { maxValuePerTxUsd: raw })).toEqual({
+        tightens: false,
+        loosenedFields: ['maxValuePerTxUsd'],
+      });
+    });
+
+    it('is independent of maxValuePerTxEth (no cross-reading of units)', () => {
+      // Raising the USD cap while lowering the ETH cap still loosens the USD field.
+      const result = classifyPolicyChange(basePolicy(), { maxValuePerTxEth: '0.1', maxValuePerTxUsd: '100' });
+      expect(result.loosenedFields).toEqual(['maxValuePerTxUsd']);
+      // A current non-decimal (unlimited) USD cap can be tightened to a real one.
+      expect(classifyPolicyChange(basePolicy({ maxValuePerTxUsd: 'unlimited' }), { maxValuePerTxUsd: '1000' }).tightens).toBe(true);
+    });
+  });
+
+  describe('allowedRecipients (Q8)', () => {
+    it('loosens when a non-empty list is cleared or gains an address', () => {
+      expect(classifyPolicyChange(basePolicy(), { allowedRecipients: [] }).loosenedFields).toEqual(['allowedRecipients']);
+      expect(classifyPolicyChange(basePolicy(), { allowedRecipients: [SELLER, PROVIDER] }).loosenedFields).toEqual([
+        'allowedRecipients',
+      ]);
+      expect(classifyPolicyChange(basePolicy(), { allowedRecipients: [PROVIDER] }).loosenedFields).toEqual(['allowedRecipients']);
+    });
+
+    it('tightens or is neutral for a subset / the same list in another case', () => {
+      const current = basePolicy({ allowedRecipients: [SELLER, PROVIDER] });
+      expect(classifyPolicyChange(current, { allowedRecipients: [PROVIDER] })).toEqual({ tightens: true, loosenedFields: [] });
+      expect(classifyPolicyChange(basePolicy(), { allowedRecipients: [SELLER.toUpperCase().replace('0X', '0x')] }).tightens).toBe(
+        true,
+      );
+    });
+
+    it('tightens when a list is introduced against an empty (unrestricted) one', () => {
+      expect(classifyPolicyChange(basePolicy({ allowedRecipients: [] }), { allowedRecipients: [PROVIDER] })).toEqual({
+        tightens: true,
+        loosenedFields: [],
+      });
+    });
+
+    it('is judged against the current recipients, never against allowedContracts', () => {
+      // The router is an allowed CONTRACT, not an allowed recipient: adding it as a recipient loosens.
+      expect(classifyPolicyChange(basePolicy(), { allowedRecipients: [SELLER, UNISWAP_ROUTER] }).loosenedFields).toEqual([
+        'allowedRecipients',
+      ]);
+    });
+  });
+
   describe('allowedTokens', () => {
     it('loosens when a non-empty whitelist is cleared', () => {
       const result = classifyPolicyChange(basePolicy(), { allowedTokens: [] });
@@ -265,8 +329,10 @@ describe('classifyPolicyChange', () => {
     it('treats any patch that sets limits as tightening', () => {
       const result = classifyPolicyChange(null, {
         maxValuePerTxEth: '100',
+        maxValuePerTxUsd: '100',
         maxDailyVolumeUsd: '1000000',
         allowedContracts: [UNISWAP_ROUTER],
+        allowedRecipients: [SELLER],
         allowedTokens: [USDC],
         cooldownSeconds: 1,
         expiresAt: EXPIRY,
@@ -307,15 +373,19 @@ describe('classifyPolicyChange', () => {
       active: true,
       cooldownSeconds: 0,
       allowedTokens: [],
+      allowedRecipients: [],
       allowedContracts: [],
       maxDailyVolumeUsd: '99999',
+      maxValuePerTxUsd: '10',
       maxValuePerTxEth: '10',
     });
     expect(result.tightens).toBe(false);
     expect(result.loosenedFields).toEqual([
       'maxValuePerTxEth',
+      'maxValuePerTxUsd',
       'maxDailyVolumeUsd',
       'allowedContracts',
+      'allowedRecipients',
       'allowedTokens',
       'cooldownSeconds',
       'active',

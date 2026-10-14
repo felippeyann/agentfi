@@ -127,7 +127,9 @@ function escrowJob(overrides: Record<string, unknown> = {}) {
     evaluator: runtimeMock.erc8183Config.evaluatorAddress,
     budgetToken: USDC,
     budgetAmount: '12500000',
-    expiresAt: new Date('2026-10-13T12:00:00.000Z'),
+    // Relative to now: a fixed date (2026-10-13) turned every transition into
+    // 409 ESCROW_EXPIRING once it passed.
+    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     deliverableHash: null,
     settleTxHash: null,
     platformFeeAmount: null,

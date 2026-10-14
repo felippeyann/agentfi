@@ -56,14 +56,41 @@ const registrationFileConfig = {
   mcpPublicUrl: env.MCP_PUBLIC_URL ?? null,
 };
 
-/** Initial policy for a new agent. `parse({})` yields the server defaults. */
-const initialPolicySchema = z.object({
-  maxValuePerTxEth: policyDecimal.default('1.0'),
-  maxDailyVolumeUsd: policyDecimal.default('10000'),
-  allowedContracts: z.array(z.string()).default([]),
-  allowedTokens: z.array(z.string()).default([]),
-  cooldownSeconds: z.number().default(60),
-});
+/** An EVM address (`allowedRecipients` entries, Q8). */
+const recipientAddress = z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 0x-prefixed 20-byte hex address');
+
+/**
+ * Q8: `allowedRecipients` must be explicit whenever `allowedContracts` is
+ * non-empty on a NEW policy row. Before Q8 that list also restricted who the
+ * agent could pay (x402 `payTo`, escrow provider); a caller still writing
+ * only `allowedContracts` would otherwise get a policy with no recipient
+ * restriction at all — a silent widening. `[]` states "no recipient
+ * restriction" explicitly.
+ */
+const RECIPIENTS_REQUIRED_MESSAGE =
+  'allowedRecipients is required when allowedContracts is non-empty: allowedContracts no longer restricts who the agent ' +
+  'pays (x402 payTo, escrow provider, transfer recipient). List the allowed recipients, or send [] for no recipient restriction.';
+
+/**
+ * Initial policy for a new agent. `parse({})` yields the server defaults
+ * (`maxValuePerTxUsd` omitted → the column default "1.0"; it is never derived
+ * from `maxValuePerTxEth`).
+ */
+const initialPolicySchema = z
+  .object({
+    maxValuePerTxEth: policyDecimal.default('1.0'),
+    maxValuePerTxUsd: policyDecimal.optional(),
+    maxDailyVolumeUsd: policyDecimal.default('10000'),
+    allowedContracts: z.array(z.string()).default([]),
+    allowedRecipients: z.array(recipientAddress).optional(),
+    allowedTokens: z.array(z.string()).default([]),
+    cooldownSeconds: z.number().default(60),
+  })
+  .superRefine((policy, ctx) => {
+    if (policy.allowedContracts.length > 0 && policy.allowedRecipients === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['allowedRecipients'], message: RECIPIENTS_REQUIRED_MESSAGE });
+    }
+  });
 
 const createAgentSchema = z.object({
   name: z.string().min(1).max(100),
@@ -143,8 +170,12 @@ async function provisionAgent(
         policy: {
           create: {
             maxValuePerTxEth: body.policy.maxValuePerTxEth,
+            // Omitted → the column default "1.0" (Q8: never copied from the ETH field).
+            ...(body.policy.maxValuePerTxUsd !== undefined ? { maxValuePerTxUsd: body.policy.maxValuePerTxUsd } : {}),
             maxDailyVolumeUsd: body.policy.maxDailyVolumeUsd,
             allowedContracts: body.policy.allowedContracts,
+            // Undefined only when allowedContracts is empty (the schema refuses otherwise).
+            allowedRecipients: body.policy.allowedRecipients ?? [],
             allowedTokens: body.policy.allowedTokens,
             cooldownSeconds: body.policy.cooldownSeconds,
           },
@@ -186,10 +217,19 @@ async function provisionAgent(
   };
 }
 
+/**
+ * Patchable policy fields `AgentPolicyModule` has no slot for, so the
+ * `syncOnChain` calldata never carries them and only the backend enforces
+ * them: the two Q8 fields, and the daily limit (off-chain since before Q8).
+ */
+const OFF_CHAIN_ONLY_POLICY_FIELDS = ['maxValuePerTxUsd', 'allowedRecipients', 'maxDailyVolumeUsd'] as const;
+
 const updatePolicySchema = z.object({
   maxValuePerTxEth: policyDecimal.optional(),
+  maxValuePerTxUsd: policyDecimal.optional(),
   maxDailyVolumeUsd: policyDecimal.optional(),
   allowedContracts: z.array(z.string()).optional(),
+  allowedRecipients: z.array(recipientAddress).optional(),
   allowedTokens: z.array(z.string()).optional(),
   cooldownSeconds: z.number().optional(),
   active: z.boolean().optional(),
@@ -225,7 +265,8 @@ export async function agentRoutes(fastify: FastifyInstance) {
    *     default 5). Operators can tighten via env.
    *   - Tier forced to FREE regardless of request body.
    *   - Policy forced to the server defaults (`maxValuePerTxEth=1.0`,
-   *     `maxDailyVolumeUsd=10000`, empty whitelists, `cooldownSeconds=60`).
+   *     `maxValuePerTxUsd=1.0`, `maxDailyVolumeUsd=10000`, empty whitelists
+   *     — contracts, recipients, tokens — and `cooldownSeconds=60`).
    *     Any `policy` in the body is IGNORED — an unauthenticated caller must
    *     not pick its own limits. Loosening afterwards requires the operator
    *     credential on `PATCH /v1/agents/:id/policy`.
@@ -380,8 +421,17 @@ export async function agentRoutes(fastify: FastifyInstance) {
    * Pass `expiresAt: null` to clear a previous expiry and make the policy permanent
    * (loosening — operator only once an expiry exists).
    *
-   * `maxValuePerTxEth` / `maxDailyVolumeUsd` must match `POLICY_DECIMAL_PATTERN`
-   * (plain decimal string); anything else is 400. An optional `reason` (<= 500
+   * Q8: `maxValuePerTxEth` caps native ETH on `/v1/transactions/*`;
+   * `maxValuePerTxUsd` caps USD-denominated spends (USDC x402, ERC-8183 escrow
+   * budgets); `allowedContracts` is the call target, `allowedRecipients` every
+   * address that receives value. Both Q8 fields are off-chain only (the
+   * `onChainSync` answer lists them in `offChainOnlyFields`). A PATCH that
+   * creates the policy row with a non-empty `allowedContracts` must name
+   * `allowedRecipients` (400 otherwise); on an existing row omitted fields stay.
+   *
+   * `maxValuePerTxEth` / `maxValuePerTxUsd` / `maxDailyVolumeUsd` must match
+   * `POLICY_DECIMAL_PATTERN` (plain decimal string); anything else is 400.
+   * `allowedRecipients` entries must be addresses. An optional `reason` (<= 500
    * chars) is appended to the audit log line and is NOT stored.
    */
   fastify.patch<{ Params: { id: string } }>('/v1/agents/:id/policy', async (request, reply) => {
@@ -404,6 +454,18 @@ export async function agentRoutes(fastify: FastifyInstance) {
     const changedFields = changedPolicyFields(patch);
 
     const current = await policyService.getPolicy(agentId);
+
+    // Q8: a PATCH that CREATES the policy row follows the creation rule — a
+    // non-empty allowedContracts needs an explicit allowedRecipients (see
+    // RECIPIENTS_REQUIRED_MESSAGE). On an existing row an omitted field keeps
+    // its current value, so nothing widens.
+    if (!current && (patch.allowedContracts?.length ?? 0) > 0 && patch.allowedRecipients === undefined) {
+      return reply.code(400).send({
+        error: 'Validation failed',
+        details: [{ code: 'custom', path: ['allowedRecipients'], message: RECIPIENTS_REQUIRED_MESSAGE }],
+      });
+    }
+
     const { tightens, loosenedFields } = classifyPolicyChange(current, patch);
 
     // `reason` is audit-only: it goes on the log line and is never persisted.
@@ -476,7 +538,12 @@ export async function agentRoutes(fastify: FastifyInstance) {
           to: contracts.policyModule,
           chainId,
           actions,
-          notice: "Execute these actions via 'execute_batch' to sync your policy on-chain."
+          // Q8: these fields have no on-chain counterpart in AgentPolicyModule;
+          // the backend enforces them, the module never sees them.
+          offChainOnlyFields: OFF_CHAIN_ONLY_POLICY_FIELDS,
+          notice:
+            "Execute these actions via 'execute_batch' to sync your policy on-chain. " +
+            `Not synced (enforced off-chain by the backend only): ${OFF_CHAIN_ONLY_POLICY_FIELDS.join(', ')}.`,
         };
       }
     }

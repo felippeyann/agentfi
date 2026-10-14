@@ -230,14 +230,16 @@ async function latestAgentTxAt(client: Pick<PrismaClient, 'transaction'> | Prism
  * `evaluateUsdcSpend` decides with the same readings as pay-resource:
  *   - active / expiresAt: a paused or expired policy refuses;
  *   - allowedTokens (non-empty): the escrow's USDC must be listed;
- *   - allowedContracts (non-empty): the PAYEE must be listed — for an escrow
- *     job the provider's wallet, where the budget ends on `complete`. The
- *     escrow contract is the operator's own custody (configured, not chosen
- *     by the agent); checking it would make the list a no-op for every
+ *   - allowedRecipients (non-empty, Q8): the PAYEE must be listed — for an
+ *     escrow job the provider's wallet, where the budget ends on `complete`.
+ *     The escrow contract is the operator's own custody (configured, not
+ *     chosen by the agent); checking it would make the list a no-op for every
  *     escrow job, whereas the provider is exactly the choice a prompt-injected
- *     agent would make. Same reading as x402 `payTo` and an ETH transfer's
- *     recipient (P6: "who this agent may send value to");
- *   - maxValuePerTxEth: read in USD for USDC (the whole budget is one spend);
+ *     agent would make. Same list as x402 `payTo` and a transfer's recipient
+ *     ("who this agent may send value to"). Until Q8 this was
+ *     `allowedContracts`; that list is not read here any more;
+ *   - maxValuePerTxUsd (Q8): the whole budget is one USD spend (until Q8 the
+ *     `maxValuePerTxEth` number read in USD; that field is ETH only now);
  *   - maxDailyVolumeUsd: DailyVolume (transactions + earlier jobs) + counted
  *     x402 rows + this budget ≤ limit.
  * The cooldown applies too: creating a paid job commits funds (the
@@ -307,13 +309,13 @@ export async function reserveEscrowJobSpend<T>(
 
       // Static rules (paused / expired / allowlists / per-tx cap; the daily
       // limit against this budget alone). The committed volume follows.
-      const verdict = evaluateUsdcSpend(policy, { amount, token: params.token, counterparty: params.payee, spentTodayMicroUsd: 0n, now });
+      const verdict = evaluateUsdcSpend(policy, { amount, token: params.token, recipient: params.payee, spentTodayMicroUsd: 0n, now });
       if (!verdict.allowed) {
         throw new SpendRefused({
           success: false,
           httpStatus: 403,
           code: verdict.rule === 'policyPaused' || verdict.rule === 'policyExpired' ? 'POLICY_PAUSED' : 'POLICY_VIOLATION',
-          reason: verdict.rule === 'allowedContracts' ? `Provider wallet ${params.payee} is not in the agent's allowed contracts (payees) whitelist` : verdict.reason,
+          reason: verdict.rule === 'allowedRecipients' ? `Provider wallet ${params.payee} is not in the agent's allowed recipients whitelist` : verdict.reason,
           rule: verdict.rule,
           ...(verdict.limit !== undefined ? { limit: verdict.limit } : {}),
         });

@@ -245,10 +245,23 @@ model AgentPolicy {
   id                        String    @id @default(cuid())
   agentId                   String    @unique
   agent                     Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// Native ETH per transaction on `/v1/transactions/*` (synced on-chain as
+  /// `AgentPolicyModule.maxValuePerTx`). Never read as USD since Q8.
   maxValuePerTxEth          String    @default("1.0")
+  /// Q8 (migration 0021): per-spend cap in USD for spends denominated in USD
+  /// by definition — USDC x402 payments and ERC-8183 escrow budgets. Off-chain
+  /// only. Plain decimal; a non-decimal stored value is unlimited.
+  maxValuePerTxUsd          String    @default("1.0")
   maxValueForAutoApprovalEth String    @default("0.1")
   maxDailyVolumeUsd         String    @default("10000")
+  /// Call targets (`tx.to`) of ordinary transactions — the list
+  /// `AgentPolicyModule` enforces on-chain. Empty = unrestricted.
   allowedContracts  String[]
+  /// Q8 (migration 0021): every address that RECEIVES value from the agent
+  /// (native / ERC-20 transfer recipient, x402 `payTo`, escrow provider
+  /// wallet, legacy A2A payee, batch action with native value). Off-chain
+  /// only. Empty = unrestricted.
+  allowedRecipients String[]
   allowedTokens     String[]
   cooldownSeconds   Int       @default(60)
   active            Boolean   @default(true)

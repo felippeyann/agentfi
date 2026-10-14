@@ -76,6 +76,8 @@ type AuthModule = typeof import('../api/middleware/auth.js');
 
 const UNISWAP_ROUTER = '0xE592427A0AEce92De3Edee1F18E0157C05861564';
 const AAVE_POOL = '0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2';
+const PAYEE = '0x00000000000000000000000000000000000000b0';
+const OTHER_PAYEE = '0x00000000000000000000000000000000000000c1';
 const AGENT_KEY = 'agfi_live_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 const LOOSENING_ERROR =
   'Policy can only be tightened by the agent. Loosening requires the operator credential.';
@@ -86,9 +88,11 @@ function basePolicy(overrides: Partial<AgentPolicy> = {}): AgentPolicy {
     agentId: 'agent-1',
     active: true,
     maxValuePerTxEth: '1.0',
+    maxValuePerTxUsd: '1.0',
     maxValueForAutoApprovalEth: '0.1',
     maxDailyVolumeUsd: '10000',
     allowedContracts: [UNISWAP_ROUTER],
+    allowedRecipients: [PAYEE],
     allowedTokens: [],
     cooldownSeconds: 60,
     expiresAt: null,
@@ -293,6 +297,113 @@ describe('PATCH /v1/agents/:id/policy — operator caller', () => {
     expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
 
     await app.close();
+  });
+});
+
+// ── Q8: maxValuePerTxUsd and allowedRecipients ─────────────────────────────
+
+describe('PATCH /v1/agents/:id/policy — Q8 fields', () => {
+  it('agent: raising maxValuePerTxUsd or adding a recipient is 403; lowering / narrowing applies', async () => {
+    const app = await buildApp({ agentId: 'agent-1' });
+
+    const loosen = await app.inject({
+      method: 'PATCH',
+      url: '/v1/agents/agent-1/policy',
+      payload: { maxValuePerTxUsd: '50', allowedRecipients: [PAYEE, OTHER_PAYEE] },
+    });
+    expect(loosen.statusCode).toBe(403);
+    expect(loosen.json()).toEqual({ error: LOOSENING_ERROR, loosenedFields: ['maxValuePerTxUsd', 'allowedRecipients'] });
+
+    const cleared = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { allowedRecipients: [] } });
+    expect(cleared.statusCode).toBe(403);
+    expect(cleared.json().loosenedFields).toEqual(['allowedRecipients']);
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
+
+    const tighten = await app.inject({
+      method: 'PATCH',
+      url: '/v1/agents/agent-1/policy',
+      payload: { maxValuePerTxUsd: '0.25', allowedRecipients: [PAYEE] },
+    });
+    expect(tighten.statusCode).toBe(200);
+    expect(mockDb.agentPolicy.upsert.mock.calls[0][0].update).toEqual({ maxValuePerTxUsd: '0.25', allowedRecipients: [PAYEE] });
+
+    await app.close();
+  });
+
+  it('agent: a non-decimal maxValuePerTxUsd is 400 (never stored), a non-address recipient is 400', async () => {
+    const app = await buildApp({ agentId: 'agent-1' });
+    for (const payload of [{ maxValuePerTxUsd: 'unlimited' }, { maxValuePerTxUsd: '' }, { allowedRecipients: ['payee'] }]) {
+      const res = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload });
+      expect(res.statusCode).toBe(400);
+    }
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('existing row: patching allowedContracts alone leaves allowedRecipients unchanged (not in the write)', async () => {
+    const app = await buildApp({ isOperator: true });
+
+    const res = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { allowedContracts: [AAVE_POOL] } });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDb.agentPolicy.upsert.mock.calls[0][0].update).toEqual({ allowedContracts: [AAVE_POOL] });
+    expect(res.json()).toMatchObject({ allowedContracts: [AAVE_POOL], allowedRecipients: [PAYEE], maxValuePerTxUsd: '1.0' });
+
+    await app.close();
+  });
+
+  it('no row yet: a PATCH that creates it with allowedContracts but no allowedRecipients is 400 (creation rule)', async () => {
+    mockDb.agentPolicy.findUnique.mockResolvedValue(null);
+    for (const caller of [{ agentId: 'agent-1' }, { isOperator: true }]) {
+      const app = await buildApp(caller);
+      const res = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { allowedContracts: [UNISWAP_ROUTER] } });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({
+        error: 'Validation failed',
+        details: [expect.objectContaining({ path: ['allowedRecipients'], message: expect.stringMatching(/allowedRecipients is required/) })],
+      });
+      await app.close();
+    }
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
+
+    const app = await buildApp({ agentId: 'agent-1' });
+    const ok = await app.inject({
+      method: 'PATCH',
+      url: '/v1/agents/agent-1/policy',
+      payload: { allowedContracts: [UNISWAP_ROUTER], allowedRecipients: [] },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(mockDb.agentPolicy.upsert.mock.calls[0][0].create).toEqual({
+      agentId: 'agent-1',
+      allowedContracts: [UNISWAP_ROUTER],
+      allowedRecipients: [],
+    });
+    await app.close();
+  });
+
+  it('syncOnChain: the calldata carries no Q8 field and the answer lists them as off-chain only', async () => {
+    // The contract table is built at module load; point the testnet policy module at a dummy address.
+    const { CONTRACT_ADDRESSES } = await import('../config/contracts.js');
+    const previous = CONTRACT_ADDRESSES[84532]!.policyModule;
+    CONTRACT_ADDRESSES[84532]!.policyModule = '0x00000000000000000000000000000000000000Aa';
+    mockDb.agent.findUniqueOrThrow.mockResolvedValue({ safeAddress: '0x1111111111111111111111111111111111111111', chainIds: [84532] });
+    try {
+      const app = await buildApp({ isOperator: true });
+      const res = await app.inject({
+        method: 'PATCH',
+        url: '/v1/agents/agent-1/policy',
+        payload: { maxValuePerTxUsd: '20', allowedRecipients: [PAYEE, OTHER_PAYEE], syncOnChain: true },
+      });
+      expect(res.statusCode).toBe(200);
+      const sync = res.json().onChainSync;
+      expect(sync.offChainOnlyFields).toEqual(['maxValuePerTxUsd', 'allowedRecipients', 'maxDailyVolumeUsd']);
+      expect(sync.notice).toMatch(/Not synced .*maxValuePerTxUsd, allowedRecipients/);
+      // Only the core setPolicy call: no recipient whitelist exists on-chain.
+      expect(sync.actions).toHaveLength(1);
+      await app.close();
+    } finally {
+      CONTRACT_ADDRESSES[84532]!.policyModule = previous;
+    }
   });
 });
 

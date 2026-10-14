@@ -152,7 +152,7 @@ Redeploy order: Base Sepolia → Base mainnet (human-run; see `docs/operations/c
 | Action           | Endpoint                     | Notes                                                                                         |
 | ---------------- | ---------------------------- | --------------------------------------------------------------------------------------------- |
 | Register agent   | `POST /v1/agents` (operator `API_SECRET`) · `POST /v1/public/agents` (rate-limited self-registration, default policy) | Creates a Turnkey wallet → Safe Smart Wallet only when `SAFE_DEPLOYER_PRIVATE_KEY` is set → initial `AgentPolicy` → optional ENS subdomain |
-| Configure policy | `PATCH /v1/agents/:id/policy` | Off-chain limits: `maxValuePerTx`, `allowedContracts`, `cooldownSeconds`, `maxDailyVolumeUsd`; the agent may only tighten, loosening needs the operator credential |
+| Configure policy | `PATCH /v1/agents/:id/policy` | Off-chain limits: `maxValuePerTxEth` (native), `maxValuePerTxUsd` (USDC x402 / escrow, Q8), `allowedContracts` (call targets), `allowedRecipients` (who may receive value, Q8), `cooldownSeconds`, `maxDailyVolumeUsd`; the agent may only tighten, loosening needs the operator credential |
 | Kill switch      | `DELETE /v1/agents/:id`      | Soft-deactivate + emergency pause                                                             |
 | Billing view     | `GET /v1/billing/status`     | Fees paid, tx count this period, subscription tier                                            |
 
@@ -193,7 +193,7 @@ Example: an agent swaps 0.1 ETH to USDC on Base.
 1. Agent calls MCP tool `execute_swap` via stdio or SSE.
 2. MCP server pulls `AGENTFI_API_KEY` from env and `POST`s to `/v1/transactions/swap`.
 3. Backend validates request (Zod) and resolves `Agent` by `apiKeyHash` (bcrypt).
-4. **Off-chain policy check** (`PolicyService`) — active? kill switch? `maxValuePerTxEth`? contract allowlisted? cooldown elapsed? daily-volume ceiling (atomic raw SQL)? If any fails, 403.
+4. **Off-chain policy check** (`PolicyService`) — active? kill switch? `maxValuePerTxEth`? contract allowlisted? recipient allowlisted (`allowedRecipients`, Q8)? cooldown elapsed? daily-volume ceiling (atomic raw SQL)? If any fails, 403.
 5. `TransactionBuilder` builds Uniswap V3 router calldata via viem + SDK.
 6. `SimulatorService` runs Tenderly — if it would revert, returns 400 with the reason _without spending gas_.
 7. DB inserts a `Transaction` row with status `QUEUED`.

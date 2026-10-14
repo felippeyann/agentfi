@@ -62,14 +62,19 @@ export const statusTools = [
     name: 'get_policy',
     description:
       'Returns the current operational limits and restrictions for this agent. ' +
-      'Check this to understand what transactions are allowed before attempting them.',
+      'Check this to understand what transactions are allowed before attempting them. ' +
+      'maxValuePerTxEth caps native ETH per ordinary transaction; maxValuePerTxUsd caps each USDC payment and escrowed ' +
+      'job budget; allowedContracts are the contracts you may call; allowedRecipients are the addresses that may receive ' +
+      'value from you (empty list = unrestricted).',
     inputSchema: z.object({}),
     handler: async (_input: Record<string, never>) => {
       const agentInfo = await api.get<{
         policy: {
           maxValuePerTxEth: string;
+          maxValuePerTxUsd: string;
           maxDailyVolumeUsd: string;
           allowedContracts: string[];
+          allowedRecipients: string[];
           allowedTokens: string[];
           cooldownSeconds: number;
           active: boolean;
@@ -85,7 +90,9 @@ export const statusTools = [
         tier: agentInfo.tier,
         policy: agentInfo.policy ?? {
           maxValuePerTxEth: 'unlimited (no policy set)',
+          maxValuePerTxUsd: 'unlimited (no policy set)',
           allowedContracts: [],
+          allowedRecipients: [],
           allowedTokens: [],
           cooldownSeconds: 0,
           active: true,

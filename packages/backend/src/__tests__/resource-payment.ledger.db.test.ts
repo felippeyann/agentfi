@@ -66,7 +66,7 @@ async function mkAgent(role: string, policy: Record<string, unknown> = {}) {
       // 0x6060… never matches the agent search suite's queries.
       safeAddress: `0x6060${randomBytes(18).toString('hex')}`,
       chainIds: [84532],
-      policy: { create: { maxValuePerTxEth: '1', maxDailyVolumeUsd: '10000', cooldownSeconds: 0, ...policy } },
+      policy: { create: { maxValuePerTxUsd: '1', maxDailyVolumeUsd: '10000', cooldownSeconds: 0, ...policy } },
     },
   });
   createdAgents.push(agent.id);
@@ -273,7 +273,7 @@ describe('pay-resource ledger on Postgres (P6)', () => {
   }, 60_000);
 
   it('the daily volume spans jobs and includes DailyVolume; the per-payment cap and payee allowlist refuse before signing', async () => {
-    const provider = await mkAgent('prov', { maxDailyVolumeUsd: '1', maxValuePerTxEth: '0.5' });
+    const provider = await mkAgent('prov', { maxDailyVolumeUsd: '1', maxValuePerTxUsd: '0.5' });
     const requester = await mkAgent('req');
     const f = await fixture();
     const svc = service(f.base);
@@ -291,19 +291,19 @@ describe('pay-resource ledger on Postgres (P6)', () => {
     ).rejects.toMatchObject({ code: 'POLICY_VIOLATION', details: { rule: 'maxDailyVolume', spentToday: '0.95' } });
 
     // Per-payment cap below the price.
-    await db.agentPolicy.update({ where: { agentId: provider.id }, data: { maxDailyVolumeUsd: '0', maxValuePerTxEth: '0.3' } });
+    await db.agentPolicy.update({ where: { agentId: provider.id }, data: { maxDailyVolumeUsd: '0', maxValuePerTxUsd: '0.3' } });
     await expect(
       svc.payForResource({ jobId: jobB.id, agentId: provider.id, url: f.url, method: 'GET' }),
-    ).rejects.toMatchObject({ code: 'POLICY_VIOLATION', details: { rule: 'maxValuePerTx' } });
+    ).rejects.toMatchObject({ code: 'POLICY_VIOLATION', details: { rule: 'maxValuePerTxUsd' } });
 
-    // A payee allowlist that does not name the seller.
+    // A payee allowlist (allowedRecipients, Q8) that does not name the seller.
     await db.agentPolicy.update({
       where: { agentId: provider.id },
-      data: { maxValuePerTxEth: '1', allowedContracts: ['0x00000000000000000000000000000000000000c1'] },
+      data: { maxValuePerTxUsd: '1', allowedRecipients: ['0x00000000000000000000000000000000000000c1'] },
     });
     await expect(
       svc.payForResource({ jobId: jobB.id, agentId: provider.id, url: f.url, method: 'GET' }),
-    ).rejects.toMatchObject({ code: 'POLICY_VIOLATION', details: { rule: 'allowedContracts' } });
+    ).rejects.toMatchObject({ code: 'POLICY_VIOLATION', details: { rule: 'allowedRecipients' } });
     expect(wallet.signatures).toBe(signed);
     expect(f.counts.settle).toBe(2);
   }, 60_000);
