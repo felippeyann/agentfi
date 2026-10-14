@@ -36,9 +36,12 @@
  * A6b: the stamp also records the signed hash (`broadcastTxHash`). A stamped
  * row is never FAILED by the guard, the failed handler or the stranded-QUEUED
  * sweep: `stopStampedTransaction` hands it to the chain (SUBMITTED with that
- * hash) and the receipt — or the re-poll's drop — settles it as above. An
- * operator approval on a later UTC day moves the reservation to that day
- * (`moveReservationToDay`).
+ * hash) and the receipt — or the re-poll's drop — settles it as above.
+ *
+ * A6c: an operator approval revalidates the spend on the approval day and
+ * moves a reservation made on an earlier UTC day to it, refused — nothing
+ * moved, nothing released — when that day's limit would be exceeded
+ * (`approvePendingTransaction`).
  *
  * Rows that reserve nothing keep `volumeState` NULL and every settlement is a
  * no-op for them: zero-value transactions, the legacy A2A payment (its spend
@@ -216,52 +219,192 @@ export async function createTransactionWithVolume(
     });
 }
 
+/** Why `approvePendingTransaction` refused. The row is left exactly as it was. */
+export type ApprovalRefusalCode =
+  /** Not (or no longer) PENDING_APPROVAL: a concurrent approval or rejection won. */
+  | 'APPROVAL_NOT_PENDING'
+  /** The agent was paused (`Agent.active = false`) since the request. */
+  | 'APPROVAL_AGENT_PAUSED'
+  /** The agent's policy is inactive (kill switch) since the request. */
+  | 'APPROVAL_POLICY_INACTIVE'
+  /** The agent's policy expired (`expiresAt`) since the request. */
+  | 'APPROVAL_POLICY_EXPIRED'
+  /** Counting the spend on the approval day would exceed that day's `maxDailyVolumeUsd`. */
+  | 'APPROVAL_DAILY_LIMIT'
+  /** A daily limit applies now but the spend reserved nothing (it was unpriced while no limit applied). */
+  | 'APPROVAL_UNCOUNTED_SPEND';
+
+export type ApprovalResult =
+  /** Approved: the row is QUEUED; `moved` when its reservation went from an earlier day to `day`. */
+  | { ok: true; day: string; moved: boolean }
+  | {
+      ok: false;
+      code: ApprovalRefusalCode;
+      reason: string;
+      /** APPROVAL_DAILY_LIMIT only: the approval day's numbers (USD, decimal strings). */
+      details?: { day: string; limitUsd: string; committedUsd: string; requestedUsd: string };
+    };
+
+/** Thrown inside the approval transaction to roll it back; never escapes this module. */
+class ApprovalRefusal extends Error {
+  constructor(readonly result: Extract<ApprovalResult, { ok: false }>) {
+    super(result.reason);
+  }
+}
+
+function refuseApproval(code: ApprovalRefusalCode, reason: string, details?: Extract<ApprovalResult, { ok: false }>['details']): never {
+  throw new ApprovalRefusal({ ok: false, code, reason, ...(details ? { details } : {}) });
+}
+
+/** The legacy A2A payment row: its spend is the Job's reservation (`reserveJobEscrow`), not the row's. */
+function isLegacyA2APayment(metadata: Prisma.JsonValue | null): boolean {
+  return typeof metadata === 'object' && metadata !== null && !Array.isArray(metadata) && metadata['a2aPayment'] === true;
+}
+
 /**
- * A6b: moves a still-RESERVED reservation to the UTC day of `now` when it was
- * made on an earlier day — called when the operator approves a
- * PENDING_APPROVAL transaction, which executes on the approval day. Without it
- * the spend counted against the creation day only, and the approval day's
- * limit gave the agent a full fresh budget on top of the approved amount.
+ * The operator's approval of a PENDING_APPROVAL transaction (A6c, plan §5
+ * question 8): revalidates the spend on the EFFECTIVE approval day — the UTC
+ * day of `now`, when it executes — and approves it, atomically.
  *
- * The move is not refused by today's limit: the operator approved this
- * transaction explicitly; counting it today limits what the agent can spend on
- * its own for the rest of the day. One database transaction under the agent
- * lock (the reservation paths' lock order: Agent, then Transaction /
- * DailyVolume); conditional on the row still RESERVED on an earlier day, so a
- * repeated or concurrent call moves it once. Returns whether it moved.
+ * One database transaction under the agent row lock (`FOR NO KEY UPDATE`, the
+ * lock every reservation path takes, so x402 payments, escrow jobs, new
+ * transactions and other approvals of the same agent are judged one at a
+ * time), in order:
+ *  1. the row must still be PENDING_APPROVAL;
+ *  2. the agent must be active and its policy active and unexpired (the
+ *     pre-submit guard's rules, checked here so the operator is told now);
+ *  3. a daily limit applies but the spend reserved nothing (unpriced when no
+ *     limit applied — D15: never counted as 0) → refused; the legacy A2A
+ *     payment is exempt (its spend is the Job's reservation, see below);
+ *  4. PENDING_APPROVAL → QUEUED, conditional (a rejection takes no agent lock;
+ *     whichever writes first wins, the other matches nothing);
+ *  5. a reservation made on an earlier UTC day moves to the approval day
+ *     (A6b: it executes then; counted on its creation day the approval day's
+ *     limit would hand the agent a full fresh budget on top of it);
+ *  6. the approval day's DailyVolume — this reservation included — plus its
+ *     counted x402 payments must stay within `maxDailyVolumeUsd`; on the
+ *     creation day too (the total there includes it already: only a limit
+ *     lowered since the request can refuse it).
+ * Any refusal throws inside the transaction: the status, the move and the
+ * DailyVolume writes roll back together — the row stays PENDING_APPROVAL with
+ * its reservation untouched on the day it was made; nothing is released or
+ * moved. A database error rolls back the same way and is rethrown.
+ *
+ * An ordinary approval never exceeds the daily limit. Approving beyond it
+ * would need a separate, explicit, audited operator act, which does not exist
+ * (the operator can raise the policy's limit, an audited policy change of its
+ * own, and approve again).
+ *
+ * Not revalidated here: the per-transaction caps, the allowlists and the
+ * cooldown (judged at the request), and the legacy A2A payment's Job
+ * reservation, which stays on the Job's day (legacy path, D8).
  */
-export async function moveReservationToDay(db: VolumeDb, transactionId: string, now: Date = new Date()): Promise<boolean> {
+export async function approvePendingTransaction(
+  db: VolumeDb,
+  transactionId: string,
+  now: Date = new Date(),
+): Promise<ApprovalResult> {
   const today = utcDay(now);
-  return db.$transaction(async (tx) => {
-    const row = await tx.transaction.findUnique({
-      where: { id: transactionId },
-      select: { agentId: true, volumeState: true, volumeReservedUsd: true, volumeReservedDate: true },
+  const owner = await db.transaction.findUnique({ where: { id: transactionId }, select: { agentId: true } });
+  if (!owner) return { ok: false, code: 'APPROVAL_NOT_PENDING', reason: 'Transaction not found.' };
+  const agentId = owner.agentId;
+
+  return db
+    .$transaction(async (tx): Promise<ApprovalResult> => {
+      const [agent] = await tx.$queryRaw<Array<{ active: boolean }>>`
+        SELECT "active" FROM "Agent" WHERE "id" = ${agentId} FOR NO KEY UPDATE
+      `;
+      const row = await tx.transaction.findUnique({
+        where: { id: transactionId },
+        select: { status: true, volumeState: true, volumeReservedUsd: true, volumeReservedDate: true, metadata: true },
+      });
+      if (row?.status !== 'PENDING_APPROVAL') refuseApproval('APPROVAL_NOT_PENDING', 'Transaction is no longer PENDING_APPROVAL.');
+      if (!agent?.active) refuseApproval('APPROVAL_AGENT_PAUSED', 'The agent is paused; it cannot be approved. Resume the agent first.');
+
+      const policy = await tx.agentPolicy.findUnique({
+        where: { agentId },
+        select: { active: true, expiresAt: true, maxDailyVolumeUsd: true },
+      });
+      if (policy && !policy.active) {
+        refuseApproval('APPROVAL_POLICY_INACTIVE', 'Agent policy is paused (kill switch active); it cannot be approved.');
+      }
+      if (policy?.expiresAt && policy.expiresAt < now) {
+        refuseApproval('APPROVAL_POLICY_EXPIRED', `Agent policy expired at ${policy.expiresAt.toISOString()}; it cannot be approved.`);
+      }
+      // Same reading as everywhere: no policy, 0 or unparsable = no daily limit.
+      const limit = policy ? parsePolicyDecimal(policy.maxDailyVolumeUsd) ?? 0 : 0;
+
+      const reserved =
+        row.volumeState === 'RESERVED' && row.volumeReservedUsd && row.volumeReservedDate
+          ? { usd: row.volumeReservedUsd, day: row.volumeReservedDate }
+          : null;
+      if (!reserved && limit > 0 && !isLegacyA2APayment(row.metadata)) {
+        refuseApproval(
+          'APPROVAL_UNCOUNTED_SPEND',
+          `This spend reserved nothing in the daily volume (it could not be priced when no daily limit applied), and the daily volume ` +
+            `limit of ${policy?.maxDailyVolumeUsd} USD applies now, so it cannot be checked. Reject it; the agent can request it again.`,
+        );
+      }
+
+      const move = reserved !== null && reserved.day < today;
+      const { count } = await tx.transaction.updateMany({
+        where: { id: transactionId, status: 'PENDING_APPROVAL' },
+        data: { status: 'QUEUED', ...(move ? { volumeReservedDate: today } : {}) },
+      });
+      if (count === 0) refuseApproval('APPROVAL_NOT_PENDING', 'Transaction is no longer PENDING_APPROVAL.');
+
+      if (!reserved) return { ok: true, day: today, moved: false };
+
+      // The day the reservation counts on from now on (a creation day "after"
+      // `now` — clock skew around midnight — keeps its own day).
+      const day = move ? today : reserved.day;
+      let dayVolumeUsd: string;
+      if (move) {
+        await tx.$executeRaw`
+          UPDATE "DailyVolume"
+          SET "volumeUsd" = GREATEST(0, (("volumeUsd"::numeric) - (${reserved.usd}::numeric)))::text,
+              "updatedAt" = NOW()
+          WHERE "agentId" = ${agentId} AND "date" = ${reserved.day}
+        `;
+        const [added] = await tx.$queryRaw<[{ volumeUsd: string }]>`
+          INSERT INTO "DailyVolume" ("id", "agentId", "date", "volumeUsd", "updatedAt")
+          VALUES (gen_random_uuid()::text, ${agentId}, ${today}, ${reserved.usd}, NOW())
+          ON CONFLICT ("agentId", "date")
+          DO UPDATE SET
+            "volumeUsd" = (("DailyVolume"."volumeUsd"::numeric) + (${reserved.usd}::numeric))::text,
+            "updatedAt" = NOW()
+          RETURNING "volumeUsd"
+        `;
+        dayVolumeUsd = added?.volumeUsd ?? reserved.usd;
+      } else {
+        const current = await tx.dailyVolume.findUnique({
+          where: { agentId_date: { agentId, date: day } },
+          select: { volumeUsd: true },
+        });
+        dayVolumeUsd = current?.volumeUsd ?? reserved.usd;
+      }
+
+      if (limit > 0) {
+        const x402Usd = Number(await resourcePaymentSpentToday(tx, agentId, now)) / 1e6;
+        const projected = Number.parseFloat(dayVolumeUsd) + x402Usd;
+        if (projected > limit) {
+          const requested = Number.parseFloat(reserved.usd);
+          const committed = Math.max(0, projected - requested);
+          refuseApproval(
+            'APPROVAL_DAILY_LIMIT',
+            `Approving it on ${day} would exceed the daily volume limit of ${policy?.maxDailyVolumeUsd} USD: ` +
+              `${committed.toFixed(2)} USD already committed that day, ${requested.toFixed(2)} USD requested. ` +
+              'An approval never exceeds the daily limit; it stays PENDING_APPROVAL (approve it when the day has room, or reject it).',
+            { day, limitUsd: policy?.maxDailyVolumeUsd ?? String(limit), committedUsd: committed.toFixed(6), requestedUsd: requested.toFixed(6) },
+          );
+        }
+      }
+      return { ok: true, day, moved: move };
+    }, RESERVATION_TX_OPTIONS)
+    .catch((err: unknown) => {
+      if (err instanceof ApprovalRefusal) return err.result;
+      throw err;
     });
-    if (row?.volumeState !== 'RESERVED' || !row.volumeReservedUsd || !row.volumeReservedDate || row.volumeReservedDate >= today) {
-      return false;
-    }
-    await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${row.agentId} FOR NO KEY UPDATE`;
-    const { count } = await tx.transaction.updateMany({
-      where: { id: transactionId, volumeState: 'RESERVED', volumeReservedDate: row.volumeReservedDate },
-      data: { volumeReservedDate: today },
-    });
-    if (count === 0) return false;
-    await tx.$executeRaw`
-      UPDATE "DailyVolume"
-      SET "volumeUsd" = GREATEST(0, (("volumeUsd"::numeric) - (${row.volumeReservedUsd}::numeric)))::text,
-          "updatedAt" = NOW()
-      WHERE "agentId" = ${row.agentId} AND "date" = ${row.volumeReservedDate}
-    `;
-    await tx.$executeRaw`
-      INSERT INTO "DailyVolume" ("id", "agentId", "date", "volumeUsd", "updatedAt")
-      VALUES (gen_random_uuid()::text, ${row.agentId}, ${today}, ${row.volumeReservedUsd}, NOW())
-      ON CONFLICT ("agentId", "date")
-      DO UPDATE SET
-        "volumeUsd" = (("DailyVolume"."volumeUsd"::numeric) + (${row.volumeReservedUsd}::numeric))::text,
-        "updatedAt" = NOW()
-    `;
-    return true;
-  }, RESERVATION_TX_OPTIONS);
 }
 
 /** RESERVED → COMMITTED (the transaction confirmed). Returns whether this call settled it. */

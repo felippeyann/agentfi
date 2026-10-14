@@ -3036,7 +3036,19 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Approve a PENDING_APPROVAL transaction */
+        /**
+         * Approve a PENDING_APPROVAL transaction
+         * @description The approval is revalidated on the day it is given (UTC), atomically
+         *     with the status change: the agent and its policy must be active and
+         *     the policy unexpired, and the transaction's daily-volume reservation
+         *     — moved to the approval day when it was made on an earlier day —
+         *     plus everything else committed that day (transactions, escrow jobs,
+         *     x402 payments) must stay within `maxDailyVolumeUsd`. An approval never
+         *     exceeds the daily limit and there is no override: a refusal (409)
+         *     leaves the transaction PENDING_APPROVAL with its reservation untouched;
+         *     approve it again when the day has room (or after raising the policy's
+         *     limit), or reject it.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -3055,14 +3067,51 @@ export interface paths {
                     };
                     content?: never;
                 };
-                /** @description A concurrent approve or reject already moved the transaction out of PENDING_APPROVAL. */
-                409: {
+                /** @description The transaction is not PENDING_APPROVAL, or predates approval support (no stored payload). */
+                400: {
                     headers: {
                         [name: string]: unknown;
                     };
                     content?: never;
                 };
-                /** @description The transaction could not be enqueued; it is still PENDING_APPROVAL and the approval can be retried. */
+                /** @description No such transaction. */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /**
+                 * @description Refused; the transaction is still PENDING_APPROVAL unless `code` is
+                 *     `APPROVAL_NOT_PENDING`. Codes: `APPROVAL_NOT_PENDING` (a concurrent
+                 *     approve or reject already moved it), `APPROVAL_AGENT_PAUSED`,
+                 *     `APPROVAL_POLICY_INACTIVE`, `APPROVAL_POLICY_EXPIRED`,
+                 *     `APPROVAL_DAILY_LIMIT` (with `details`: the approval `day`,
+                 *     `limitUsd`, `committedUsd` that day without this transaction,
+                 *     `requestedUsd`), `APPROVAL_UNCOUNTED_SPEND` (a daily limit applies
+                 *     now but the spend reserved nothing — it was unpriced when no limit
+                 *     applied; reject it).
+                 */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: string;
+                            /** @enum {string} */
+                            code: "APPROVAL_NOT_PENDING" | "APPROVAL_AGENT_PAUSED" | "APPROVAL_POLICY_INACTIVE" | "APPROVAL_POLICY_EXPIRED" | "APPROVAL_DAILY_LIMIT" | "APPROVAL_UNCOUNTED_SPEND";
+                            details?: {
+                                /** @example 2026-10-15 */
+                                day?: string;
+                                limitUsd?: string;
+                                committedUsd?: string;
+                                requestedUsd?: string;
+                            };
+                        };
+                    };
+                };
+                /** @description The approval could not be recorded (`APPROVAL_UNAVAILABLE`) or the transaction could not be enqueued; it is still PENDING_APPROVAL and the approval can be retried. */
                 503: {
                     headers: {
                         [name: string]: unknown;
