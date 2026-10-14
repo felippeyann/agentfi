@@ -63,7 +63,14 @@ vi.mock('../queues/transaction.queue.js', () => ({ repollSubmittedTransactionsNo
 // A6b stranded-QUEUED sweep: exercised on Postgres in broadcast-outcome.db.test.ts; here only its place in the tick.
 vi.mock('../services/transaction/stranded-queued.js', () => ({ recoverStrandedQueuedTransactions: strandedMock }));
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+
+// Load the recovery module (a large graph since A6b / Q9) once, outside any
+// test's 5 s budget: under a loaded full run the cold import alone exceeded it
+// in the first test (G1 review, three local runs).
+beforeAll(async () => {
+  await import('../queues/payment-recovery.queue.js');
+}, 60_000);
 
 const OLD = new Date('2026-10-06T00:00:00.000Z');
 
