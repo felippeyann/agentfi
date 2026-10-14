@@ -33,6 +33,13 @@
  * status write and its settlement are separate writes: a crash between them
  * is repaired by `sweepUnsettledVolume` on the payment-recovery tick.
  *
+ * A6b: the stamp also records the signed hash (`broadcastTxHash`). A stamped
+ * row is never FAILED by the guard, the failed handler or the stranded-QUEUED
+ * sweep: `stopStampedTransaction` hands it to the chain (SUBMITTED with that
+ * hash) and the receipt — or the re-poll's drop — settles it as above. An
+ * operator approval on a later UTC day moves the reservation to that day
+ * (`moveReservationToDay`).
+ *
  * Rows that reserve nothing keep `volumeState` NULL and every settlement is a
  * no-op for them: zero-value transactions, the legacy A2A payment (its spend
  * is the Job's reservation, `reserveJobEscrow` / `releaseJobEscrow`) and the
