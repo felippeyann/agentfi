@@ -184,6 +184,13 @@ describe('S7 — the corrected addresses are the official deployments', () => {
     expect(quoters?.[8453]).toBe('0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a');
   });
 
+  it('Base Sepolia (the C5 chain): the swap route has the official QuoterV2, the same as config uniswapV3Quoter', () => {
+    // docs.uniswap.org (Uniswap/docs@1c7597d) Base deployments, "Base Sepolia Address" column.
+    const quoters = (contracts as Record<string, unknown>)['UNISWAP_V3_QUOTER_V2'] as Record<number, string> | undefined;
+    expect(quoters?.[84532]).toBe('0xC5290058841028F1614F3A6F0F5816cAd0df5E27');
+    expect(quoters?.[84532]).toBe(contracts.getContracts(84532).uniswapV3Quoter);
+  });
+
   it('Arbitrum: GMX OrderVault and Router, the same in config/contracts.ts and gmx.service.ts', () => {
     const arb = contracts.getContracts(42161);
     expect(arb.gmxOrderVault).toBe('0x31eF83a530Fde1B38EE9A18093A333D8Bbbc40D5');
