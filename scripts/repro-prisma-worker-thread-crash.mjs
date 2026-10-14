@@ -23,8 +23,14 @@
  *   noprisma-terminate    control — a thread that never loads Prisma, terminate()d
  *   proc-disconnect       control — the `disconnect` body in a child PROCESS
  *
- * Exit code 0 and "all workers completed" = no crash in this run. Results on
- * the maintainer's machine: docs/operations/local-validation.md §4.
+ * Exit code 0 and "all workers completed" = no crash in this run, and every
+ * lifecycle ended as its mode expects: a child process with exit code 0 and
+ * no signal; a thread that ends by itself with 0; a terminate()d thread with
+ * 1 (Node's code for terminate()), before the 15 s timeout. Any other end is
+ * marked `!` (a timeout `T!`), counted, and the run exits 1 — a failed child
+ * or a hung worker is never reported as a clean control run. A native crash
+ * of this process itself shows as 139 / 0xC0000005 (it never gets here).
+ * Results on the maintainer's machine: docs/operations/local-validation.md §4.
  */
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { fork } from 'node:child_process';
@@ -65,12 +71,17 @@ if (process.argv[2] === '--child') {
     process.exit(2);
   }
   console.log(`node ${process.version} ${process.platform} workers=${count} mode=${mode}`);
+  // terminate() ends a worker with exit code 1: the expected end in these modes.
+  const expectedThreadExit = mode === 'terminate' || mode.endsWith('-terminate') ? 1 : 0;
+  let failed = 0;
   for (let i = 0; i < count; i++) {
     await new Promise((resolve, reject) => {
       if (mode.startsWith('proc-')) {
         const child = fork(SELF, ['--child', mode.slice('proc-'.length)], { stdio: 'inherit' });
         child.on('exit', (code, signal) => {
-          process.stdout.write(`${i}:${code ?? signal} `);
+          const clean = code === 0 && signal === null;
+          if (!clean) failed++;
+          process.stdout.write(`${i}:${code ?? signal}${clean ? '' : '!'} `);
           resolve();
         });
         child.on('error', reject);
@@ -89,10 +100,16 @@ if (process.argv[2] === '--child') {
       worker.on('error', reject);
       worker.on('exit', (code) => {
         clearTimeout(timer);
-        process.stdout.write(`${i}:${code}${timedOut ? 'T' : ''} `);
+        const clean = !timedOut && code === expectedThreadExit;
+        if (!clean) failed++;
+        process.stdout.write(`${i}:${code}${timedOut ? 'T' : ''}${clean ? '' : '!'} `);
         resolve();
       });
     });
+  }
+  if (failed > 0) {
+    console.error(`\n${failed} of ${count} lifecycles did not end cleanly (marked "!") — not a clean run`);
+    process.exit(1);
   }
   console.log('\nall workers completed');
 } else {
