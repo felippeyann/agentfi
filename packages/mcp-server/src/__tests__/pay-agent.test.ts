@@ -165,6 +165,56 @@ describe('pay_agent refuses before calling the API', () => {
   });
 });
 
+describe('native "ETH" only where the native asset is ETH (review of #181, P1)', () => {
+  // The transfer route reads token "ETH" as the chain's NATIVE asset
+  // (`transactions.ts`, `isEthTransfer`): on Polygon (137) that is POL, so a
+  // payment asked for in ETH would send POL and the result would still say ETH.
+  const POLYGON = 137;
+  const WETH_POLYGON = '0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619';
+
+  it('ETH on Polygon is refused INVALID_INPUT before any request, naming POL and the ERC-20 alternative', async () => {
+    const result = await pay({ token_symbol: 'ETH', chain_id: POLYGON });
+
+    expect(result.isError).toBe(true);
+    const payload = payloadOf(result);
+    expect(payload).toMatchObject({ code: 'INVALID_INPUT', tool: 'pay_agent' });
+    expect(payload['error']).toMatch(/token_symbol: .*chain 137.*POL/);
+    expect(payload['error']).toMatch(/WETH/);
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it('"eth" in any case on Polygon is refused the same way', async () => {
+    const result = await pay({ token_symbol: ' eth ', chain_id: POLYGON });
+    expect(payloadOf(result)).toMatchObject({ code: 'INVALID_INPUT' });
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it('ETH on a chain the server does not know is refused too (its native asset is unknown here)', async () => {
+    const result = await pay({ token_symbol: 'ETH', chain_id: 56 });
+    expect(payloadOf(result)).toMatchObject({ code: 'INVALID_INPUT' });
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it('the known-symbols list on Polygon does not offer ETH', async () => {
+    const result = await pay({ token_symbol: 'DOGE', chain_id: POLYGON });
+    const error = String(payloadOf(result)['error']);
+    expect(error).toMatch(/known symbols there are DAI, USDC, USDT, WBTC, WETH\./);
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it('WETH on Polygon (the bridged-ETH ERC-20) is still a payment, by contract address', async () => {
+    const result = await pay({ token_symbol: 'WETH', chain_id: POLYGON });
+    expect(result.isError, JSON.stringify(payloadOf(result))).toBeFalsy();
+    expect(sent()[1]).toEqual({ to: RECIPIENT, token: WETH_POLYGON, amount: '1.5', chainId: POLYGON });
+  });
+
+  it.each([1, 8453, 84532, 42161])('native ETH stays accepted on chain %i (its native asset is ETH)', async (chainId) => {
+    const result = await pay({ token_symbol: 'ETH', chain_id: chainId });
+    expect(result.isError, JSON.stringify(payloadOf(result))).toBeFalsy();
+    expect(sent()[1]).toMatchObject({ token: 'ETH', chainId });
+  });
+});
+
 describe('pay_agent backend refusals', () => {
   it('a policy refusal comes back as a 403 tool error with the backend reason', async () => {
     // The transfer route answers a policy refusal as `403 { error }` (sendPolicyRefusal).
