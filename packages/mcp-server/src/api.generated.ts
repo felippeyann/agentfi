@@ -56,6 +56,9 @@ export interface paths {
          *     result is reused for 5 seconds (concurrent callers share it), and each
          *     client IP may call it 30 times per minute (an in-process limit, so it
          *     keeps answering when Redis is down). `timestamp` is when the probe ran.
+         *     `escrowConfig` (Q7) lists this API process's verification state of
+         *     each ERC-8183 chain; it is diagnostic only and never changes the status
+         *     (reasons: `GET /admin/escrow/verification`).
          */
         get: {
             parameters: {
@@ -1794,7 +1797,12 @@ export interface paths {
                 };
                 404: components["responses"]["NotFound"];
                 /**
-                 * @description ERC-8183 chain only. `ERC8183_UNAVAILABLE` (escrow token could not be
+                 * @description ERC-8183 chain only. `ESCROW_CONFIG_UNVERIFIED` (Q7) — this process
+                 *     has not verified the chain's deployed escrow / hook configuration
+                 *     right now (RPC unreachable, verification expired, mismatch); nothing
+                 *     was reserved or created; retry after `Retry-After` seconds (body:
+                 *     `chainId`, `state`, `retryAfterSeconds`).
+                 *     `ERC8183_UNAVAILABLE` (escrow token could not be
                  *     resolved; `message`) or `ERC8183_START_FAILED` (the `createJob` step
                  *     could not be queued; the job is left `FAILED` and the reservation
                  *     released; `jobId` and `reason` are included). `message` / `reason`
@@ -1803,10 +1811,12 @@ export interface paths {
                  */
                 503: {
                     headers: {
+                        /** @description Seconds to wait (with `ESCROW_CONFIG_UNVERIFIED`). */
+                        "Retry-After"?: number;
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["Error"];
+                        "application/json": components["schemas"]["EscrowConfigUnverifiedError"] | components["schemas"]["Error"];
                     };
                 };
             };
@@ -2024,17 +2034,25 @@ export interface paths {
                     };
                 };
                 /**
-                 * @description ERC-8183 chain only. `ESCROW_SUBMIT_FAILED` — the provider's `submit`
+                 * @description ERC-8183 chain only. `ESCROW_CONFIG_UNVERIFIED` (Q7) — `COMPLETED`
+                 *     (→ `submit`, then the evaluator's settlement), `CANCELLED` or
+                 *     `FAILED` (→ the evaluator's refund) of an escrow job that may still
+                 *     move money on-chain, while this process has not verified the
+                 *     chain's escrow / hook configuration; nothing was changed; retry
+                 *     after `Retry-After` seconds. `ACCEPTED` is never refused for it.
+                 *     `ESCROW_SUBMIT_FAILED` — the provider's `submit`
                  *     could not be queued (`reason`, sanitized); the job is returned to
                  *     `ACCEPTED` so the completion can be retried (unless a `submit` of
                  *     the job is already in flight).
                  */
                 503: {
                     headers: {
+                        /** @description Seconds to wait (with `ESCROW_CONFIG_UNVERIFIED`). */
+                        "Retry-After"?: number;
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["Error"];
+                        "application/json": components["schemas"]["EscrowConfigUnverifiedError"] | components["schemas"]["Error"];
                     };
                 };
             };
@@ -2796,6 +2814,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/escrow/verification": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * On-chain configuration verification state of each ERC-8183 chain (Q7)
+         * @description This API process's verification state of each escrow chain, with the
+         *     reason when new escrow operations are blocked, and the TTL / re-check
+         *     settings. The worker verifies on its own (its state changes are logged
+         *     and sent as `ESCROW_ALERT` notifications). While a chain is not
+         *     verified, NEW escrow-dependent signatures wait: escrow job creation and
+         *     escrow delivery / cancellation answer `503 ESCROW_CONFIG_UNVERIFIED`,
+         *     queued escrow steps, ERC-8004 identity transactions and evaluator
+         *     settlements are deferred (never failed or unwound). Ordinary transfers,
+         *     swaps and DeFi calls are not affected; confirmations, re-polls and the
+         *     reconciliation of already broadcast transactions continue.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The state of every configured escrow chain. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {string} */
+                            process?: "api";
+                            ttlSeconds?: number;
+                            recheckSeconds?: number;
+                            chains?: components["schemas"]["EscrowVerificationView"][];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/agents/{id}/pnl": {
         parameters: {
             query?: never;
@@ -3339,10 +3412,50 @@ export interface components {
         };
         ReadinessStatus: {
             /** @enum {string} */
-            status?: "ok" | "degraded";
+            status?: "ready" | "degraded";
             checks?: {
-                [key: string]: "ok" | "fail";
+                [key: string]: boolean;
             };
+            /** Format: date-time */
+            timestamp?: string;
+            /** @description Q7 — this API process's verification state of each ERC-8183 chain (diagnostic; never changes `status`). */
+            escrowConfig?: components["schemas"]["EscrowVerificationView"][];
+        };
+        /**
+         * @description Q7 — whether this process may sign NEW escrow-dependent transactions on
+         *     the chain (escrow steps, the evaluator settlement, the ERC-8004
+         *     identity registration and hook bind). `verified` for
+         *     `ESCROW_CONFIG_VERIFIED_TTL_SECONDS` after a successful read of the
+         *     deployed escrow / hook and `eth_chainId`; any failed read, a changed
+         *     configuration or an expired verification blocks until the next
+         *     successful re-check.
+         */
+        EscrowVerificationView: {
+            chainId: number;
+            /** @enum {string} */
+            state: "verified" | "not-configured" | "not-verified-yet" | "unverified" | "mismatch" | "expired" | "config-changed";
+            allowed: boolean;
+            /** Format: date-time */
+            verifiedAt?: string | null;
+            /** Format: date-time */
+            validUntil?: string | null;
+            /**
+             * Format: date-time
+             * @description Start of the current unverified / mismatch period.
+             */
+            since?: string | null;
+            /** @description Operator-facing explanation (admin view only). */
+            reason?: string;
+        };
+        /** @description Q7 — `503 ESCROW_CONFIG_UNVERIFIED`, sent with a `Retry-After` header before anything is reserved or written. */
+        EscrowConfigUnverifiedError: {
+            /** @enum {string} */
+            error: "ESCROW_CONFIG_UNVERIFIED";
+            message?: string;
+            chainId: number;
+            /** @enum {string} */
+            state: "not-configured" | "not-verified-yet" | "unverified" | "mismatch" | "expired" | "config-changed";
+            retryAfterSeconds: number;
         };
         /** @enum {string} */
         AgentTier: "FREE" | "PRO" | "ENTERPRISE";
