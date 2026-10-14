@@ -132,6 +132,11 @@ model Job {
   // daily limit applied). A release credits back exactly this; NULL on older
   // rows (released by re-pricing the reward, as before).
   reservedValueUsd  String?
+  // Q9 (migration 0022): price source behind `reservedValueUsd` — "usdc-peg"
+  // (ERC-8183 escrow budget, USDC at 1.00), "oracle" or "synthetic" (legacy
+  // reward on a testnet, a configured TEST price). NULL when nothing was
+  // priced / reserved, or for rows from before 0022.
+  reservedValueSource String?
 
   // Phase 2 of #71 — revenue snapshot captured at payment confirmation.
   // NULL on a COMPLETED job ⇒ oracle was unresolved at finalization;
@@ -320,6 +325,11 @@ model Transaction {
   volumeReservedUsd    String?
   volumeReservedDate   String?
   volumeState          VolumeState?
+  // Q9: where the price behind `volumeReservedUsd` came from — "oracle"
+  // (mainnet chains), "synthetic" (a configured TEST price on a testnet, not
+  // a market price) or "usdc-peg". NULL when nothing was reserved or for rows
+  // reserved before migration 0022.
+  volumePriceSource    String?
   // A6: set before the first signed broadcast; a failure after it is an
   // unknown outcome, never "never executed". `broadcastAttempts` counts the
   // signed broadcasts: a revert releases only after exactly one. Migration 0020.

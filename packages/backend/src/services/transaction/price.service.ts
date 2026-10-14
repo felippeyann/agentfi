@@ -1,6 +1,12 @@
 /**
  * Price Service — ETH/token price lookups via CoinGecko (free tier).
- * Used to convert wei fee amounts to USD for accounting.
+ * Used to convert wei fee amounts to USD for accounting: fee events, P&L and
+ * the per-job revenue snapshot. Policy and daily-volume accounting price
+ * through `services/policy/spend-pricing.ts` instead (Q9), which wraps this
+ * module on mainnet chains only. This module NEVER reads synthetic test
+ * prices, and since Q9 it no longer prices a chain it does not map (Base
+ * Sepolia) with the mainnet ETH price: such a value is "0" (unpriced), so a
+ * testnet fee / gas cost / revenue snapshot stays unpriced (NULL snapshot).
  */
 
 import { formatEther, formatUnits, getAddress } from 'viem';
@@ -58,7 +64,9 @@ export function clearPriceCache(): void {
  * Returns '0' if price lookup fails — fee accounting degrades gracefully.
  */
 export async function weiToUsd(amountWei: bigint, chainId: number): Promise<string> {
-  const tokenId = CHAIN_NATIVE_TOKEN[chainId] ?? 'ethereum';
+  // Q9: no default — a testnet's native asset is not mainnet ETH.
+  const tokenId = CHAIN_NATIVE_TOKEN[chainId];
+  if (!tokenId) return '0';
   const price = await fetchPrice(tokenId);
   if (price === 0) return '0';
 

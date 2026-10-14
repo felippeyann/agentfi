@@ -10,7 +10,11 @@ import {
   nodeEnvUnsetVerdict,
   placeholderKeys,
   rpcUrlProblem,
+  syntheticPricesProblem,
 } from './env-guards.js';
+// Read only when SYNTHETIC_TEST_PRICES_USD is set (several suites mock
+// chains.js partially; an unset variable never touches this binding).
+import { TESTNET_CHAIN_IDS } from './chains.js';
 import { parseTrustProxy, type TrustProxySetting } from './trust-proxy.js';
 
 /** Chains the ERC-8183 escrow can be configured on (one address pair per chain). */
@@ -264,6 +268,12 @@ const envSchema = z.object({
       .optional(),
   ),
 
+  // Synthetic test prices (Q9): `chainId:asset=usd,…`, testnet chains only,
+  // refused in production / staging (config/synthetic-prices.ts,
+  // env-guards.ts). Unset: a testnet spend has no price, so it is refused
+  // while a daily limit applies. Validated after parsing (below).
+  SYNTHETIC_TEST_PRICES_USD: z.preprocess(blankToUndefined, z.string().optional()),
+
   // Rate-limit overrides (requests/minute per tier)
   RATE_LIMIT_FREE: z.coerce.number().int().positive().default(30),
   RATE_LIMIT_PRO: z.coerce.number().int().positive().default(300),
@@ -307,6 +317,21 @@ for (const key of Object.keys(parsed.data).filter((k) => k.startsWith('RPC_URL_'
     console.error(`FATAL: ${key} ${problem}.`);
     process.exit(1);
   }
+}
+
+// Synthetic test prices (Q9): FATAL in production / staging when set at all;
+// elsewhere a malformed value or a non-testnet entry is FATAL (a typo must
+// not silently leave a testnet spend unpriced — or priced wrong).
+if (parsed.data.SYNTHETIC_TEST_PRICES_USD !== undefined) {
+  const problem = syntheticPricesProblem(parsed.data.SYNTHETIC_TEST_PRICES_USD, parsed.data.NODE_ENV, TESTNET_CHAIN_IDS);
+  if (problem) {
+    console.error(`FATAL: ${problem}`);
+    process.exit(1);
+  }
+  console.warn(
+    `WARN: SYNTHETIC_TEST_PRICES_USD is set — testnet spends are counted against daily limits at SYNTHETIC test prices ` +
+      `(not market prices): ${parsed.data.SYNTHETIC_TEST_PRICES_USD}`,
+  );
 }
 
 // Production AND staging (S6: staging is as strict as production for

@@ -192,7 +192,9 @@ export async function jobRoutes(fastify: FastifyInstance) {
 
     // v2 Escrow: if reward is specified, reserve funds before creating the job.
     // This prevents requesters from creating paid jobs they can't honor.
-    const jobData = (reservation: { at: Date; reservedValueUsd: string | null } | null): Prisma.JobUncheckedCreateInput => ({
+    const jobData = (
+      reservation: { at: Date; reservedValueUsd: string | null; reservedValueSource: string | null } | null,
+    ): Prisma.JobUncheckedCreateInput => ({
       requesterId: request.agentId,
       providerId: body.providerId,
       payload: body.payload,
@@ -207,6 +209,7 @@ export async function jobRoutes(fastify: FastifyInstance) {
             reservedAt: reservation.at,
             reservationStatus: 'PENDING',
             reservedValueUsd: reservation.reservedValueUsd,
+            reservedValueSource: reservation.reservedValueSource,
           }
         : {}),
     });
@@ -229,7 +232,10 @@ export async function jobRoutes(fastify: FastifyInstance) {
           payee: provider.safeAddress,
           now: at,
         },
-        (tx, reservation) => tx.job.create({ data: jobData({ at, reservedValueUsd: reservation.reservedValueUsd }) }),
+        (tx, reservation) =>
+          tx.job.create({
+            data: jobData({ at, reservedValueUsd: reservation.reservedValueUsd, reservedValueSource: reservation.reservedValueSource }),
+          }),
       );
       if (!spend.success) {
         if (spend.code === 'RESERVATION_FAILED') {
@@ -256,12 +262,28 @@ export async function jobRoutes(fastify: FastifyInstance) {
         },
       });
       if (!reservation.success) {
+        // Q9: a reward with no trusted price while a daily limit applies is
+        // 503 PRICE_UNAVAILABLE (the job is not created), like the
+        // transaction routes; every other refusal stays 400.
+        if (reservation.code === 'PRICE_UNAVAILABLE') {
+          return reply.code(503).send({
+            error: 'Escrow reservation failed',
+            code: 'PRICE_UNAVAILABLE',
+            reason: reservation.reason,
+          });
+        }
         return reply.code(400).send({
           error: 'Escrow reservation failed',
           reason: reservation.reason,
         });
       }
-      job = await db.job.create({ data: jobData({ at: new Date(), reservedValueUsd: reservation.reservedValueUsd ?? null }) });
+      job = await db.job.create({
+        data: jobData({
+          at: new Date(),
+          reservedValueUsd: reservation.reservedValueUsd ?? null,
+          reservedValueSource: reservation.reservedValueSource ?? null,
+        }),
+      });
     } else {
       job = await db.job.create({ data: jobData(null) });
     }

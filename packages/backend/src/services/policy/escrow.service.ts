@@ -36,8 +36,15 @@ import { logger } from '../../api/middleware/logger.js';
 import { resolveRewardUsd } from '../billing/reward-pricing.js';
 import { onChainEscrowService } from './escrow-onchain.service.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
-import { getAddress, parseUnits, type Address } from 'viem';
-import { getKnownTokenDecimals } from '../transaction/token-registry.js';
+import { getAddress, parseEther, parseUnits, type Address } from 'viem';
+import { getKnownTokenDecimals, isNativeTokenSymbol, resolveKnownPricedToken } from '../transaction/token-registry.js';
+import {
+  priceNativeSpend,
+  priceTokenSpend,
+  unknownAmountSpend,
+  type SpendPriceSource,
+  type SpendPricing,
+} from './spend-pricing.js';
 import { resourcePaymentSpentToday, utcDay } from '../payments/resource-payment-ledger.js';
 import { parsePolicyDecimal } from './policy-numbers.js';
 import {
@@ -57,8 +64,31 @@ interface RewardSpec {
 interface ReservationResult {
   success: boolean;
   reason?: string;
+  /** Q9: `PRICE_UNAVAILABLE` when the reward has no trusted price while a daily limit applies (the route answers 503). */
+  code?: 'PRICE_UNAVAILABLE';
   /** USD added to the requester's DailyVolume ("0" when no daily limit applied). Stored as `Job.reservedValueUsd`. */
   reservedValueUsd?: string;
+  /** Q9: price source of `reservedValueUsd` (`Job.reservedValueSource`); null when nothing was reserved. */
+  reservedValueSource?: SpendPriceSource | null;
+}
+
+/**
+ * Q9: a legacy reward priced for the daily limit with the spend-pricing rules
+ * (oracle on mainnet chains, a configured synthetic price on a testnet, never
+ * the mainnet ETH price on a testnet). Unknown token / malformed amount =
+ * unpriced. `resolveRewardUsd` stays the revenue / P&L helper.
+ */
+async function priceReward(reward: RewardSpec): Promise<SpendPricing> {
+  try {
+    if (isNativeTokenSymbol(reward.token)) return await priceNativeSpend(parseEther(reward.amount), reward.chainId);
+    const token = resolveKnownPricedToken(reward.token, reward.chainId);
+    if (!token) {
+      return unknownAmountSpend(`The reward token ${reward.token} is not a known token on chain ${reward.chainId}, so it has no trusted price`);
+    }
+    return await priceTokenSpend(parseUnits(reward.amount, token.decimals), token.address, token.decimals, reward.chainId);
+  } catch {
+    return unknownAmountSpend(`The reward amount ${JSON.stringify(reward.amount)} could not be read`);
+  }
 }
 
 /**
@@ -109,6 +139,12 @@ async function subtractDailyVolume(agentId: string, date: string, usd: string, c
  * oracle does not price. Without a daily limit an unpriced reward still
  * reserves nothing. The amount actually added to DailyVolume is returned as
  * `reservedValueUsd` so the release credits back exactly that.
+ *
+ * Q9: the reward is priced with `spend-pricing.ts` (`priceReward`): on a
+ * testnet only a configured synthetic price counts — before Q9 a native
+ * reward on Base Sepolia was priced with the MAINNET ETH price — and the
+ * refusal carries `code: PRICE_UNAVAILABLE` (route: 503). The price source is
+ * returned as `reservedValueSource` (stored on the Job).
  */
 export async function reserveJobEscrow(params: {
   requesterId: string;
@@ -138,30 +174,35 @@ export async function reserveJobEscrow(params: {
   });
   const dailyLimitUsd = policy && policy.active ? parsePolicyDecimal(policy.maxDailyVolumeUsd) ?? 0 : 0;
 
-  // 3. Convert reward to USD
-  const priced = await resolveRewardUsd(params.reward);
-  const valueUsdNum = priced.resolved ? parseFloat(priced.usd) : 0;
+  // 3. Price the reward (Q9 rules: trusted prices only).
+  const pricing = await priceReward(params.reward);
+  const valueUsdNum = pricing.status === 'priced' ? parseFloat(pricing.usd) : 0;
 
-  if (!priced.resolved || valueUsdNum <= 0) {
+  if (pricing.status === 'unpriced') {
     if (dailyLimitUsd > 0) {
-      // C3d: fail closed — a daily limit that cannot be checked must not pass.
+      // C3d / Q9: fail closed — a daily limit that cannot be checked must
+      // not pass, and the job is not created (it used to be on testnets,
+      // priced with the mainnet ETH price).
       logger.warn(
-        { requesterId: params.requesterId, reward: params.reward },
-        'Escrow: reward price unresolved while a daily limit applies — reservation refused',
+        { requesterId: params.requesterId, reward: params.reward, reason: pricing.reason },
+        'Escrow: reward has no trusted price while a daily limit applies — reservation refused',
       );
       return {
         success: false,
+        code: 'PRICE_UNAVAILABLE',
         reason:
-          `The reward (${params.reward.amount} ${params.reward.token} on chain ${params.reward.chainId}) could not be priced in USD, ` +
-          `so the daily volume limit of $${policy!.maxDailyVolumeUsd} cannot be checked; retry later or pay in USDC on an escrow chain`,
+          `${pricing.reason}. The reward (${params.reward.amount} ${params.reward.token} on chain ${params.reward.chainId}) ` +
+          `could not be priced in USD, so the daily volume limit of $${policy!.maxDailyVolumeUsd} cannot be checked; ` +
+          'pay in USDC on an escrow chain or ask the operator',
       };
     }
     logger.warn(
-      { requesterId: params.requesterId, reward: params.reward },
-      'Escrow: USD value unresolved and no daily limit applies, skipping volume reservation',
+      { requesterId: params.requesterId, reward: params.reward, reason: pricing.reason },
+      'Escrow: reward has no trusted price and no daily limit applies — nothing reserved',
     );
-    return { success: true, reservedValueUsd: '0' };
+    return { success: true, reservedValueUsd: '0', reservedValueSource: null };
   }
+  if (pricing.status === 'zero') return { success: true, reservedValueUsd: '0', reservedValueSource: null };
 
   // 4. Atomically reserve daily volume when a limit applies.
   if (dailyLimitUsd > 0) {
@@ -175,12 +216,15 @@ export async function reserveJobEscrow(params: {
         reason: `Daily volume limit of $${policy!.maxDailyVolumeUsd} USD would be exceeded by escrow reservation ($${valueUsdNum.toFixed(2)})`,
       };
     }
-    logger.info({ requesterId: params.requesterId, reward: params.reward, reservedValueUsd: usd }, 'Job escrow reserved');
-    return { success: true, reservedValueUsd: usd };
+    logger.info(
+      { requesterId: params.requesterId, reward: params.reward, reservedValueUsd: usd, priceSource: pricing.source },
+      pricing.source === 'synthetic' ? 'Job escrow reserved at a SYNTHETIC test price' : 'Job escrow reserved',
+    );
+    return { success: true, reservedValueUsd: usd, reservedValueSource: pricing.source };
   }
 
-  logger.info({ requesterId: params.requesterId, reward: params.reward, valueUsd: priced.usd }, 'Job escrow reserved (no daily limit — nothing added to DailyVolume)');
-  return { success: true, reservedValueUsd: '0' };
+  logger.info({ requesterId: params.requesterId, reward: params.reward, valueUsd: pricing.usd, priceSource: pricing.source }, 'Job escrow reserved (no daily limit — nothing added to DailyVolume)');
+  return { success: true, reservedValueUsd: '0', reservedValueSource: null };
 }
 
 // ── ERC-8183 escrow jobs (C3d) ─────────────────────────────────────────────
@@ -275,7 +319,7 @@ export async function reserveEscrowJobSpend<T>(
     now?: Date;
   },
   /** Creates the Job row inside the reservation transaction (it receives the USD actually reserved). */
-  create: (tx: Prisma.TransactionClient, reservation: { reservedValueUsd: string }) => Promise<T>,
+  create: (tx: Prisma.TransactionClient, reservation: { reservedValueUsd: string; reservedValueSource: SpendPriceSource | null }) => Promise<T>,
 ): Promise<EscrowSpendResult<T>> {
   const now = params.now ?? new Date();
   const requester = await db.agent.findUnique({
@@ -304,7 +348,7 @@ export async function reserveEscrowJobSpend<T>(
       const policy = await tx.agentPolicy.findUnique({ where: { agentId: params.requesterId } });
       if (!policy) {
         // No policy = no restrictions (same as validateTransaction).
-        return { success: true as const, reservedValueUsd: '0', created: await create(tx, { reservedValueUsd: '0' }) };
+        return { success: true as const, reservedValueUsd: '0', created: await create(tx, { reservedValueUsd: '0', reservedValueSource: null }) };
       }
 
       // Static rules (paused / expired / allowlists / per-tx cap; the daily
@@ -340,7 +384,7 @@ export async function reserveEscrowJobSpend<T>(
 
       const daily = policyDecimalToMicro(policy.maxDailyVolumeUsd);
       if (daily === null || daily === 0n) {
-        return { success: true as const, reservedValueUsd: '0', created: await create(tx, { reservedValueUsd: '0' }) };
+        return { success: true as const, reservedValueUsd: '0', created: await create(tx, { reservedValueUsd: '0', reservedValueSource: null }) };
       }
 
       const total = await addDailyVolume(params.requesterId, utcDay(now), amountUsd, tx);
@@ -361,7 +405,7 @@ export async function reserveEscrowJobSpend<T>(
           spentToday: formatMicroUsd(spentToday),
         });
       }
-      const created = await create(tx, { reservedValueUsd: amountUsd });
+      const created = await create(tx, { reservedValueUsd: amountUsd, reservedValueSource: 'usdc-peg' });
       logger.info({ requesterId: params.requesterId, chainId: params.chainId, reservedValueUsd: amountUsd }, 'ERC-8183 job budget reserved against the daily limit');
       return { success: true as const, reservedValueUsd: amountUsd, created };
     });

@@ -2,12 +2,19 @@ import type { PrismaClient, AgentPolicy } from '@prisma/client';
 import { getAddress, type Address } from 'viem';
 import { OnChainPolicyService } from './onchain-policy.service.js';
 import { parsePolicyDecimal } from './policy-numbers.js';
+import { countedUsd, type SpendPricing } from './spend-pricing.js';
 import { resourcePaymentSpentToday } from '../payments/resource-payment-ledger.js';
 
 export interface PolicyValidationResult {
   allowed: boolean;
   requiresApproval?: boolean;
   reason?: string;
+  /**
+   * Q9: `PRICE_UNAVAILABLE` when the refusal is that a component of the spend
+   * has no trusted price while a daily limit applies (the routes answer 503).
+   * Absent for an ordinary policy refusal (403).
+   */
+  code?: 'PRICE_UNAVAILABLE';
 }
 
 /**
@@ -66,6 +73,13 @@ export class PolicyService {
     tokenAddress?: Address;
     valueEth: string; // as decimal string, e.g. "0.5"
     valueUsd?: string; // as decimal string, e.g. "150.00"
+    /**
+     * Q9: the spend's pricing (`spend-pricing.ts`). When given, its counted
+     * USD replaces `valueUsd`, and an UNPRICED spend is refused
+     * (`code: PRICE_UNAVAILABLE`) while the policy has a daily limit — before
+     * the caller simulates or reserves anything.
+     */
+    pricing?: SpendPricing;
     lastTxTimestamp?: number; // unix seconds
     /**
      * The spend is already counted elsewhere — the legacy A2A payment, whose
@@ -178,9 +192,19 @@ export class PolicyService {
     // lock when the row is created (daily-volume.ts).
     const dailyLimitUsd = parsePolicyDecimal(policy.maxDailyVolumeUsd) ?? 0;
     if (dailyLimitUsd > 0 && !params.dailyVolumeAccounted) {
+      // Q9: a spend that cannot be priced would count as 0 — refuse it.
+      if (params.pricing?.status === 'unpriced') {
+        return {
+          allowed: false,
+          code: 'PRICE_UNAVAILABLE',
+          reason:
+            `${params.pricing.reason}. The daily volume limit of ${policy.maxDailyVolumeUsd} USD cannot be checked, ` +
+            'so the spend is refused (it would otherwise count as 0).',
+        };
+      }
       const now = new Date();
       const today = now.toISOString().slice(0, 10); // YYYY-MM-DD
-      const incomingVolumeUsd = parseFloat(params.valueUsd ?? '0');
+      const incomingVolumeUsd = parseFloat(params.pricing ? countedUsd(params.pricing) : params.valueUsd ?? '0');
       // x402 payments (pay-resource, P6) are not in DailyVolume: they count
       // from their ledger rows (counted states, reserved today), so one daily
       // limit covers both paths.

@@ -11,12 +11,22 @@ import {
 } from '../../services/transaction/simulation-guard.js';
 import { ExecutorService } from '../../services/transaction/executor.service.js';
 import { AGENT_EXECUTOR_ABI } from '../../abi/AgentExecutor.abi.js';
-import { PolicyService } from '../../services/policy/policy.service.js';
+import { PolicyService, type PolicyValidationResult } from '../../services/policy/policy.service.js';
 import { createTransactionWithVolume, settleVolumeAfterFailure } from '../../services/policy/daily-volume.js';
 import { FeeService } from '../../services/policy/fee.service.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
 import { transactionJobId } from '../../queues/transaction-job-id.js';
-import { weiToUsd, tokenAmountToUsd } from '../../services/transaction/price.service.js';
+import {
+  countedUsd,
+  priceNativeSpend,
+  priceSourceOf,
+  priceTokenSpend,
+  sumSpendPricings,
+  unknownAmountSpend,
+  type SpendPricing,
+} from '../../services/policy/spend-pricing.js';
+import { classifyBatchCalldata } from '../../services/policy/batch-calldata.js';
+import { parsePolicyDecimal } from '../../services/policy/policy-numbers.js';
 import { getKnownTokenDecimals } from '../../services/transaction/token-registry.js';
 import { cacheSimulation, getSimulation } from '../../services/transaction/simulation-cache.js';
 import { getContracts } from '../../config/contracts.js';
@@ -289,20 +299,23 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
     const isNativeInput = isNativeWeth(body.chainId, body.fromToken);
 
-    // Policy check — target is the Uniswap router, not the token address
+    // Policy check — target is the Uniswap router, not the token address.
+    // Q9: the input is the spend — WETH priced as the native asset (as
+    // before), any other ERC-20 input priced as that token (was: counted 0).
     const swapContracts = getContracts(body.chainId);
-    const valueUsd = isNativeInput ? await weiToUsd(amountInWei, body.chainId) : '0';
+    const pricing = isNativeInput
+      ? await priceNativeSpend(amountInWei, body.chainId)
+      : await priceTokenSpend(amountInWei, getAddress(body.fromToken), amountInDecimals, body.chainId);
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: swapContracts.uniswapV3Router,
       tokenAddress: getAddress(body.fromToken),
       valueEth: isNativeInput ? body.amountIn : '0',
-      valueUsd,
+      valueUsd: countedUsd(pricing),
+      pricing,
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
-    if (!policyResult.allowed) {
-      return reply.code(403).send({ error: policyResult.reason });
-    }
+    if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
 
     // Try fee tiers from most to least liquid — use first one that returns a quote
     const FEE_TIERS = [500, 3000, 10000] as const;
@@ -370,8 +383,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     // Create transaction record
     const tx = await createWithVolumeReservation(reply, {
       agentId: request.agentId,
-      valueUsd,
-      nativeValueWei: isNativeInput ? amountInWei : 0n,
+      pricing,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -482,14 +494,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     }
 
     const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
-    const transferValueUsd = isEthTransfer
-      ? await weiToUsd(txData.value, body.chainId)
-      : await tokenAmountToUsd(
-          parseUnits(body.amount, transferDecimals),
-          body.token,
-          transferDecimals,
-          body.chainId,
-        );
+    const pricing = isEthTransfer
+      ? await priceNativeSpend(txData.value, body.chainId)
+      : await priceTokenSpend(parseUnits(body.amount, transferDecimals), getAddress(body.token), transferDecimals, body.chainId);
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: isEthTransfer ? getAddress(body.to) : txData.to,
@@ -498,12 +505,11 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       recipient: getAddress(body.to),
       ...(!isEthTransfer ? { tokenAddress: getAddress(body.token) } : {}),
       valueEth: isEthTransfer ? body.amount : '0',
-      valueUsd: transferValueUsd,
+      valueUsd: countedUsd(pricing),
+      pricing,
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
-    if (!policyResult.allowed) {
-      return reply.code(403).send({ error: policyResult.reason });
-    }
+    if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
 
     const sim = await simulator.simulate({
       chainId: body.chainId,
@@ -525,8 +531,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const tx = await createWithVolumeReservation(reply, {
       agentId: request.agentId,
-      valueUsd: transferValueUsd,
-      nativeValueWei: txData.value,
+      pricing,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -634,18 +639,17 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     });
 
     const depositLastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
-    const depositValueUsd = await tokenAmountToUsd(amountWei, body.asset, decimals, body.chainId);
+    const pricing = await priceTokenSpend(amountWei, getAddress(body.asset), decimals, body.chainId);
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: supplyTx.to,
       tokenAddress: getAddress(body.asset),
       valueEth: '0',
-      valueUsd: depositValueUsd,
+      valueUsd: countedUsd(pricing),
+      pricing,
       ...(depositLastTxTimestamp !== undefined ? { lastTxTimestamp: depositLastTxTimestamp } : {}),
     });
-    if (!policyResult.allowed) {
-      return reply.code(403).send({ error: policyResult.reason });
-    }
+    if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
 
     // Simulate supply tx
     const sim = await simulator.simulate({
@@ -665,7 +669,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const tx = await createWithVolumeReservation(reply, {
       agentId: request.agentId,
-      valueUsd: depositValueUsd,
+      pricing,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -769,21 +773,21 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     });
 
     const withdrawLastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
-    // For max-withdraw, we can't know the exact amount until on-chain; pass '0' to avoid blocking on unknown value
-    const withdrawValueUsd = amountWei === maxUint256
-      ? '0'
-      : await tokenAmountToUsd(amountWei, body.asset, decimals, body.chainId);
+    // Q9: a max-withdraw's amount is unknown until it executes — it is no
+    // longer counted as 0 (refused while a daily limit applies).
+    const pricing = amountWei === maxUint256
+      ? unknownAmountSpend(MAX_AMOUNT_UNPRICED)
+      : await priceTokenSpend(amountWei, getAddress(body.asset), decimals, body.chainId);
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: withdrawTx.to,
       tokenAddress: getAddress(body.asset),
       valueEth: '0',
-      valueUsd: withdrawValueUsd,
+      valueUsd: countedUsd(pricing),
+      pricing,
       ...(withdrawLastTxTimestamp !== undefined ? { lastTxTimestamp: withdrawLastTxTimestamp } : {}),
     });
-    if (!policyResult.allowed) {
-      return reply.code(403).send({ error: policyResult.reason });
-    }
+    if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
 
     const sim = await simulator.simulate({
       chainId: body.chainId,
@@ -802,7 +806,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const tx = await createWithVolumeReservation(reply, {
       agentId: request.agentId,
-      valueUsd: withdrawValueUsd,
+      pricing,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -892,18 +896,17 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     });
 
     const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
-    const valueUsd = await tokenAmountToUsd(amountWei, body.asset, decimals, body.chainId);
+    const pricing = await priceTokenSpend(amountWei, getAddress(body.asset), decimals, body.chainId);
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: supplyTx.to,
       tokenAddress: getAddress(body.asset),
       valueEth: '0',
-      valueUsd,
+      valueUsd: countedUsd(pricing),
+      pricing,
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
-    if (!policyResult.allowed) {
-      return reply.code(403).send({ error: policyResult.reason });
-    }
+    if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
 
     const sim = await simulator.simulate({
       chainId: body.chainId,
@@ -921,7 +924,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const tx = await createWithVolumeReservation(reply, {
       agentId: request.agentId,
-      valueUsd,
+      pricing,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1012,21 +1015,20 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     });
 
     const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
-    const valueUsd =
+    const pricing =
       body.amount === 'max'
-        ? '0'
-        : await tokenAmountToUsd(amountWei, body.asset, decimals, body.chainId);
+        ? unknownAmountSpend(MAX_AMOUNT_UNPRICED)
+        : await priceTokenSpend(amountWei, getAddress(body.asset), decimals, body.chainId);
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: withdrawTx.to,
       tokenAddress: getAddress(body.asset),
       valueEth: '0',
-      valueUsd,
+      valueUsd: countedUsd(pricing),
+      pricing,
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
-    if (!policyResult.allowed) {
-      return reply.code(403).send({ error: policyResult.reason });
-    }
+    if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
 
     const sim = await simulator.simulate({
       chainId: body.chainId,
@@ -1047,7 +1049,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const tx = await createWithVolumeReservation(reply, {
       agentId: request.agentId,
-      valueUsd,
+      pricing,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1136,18 +1138,17 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     });
 
     const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
-    const valueUsd = await tokenAmountToUsd(amountWei, body.asset, decimals, body.chainId);
+    const pricing = await priceTokenSpend(amountWei, getAddress(body.asset), decimals, body.chainId);
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: depositTx.to,
       tokenAddress: getAddress(body.asset),
       valueEth: '0',
-      valueUsd,
+      valueUsd: countedUsd(pricing),
+      pricing,
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
-    if (!policyResult.allowed) {
-      return reply.code(403).send({ error: policyResult.reason });
-    }
+    if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
 
     const sim = await simulator.simulate({
       chainId: body.chainId,
@@ -1165,7 +1166,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const tx = await createWithVolumeReservation(reply, {
       agentId: request.agentId,
-      valueUsd,
+      pricing,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1254,21 +1255,20 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     });
 
     const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
-    const valueUsd =
+    const pricing =
       body.amount === 'max'
-        ? '0'
-        : await tokenAmountToUsd(amountWei, body.asset, decimals, body.chainId);
+        ? unknownAmountSpend(MAX_AMOUNT_UNPRICED)
+        : await priceTokenSpend(amountWei, getAddress(body.asset), decimals, body.chainId);
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: withdrawTx.to,
       tokenAddress: getAddress(body.asset),
       valueEth: '0',
-      valueUsd,
+      valueUsd: countedUsd(pricing),
+      pricing,
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
-    if (!policyResult.allowed) {
-      return reply.code(403).send({ error: policyResult.reason });
-    }
+    if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
 
     const sim = await simulator.simulate({
       chainId: body.chainId,
@@ -1289,7 +1289,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const tx = await createWithVolumeReservation(reply, {
       agentId: request.agentId,
-      valueUsd,
+      pricing,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1385,23 +1385,17 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     });
 
     const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
-    const valueUsd = await tokenAmountToUsd(
-      amountInWei,
-      body.fromTokenAddress,
-      fromDecimals,
-      body.chainId,
-    );
+    const pricing = await priceTokenSpend(amountInWei, getAddress(body.fromTokenAddress), fromDecimals, body.chainId);
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: swapTx.to,
       tokenAddress: getAddress(body.fromTokenAddress),
       valueEth: '0',
-      valueUsd,
+      valueUsd: countedUsd(pricing),
+      pricing,
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
-    if (!policyResult.allowed) {
-      return reply.code(403).send({ error: policyResult.reason });
-    }
+    if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
 
     const sim = await simulator.simulate({
       chainId: body.chainId,
@@ -1424,7 +1418,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const tx = await createWithVolumeReservation(reply, {
       agentId: request.agentId,
-      valueUsd,
+      pricing,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1559,17 +1553,20 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     const { executionFeeWei } = await gmxService.getExecutionFee({ chainId: body.chainId, orderType: 'increase' });
 
     const lastTxTimestamp = await getLatestAgentTxTimestamp(request.agentId);
+    // Q9 (A6b): the collateral is the spend (was: valueUsd "0", never
+    // counted). The keeper execution fee is native gas-like value checked by
+    // maxValuePerTxEth and not counted against the daily volume (unchanged).
+    const pricing = await priceTokenSpend(collateralAmountRaw, getAddress(body.collateralToken), collateralDecimals, body.chainId);
     const policyResult = await policyService.validateTransaction({
       agentId: request.agentId,
       targetContract: contracts.gmxExchangeRouter,
       tokenAddress: getAddress(body.collateralToken),
       valueEth: weiToEthDecimalString(executionFeeWei),
-      valueUsd: '0',
+      valueUsd: countedUsd(pricing),
+      pricing,
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
-    if (!policyResult.allowed) {
-      return reply.code(403).send({ error: policyResult.reason });
-    }
+    if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
 
     const txData = builder.buildGmxCreateOrder({
       exchangeRouter: contracts.gmxExchangeRouter,
@@ -1602,7 +1599,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const tx = await createWithVolumeReservation(reply, {
       agentId: request.agentId,
-      valueUsd: '0',
+      pricing,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1713,12 +1710,12 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       targetContract: contracts.gmxExchangeRouter,
       tokenAddress: getAddress(body.collateralToken),
       valueEth: weiToEthDecimalString(executionFeeWei),
+      // Q9: a close reduces a position (value comes back to the agent); it
+      // counts nothing, as before. Documented in api-reference.
       valueUsd: '0',
       ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     });
-    if (!policyResult.allowed) {
-      return reply.code(403).send({ error: policyResult.reason });
-    }
+    if (!policyResult.allowed) return sendPolicyRefusal(reply, policyResult);
 
     const txData = builder.buildGmxCreateOrder({
       exchangeRouter: contracts.gmxExchangeRouter,
@@ -1751,7 +1748,7 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const tx = await createWithVolumeReservation(reply, {
       agentId: request.agentId,
-      valueUsd: '0',
+      pricing: { status: 'zero' },
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -1891,6 +1888,75 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       }
     }
 
+    // Q9 (owner decision "only authorised contracts", 2026-10-14): while a
+    // daily limit applies, every action carrying calldata is accounted for or
+    // explicitly authorised (services/policy/batch-calldata.ts), and the
+    // whole batch is priced — native value (A6) plus recognised ERC-20
+    // transfers — before anything is simulated or reserved. Without a daily
+    // limit nothing here changes the batch (nothing to count).
+    const dailyLimited = Boolean(policy?.active) && (parsePolicyDecimal(policy?.maxDailyVolumeUsd) ?? 0) > 0;
+    const batchNativeWei = body.actions.reduce((sum, a) => sum + BigInt(a.value), 0n);
+    const components: Array<{ pricing: SpendPricing; actionIndex?: number }> = [
+      { pricing: await priceNativeSpend(batchNativeWei, body.chainId) },
+    ];
+    if (dailyLimited && policy) {
+      for (let i = 0; i < body.actions.length; i++) {
+        const action = body.actions[i]!;
+        const call = classifyBatchCalldata(action, { policyModule: contracts.policyModule });
+        if (call.kind === 'none' || call.kind === 'policy-sync') continue;
+        if (call.kind === 'erc20-transfer') {
+          if (policy.allowedRecipients.length > 0 && !inList(policy.allowedRecipients, call.to)) {
+            return reply.code(403).send({
+              error: `Action at index ${i} blocked by policy: Recipient ${call.to} of the ERC-20 ${call.fn} is not in the agent's allowed recipients whitelist`,
+              actionIndex: i,
+              rule: 'allowedRecipients',
+            });
+          }
+          if (policy.allowedTokens.length > 0 && !inList(policy.allowedTokens, call.token)) {
+            return reply.code(403).send({
+              error: `Action at index ${i} blocked by policy: Token ${call.token} is not in the agent's allowed tokens whitelist`,
+              actionIndex: i,
+              rule: 'allowedTokens',
+            });
+          }
+          let decimals: number;
+          try {
+            decimals = await getTokenDecimals(call.token, body.chainId);
+          } catch {
+            components.push({ pricing: unknownAmountSpend(`The decimals of token ${call.token} could not be read`), actionIndex: i });
+            continue;
+          }
+          components.push({ pricing: await priceTokenSpend(call.amount, call.token, decimals, body.chainId), actionIndex: i });
+          continue;
+        }
+        // Anything else (approve, an unknown selector…): uncounted, so it
+        // needs the operator's explicit authorisation of the target.
+        if (!(policy.allowedContracts.length > 0 && inList(policy.allowedContracts, action.to))) {
+          return reply.code(403).send({
+            error:
+              `Action at index ${i} calls ${action.to} (selector ${call.selector}) with calldata the backend cannot count ` +
+              'against the daily volume limit. Only ERC-20 transfer / transferFrom calldata is counted; any other call ' +
+              'needs its target listed in allowedContracts by the operator.',
+            code: 'UNACCOUNTED_CALL',
+            rule: 'unaccountedCall',
+            actionIndex: i,
+            selector: call.selector,
+          });
+        }
+      }
+    }
+    const pricing = sumSpendPricings(components.map((c) => c.pricing));
+    if (dailyLimited && pricing.status === 'unpriced') {
+      const culprit = components.find((c) => c.pricing.status === 'unpriced');
+      return reply.code(503).send({
+        error:
+          `${pricing.reason}. The daily volume limit of ${policy?.maxDailyVolumeUsd} USD cannot be checked, ` +
+          'so the batch is refused (it would otherwise count as 0).',
+        code: 'PRICE_UNAVAILABLE',
+        ...(culprit?.actionIndex !== undefined ? { actionIndex: culprit.actionIndex } : {}),
+      });
+    }
+
     const { encodeFunctionData } = await import('viem');
 
     // Build on-chain action array (matches AgentExecutor.Action struct)
@@ -1930,14 +1996,12 @@ export async function transactionRoutes(fastify: FastifyInstance) {
 
     const feeCalc = feeService.calculateFee({ grossAmountWei: totalValueWei, tier: request.agentTier });
 
-    // The native value the batch moves is its daily-volume spend (A6): the
-    // per-action checks above judge each action without it.
-    const batchValueUsd = totalValueWei > 0n ? await weiToUsd(totalValueWei, body.chainId) : '0';
-
+    // The batch's daily-volume spend: its native value (A6) plus, while a
+    // daily limit applies, its recognised ERC-20 transfers (Q9) — priced
+    // above. Its source is `synthetic` when any component is.
     const tx = await createWithVolumeReservation(reply, {
       agentId: request.agentId,
-      valueUsd: batchValueUsd,
-      nativeValueWei: totalValueWei,
+      pricing,
       data: {
         agentId: request.agentId,
         idempotencyKey: body.idempotencyKey ?? null,
@@ -2142,20 +2206,25 @@ async function createWithVolumeReservation(
   reply: FastifyReply,
   params: {
     agentId: string;
-    valueUsd: string;
-    /** Native value (wei) behind `valueUsd`; "0" USD for a positive amount means the oracle failed. */
-    nativeValueWei?: bigint;
+    /** Q9: the spend's pricing; its counted USD is reserved with its price source. */
+    pricing: SpendPricing;
     data: Prisma.TransactionUncheckedCreateInput;
   },
 ): Promise<Transaction | null> {
-  const { nativeValueWei, ...rest } = params;
-  // `weiToUsd` answers exactly "0" when the oracle failed; a priced dust amount
-  // is "0.000000" and is not refused.
-  const unpricedNativeValue = (nativeValueWei ?? 0n) > 0n && params.valueUsd === '0';
+  const { pricing, ...rest } = params;
   try {
-    const created = await createTransactionWithVolume(db, { ...rest, unpricedNativeValue });
+    const created = await createTransactionWithVolume(db, {
+      ...rest,
+      valueUsd: countedUsd(pricing),
+      priceSource: priceSourceOf(pricing),
+      ...(pricing.status === 'unpriced' ? { unpricedReason: pricing.reason } : {}),
+    });
     if (!created.ok) {
-      reply.code(created.code === 'PRICE_UNAVAILABLE' ? 503 : 403).send({ error: created.reason });
+      if (created.code === 'PRICE_UNAVAILABLE') {
+        reply.code(503).send({ error: created.reason, code: 'PRICE_UNAVAILABLE' });
+      } else {
+        reply.code(403).send({ error: created.reason });
+      }
       return null;
     }
     if (created.replayed) {
@@ -2233,6 +2302,27 @@ async function getLatestAgentTxTimestamp(agentId: string): Promise<number | unde
 
   if (!latest) return undefined;
   return Math.floor(latest.createdAt.getTime() / 1000);
+}
+
+/**
+ * A policy refusal from `validateTransaction`: 503 `PRICE_UNAVAILABLE` when the
+ * spend could not be priced while a daily limit applies (Q9), 403 otherwise.
+ */
+function sendPolicyRefusal(reply: FastifyReply, result: PolicyValidationResult) {
+  if (result.code === 'PRICE_UNAVAILABLE') {
+    return reply.code(503).send({ error: result.reason, code: 'PRICE_UNAVAILABLE' });
+  }
+  return reply.code(403).send({ error: result.reason });
+}
+
+/** Q9: a `max` withdraw moves an amount known only once it executes. */
+const MAX_AMOUNT_UNPRICED =
+  'A "max" withdrawal moves an amount that is only known once it executes, so it cannot be priced in advance; ' +
+  'pass an explicit amount';
+
+function inList(list: readonly string[], address: string): boolean {
+  const target = address.toLowerCase();
+  return list.some((entry) => entry.trim().toLowerCase() === target);
 }
 
 function isNativeWeth(chainId: number, tokenAddress: string): boolean {
@@ -2349,15 +2439,9 @@ export async function executeA2APayment(params: {
       });
 
   const lastTxTimestamp = await getLatestAgentTxTimestamp(requester.id);
-  const transferValueUsd = isEthTransfer
-    ? await weiToUsd(txData.value, params.chainId)
-    : await tokenAmountToUsd(
-        parseUnits(params.amount, transferDecimals),
-        params.token,
-        transferDecimals,
-        params.chainId,
-      );
 
+  // No USD value here: the reward was priced (Q9: with a trusted price, or
+  // refused while a daily limit applies) and counted by the Job at creation.
   const policyResult = await policyService.validateTransaction({
     agentId: requester.id,
     targetContract: isEthTransfer
@@ -2367,7 +2451,6 @@ export async function executeA2APayment(params: {
     recipient: getAddress(params.providerSafeAddress),
     ...(!isEthTransfer ? { tokenAddress: getAddress(params.token) } : {}),
     valueEth: isEthTransfer ? params.amount : '0',
-    valueUsd: transferValueUsd,
     ...(lastTxTimestamp !== undefined ? { lastTxTimestamp } : {}),
     // A6: the Job reserved the reward in DailyVolume at creation
     // (reserveJobEscrow) and gives it back on failure (releaseJobEscrow); the

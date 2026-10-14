@@ -18,6 +18,26 @@ export const SUPPORTED_CHAINS: Record<number, Chain> = {
 export const CHAIN_IDS = [1, 8453, 42161, 137, 84532] as const;
 export type SupportedChainId = (typeof CHAIN_IDS)[number];
 
+/**
+ * Test networks (Q9) — THE list; every testnet decision reads it from here.
+ * On these chains a spend is priced only with an explicitly configured
+ * synthetic test price (`SYNTHETIC_TEST_PRICES_USD`): no oracle, and never
+ * the mainnet price of the "same" asset. A synthetic price for any chain not
+ * listed here is a boot error. Mainnet chains = `CHAIN_IDS` minus these.
+ */
+export const TESTNET_CHAIN_IDS: readonly number[] = [84532];
+
+/** Supported chains whose assets have real value: priced by the oracle only. */
+export const MAINNET_CHAIN_IDS: readonly number[] = CHAIN_IDS.filter((id) => !TESTNET_CHAIN_IDS.includes(id));
+
+export function isTestnetChain(chainId: number): boolean {
+  return TESTNET_CHAIN_IDS.includes(chainId);
+}
+
+export function isMainnetChain(chainId: number): boolean {
+  return MAINNET_CHAIN_IDS.includes(chainId);
+}
+
 export function getChain(chainId: number): Chain {
   const chain = SUPPORTED_CHAINS[chainId];
   if (!chain) throw new Error(`Unsupported chain ID: ${chainId}`);

@@ -54,6 +54,7 @@
 
 import { Prisma, type PrismaClient, type Transaction } from '@prisma/client';
 import { parsePolicyDecimal } from './policy-numbers.js';
+import type { SpendPriceSource } from './spend-pricing.js';
 import { resourcePaymentSpentToday, utcDay } from '../payments/resource-payment-ledger.js';
 
 export type VolumeDb = Pick<PrismaClient, '$transaction' | 'transaction'>;
@@ -95,13 +96,16 @@ function reservableUsd(valueUsd: string | undefined): number {
  * Under the agent row lock, in order:
  *  1. a row with the same idempotencyKey already exists → it is returned
  *     (`replayed`), nothing is reserved;
- *  2. native value the oracle could not price (`unpricedNativeValue`) while a
- *     daily limit applies → refused (`PRICE_UNAVAILABLE`, fail closed): an
- *     unpriced spend would never be counted;
+ *  2. a spend with an unpriced component (`unpricedReason`, Q9 — any asset,
+ *     not only native value as in A6) while a daily limit applies → refused
+ *     (`PRICE_UNAVAILABLE`, fail closed): an unpriced spend would be counted
+ *     as 0. The routes refuse it earlier, before simulating
+ *     (`validateTransaction`); this is the binding check under the lock;
  *  3. DailyVolume += usd, then the binding limit check against everything
  *     committed today (DailyVolume, this reservation included, plus the
  *     counted x402 payments) → refused (`DAILY_LIMIT`) and rolled back;
- *  4. the row is inserted as RESERVED.
+ *  4. the row is inserted as RESERVED, with the price source of `usd`
+ *     (`volumePriceSource`: oracle / synthetic / usdc-peg, Q9).
  * `PolicyService.validateTransaction` only pre-checks the limit (read-only) to
  * fail before simulating.
  *
@@ -115,17 +119,20 @@ export async function createTransactionWithVolume(
     /** The USD value the policy judged (decimal string). 0 / unparsable: nothing reserved. */
     valueUsd: string | undefined;
     /**
-     * The transaction moves native value whose USD price did not resolve
-     * (`weiToUsd` returns "0" when the oracle fails). Refused when a daily
-     * limit applies; reserves nothing otherwise.
+     * Set when a component of the spend has no trusted price (Q9,
+     * `spend-pricing.ts`): the reason. Refused when a daily limit applies;
+     * otherwise only the priced part (`valueUsd`) is reserved.
      */
-    unpricedNativeValue?: boolean;
+    unpricedReason?: string;
+    /** Price source of `valueUsd`, stored next to the reservation (`volumePriceSource`). */
+    priceSource?: SpendPriceSource | null;
     data: Prisma.TransactionUncheckedCreateInput;
     now?: Date;
   },
 ): Promise<CreateWithVolumeResult> {
   const usd = reservableUsd(params.valueUsd);
-  const needsLock = usd > 0 || params.unpricedNativeValue === true || Boolean(params.data.idempotencyKey);
+  const unpriced = params.unpricedReason !== undefined;
+  const needsLock = usd > 0 || unpriced || Boolean(params.data.idempotencyKey);
   if (!needsLock) {
     return { ok: true, transaction: await db.transaction.create({ data: params.data }), replayed: false };
   }
@@ -157,14 +164,15 @@ export async function createTransactionWithVolume(
       // Same reading as validateTransaction: 0 / unparsable = no daily limit.
       const limit = policy?.active ? parsePolicyDecimal(policy.maxDailyVolumeUsd) ?? 0 : 0;
 
+      if (unpriced && limit > 0) {
+        throw new ReservationRefusal(
+          'PRICE_UNAVAILABLE',
+          `${params.unpricedReason}. The daily volume limit of ${policy?.maxDailyVolumeUsd} USD cannot be checked, ` +
+            'so the spend is refused (it would otherwise count as 0).',
+        );
+      }
+
       if (usd === 0) {
-        if (params.unpricedNativeValue && limit > 0) {
-          throw new ReservationRefusal(
-            'PRICE_UNAVAILABLE',
-            'The USD price of the native value could not be resolved, so the daily volume limit cannot be ' +
-              'checked. Retry shortly.',
-          );
-        }
         return { ok: true as const, transaction: await tx.transaction.create({ data: params.data }), replayed: false };
       }
 
@@ -197,6 +205,7 @@ export async function createTransactionWithVolume(
           volumeReservedUsd: reservedUsd,
           volumeReservedDate: day,
           volumeState: 'RESERVED',
+          volumePriceSource: params.priceSource ?? null,
         },
       });
       return { ok: true as const, transaction, replayed: false };
