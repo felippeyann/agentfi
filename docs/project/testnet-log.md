@@ -283,10 +283,10 @@ The value on the command line wins over `.env` (dotenv never overrides a variabl
 **6. Happy path** (third terminal, repository root):
 
 ```bash
-AGENTFI_STEP_TIMEOUT_SEC=4500 AGENTFI_API_URL=http://localhost:3000 AGENTFI_OPERATOR_SECRET=<API_SECRET> node examples/escrow-erc8183/index.mjs
+AGENTFI_API_URL=http://localhost:3000 AGENTFI_OPERATOR_SECRET=<API_SECRET> node examples/escrow-erc8183/index.mjs
 ```
 
-The script registers a requester and a provider (two Turnkey wallets), prints both API keys (keep them for step 7) and waits up to 15 minutes for funds: send the **requester** at least 1 USDC (Circle faucet, <https://faucet.circle.com>, network Base Sepolia) and 0.0005 ETH, the **provider** 0.0005 ETH (faucets in §2.1). It then runs `createJob → setBudget → approve → fund`, the provider's ERC-8004 `register` + `setProviderAgentId`, `submit`, and the evaluator's `complete`, and ends with `✓ Escrow flow completed end to end.` (`feedback written`). The `complete` comes one hour after `submit` (the contest window of step 3; the job shows `escrow.onChainStatus = SUBMITTED` meanwhile), which is why `AGENTFI_STEP_TIMEOUT_SEC=4500` raises the script's per-step wait from its default 600 s.
+The script registers a requester and a provider (two Turnkey wallets), prints both API keys (keep them for step 7) and waits up to 15 minutes for funds: send the **requester** at least 1 USDC (Circle faucet, <https://faucet.circle.com>, network Base Sepolia) and 0.0005 ETH, the **provider** 0.0005 ETH (faucets in §2.1). It then runs `createJob → setBudget → approve → fund`, the provider's ERC-8004 `register` + `setProviderAgentId`, `submit`, and the evaluator's `complete`, and ends with `✓ Escrow flow completed end to end.` (`feedback written`). Expected duration: funding and binding take a few minutes, then the `complete` comes **about one hour after `submit`** (the contest window of step 3; the job shows `escrow.onChainStatus = SUBMITTED` meanwhile). The script logs `deliverable Submitted on-chain — waiting for the contest window`, prints a line every 5 minutes, and allows the window plus one step timeout (`AGENTFI_CONTEST_WINDOW_SEC`, default 3600, + `AGENTFI_STEP_TIMEOUT_SEC`, default 600), so plan on roughly 70 minutes for the happy run. Keep `ESCROW_JOB_TTL_SECONDS` at its default (7 days): a TTL under about 62 minutes would clamp the window. The cancel run (step 7) is not affected by the window.
 
 **7. Failure path** (same two agents; the happy run spent the requester's USDC, so the script waits until you send it 1 USDC again):
 
