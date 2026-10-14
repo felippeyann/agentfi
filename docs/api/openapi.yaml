@@ -643,10 +643,12 @@ paths:
         limit. `"max"` (everything the agent holds there) cannot be priced: it
         is accepted outside the count only when the built calldata is exactly
         `Pool.withdraw(asset, max, <the agent's own wallet>)` to the pool the
-        configured PoolAddressesProvider reports, with no native value — the
-        row is then marked `metadata.volumeExemption` (`rule:
-        max-withdrawal-to-own-wallet`). Otherwise, under a daily limit, `503
-        PRICE_UNAVAILABLE`.
+        configured PoolAddressesProvider reports, with no native value, and
+        the address that signs it (the wallet provider's address for the
+        agent's wallet — `msg.sender`) IS the agent's own wallet (not in Safe
+        mode, where the owner EOA signs) — the row is then marked
+        `metadata.volumeExemption` (`rule: max-withdrawal-to-own-wallet`).
+        Otherwise, under a daily limit, `503 PRICE_UNAVAILABLE`.
       requestBody:
         required: true
         content:
@@ -682,7 +684,8 @@ paths:
         An explicit amount is priced and counted against the daily volume
         limit. `"max"` is accepted outside the count only when the built
         calldata is exactly `Comet.withdraw(asset, max)` (from and to the
-        sender) to the configured Comet, with no native value — marked
+        signer) to the configured Comet, with no native value, and the signer
+        IS the agent's own wallet (not in Safe mode) — marked
         `metadata.volumeExemption`. Otherwise, under a daily limit, `503
         PRICE_UNAVAILABLE`.
       requestBody:
@@ -1850,9 +1853,12 @@ paths:
             `APPROVAL_POLICY_INACTIVE`, `APPROVAL_POLICY_EXPIRED`,
             `APPROVAL_DAILY_LIMIT` (with `details`: the approval `day`,
             `limitUsd`, `committedUsd` that day without this transaction,
-            `requestedUsd`), `APPROVAL_UNCOUNTED_SPEND` (a daily limit applies
-            now but the spend reserved nothing — it was unpriced when no limit
-            applied; reject it).
+            `requestedUsd`; compared exactly in micro-USD),
+            `APPROVAL_UNCOUNTED_SPEND` (a daily limit applies now but the spend
+            reserved nothing because it was unpriced when no limit applied —
+            or its row predates the record of why; reject it. A spend counted
+            as zero on purpose, e.g. a GMX close whose execution fee needed
+            approval, is approved normally).
           content:
             application/json:
               schema:

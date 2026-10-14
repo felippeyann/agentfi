@@ -254,16 +254,41 @@ export const MAX_AMOUNT_UNPRICED =
  * The spend pricing of a max withdrawal the backend built: nothing to count
  * (`zero`) with the exemption marker when the proof holds; otherwise
  * unpriced, which D15 refuses while a daily limit applies.
+ *
+ * #180 review (P1): the proof is made against the address that SIGNS the
+ * transaction — the wallet provider's address for the agent's `walletId`,
+ * i.e. the EVM `msg.sender` the protocol pays (Comet) or whose position it
+ * burns (Aave) — and only when that address IS the agent's own wallet
+ * (`Agent.safeAddress`). In Safe mode `safeAddress` is the Safe while its
+ * owner EOA signs, so the funds would land on the EOA: no exemption. A signer
+ * that cannot be resolved gets none either (fail closed).
  */
 export async function maxWithdrawalPricing(
-  params: { chainId: number; from: string; tx: { to: string; data: string; value: bigint | string | number } },
+  params: {
+    chainId: number;
+    /** The agent's own wallet (`Agent.safeAddress`): where the funds must return. */
+    agentWallet: string;
+    /** The address that signs and sends the transaction; null when the wallet provider could not resolve it. */
+    signer: string | null;
+    tx: { to: string; data: string; value: bigint | string | number };
+  },
   readAavePool?: AavePoolReader,
 ): Promise<{ pricing: SpendPricing; exemption: VolumeExemption | null }> {
-  const trusted = await resolveTrustedWithdrawTargets(params.chainId, readAavePool);
-  const proof = proveMaxWithdrawalToSelf({ from: params.from, tx: params.tx, trusted });
-  if (proof.proven) return { pricing: { status: 'zero' }, exemption: proof.exemption };
-  return {
-    pricing: unknownAmountSpend(`${MAX_AMOUNT_UNPRICED} (it is not proven to return only to the agent's own wallet: ${proof.reason})`),
+  const notProven = (reason: string) => ({
+    pricing: unknownAmountSpend(`${MAX_AMOUNT_UNPRICED} (it is not proven to return only to the agent's own wallet: ${reason})`),
     exemption: null,
-  };
+  });
+  if (!params.signer || !isAddress(params.signer, { strict: false })) {
+    return notProven('the address that signs it could not be resolved from the wallet provider');
+  }
+  if (!isAddress(params.agentWallet, { strict: false }) || params.signer.toLowerCase() !== params.agentWallet.toLowerCase()) {
+    return notProven(
+      `it is signed by ${getAddress(params.signer)}, not by the agent's wallet ${params.agentWallet} (Safe mode) — ` +
+        'the protocol pays the signer',
+    );
+  }
+  const trusted = await resolveTrustedWithdrawTargets(params.chainId, readAavePool);
+  const proof = proveMaxWithdrawalToSelf({ from: params.signer, tx: params.tx, trusted });
+  if (proof.proven) return { pricing: { status: 'zero' }, exemption: proof.exemption };
+  return notProven(proof.reason);
 }

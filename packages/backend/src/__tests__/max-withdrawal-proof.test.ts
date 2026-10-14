@@ -234,16 +234,51 @@ describe('resolveTrustedWithdrawTargets — from config/contracts.ts only', () =
 });
 
 describe('maxWithdrawalPricing', () => {
+  const OWNER_EOA = getAddress('0x0e0a00000000000000000000000000000000e0a1');
+
   it('proven → nothing to count (zero) plus the marker', async () => {
-    const r = await maxWithdrawalPricing({ chainId: 1, from: AGENT, tx: { to: POOL, data: aave(AGENT), value: 0n } }, async () => POOL);
+    const r = await maxWithdrawalPricing({ chainId: 1, agentWallet: AGENT, signer: AGENT, tx: { to: POOL, data: aave(AGENT), value: 0n } }, async () => POOL);
     expect(r.pricing).toEqual({ status: 'zero' });
     expect(r.exemption).toMatchObject({ protocol: 'aave-v3', recipient: AGENT });
   });
 
   it('not proven → unpriced (D15 refuses it under a daily limit), with the reason', async () => {
-    const r = await maxWithdrawalPricing({ chainId: 1, from: AGENT, tx: { to: POOL, data: aave(ATTACKER), value: 0n } }, async () => POOL);
+    const r = await maxWithdrawalPricing({ chainId: 1, agentWallet: AGENT, signer: AGENT, tx: { to: POOL, data: aave(ATTACKER), value: 0n } }, async () => POOL);
     expect(r.exemption).toBeNull();
     expect(r.pricing.status).toBe('unpriced');
     if (r.pricing.status === 'unpriced') expect(r.pricing.reason).toMatch(/"max" withdrawal.*not proven.*not to the sender/);
+  });
+
+  it('#180 review: Safe mode — the signer (owner EOA) is not the agent wallet (the Safe) → not proven, whatever the calldata', async () => {
+    // Calldata naming the Safe as recipient, and calldata naming the EOA: neither is exempt.
+    for (const recipient of [AGENT, OWNER_EOA]) {
+      const r = await maxWithdrawalPricing(
+        { chainId: 1, agentWallet: AGENT, signer: OWNER_EOA, tx: { to: POOL, data: aave(recipient), value: 0n } },
+        async () => POOL,
+      );
+      expect(r.exemption).toBeNull();
+      if (r.pricing.status === 'unpriced') expect(r.pricing.reason).toMatch(/signed by .*not by the agent's wallet/);
+    }
+    const comet = await maxWithdrawalPricing(
+      { chainId: 1, agentWallet: AGENT, signer: OWNER_EOA, tx: { to: COMET, data: encodeFunctionData({ abi: COMET_ABI, functionName: 'withdraw', args: [USDC, maxUint256] as never }), value: 0n } },
+      async () => POOL,
+    );
+    expect(comet.exemption).toBeNull();
+  });
+
+  it('#180 review: an unresolved or malformed signer → not proven (fail closed)', async () => {
+    for (const signer of [null, '', 'not-an-address']) {
+      const r = await maxWithdrawalPricing({ chainId: 1, agentWallet: AGENT, signer, tx: { to: POOL, data: aave(AGENT), value: 0n } }, async () => POOL);
+      expect(r.exemption).toBeNull();
+      if (r.pricing.status === 'unpriced') expect(r.pricing.reason).toMatch(/could not be resolved/);
+    }
+  });
+
+  it('the signer and the agent wallet compare case-insensitively', async () => {
+    const r = await maxWithdrawalPricing(
+      { chainId: 1, agentWallet: AGENT.toLowerCase(), signer: AGENT, tx: { to: POOL, data: aave(AGENT), value: 0n } },
+      async () => POOL,
+    );
+    expect(r.exemption).toMatchObject({ recipient: AGENT });
   });
 });
