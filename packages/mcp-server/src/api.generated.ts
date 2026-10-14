@@ -697,8 +697,10 @@ export interface paths {
          *
          *     `maxValuePerTxEth` / `maxValuePerTxUsd` / `maxOutflowPerTxUsd` (or `null`)
          *     / `maxDailyVolumeUsd` must be plain
-         *     decimal strings (`^\d+(\.\d+)?$`); anything else — empty, whitespace,
-         *     exponent, hex, words — is `400` for every caller. `allowedRecipients`
+         *     decimal strings (`^\d+(\.\d+)?$`), the three USD limits with at most 6
+         *     decimals (`^\d+(\.\d{1,6})?$`, micro-USD — what every USD check counts
+         *     in); anything else — empty, whitespace, exponent, hex, words, a 7th USD
+         *     decimal — is `400` for every caller. `allowedRecipients`
          *     entries must be `0x` addresses. An optional `reason` is written to the
          *     audit log line and is not stored.
          */
@@ -3857,7 +3859,8 @@ export interface components {
              *     Default `"1.0"` at creation when omitted — never derived from
              *     `maxValuePerTxEth`. Policies that existed before migration 0021 were
              *     backfilled with their `maxValuePerTxEth` text (the number USDC spends
-             *     already obeyed). Same validation as `maxValuePerTxEth`.
+             *     already obeyed). Plain decimal with at most 6 decimals (micro-USD,
+             *     what every USD check counts in); anything else is 400.
              * @example 1.0
              */
             maxValuePerTxUsd?: string;
@@ -3877,13 +3880,16 @@ export interface components {
              *     trusted price is `503 PRICE_UNAVAILABLE` (D15), daily limit or not.
              *     Authority: `null` is the most restrictive value — setting any value from
              *     `null` is loosening (operator credential); the agent may lower a value or
-             *     set it back to `null`. Off-chain only. Same validation as
-             *     `maxValuePerTxEth` (or `null`).
+             *     set it back to `null`. Off-chain only. Plain decimal with at most 6
+             *     decimals (micro-USD), or `null`; anything else is 400.
              * @example 250
              */
             maxOutflowPerTxUsd?: string | null;
             /**
-             * @description Plain decimal string; `"0"` means no daily limit. Same validation as `maxValuePerTxEth`.
+             * @description Plain decimal string with at most 6 decimals (micro-USD, what every
+             *     daily-limit check counts in); `"0"` means no daily limit. A finer value
+             *     is 400: a limit below one micro-dollar used to mean "no limit" to the
+             *     x402 / escrow checks and a blocking limit to the transaction checks.
              * @example 10000
              */
             maxDailyVolumeUsd?: string;

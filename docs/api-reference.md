@@ -253,7 +253,10 @@ changed fields.
 
 `maxValuePerTxEth`, `maxValuePerTxUsd`, `maxOutflowPerTxUsd` (or `null`) and
 `maxDailyVolumeUsd` must be plain
-decimal strings (`^\d+(\.\d+)?$` — e.g. `"0.5"`, `"10000"`). Empty strings,
+decimal strings (`^\d+(\.\d+)?$` — e.g. `"0.5"`, `"10000"`); the three USD
+limits take at most 6 decimals (micro-USD, what every USD check counts in), so
+a daily limit below one micro-dollar — "no limit" to x402 / escrow, a blocking
+limit to the transaction checks — can no longer be written. Empty strings,
 whitespace, exponents (`"1e3"`), hex (`"0x10"`) and words are rejected with
 `400`, for both callers, so a value can never mean "0" to the tighten-only
 check and "no limit" to enforcement. `allowedRecipients` entries must be `0x`

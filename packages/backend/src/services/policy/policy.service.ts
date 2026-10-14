@@ -4,6 +4,7 @@ import { OnChainPolicyService } from './onchain-policy.service.js';
 import { parsePolicyDecimal } from './policy-numbers.js';
 import { countedUsd, type SpendPricing } from './spend-pricing.js';
 import { judgeOutflowCap } from './outflow-cap.js';
+import { policyDecimalToMicro, usdTextToMicroCeil } from './usdc-spend-policy.js';
 import { resourcePaymentSpentToday } from '../payments/resource-payment-ledger.js';
 
 export interface PolicyValidationResult {
@@ -208,21 +209,26 @@ export class PolicyService {
       }
       const now = new Date();
       const today = now.toISOString().slice(0, 10); // YYYY-MM-DD
-      const incomingVolumeUsd = parseFloat(params.pricing ? countedUsd(params.pricing) : params.valueUsd ?? '0');
+      // Exact, in micro-USD (#185 follow-up; as the binding check, the
+      // approval and the x402 / escrow checks): floats refused a spend that
+      // filled the limit (0.2 + 0.1 > 0.3).
+      const incomingMicro = usdTextToMicroCeil(params.pricing ? countedUsd(params.pricing) : params.valueUsd ?? '0');
       // x402 payments (pay-resource, P6) are not in DailyVolume: they count
       // from their ledger rows (counted states, reserved today), so one daily
       // limit covers both paths.
-      const x402TodayUsd = Number(await resourcePaymentSpentToday(this.db, params.agentId, now)) / 1e6;
+      const x402TodayMicro = await resourcePaymentSpentToday(this.db, params.agentId, now);
       const committed = await this.db.dailyVolume.findUnique({
         where: { agentId_date: { agentId: params.agentId, date: today } },
         select: { volumeUsd: true },
       });
-      const currentVolumeUsd = parseFloat(committed?.volumeUsd ?? '0') + x402TodayUsd;
+      const currentMicro = usdTextToMicroCeil(committed?.volumeUsd ?? '0') + x402TodayMicro;
+      const limitMicro = policyDecimalToMicro(policy.maxDailyVolumeUsd) ?? 0n;
 
-      if (currentVolumeUsd + incomingVolumeUsd > dailyLimitUsd) {
+      if (currentMicro + incomingMicro > limitMicro) {
+        const usd2 = (micro: bigint) => (Number(micro) / 1e6).toFixed(2); // display only
         return {
           allowed: false,
-          reason: `Daily volume limit of ${policy.maxDailyVolumeUsd} USD would be exceeded. Current: ${currentVolumeUsd.toFixed(2)}, requested: ${incomingVolumeUsd.toFixed(2)}`,
+          reason: `Daily volume limit of ${policy.maxDailyVolumeUsd} USD would be exceeded. Current: ${usd2(currentMicro)}, requested: ${usd2(incomingMicro)}`,
         };
       }
     }

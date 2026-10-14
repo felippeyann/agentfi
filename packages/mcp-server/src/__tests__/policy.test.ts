@@ -71,6 +71,7 @@ describe('update_policy (Q8 fields)', () => {
   it.each([
     [{ max_value_per_tx_usd: '1e3' }, 'max_value_per_tx_usd'],
     [{ max_value_per_tx_usd: '' }, 'max_value_per_tx_usd'],
+    [{ max_value_per_tx_usd: '5.0000001' }, 'max_value_per_tx_usd'], // USD: at most 6 decimals
     [{ allowed_recipients: ['payee'] }, 'allowed_recipients'],
   ])('refuses %j before calling the backend (INVALID_INPUT)', async (input, path) => {
     const result = await callTool('update_policy', { ...input, reason: 'x' }, { log });
@@ -103,7 +104,7 @@ describe('update_policy — max_outflow_per_tx_usd (§5-6)', () => {
     expect(apiMock.patch.mock.calls[0]![1]).toMatchObject({ maxOutflowPerTxUsd: sent });
   });
 
-  it.each(['1e3', '', 'unlimited'])('refuses %j before calling the backend (INVALID_INPUT)', async (raw) => {
+  it.each(['1e3', '', 'unlimited', '1.0000001'])('refuses %j before calling the backend (INVALID_INPUT)', async (raw) => {
     const result = await callTool('update_policy', { max_outflow_per_tx_usd: raw, reason: 'x' }, { log });
     expect(result.isError).toBe(true);
     expect(payloadOf(result)).toMatchObject({ code: 'INVALID_INPUT' });

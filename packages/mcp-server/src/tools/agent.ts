@@ -216,14 +216,15 @@ export const agentTools = [
         .describe('New max ETH per transaction as a plain decimal string (e.g. "0.5"). Must be <= the current limit.'),
       max_value_per_tx_usd: z
         .string()
-        .regex(/^\d+(\.\d+)?$/, 'must be a plain decimal string such as "5"')
+        // USD: at most 6 decimals (micro-USD), as the backend requires.
+        .regex(/^\d+(\.\d{1,6})?$/, 'must be a plain decimal string with at most 6 decimals, such as "5"')
         .optional()
         .describe(
           'New max USD per USDC payment / escrowed job budget as a plain decimal string (e.g. "5"). Must be <= the current limit.',
         ),
       max_outflow_per_tx_usd: z
         .string()
-        .regex(/^\d+(\.\d+)?$/, 'must be a plain decimal string such as "100"')
+        .regex(/^\d+(\.\d{1,6})?$/, 'must be a plain decimal string with at most 6 decimals, such as "100"')
         .nullable()
         .optional()
         .describe(

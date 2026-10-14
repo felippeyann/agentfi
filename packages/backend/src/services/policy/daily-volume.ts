@@ -230,14 +230,19 @@ export async function createTransactionWithVolume(
       `;
 
       if (limit > 0) {
-        const x402Usd = Number(await resourcePaymentSpentToday(tx, params.agentId, now)) / 1e6;
-        const projected = Number.parseFloat(row?.volumeUsd ?? '0') + x402Usd;
-        if (projected > limit) {
+        // Exact, in micro-USD (as the approval and the x402 / escrow checks):
+        // floats refused a spend that filled the limit (0.2 + 0.1 > 0.3).
+        const limitMicro = policyDecimalToMicro(policy?.maxDailyVolumeUsd) ?? 0n;
+        const x402Micro = await resourcePaymentSpentToday(tx, params.agentId, now);
+        const projectedMicro = usdTextToMicroCeil(row?.volumeUsd ?? '0') + x402Micro;
+        if (projectedMicro > limitMicro) {
+          const requestedMicro = usdTextToMicroCeil(reservedUsd);
+          const currentMicro = projectedMicro > requestedMicro ? projectedMicro - requestedMicro : 0n;
           // Throwing rolls the DailyVolume increment back with the transaction.
           throw new ReservationRefusal(
             'DAILY_LIMIT',
             `Daily volume limit of ${policy?.maxDailyVolumeUsd} USD would be exceeded. ` +
-              `Current: ${(projected - usd).toFixed(2)}, requested: ${usd.toFixed(2)}`,
+              `Current: ${microToUsd6(currentMicro)}, requested: ${microToUsd6(requestedMicro)}`,
           );
         }
       }

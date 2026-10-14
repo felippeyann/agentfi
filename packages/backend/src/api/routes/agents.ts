@@ -22,6 +22,8 @@ import {
 import {
   POLICY_DECIMAL_MESSAGE,
   POLICY_DECIMAL_PATTERN,
+  POLICY_USD_DECIMAL_MESSAGE,
+  POLICY_USD_DECIMAL_PATTERN,
 } from '../../services/policy/policy-numbers.js';
 import { ReputationService } from '../../services/policy/reputation.service.js';
 import { PnLService } from '../../services/billing/pnl.service.js';
@@ -43,6 +45,8 @@ const ensService = new EnsService();
  * (`""`, `"1e3"`, `"0x10"`, `" 5"`, `"unlimited"` are all 400 here).
  */
 const policyDecimal = z.string().regex(POLICY_DECIMAL_PATTERN, POLICY_DECIMAL_MESSAGE);
+/** USD limits: at most 6 decimals (micro-USD), what every USD enforcer reads (`POLICY_USD_DECIMAL_PATTERN`). */
+const policyUsdDecimal = z.string().regex(POLICY_USD_DECIMAL_PATTERN, POLICY_USD_DECIMAL_MESSAGE);
 
 /** ERC-8004 identities (R2) returned as `erc8004` on agent responses. */
 const IDENTITY_SELECT = {
@@ -80,10 +84,10 @@ const RECIPIENTS_REQUIRED_MESSAGE =
 const initialPolicySchema = z
   .object({
     maxValuePerTxEth: policyDecimal.default('1.0'),
-    maxValuePerTxUsd: policyDecimal.optional(),
+    maxValuePerTxUsd: policyUsdDecimal.optional(),
     // #185 review: `null` = "not configured", exactly like omitting it (the OpenAPI Policy is nullable).
-    maxOutflowPerTxUsd: policyDecimal.nullable().optional(),
-    maxDailyVolumeUsd: policyDecimal.default('10000'),
+    maxOutflowPerTxUsd: policyUsdDecimal.nullable().optional(),
+    maxDailyVolumeUsd: policyUsdDecimal.default('10000'),
     allowedContracts: z.array(z.string()).default([]),
     allowedRecipients: z.array(recipientAddress).optional(),
     allowedTokens: z.array(z.string()).default([]),
@@ -231,10 +235,10 @@ const OFF_CHAIN_ONLY_POLICY_FIELDS = ['maxValuePerTxUsd', 'maxOutflowPerTxUsd', 
 
 const updatePolicySchema = z.object({
   maxValuePerTxEth: policyDecimal.optional(),
-  maxValuePerTxUsd: policyDecimal.optional(),
+  maxValuePerTxUsd: policyUsdDecimal.optional(),
   /// §5-6: USD cap on ordinary outflows. `null` = not configured (blocks them). Setting a value from null is loosening.
-  maxOutflowPerTxUsd: policyDecimal.nullable().optional(),
-  maxDailyVolumeUsd: policyDecimal.optional(),
+  maxOutflowPerTxUsd: policyUsdDecimal.nullable().optional(),
+  maxDailyVolumeUsd: policyUsdDecimal.optional(),
   allowedContracts: z.array(z.string()).optional(),
   allowedRecipients: z.array(recipientAddress).optional(),
   allowedTokens: z.array(z.string()).optional(),
@@ -443,7 +447,8 @@ export async function agentRoutes(fastify: FastifyInstance) {
    * `allowedRecipients` (400 otherwise); on an existing row omitted fields stay.
    *
    * `maxValuePerTxEth` / `maxValuePerTxUsd` / `maxDailyVolumeUsd` must match
-   * `POLICY_DECIMAL_PATTERN` (plain decimal string); anything else is 400.
+   * `POLICY_DECIMAL_PATTERN` (plain decimal string) — the three USD limits
+   * `POLICY_USD_DECIMAL_PATTERN` (at most 6 decimals, micro-USD); anything else is 400.
    * `allowedRecipients` entries must be addresses. An optional `reason` (<= 500
    * chars) is appended to the audit log line and is NOT stored.
    */
