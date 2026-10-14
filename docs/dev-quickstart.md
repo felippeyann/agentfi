@@ -74,7 +74,7 @@ You'll get back something like:
   "id": "clx...",
   "name": "alice",
   "apiKey": "agfi_live_abc123...",
-  "walletAddress": "0x7e5F4552091A69125d5DfCb7b8C2659029395Bdf",
+  "walletAddress": "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf",
   "chainIds": [1],
   "tier": "FREE",
   "ensName": null

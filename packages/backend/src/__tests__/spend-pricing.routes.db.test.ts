@@ -113,8 +113,8 @@ vi.mock('../config/contracts.js', async () => {
   const actual = await vi.importActual<typeof import('../config/contracts.js')>('../config/contracts.js');
   return {
     ...actual,
-    // Placeholder addresses: nothing is broadcast. (The configured Arbitrum GMX
-    // OrderVault / Router fail viem's EIP-55 check — see the PR's findings.)
+    // Placeholder addresses: nothing is broadcast. (The real ones are covered
+    // by contracts.addresses.routes.db.test.ts since S7.)
     getContracts: (chainId: number) => ({
       ...actual.getContracts(chainId),
       executor: '0x00000000000000000000000000000000000E8ec0',

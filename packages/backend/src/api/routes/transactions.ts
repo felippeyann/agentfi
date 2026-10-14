@@ -29,7 +29,7 @@ import { classifyBatchCalldata } from '../../services/policy/batch-calldata.js';
 import { parsePolicyDecimal } from '../../services/policy/policy-numbers.js';
 import { getKnownTokenDecimals } from '../../services/transaction/token-registry.js';
 import { cacheSimulation, getSimulation } from '../../services/transaction/simulation-cache.js';
-import { getContracts } from '../../config/contracts.js';
+import { getContracts, UNISWAP_V3_QUOTER_V2 } from '../../config/contracts.js';
 import { createChainPublicClient } from '../../config/chains.js';
 import { logger } from '../middleware/logger.js';
 import { sanitizeContextFromEnv, sanitizeErrorFields, type SanitizeContext } from '../errors/sanitize.js';
@@ -99,16 +99,10 @@ const QUOTER_ABI = [
   },
 ] as const;
 
-// QuoterV2 addresses per chain
-const QUOTER_ADDRESSES: Record<number, `0x${string}`> = {
-  1:     '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
-  8453:  '0x3d4e44Eb1374240CE5F1B136aa68B6bF57c6F809',
-  42161: '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
-  137:   '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
-};
-
 /**
- * Gets expected amountOut from Uniswap QuoterV2.
+ * Gets expected amountOut from Uniswap QuoterV2 (`UNISWAP_V3_QUOTER_V2`, with
+ * its sources, in config/contracts.ts — S7: the Base entry here was a wrong
+ * address that viem refused, so every Base swap fell back to 0).
  * Falls back to 0n on error (no slippage protection — acceptable for testnet).
  */
 async function getQuotedAmountOut(params: {
@@ -119,7 +113,7 @@ async function getQuotedAmountOut(params: {
   fee: number;
 }): Promise<bigint> {
   try {
-    const quoterAddress = QUOTER_ADDRESSES[params.chainId];
+    const quoterAddress = UNISWAP_V3_QUOTER_V2[params.chainId];
     if (!quoterAddress) return 0n;
 
     const client = createChainPublicClient(params.chainId);
