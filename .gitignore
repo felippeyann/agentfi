@@ -94,3 +94,6 @@ graphify-out/.graphify_labels.json.sig
 
 # graphify dated backups of the curated graph (machine-local)
 graphify-out/20*/
+
+# C5 escrow validation runner state: job ids, evidence and the agents' API keys (packages/backend/src/scripts/c5)
+c5-run/
