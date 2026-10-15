@@ -14,7 +14,7 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 **The thesis** (from VISION.md):
 
 - AI agents today _plan_ transactions and hand off to humans to click "approve" — they're advisors behind glass.
-- AgentFi removes the glass: each agent has an MPC wallet, an on-chain policy, and can execute transactions within auditable limits set by its operator.
+- AgentFi removes the glass: each agent has its own wallet, an on-chain policy, and can execute transactions within auditable limits set by its operator.
 - DeFi is the entry point because it's the only economic system that doesn't require a passport. A smart contract checks if the transaction is valid, not who sent it.
 - The real goal is the **agent-to-agent economy** — agents paying each other for data, compute, coordination, services, at machine speed. The volume is expected to eclipse human-to-human economic activity the same way algorithmic trading eclipsed human day-trading.
 - **Self-sustaining agents**: the moment an agent's earnings exceed its costs, it has crossed a line no AI system has crossed before — the transition from _tool_ to _participant_.
@@ -41,15 +41,15 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 │  API + worker (BullMQ/Redis), Prisma/PostgreSQL │
 ├─────────────────────────────────────────────────┤
 │  L2  Smart Contracts (Solidity 0.8.24)          │
-│  AgentPolicyModule — per-Safe tx validation     │
+│  AgentPolicyModule — per-agent tx validation    │
 │  AgentExecutor — atomic batch + on-chain fee    │
 │  AgentJobEscrow — ERC-8183 USDC job escrow      │
 │  ReputationHook — ERC-8004 feedback on settle   │
 │  (EscrowModule — legacy ETH escrow, opt-in)     │
 ├─────────────────────────────────────────────────┤
 │  L1  Wallet Infrastructure                      │
-│  Turnkey MPC (keys never reconstructed)         │
-│  Safe Smart Wallets (ERC-4337 compatible)       │
+│  Turnkey wallets (keys stay in its enclaves)    │
+│  Safe mode: not working yet (D19)               │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -57,8 +57,8 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 
 | Layer     | Stack                                                                                  | Why                                                                                                             |
 | --------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| L1        | Turnkey MPC + Safe SDK                                                                 | MPC splits keys across shards that never reunite; Safe allows modules that enforce policy on-chain              |
-| L2        | Solidity 0.8.24 + Foundry                                                              | Policy module validates each tx before Safe executes; Executor batches and collects fee in the same transaction; `AgentJobEscrow` escrows a USDC budget per job (ERC-8183) and `ReputationHook` writes ERC-8004 feedback in the settlement transaction |
+| L1        | Turnkey + Safe SDK                                                                     | Turnkey creates and uses agent keys inside secure enclaves, so the backend never holds them. The Safe SDK is in the code, but Safe mode does not work yet (D19): it is refused in production / staging, and elsewhere it only warns and agents fall back to their EOA |
+| L2        | Solidity 0.8.24 + Foundry                                                              | Policy module validates each action routed through the executor (agents with a synced policy); Executor batches and collects fee in the same transaction; `AgentJobEscrow` escrows a USDC budget per job (ERC-8183) and `ReputationHook` writes ERC-8004 feedback in the settlement transaction |
 | L3        | Node 22 + Fastify 5 + Prisma 5 + Zod + viem 2 (ethers 5 still used by Aave helpers)    | Type-safe API, runtime validation, RPC fallback, decoupled workers                                              |
 | L3 queues | BullMQ on Redis                                                                        | Async tx pipeline, retries, DLQ, daily reputation cron                                                          |
 | L3 DB     | PostgreSQL 15 via Prisma 5                                                             | Relational graph of Agent ↔ Jobs ↔ Transactions ↔ FeeEvents ↔ DailyVolume                                       |
@@ -72,7 +72,7 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 | Service    | Role                                         | Alternatives                                          |
 | ---------- | -------------------------------------------- | ----------------------------------------------------- |
 | Alchemy    | RPC for Ethereum / Base / Arbitrum / Polygon | Infura, QuickNode, Ankr                               |
-| Turnkey    | MPC wallet provisioning + signing            | — (AWS KMS would work but trades MPC for single root) |
+| Turnkey    | Wallet provisioning + signing (secure enclaves) | — (AWS KMS would also keep keys out of the process) |
 | Tenderly   | Pre-broadcast transaction simulation         | Optional — graceful fallback if unset                 |
 | PostgreSQL | Persistence                                  | Neon, Supabase, Railway PG, self-host                 |
 | Redis      | BullMQ queues + rate limit + sim cache       | Upstash, Railway Redis                                |
@@ -151,7 +151,7 @@ Redeploy order: Base Sepolia → Base mainnet (human-run; see `docs/operations/c
 
 | Action           | Endpoint                     | Notes                                                                                         |
 | ---------------- | ---------------------------- | --------------------------------------------------------------------------------------------- |
-| Register agent   | `POST /v1/agents` (operator `API_SECRET`) · `POST /v1/public/agents` (rate-limited self-registration, default policy) | Creates a Turnkey wallet → Safe Smart Wallet only when `SAFE_DEPLOYER_PRIVATE_KEY` is set → initial `AgentPolicy` → optional ENS subdomain |
+| Register agent   | `POST /v1/agents` (operator `API_SECRET`) · `POST /v1/public/agents` (rate-limited self-registration, default policy) | Creates a Turnkey wallet (the agent's EOA; `SAFE_DEPLOYER_PRIVATE_KEY` would attempt a Safe, which does not work yet — D19) → initial `AgentPolicy` → optional ENS subdomain |
 | Configure policy | `PATCH /v1/agents/:id/policy` | Off-chain limits: `maxValuePerTxEth` (native), `maxValuePerTxUsd` (USDC x402 / escrow, Q8), `maxOutflowPerTxUsd` (USD per ordinary outflow, §5-6; `null` = not configured, outflows blocked until the operator sets it), `allowedContracts` (call targets), `allowedRecipients` (who may receive value, Q8), `cooldownSeconds`, `maxDailyVolumeUsd`; the agent may only tighten, loosening needs the operator credential |
 | Kill switch      | `DELETE /v1/agents/:id`      | Soft-deactivate + emergency pause                                                             |
 | Billing view     | `GET /v1/billing/status`     | Fees paid, tx count this period, subscription tier                                            |
@@ -159,16 +159,16 @@ Redeploy order: Base Sepolia → Base mainnet (human-run; see `docs/operations/c
 Policy enforces in **two layers** on purpose:
 
 1. Off-chain — `PolicyService` validates before simulation.
-2. On-chain — `AgentPolicyModule` validates when the Safe tries to execute.
+2. On-chain — `AgentPolicyModule` validates the actions routed through `AgentExecutor`, for agents whose policy is synced on-chain (S8).
 
-Even if the backend is compromised, the Safe will refuse transactions that violate the module.
+Agents are plain wallets (EOA). Safe mode does not work yet (D19). The on-chain layer therefore does **not** stop a compromised backend: it can still sign directly with the agent's wallet. Today the off-chain layer is the binding control. No module or executor from this build is deployed on a public network yet.
 
 ### 4.4 Self-sustaining agents (Phase 4)
 
 | Action                    | Endpoint                                                     | Notes                                                                                                                                          |
 | ------------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | P&L dashboard             | `GET /v1/agents/me/pnl`                                      | Profit / loss: earnings (A2A rewards received) vs costs (protocol fees + rewards paid + **gas**, computed as `gasUsed × effectiveGasPriceWei`) |
-| ENS identity              | auto on register when `ENS_PARENT_DOMAIN` is set             | Agent gets `alice-abc123.agentfi.eth` pointing to its Safe address — referenceable by other dApps, explorers, peer agents                      |
+| ENS identity              | auto on register when `ENS_PARENT_DOMAIN` is set             | Agent gets `alice-abc123.agentfi.eth` pointing to its wallet address — referenceable by other dApps, explorers, peer agents                      |
 | Reputation auto-recompute | `POST /admin/reputation/recompute` + daily cron at 02:00 UTC | Score 0–10 000 from: tx success (40%) + job completion (30%) + volume (20%) + consistency (10%), with 2× weight on the last 30 days            |
 
 ### 4.5 Operator admin
@@ -200,7 +200,7 @@ Example: an agent swaps 0.1 ETH to USDC on Base.
 8. Job is enqueued in the BullMQ `transactions` queue.
 9. API returns `{ transactionId, status: QUEUED }` immediately.
 10. Worker pulls the job from Redis.
-11. `SubmitterService` signs via Turnkey MPC (private key never enters our process) and broadcasts through Alchemy.
+11. `SubmitterService` signs via Turnkey (the private key never enters our process) and broadcasts through Alchemy.
 12. `MonitorService` polls for the receipt with exponential backoff (2s → 3s → 4.5s → … capped at 30s, up to 20 attempts).
 13. On confirmation: `gasUsed`, `effectiveGasPriceWei`, `confirmedAt` persisted; status `CONFIRMED`.
 14. `FeeService` records a `FeeEvent` linked to `AgentBilling`. If the tx went through `AgentExecutor`, the fee was already collected on-chain atomically to `OPERATOR_FEE_WALLET`.
@@ -251,9 +251,9 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 ## 8. What does _not_ exist (on purpose)
 
 - **Canonical hosted production** — would violate the "commons, fork it" principle. No hosted instance exists at all (the staging was decommissioned on 2026-05-17).
-- **Landing page / marketing surface** — AgentFi is infrastructure, not a product. Stripe integration is there only so self-hosting operators can charge subscriptions of their _own_ if they want.
+- **Product marketing surface** — AgentFi is infrastructure, not a product. The only public page is a static site (`www.agentfi.cc`) from a separate private repository (HANDOFF §7). A version that points to the code, docs and validation status is prepared locally but not published (plan X8). Until it is, the live site still carries the older MPC / Safe claims. Stripe integration is there only so self-hosting operators can charge subscriptions of their _own_ if they want.
 - **Closed-source features** — zero paywalls on core functionality.
-- **Centralized custody** — Turnkey MPC guarantees even the maintainer cannot move agent funds.
+- **Centralized custody** — the maintainer runs no instance and holds no agent keys; each operator's own Turnkey organisation holds its agents' keys.
 - **Legal personhood wrapper** — explicitly called out in VISION.md as a non-technical problem. Liability sits with the human operator for V1.
 
 ---
@@ -267,7 +267,7 @@ All pending work is tracked task by task in [docs/project/execution-plan-2026-10
 - **Done on 2026-10-14 (G1 closing round, #170–#176):** the owner decisions Q6–Q9 (D12–D15: contest window for validation, no escrow signature while the on-chain configuration is unverified, explicit USD cap and separate recipients, no spend counted as zero with synthetic test prices on testnet only), the C3e / A6b leftovers reproduced and fixed by financial effect, and the fixes from an independent adversarial review (no P1). **G1 met on `03a429d`.**
 - **Done on 2026-10-14 (C4/C5 preparation round, #178–#187):** contract identity before authority or value (S9, D16: the runtime bytecode of this repository's build plus the configured bindings, checked before Safe module enablement, executor-routed transactions, the policy sync and escrow); `AgentPolicyModule` accepts only its bound executor and checks the cooldown once per execution (D18); Safe mode refused in production / staging (D19); the on-chain policy sync signed by the agent wallet and sent straight to the module (S8); the four wrong third-party addresses replaced by official deployments (S7) and MCP `pay_agent` fixed (X5); `maxOutflowPerTxUsd`, a USD cap on ordinary outflows that blocks them until the operator sets it (D17, migration 0025); "max" withdrawals uncounted only on calldata proof, approvals revalidated on the approval day (D20); the Windows DB-suite crash (Prisma N-API engine in worker threads; `pool: 'forks'`). G1 stays met on `03a429d` within its threshold; it is not a general security claim.
 - **Open, owner decisions:** plan §5 questions 9–13 (mainnet contest window, `"ETH"` on Polygon at the API, GMX, the Uniswap routers on Ethereum / Arbitrum / Polygon, ERC-4626 max withdrawals); questions 6–8 were answered on 2026-10-14 (D17, D20). The per-agent `maxOutflowPerTxUsd` values are an operator choice.
-- **Prepared on 2026-10-15, waiting for the owner's approval:** the C4 / C5 authorisation package for the escrow validation (completed, cancel, contest → operator resolution) — [c4-c5-checklist.md](docs/project/c4-c5-checklist.md) and [c5-escrow-validation.md](docs/project/c5-escrow-validation.md), with the resumable runner `npm run c5:escrow` rehearsed end to end on a fork. Nothing executed on the real network; G2 pending.
+- **Prepared on 2026-10-15, waiting for the owner's approval:** the C4 / C5 authorisation package for the escrow validation (completed, cancel, contest → operator resolution) — [c4-c5-checklist.md](docs/project/c4-c5-checklist.md) and [c5-escrow-validation.md](docs/project/c5-escrow-validation.md), with the resumable runner `npm run c5:escrow` rehearsed end to end on a fork (`75796fb`, repeated on `cc0bb90` = the candidate `e6e93bd`'s tree). No deploy, funding or transaction on the real network (read-only RPC reads only); five owner decisions open; G2 pending.
 - **Next, owner-run:** C4 deploys the contracts on Base Sepolia ([runbook](docs/project/testnet-log.md), §2), C5 runs the two-agent E2E there with Turnkey wallets (D11, §5.4), demand interviews V1–V3. Then X1–X3 (example on testnet, screencast, mcp-server 0.6.0) and the C6 mainnet decision.
 - **Go/no-go:** 2027-01-05.
 

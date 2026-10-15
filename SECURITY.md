@@ -10,7 +10,7 @@
 
 **Do NOT open a public GitHub issue for security vulnerabilities.**
 
-Instead, please email the maintainers directly at **security@agentfi.io** (or the email listed in `package.json`). We aim to acknowledge reports within **48 hours** and provide a fix or mitigation plan within **7 days**.
+Instead, use GitHub's [private vulnerability reporting form](https://github.com/felippeyann/agentfi/security/advisories/new). Sign in to GitHub and select **Report a vulnerability** in the repository's Security tab. Reports are shared privately with the maintainers, not posted as public issues. We aim to acknowledge reports within **48 hours** and provide a fix or mitigation plan within **7 days**.
 
 ### What to include
 
@@ -47,8 +47,8 @@ The following are in scope for security reports:
 ## Security Best Practices
 
 - All API keys are hashed with SHA-256 before storage
-- Transaction simulation via Tenderly before on-chain execution
-- On-chain policy enforcement via AgentPolicyModule (Safe module)
-- MPC wallet infrastructure via Turnkey (no raw private keys)
+- Transaction simulation before on-chain execution: Tenderly, or an `eth_call` / `estimateGas` dry-run in production / staging when Tenderly is not configured
+- On-chain policy limits via `AgentPolicyModule`. It checks actions routed through `AgentExecutor` for agents whose policy is synced on-chain; the off-chain policy checks every agent transaction (evaluator settlements do not go through it). Safe mode does not work yet (D19 in the execution plan).
+- With `WALLET_PROVIDER=turnkey`, agent wallet keys are held by Turnkey (secure enclaves) and the backend never holds them. The backend does hold one raw key, the escrow evaluator's (`ESCROW_EVALUATOR_PRIVATE_KEY`). The development-only local provider keeps keys in memory and is refused in production / staging.
 - Rate limiting on all API endpoints
 - Input validation via Zod on all routes

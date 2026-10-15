@@ -8,7 +8,7 @@ Core API server for AgentFi — handles agent management, transaction execution,
 - **Framework**: Fastify 5
 - **Database**: PostgreSQL 16 + Prisma ORM
 - **Queue**: BullMQ + Redis 7 (transaction worker + daily reputation cron)
-- **Wallet**: Turnkey MPC + Safe Smart Accounts
+- **Wallet**: Turnkey; agents use their EOA. Safe mode does not work yet (D19): refused in production / staging, elsewhere it only warns and falls back to the EOA
 - **Chains**: Ethereum, Base, Arbitrum, Polygon (via Alchemy)
 - **DeFi**: Uniswap V3 + Curve StableSwap (swaps), Aave V3 + Compound V3 + ERC-4626 vaults (yield)
 

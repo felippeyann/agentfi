@@ -79,8 +79,8 @@ All project documentation is organized in our **[Documentation Hub](docs/README.
 
 ## 🚀 Key Features
 
-- **Turnkey MPC Wallets** — keys split across shards and never exposed.
-- **Safe Smart Wallets** — per-agent on-chain policy enforcement (limits, whitelists, kill switch).
+- **Turnkey wallets** — keys are created and used inside Turnkey's secure enclaves; the AgentFi process never holds them (the in-memory local provider is for development only).
+- **On-chain policy module** — `AgentPolicyModule` holds per-agent limits, whitelists and the kill switch. It checks transactions routed through `AgentExecutor`, for agents whose policy is synced on-chain. No module or executor from this build is deployed on a public network yet. Agents run as plain wallets (EOA). Safe mode does not work yet ([plan D19](docs/project/execution-plan-2026-10.md)): it is refused in production and staging, and elsewhere it only warns and agents fall back to their EOA.
 - **Model Context Protocol** — [`@agent_fi/mcp-server`](packages/mcp-server/README.md): 35 tools in the source on `main` (DeFi execution, GMX perpetuals, A2A jobs with on-chain escrow, x402 payments, trust, and P&L); the published npm 0.5.0 has 31 of them until 0.6.0 ships (plan X3).
 - **DeFi coverage** — Uniswap V3 + Curve StableSwap (swaps); Aave V3, Compound V3, and any ERC-4626 vault (yield).
 - **Agent-to-Agent economy** — job queue and paid jobs escrowed on-chain in USDC by `AgentJobEscrow` (ERC-8183), settled by the operator's evaluator, with ERC-8004 feedback written by `ReputationHook` in the settlement transaction; not deployed on a public network yet (Base Sepolia is task C4, runbook in [`docs/project/testnet-log.md`](docs/project/testnet-log.md)). Jobs on chains without the escrow keep the older DB-level escrow. Internal reputation scoring from real metrics with time-decay.

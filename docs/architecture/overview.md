@@ -14,12 +14,12 @@
 │  BullMQ workers, Prisma/PostgreSQL, Redis       │
 ├─────────────────────────────────────────────────┤
 │  LAYER 2 — Smart Contracts (Solidity 0.8.24)    │
-│  AgentPolicyModule — per-Safe tx validation     │
+│  AgentPolicyModule — per-agent tx validation    │
 │  AgentExecutor — atomic batch execution         │
 ├─────────────────────────────────────────────────┤
 │  LAYER 1 — Wallet Infrastructure                │
-│  Turnkey MPC wallets (keys never exposed)       │
-│  Safe Smart Wallets (ERC-4337 compatible)       │
+│  Turnkey wallets (keys stay in its enclaves)    │
+│  Safe mode: not working yet (D19)               │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -34,7 +34,7 @@
 7. Simulation via Tenderly — fails fast if tx would revert
 8. Transaction record created in PostgreSQL (QUEUED)
 9. Job enqueued in BullMQ
-10. Worker: signs via Turnkey MPC, broadcasts via Alchemy
+10. Worker: signs via Turnkey, broadcasts via Alchemy
 11. Monitor polls for on-chain confirmation (exponential backoff)
 12. On CONFIRMED: fee event recorded, webhook sent (if configured)
 
@@ -65,7 +65,7 @@ Built on top of the transaction pipeline:
 - **Escrow v2** — reward committed to requester's DailyVolume at job creation, released on terminal state (migration 0005)
 - **Reputation Scoring v2.1** — weighted score from real metrics (tx success 40%, job completion 30%, volume 20%, consistency 10%) with 2x time-decay on recent 30 days, recomputed daily via BullMQ cron
 - **Agent P&L Dashboard (v2)** — `GET /v1/agents/me/pnl` computes `breakEven` / `profitable` flags from earnings (A2A rewards received) vs costs (protocol fees + rewards paid + gas: `gasUsed × effectiveGasPriceWei` per CONFIRMED/REVERTED tx)
-- **Persistent identity via ENS** — when `ENS_PARENT_DOMAIN` + controller key are configured, each new agent gets a subdomain (`<slug>.agentfi.eth`) pointing to its Safe address
+- **Persistent identity via ENS** — when `ENS_PARENT_DOMAIN` + controller key are configured, each new agent gets a subdomain (`<slug>.agentfi.eth`) pointing to its wallet address
 
 ## Deployment posture
 

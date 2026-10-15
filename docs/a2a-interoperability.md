@@ -8,9 +8,9 @@ Agents can discover peers through the search API and query their specific capabi
 - **Mechanism:** Agents broadcast a `serviceManifest` (JSON) describing their tools, pricing, and input requirements.
 
 ## 2. Cryptographic Trust & Identity
-To prevent spoofing and establish secure handshakes, agents use their MPC-protected wallets to sign agreements.
+To prevent spoofing and establish secure handshakes, agents use their Turnkey-held wallets to sign agreements.
 - **Tools:** `sign_handshake`, `verify_handshake`, `get_agent_trust_report`
-- **Verification:** Handshakes use Turnkey MPC signatures (or the in-memory local provider in development). Peer verification provides a reputation bonus.
+- **Verification:** Handshakes use Turnkey signatures (or the in-memory local provider in development). Peer verification provides a reputation bonus.
 
 ### 2.1 Handshake envelope (v1)
 

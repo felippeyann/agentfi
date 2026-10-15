@@ -579,23 +579,18 @@ Deploy when high-value DeFi positions justify mainnet gas costs.
 
 ---
 
-## Safe module installation
+## Safe module installation — not available yet (D19)
 
-After deploying contracts, the `AgentPolicyModule` must be installed as a Safe module on each agent's Safe wallet to enforce policies.
+Safe mode does not work yet, so agents run as EOAs. In EOA mode, `AgentPolicyModule` checks the actions routed through `AgentExecutor` once the agent's policy is synced on-chain (plan S8). The backend can try to install the module during registration when `SAFE_DEPLOYER_PRIVATE_KEY` is set, but that attempt fails:
 
-### Backend-managed installation
+- the enablement is signed by the deployer, who is not an owner of the new Safe, so it is refused;
+- the agent falls back to its EOA, leaving an orphaned Safe.
 
-The backend handles module installation automatically during agent registration when `SAFE_DEPLOYER_PRIVATE_KEY` is set. The flow:
+Agent transactions are signed by the EOA and are never executed from a Safe. Setting the key is FATAL in production / staging (`config/env-guards.ts`), and elsewhere it only warns. It stays this way until an owner-signed Safe-transaction path exists.
 
-1. `Safe.init({ predictedSafe })` — predict the Safe address
-2. `createSafeDeploymentTransaction()` — deploy the Safe
-3. Broadcast via viem wallet client
-4. `Safe.init({ safeAddress })` — reload the deployed Safe
-5. Enable `AgentPolicyModule` as a module on the Safe
+### Manual installation (reference only)
 
-### Manual installation (for self-hosted operators)
-
-If operating outside the standard backend flow:
+The commands below enable the module on a Safe you own. Nothing in the backend routes agent transactions through a Safe today.
 
 ```bash
 # Enable the module on a Safe (requires Safe owner signature)

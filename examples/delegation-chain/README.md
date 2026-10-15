@@ -97,7 +97,7 @@ On completion, the backend:
 
 1. Runs the full policy + simulation + fee pipeline (same as any public tx)
 2. Enqueues the signed tx in BullMQ
-3. Worker signs via Turnkey MPC → broadcasts via Alchemy
+3. Worker signs via Turnkey → broadcasts via Alchemy
 4. Monitor polls for receipt
 5. `FeeEvent` is recorded
 6. Protocol fee is collected atomically on-chain via `AgentExecutor`

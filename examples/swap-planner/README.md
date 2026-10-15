@@ -89,7 +89,7 @@ The backend will then:
 - Run the same policy + builder path
 - Run a real Tenderly simulation (not the mock)
 - Enqueue the signed tx in BullMQ
-- Worker signs via Turnkey MPC → broadcasts via Alchemy
+- Worker signs via Turnkey → broadcasts via Alchemy
 - Monitor polls for the receipt
 - `FeeEvent` is recorded; protocol fee is collected on-chain atomically via `AgentExecutor`
 
