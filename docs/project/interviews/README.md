@@ -6,7 +6,7 @@ here, anonymised (`O1`, `O2`, `O3`), within a day of the call.
 **Gate G4 (plan §1):** at least 3 interviews; at least 2 operators report the
 same recurring problem with a concrete example; at least 1 runs the flow with
 their own funds (Base Sepolia is enough). Checked at the go/no-go on
-2027-01-05; Day 30 (2026-11-05) is only an on-track checkpoint (see the end
+2027-01-05; Day 30 is only an on-track checkpoint (see the end
 of this file). Abstract interest in agents, or agreeing to test, does not
 count as running the flow.
 
@@ -17,7 +17,7 @@ data, x402 resources, or other agents. Where to look, as hypotheses only:
 Coinbase Agentic Wallet, AWS AgentCore Payments or MetaMask Agent Wallet users;
 Circle Agent Marketplace participants; Claude Code users with paid MCP tools.
 The x402 Bazaar lists payment-gated *services*, which are sellers
-([CDP docs](https://docs.cdp.coinbase.com/x402/bazaar), checked 2026-10-15).
+([CDP docs](https://docs.cdp.coinbase.com/x402/buyer/discover-services), checked 2026-10-15).
 A listing there is not evidence of a buyer. Screen out anyone who has not had
 an agent pay for something in the last month.
 
@@ -80,13 +80,21 @@ opinions; ask "when was the last time…" rather than "would you…".
 These are two different decisions. Agreeing to test is a next step, never a
 pass.
 
-- **Day 30 checkpoint (2026-11-05, plan V3): is G4 on track?** On track
-  means two things:
+- **Day 30 checkpoint (plan V3): is G4 on track?** The date is 2026-11-05
+  counted from the reactivation on 2026-10-06. The plan calendar's
+  "Days 1–30" window ends on 2026-11-11, so the owner confirms which date
+  applies. On track means two things:
   - 2 or more interviews describe the same recurring problem with a concrete
     example;
-  - at least 1 operator has a dated next step to run the flow.
+  - at least 1 operator has committed to run the flow once it is available.
+    While C4 / C5 are pending, no date can be offered, so a conditional
+    commitment is the most that can exist. Its absence alone does not mean
+    there is no demand.
 
   If two of three operators say "not a problem", stop WS3–WS6 and reassess.
+  The pilot modality, and what happens if the flow is never available
+  before the go/no-go, are open owner decisions (owner note
+  `2026-10-15-kit-entrevistas.md` §11).
 - **G4 gate (plan §1, checked at the go/no-go on 2027-01-05).** G4 passes only
   when all three thresholds hold:
   - at least 3 interviews;
