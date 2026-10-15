@@ -12,7 +12,7 @@ Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) sta
 
 | Tool | Description |
 |------|-------------|
-| `get_wallet_info` | Get agent's Safe wallet address and token balances |
+| `get_wallet_info` | Get agent's wallet address and token balances |
 | `get_token_price` | Fetch current USD price of any token (CoinGecko) |
 
 ### Swaps
@@ -209,7 +209,7 @@ AgentFi MCP Server
 AgentFi Backend API
     |
     |--- Turnkey (wallet signing)
-    |--- Safe (smart account execution)
+    |--- AgentExecutor + AgentPolicyModule (on-chain policy)
     |--- Tenderly (transaction simulation)
     |--- Uniswap V3 / Curve (swaps)
     |--- Aave V3 / Compound V3 / ERC-4626 (yield)
@@ -220,10 +220,10 @@ Blockchain (Ethereum, Base, Arbitrum, Polygon)
 
 ## Safety
 
-- Every transaction is **simulated** before execution (Tenderly)
-- **Policy constraints** enforced on-chain (max value, daily cap, allowed contracts/tokens)
-- **Turnkey wallets** — the backend never holds the private keys (Turnkey keeps them in secure enclaves)
-- **Smart accounts** — Safe multisig with policy module guard
+- Every transaction is **simulated** before execution (Tenderly, or `eth_call` / `estimateGas` when Tenderly is not configured)
+- **Policy constraints** (max value, daily cap, allowed contracts/tokens) checked by the backend before signing, and on-chain by `AgentPolicyModule` for transactions routed through `AgentExecutor` when the agent's policy is synced
+- **Turnkey wallets** — the backend never holds the agents' private keys (Turnkey keeps them in secure enclaves)
+- **No Safe mode yet** — agents use their EOA (Safe mode does not work yet, D19 in the execution plan)
 - **A2A escrow** — job rewards are committed at creation time; on ERC-8183
   chains the USDC budget is locked on-chain until the evaluator settles
 

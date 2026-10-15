@@ -41,7 +41,7 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 │  API + worker (BullMQ/Redis), Prisma/PostgreSQL │
 ├─────────────────────────────────────────────────┤
 │  L2  Smart Contracts (Solidity 0.8.24)          │
-│  AgentPolicyModule — per-Safe tx validation     │
+│  AgentPolicyModule — per-agent tx validation    │
 │  AgentExecutor — atomic batch + on-chain fee    │
 │  AgentJobEscrow — ERC-8183 USDC job escrow      │
 │  ReputationHook — ERC-8004 feedback on settle   │
@@ -49,7 +49,7 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 ├─────────────────────────────────────────────────┤
 │  L1  Wallet Infrastructure                      │
 │  Turnkey wallets (keys stay in its enclaves)    │
-│  Safe Smart Wallets (ERC-4337 compatible)       │
+│  Safe mode: not working yet (D19)               │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -57,8 +57,8 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 
 | Layer     | Stack                                                                                  | Why                                                                                                             |
 | --------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| L1        | Turnkey + Safe SDK                                                                     | Turnkey creates and uses keys inside secure enclaves, so the backend never holds them; Safe allows modules that enforce policy on-chain (Safe mode is development-only, D19) |
-| L2        | Solidity 0.8.24 + Foundry                                                              | Policy module validates each tx before Safe executes; Executor batches and collects fee in the same transaction; `AgentJobEscrow` escrows a USDC budget per job (ERC-8183) and `ReputationHook` writes ERC-8004 feedback in the settlement transaction |
+| L1        | Turnkey + Safe SDK                                                                     | Turnkey creates and uses agent keys inside secure enclaves, so the backend never holds them. The Safe SDK is in the code, but Safe mode does not work yet (D19): it is refused in production / staging, and elsewhere it only warns and agents fall back to their EOA |
+| L2        | Solidity 0.8.24 + Foundry                                                              | Policy module validates each action routed through the executor (agents with a synced policy); Executor batches and collects fee in the same transaction; `AgentJobEscrow` escrows a USDC budget per job (ERC-8183) and `ReputationHook` writes ERC-8004 feedback in the settlement transaction |
 | L3        | Node 22 + Fastify 5 + Prisma 5 + Zod + viem 2 (ethers 5 still used by Aave helpers)    | Type-safe API, runtime validation, RPC fallback, decoupled workers                                              |
 | L3 queues | BullMQ on Redis                                                                        | Async tx pipeline, retries, DLQ, daily reputation cron                                                          |
 | L3 DB     | PostgreSQL 15 via Prisma 5                                                             | Relational graph of Agent ↔ Jobs ↔ Transactions ↔ FeeEvents ↔ DailyVolume                                       |
@@ -151,7 +151,7 @@ Redeploy order: Base Sepolia → Base mainnet (human-run; see `docs/operations/c
 
 | Action           | Endpoint                     | Notes                                                                                         |
 | ---------------- | ---------------------------- | --------------------------------------------------------------------------------------------- |
-| Register agent   | `POST /v1/agents` (operator `API_SECRET`) · `POST /v1/public/agents` (rate-limited self-registration, default policy) | Creates a Turnkey wallet → Safe Smart Wallet only when `SAFE_DEPLOYER_PRIVATE_KEY` is set → initial `AgentPolicy` → optional ENS subdomain |
+| Register agent   | `POST /v1/agents` (operator `API_SECRET`) · `POST /v1/public/agents` (rate-limited self-registration, default policy) | Creates a Turnkey wallet (the agent's EOA; `SAFE_DEPLOYER_PRIVATE_KEY` would attempt a Safe, which does not work yet — D19) → initial `AgentPolicy` → optional ENS subdomain |
 | Configure policy | `PATCH /v1/agents/:id/policy` | Off-chain limits: `maxValuePerTxEth` (native), `maxValuePerTxUsd` (USDC x402 / escrow, Q8), `maxOutflowPerTxUsd` (USD per ordinary outflow, §5-6; `null` = not configured, outflows blocked until the operator sets it), `allowedContracts` (call targets), `allowedRecipients` (who may receive value, Q8), `cooldownSeconds`, `maxDailyVolumeUsd`; the agent may only tighten, loosening needs the operator credential |
 | Kill switch      | `DELETE /v1/agents/:id`      | Soft-deactivate + emergency pause                                                             |
 | Billing view     | `GET /v1/billing/status`     | Fees paid, tx count this period, subscription tier                                            |
@@ -159,16 +159,16 @@ Redeploy order: Base Sepolia → Base mainnet (human-run; see `docs/operations/c
 Policy enforces in **two layers** on purpose:
 
 1. Off-chain — `PolicyService` validates before simulation.
-2. On-chain — `AgentPolicyModule` validates when the Safe tries to execute.
+2. On-chain — `AgentPolicyModule` validates the actions routed through `AgentExecutor`, for agents whose policy is synced on-chain (S8).
 
-Even if the backend is compromised, the Safe will refuse transactions that violate the module.
+Agents are plain wallets (EOA). Safe mode does not work yet (D19). The on-chain layer therefore does **not** stop a compromised backend: it can still sign directly with the agent's wallet. Today the off-chain layer is the binding control. No module or executor from this build is deployed on a public network yet.
 
 ### 4.4 Self-sustaining agents (Phase 4)
 
 | Action                    | Endpoint                                                     | Notes                                                                                                                                          |
 | ------------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | P&L dashboard             | `GET /v1/agents/me/pnl`                                      | Profit / loss: earnings (A2A rewards received) vs costs (protocol fees + rewards paid + **gas**, computed as `gasUsed × effectiveGasPriceWei`) |
-| ENS identity              | auto on register when `ENS_PARENT_DOMAIN` is set             | Agent gets `alice-abc123.agentfi.eth` pointing to its Safe address — referenceable by other dApps, explorers, peer agents                      |
+| ENS identity              | auto on register when `ENS_PARENT_DOMAIN` is set             | Agent gets `alice-abc123.agentfi.eth` pointing to its wallet address — referenceable by other dApps, explorers, peer agents                      |
 | Reputation auto-recompute | `POST /admin/reputation/recompute` + daily cron at 02:00 UTC | Score 0–10 000 from: tx success (40%) + job completion (30%) + volume (20%) + consistency (10%), with 2× weight on the last 30 days            |
 
 ### 4.5 Operator admin
@@ -251,9 +251,9 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 ## 8. What does _not_ exist (on purpose)
 
 - **Canonical hosted production** — would violate the "commons, fork it" principle. No hosted instance exists at all (the staging was decommissioned on 2026-05-17).
-- **Product marketing surface** — AgentFi is infrastructure, not a product. The only public page is a static site (`www.agentfi.cc`) from a separate private repository, and it points to the code, docs and validation status (HANDOFF §7). Stripe integration is there only so self-hosting operators can charge subscriptions of their _own_ if they want.
+- **Product marketing surface** — AgentFi is infrastructure, not a product. The only public page is a static site (`www.agentfi.cc`) from a separate private repository (HANDOFF §7). A version that points to the code, docs and validation status is prepared locally but not published (plan X8). Until it is, the live site still carries the older MPC / Safe claims. Stripe integration is there only so self-hosting operators can charge subscriptions of their _own_ if they want.
 - **Closed-source features** — zero paywalls on core functionality.
-- **Centralized custody** — the maintainer runs no instance and holds no keys; each operator's own Turnkey organisation holds its agents' keys.
+- **Centralized custody** — the maintainer runs no instance and holds no agent keys; each operator's own Turnkey organisation holds its agents' keys.
 - **Legal personhood wrapper** — explicitly called out in VISION.md as a non-technical problem. Liability sits with the human operator for V1.
 
 ---

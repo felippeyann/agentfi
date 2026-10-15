@@ -46,12 +46,16 @@ opinions; ask "when was the last time…" rather than "would you…".
    resolving disputes and the outcome recorded as reputation. "Would that have
    prevented your case? Would you rather pay per guaranteed job or a
    percentage of volume?" (plan §5.4, decision D6)
-6. **Test (3 min).** "Would you run one job on Base Sepolia with test funds,
-   or share an anonymised trace of a real case, in the next two weeks?" Record
-   yes or no, and a concrete next step with a date. Offer a Base Sepolia run
-   only after C4 deploys this build there (still pending, see
-   [c4-c5-checklist.md](../c4-c5-checklist.md)). Until then a run can only be
-   local or on a fork, and does not count for G4.
+6. **Test (3 min).** "Once it is available, would you run one job on Base
+   Sepolia with test funds? Separately, could you share an anonymised trace of
+   a real case?" Record yes or no for each, and a concrete next step.
+
+   Rules for this question:
+   - Offer a dated Base Sepolia run only after C4 deploys this build there
+     (still pending, see [c4-c5-checklist.md](../c4-c5-checklist.md)). Until
+     then a run can only be local or on a fork, and does not count for G4.
+   - A real-case trace is evidence for the problem (questions 1–4), not a run
+     of the flow.
 
 ## Log template (one file per interview: `O1.md`, `O2.md`, `O3.md`)
 
@@ -67,7 +71,7 @@ opinions; ask "when was the last time…" rather than "would you…".
 - Fit (Q5): <would it have prevented the case? why or why not>
 - Pricing preference: <per guaranteed job / % of volume / other>
 - Willing to test: <yes / no> — next step and date: <…>
-- Ran the flow: <not yet / yes — date, network, evidence (tx hashes or anonymised trace), verified by>
+- Ran the flow: <not yet / yes — date, Base Sepolia tx hashes of `fund` and settlement, verified by>
 - Same problem as: <O-ids, or "none">
 ```
 
@@ -89,7 +93,9 @@ pass.
   - 2 or more operators with the same recurring problem and a concrete
     example;
   - at least 1 operator who **has run the flow** with their own funds (Base
-    Sepolia is enough), with verifiable evidence (transaction hashes or an
-    anonymised trace) logged in their `O<n>.md`.
+    Sepolia is enough). The evidence is the Base Sepolia transaction hashes of
+    the job's `fund` and its settlement, logged in their `O<n>.md`.
+    Pseudonymous addresses are enough to stay anonymous, and a trace can only
+    complement the hashes.
 - Otherwise, record what was heard and apply plan §1. Either stop, or change
   the hypothesis before any more integration work.

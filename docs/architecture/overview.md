@@ -14,12 +14,12 @@
 │  BullMQ workers, Prisma/PostgreSQL, Redis       │
 ├─────────────────────────────────────────────────┤
 │  LAYER 2 — Smart Contracts (Solidity 0.8.24)    │
-│  AgentPolicyModule — per-Safe tx validation     │
+│  AgentPolicyModule — per-agent tx validation    │
 │  AgentExecutor — atomic batch execution         │
 ├─────────────────────────────────────────────────┤
 │  LAYER 1 — Wallet Infrastructure                │
 │  Turnkey wallets (keys stay in its enclaves)    │
-│  Safe Smart Wallets (ERC-4337 compatible)       │
+│  Safe mode: not working yet (D19)               │
 └─────────────────────────────────────────────────┘
 ```
 

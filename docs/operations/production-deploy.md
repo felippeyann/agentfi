@@ -300,13 +300,14 @@ npx -y @agent_fi/mcp-server --backend https://api.yourdomain.com --api-key agfi_
 
 ---
 
-## STEP 8 — Optional: Safe smart wallets
+## STEP 8 — Safe smart wallets: not available (D19)
 
-To give each agent a Safe smart wallet (enables on-chain policy enforcement):
+Safe mode does not work yet:
 
-1. Create a funded EOA on each chain you want to support.
-2. Add its private key to your host: `SAFE_DEPLOYER_PRIVATE_KEY=0x...`.
-3. New agents registered after this will automatically get a Safe.
+- The policy-module enablement would be signed by a deployer that is not an owner of the new Safe.
+- Agent transactions are signed by the agent's EOA, never executed from the Safe.
+
+**Leave `SAFE_DEPLOYER_PRIVATE_KEY` unset.** In production or staging it stops the backend at boot (FATAL, `config/env-guards.ts`). Agents use their EOA. Policy is enforced off-chain on every transaction, and on-chain by `AgentPolicyModule` for actions routed through `AgentExecutor` once the agent's policy is synced (plan S8).
 
 ---
 

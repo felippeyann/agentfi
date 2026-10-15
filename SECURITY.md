@@ -48,7 +48,7 @@ The following are in scope for security reports:
 
 - All API keys are hashed with SHA-256 before storage
 - Transaction simulation via Tenderly before on-chain execution
-- On-chain policy enforcement via AgentPolicyModule (Safe module)
-- Agent keys held by Turnkey (secure enclaves); the AgentFi process never holds raw private keys
+- On-chain policy limits via `AgentPolicyModule`. It checks actions routed through `AgentExecutor` for agents whose policy is synced on-chain; the off-chain policy checks every backend transaction. Safe mode does not work yet (D19 in the execution plan).
+- With `WALLET_PROVIDER=turnkey`, agent wallet keys are held by Turnkey (secure enclaves) and the backend never holds them. The backend does hold one raw key, the escrow evaluator's (`ESCROW_EVALUATOR_PRIVATE_KEY`). The development-only local provider keeps keys in memory and is refused in production / staging.
 - Rate limiting on all API endpoints
 - Input validation via Zod on all routes
