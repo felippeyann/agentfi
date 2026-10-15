@@ -84,6 +84,8 @@ import {
   sameAddress,
   settlementChecks,
   windowCheck,
+  authorityState,
+  MAX_HEAD_AGE_SECONDS,
   type Check,
   type DecodedEvent,
   type JobSnapshot,
@@ -406,7 +408,7 @@ async function chainNow(cfg: Config): Promise<bigint> {
   const head = await blockTimestamp(cfg);
   const wall = BigInt(Math.floor(Date.now() / 1000));
   if (cfg.mode === 'fork') return head > wall ? head : wall;
-  if (wall - head > 120n) stop(`the RPC head is ${wall - head} s behind the wall clock: stale RPC (C5_RPC_URL)`);
+  if (wall - head > BigInt(MAX_HEAD_AGE_SECONDS)) stop(`the RPC head is ${wall - head} s behind the wall clock: stale RPC (C5_RPC_URL)`);
   return head;
 }
 
@@ -429,6 +431,11 @@ async function preflightChecks(cfg: Config, state: State | null, keys: AgentKeys
   const version = String(await c.request({ method: 'web3_clientVersion' as any }).catch(() => 'unknown'));
   const isAnvil = /anvil/i.test(version);
   checks.push(check('RPC is a local fork only in fork mode', cfg.mode === 'fork' ? 'anvil' : 'not anvil', isAnvil ? 'anvil' : version, cfg.mode === 'fork' ? isAnvil : !isAnvil));
+  // Every read below (code, configuration, balances) must come from a live head, not an old one.
+  if (cfg.mode === 'testnet') {
+    const headAge = BigInt(Math.floor(Date.now() / 1000)) - (await blockTimestamp(cfg));
+    checks.push(check('RPC head is current', `≤ ${MAX_HEAD_AGE_SECONDS} s behind the wall clock`, `${headAge} s`, headAge <= BigInt(MAX_HEAD_AGE_SECONDS)));
+  }
 
   const [escrowCode, hookCode] = await Promise.all([c.getCode({ address: cfg.escrow }), c.getCode({ address: cfg.hook })]);
   checks.push(check('escrow runtime code = this build', 'match', codeIdentityProblem('AgentJobEscrow', escrowCode) ?? 'match'));
@@ -851,7 +858,12 @@ async function cmdRun(cfg: Config, scenario: Scenario): Promise<void> {
         break;
       }
       case 'hold': {
-        if (!rec.authorityChecks) {
+        const recorded = authorityState(rec.authorityChecks);
+        if (recorded === 'failed') {
+          printChecks('[contest] recorded authority checks', rec.authorityChecks!);
+          stop('a recorded authority check failed: investigate before anything else — the operator decision stays blocked');
+        }
+        if (recorded === 'missing') {
           const checks = await authorityChecks(cfg, state, keys, rec.jobId, BigInt(rec.onChainJobId!));
           rec.authorityChecks = checks;
           saveScenario(cfg, scenario, rec);
@@ -892,6 +904,7 @@ async function cmdResolve(cfg: Config, scenario: Scenario): Promise<void> {
   const rec = state.scenarios.contest;
   if (!rec?.onChainJobId) stop('no contest job yet');
   if (!rec!.holdProvenAt) stop('the hold is not proven yet: rerun `run contest` until it says HELD past the window');
+  if (authorityState(rec!.authorityChecks) !== 'passed') stop('the authority checks are missing or failed: no operator decision until they pass');
 
   const job = await getJob(cfg, keys.requesterApiKey, rec!.jobId);
   if (job.escrow?.resolution) {

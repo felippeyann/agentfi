@@ -10,6 +10,8 @@ import {
   C5_CONTEST_WINDOW_SECONDS,
   C5_REPUTATION_REGISTRY,
   CHAIN_STATUS,
+  authorityState,
+  check,
   HOLD_MARGIN_SECONDS,
   MIN_ETH_WEI,
   PLANNED_GAS,
@@ -119,6 +121,15 @@ describe('nextStep — every action is chosen from the current state, so a rerun
     expect(nextStep('happy', job('PENDING', 'FAILED'))).toMatchObject({ kind: 'stop' });
     expect(nextStep('happy', job('PENDING', 'EXPIRED'))).toMatchObject({ kind: 'stop' });
     expect(nextStep('happy', { status: 'PENDING', escrow: null })).toMatchObject({ kind: 'stop' });
+  });
+});
+
+describe('recorded authority checks (#189 review)', () => {
+  it('missing → run them; all ok → passed; any recorded failure → failed (never skipped on a rerun)', () => {
+    expect(authorityState(undefined)).toBe('missing');
+    expect(authorityState([])).toBe('missing');
+    expect(authorityState([check('a', 401, 401), check('b', 'Unauthorized', 'Unauthorized')])).toBe('passed');
+    expect(authorityState([check('a', 401, 401), check('b', 'Unauthorized', 'would succeed')])).toBe('failed');
   });
 });
 

@@ -353,6 +353,19 @@ export function jobViewChecks(scenario: Scenario, job: { status: string; escrow:
   return checks;
 }
 
+/**
+ * The recorded authority checks of a contest: `missing` (run them), `passed`
+ * (every one ok), or `failed` — a recorded failure is never skipped on a
+ * rerun: the run stops and the operator decision stays blocked.
+ */
+export function authorityState(checks: Check[] | undefined): 'missing' | 'passed' | 'failed' {
+  if (!checks || checks.length === 0) return 'missing';
+  return checks.every((c) => c.ok) ? 'passed' : 'failed';
+}
+
+/** The RPC head may lag the wall clock by at most this much on the real network. */
+export const MAX_HEAD_AGE_SECONDS = 120;
+
 /** Settlement no earlier than `submittedAt` + window: the approved window was applied, not a shorter one. */
 export function windowCheck(submittedAt: bigint, settledAt: bigint, windowSeconds = C5_CONTEST_WINDOW_SECONDS): Check {
   const elapsed = settledAt - submittedAt;
