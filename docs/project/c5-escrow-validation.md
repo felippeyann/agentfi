@@ -160,7 +160,7 @@ Gas measured on the fork rehearsal (receipts, `c5-run/evidence/*.json` of §8):
 Today's price (0.006 gwei; L1 data fee about 10⁻¹⁴ ETH per tx) leaves a margin of more than
 100×; the funding still covers the whole run at about 1 gwei. The runner is stricter on
 purpose: it wants 3 × the planned gas at the current price, so with this funding it stops
-before a job if Base Sepolia's gas price rises above about 0.4 gwei (requester and provider) —
+before a job if Base Sepolia's gas price rises above about 0.4 gwei (the requester's threshold; 0.7 for the provider, 0.8 for the evaluator) —
 wait, or top up and re-approve. Faucets: Coinbase Developer
 Platform or Alchemy for ETH, `faucet.circle.com` (network Base Sepolia) for USDC. A faucet drip
 larger than the proposal stays in the wallet; the policies of §4.2, not the balances, bound
