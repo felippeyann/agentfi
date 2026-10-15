@@ -1,7 +1,12 @@
 # Operator interviews (WS7, gate G4)
 
-Owner-run. Nothing here is sent to anyone by an agent. Each interview is logged
-here, anonymised (`O1`, `O2`, `O3`), within a day of the call.
+Owner-run. Nothing here is sent to anyone by an agent.
+
+**What is public** (owner decision 2026-10-15, plan D21): this script, the
+criteria and the aggregated results. **What stays private:** contacts and
+every identifiable record. Each interview is logged within a day of the call,
+as `O1`, `O2`, `O3`, in the owner's private notes, outside this repository.
+Only the aggregated results are published here.
 
 **Gate G4 (plan §1):** at least 3 interviews; at least 2 operators report the
 same recurring problem with a concrete example; at least 1 runs the flow with
@@ -51,13 +56,19 @@ opinions; ask "when was the last time…" rather than "would you…".
    a real case?" Record yes or no for each, and a concrete next step.
 
    Rules for this question:
-   - Offer a dated Base Sepolia run only after C4 deploys this build there
-     (still pending, see [c4-c5-checklist.md](../c4-c5-checklist.md)). Until
-     then a run can only be local or on a fork, and does not count for G4.
+   - The pilot is an **assisted run on Base Sepolia after C4 / C5** (D21).
+     The maintainer accompanies the run, and the operator's own wallet still
+     funds the job (G4).
+   - Offer a date only after C4 / C5 pass (still pending, see
+     [c4-c5-checklist.md](../c4-c5-checklist.md)). Until then a run can only
+     be local or on a fork, and does not count for G4.
    - A real-case trace is evidence for the problem (questions 1–4), not a run
      of the flow.
 
-## Log template (one file per interview: `O1.md`, `O2.md`, `O3.md`)
+## Log template (private: one record per interview, `O1`, `O2`, `O3`)
+
+These records stay in the owner's private notes. They are never committed
+here.
 
 ```markdown
 # O<n> — <YYYY-MM-DD>
@@ -80,10 +91,8 @@ opinions; ask "when was the last time…" rather than "would you…".
 These are two different decisions. Agreeing to test is a next step, never a
 pass.
 
-- **Day 30 checkpoint (plan V3): is G4 on track?** The date is 2026-11-05
-  counted from the reactivation on 2026-10-06. The plan calendar's
-  "Days 1–30" window ends on 2026-11-11, so the owner confirms which date
-  applies. On track means two things:
+- **Day 30 checkpoint, 2026-11-05 (plan V3, owner decision D21): is G4 on
+  track?** On track means two things:
   - 2 or more interviews describe the same recurring problem with a concrete
     example;
   - at least 1 operator has committed to run the flow once it is available.
@@ -92,9 +101,9 @@ pass.
     there is no demand.
 
   If two of three operators say "not a problem", stop WS3–WS6 and reassess.
-  The pilot modality, and what happens if the flow is never available
-  before the go/no-go, are open owner decisions (owner note
-  `2026-10-15-kit-entrevistas.md` §11).
+  The pilot modality is decided: an assisted run on Base Sepolia after C4 / C5
+  (D21). One question is still open for the owner: what happens if the flow
+  is never available before the go/no-go.
 - **G4 gate (plan §1, checked at the go/no-go on 2027-01-05).** G4 passes only
   when all three thresholds hold:
   - at least 3 interviews;
@@ -102,8 +111,23 @@ pass.
     example;
   - at least 1 operator who **has run the flow** with their own funds (Base
     Sepolia is enough). The evidence is the Base Sepolia transaction hashes of
-    the job's `fund` and its settlement, logged in their `O<n>.md`.
-    Pseudonymous addresses are enough to stay anonymous, and a trace can only
-    complement the hashes.
+    the job's `fund` and its settlement, logged in their private `O<n>`
+    record. A trace can only complement the hashes. The public results say
+    that a run was verified and by whom. They publish the hashes only with
+    the operator's consent.
 - Otherwise, record what was heard and apply plan §1. Either stop, or change
   the hypothesis before any more integration work.
+
+## Aggregated results (public)
+
+After the checkpoint and after the go/no-go, publish one `results.md` here.
+It contains only counts and problem categories:
+
+- interviews held;
+- operators reporting the same recurring problem, and the category of that
+  problem;
+- next-step classes;
+- verified runs.
+
+It contains no names, companies, contacts, quotes that could identify
+someone, or dates tied to a person.

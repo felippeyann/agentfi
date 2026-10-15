@@ -42,8 +42,11 @@ an individual is officially representing the community in public spaces.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-**conduct@agentfi.io**.
+reported to the community leaders responsible for enforcement.
+
+A monitored contact for conduct reports is being set up and will be
+published here. The address this file used to list (`conduct@agentfi.io`)
+is not monitored, so do not use it.
 
 All complaints will be reviewed and investigated promptly and fairly.
 
