@@ -13,11 +13,13 @@ count as running the flow.
 ## Who to talk to
 
 Operators whose agents **already spend money** at least weekly: paid APIs,
-data, x402 resources, or other agents. Typical pools: Coinbase Agentic Wallet,
-AWS AgentCore Payments or MetaMask Agent Wallet users, x402 buyers listed in
-Coinbase Bazaar / Circle Agent Marketplace, Claude Code users with paid MCP
-tools. Screen out anyone who has not had an agent pay for something in the
-last month.
+data, x402 resources, or other agents. Where to look, as hypotheses only:
+Coinbase Agentic Wallet, AWS AgentCore Payments or MetaMask Agent Wallet users;
+Circle Agent Marketplace participants; Claude Code users with paid MCP tools.
+The x402 Bazaar lists payment-gated *services*, which are sellers
+([CDP docs](https://docs.cdp.coinbase.com/x402/bazaar), checked 2026-10-15).
+A listing there is not evidence of a buyer. Screen out anyone who has not had
+an agent pay for something in the last month.
 
 ## Script (about 25 minutes)
 

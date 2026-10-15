@@ -253,6 +253,7 @@ Still open:
 | ERC-8183 is a draft and may change | Implement behind an adapter; pin the EIP revision date in `erc-8183-mapping.md`; keep AgentFi's internal job model as the stable core |
 | ERC-8004 reputation is Sybil-prone | Only write feedback backed by a settlement tx; expose the tx in the feedback payload; read with that filter |
 | Demand does not materialise | WS7 runs from Day 1; Day-30 checkpoint can stop WS3–WS6 |
+| G4 fails on setup friction, not on demand (interview kit, 2026-10-15) | **Problem:** with no hosted instance (A1), an external operator likely has to stand up the backend, deploy this build's contracts and bring their own Turnkey, Alchemy and faucet funds, then wait about 70 minutes per job (D12). That could fail V4 even if the problem is real. **Mitigation:** offer no dated pilot before C4 / C5 pass. Before the interview data comes in, the owner decides two things: the pilot modality, and whether line 51 still applies when the flow was never available (owner note `2026-10-15-kit-entrevistas.md` §11) |
 | Competitors (Kite, Agentum, Virtuals ACP v2) ship faster | Differentiate on MCP distribution for Claude/Codex and on proof-anchored reputation; interoperate rather than compete at the standard level |
 | Solo-maintainer bandwidth | Tasks are sized for 1–3 days; coding agents run them in parallel worktrees; owner tasks are explicit |
 
