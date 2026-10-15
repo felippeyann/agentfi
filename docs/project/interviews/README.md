@@ -112,9 +112,9 @@ pass.
   - at least 1 operator who **has run the flow** with their own funds (Base
     Sepolia is enough). The evidence is the Base Sepolia transaction hashes of
     the job's `fund` and its settlement, logged in their private `O<n>`
-    record. A trace can only complement the hashes. The public results say
-    that a run was verified and by whom. They publish the hashes only with
-    the operator's consent.
+    record. A trace can only complement the hashes. The public results give
+    the count of verified runs and the verifier's role. They publish the
+    hashes only with the operator's consent.
 - Otherwise, record what was heard and apply plan §1. Either stop, or change
   the hypothesis before any more integration work.
 
@@ -127,7 +127,8 @@ It contains only counts and problem categories:
 - operators reporting the same recurring problem, and the category of that
   problem;
 - next-step classes;
-- verified runs.
+- verified runs: the count, the verifier's role and, only with the operator's
+  consent, the Base Sepolia hashes.
 
 It contains no names, companies, contacts, quotes that could identify
 someone, or dates tied to a person.
