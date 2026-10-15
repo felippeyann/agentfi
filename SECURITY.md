@@ -49,6 +49,6 @@ The following are in scope for security reports:
 - All API keys are hashed with SHA-256 before storage
 - Transaction simulation via Tenderly before on-chain execution
 - On-chain policy enforcement via AgentPolicyModule (Safe module)
-- MPC wallet infrastructure via Turnkey (no raw private keys)
+- Agent keys held by Turnkey (secure enclaves); the AgentFi process never holds raw private keys
 - Rate limiting on all API endpoints
 - Input validation via Zod on all routes

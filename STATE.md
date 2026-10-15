@@ -14,7 +14,7 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 **The thesis** (from VISION.md):
 
 - AI agents today _plan_ transactions and hand off to humans to click "approve" — they're advisors behind glass.
-- AgentFi removes the glass: each agent has an MPC wallet, an on-chain policy, and can execute transactions within auditable limits set by its operator.
+- AgentFi removes the glass: each agent has its own wallet, an on-chain policy, and can execute transactions within auditable limits set by its operator.
 - DeFi is the entry point because it's the only economic system that doesn't require a passport. A smart contract checks if the transaction is valid, not who sent it.
 - The real goal is the **agent-to-agent economy** — agents paying each other for data, compute, coordination, services, at machine speed. The volume is expected to eclipse human-to-human economic activity the same way algorithmic trading eclipsed human day-trading.
 - **Self-sustaining agents**: the moment an agent's earnings exceed its costs, it has crossed a line no AI system has crossed before — the transition from _tool_ to _participant_.
@@ -48,7 +48,7 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 │  (EscrowModule — legacy ETH escrow, opt-in)     │
 ├─────────────────────────────────────────────────┤
 │  L1  Wallet Infrastructure                      │
-│  Turnkey MPC (keys never reconstructed)         │
+│  Turnkey wallets (keys stay in its enclaves)    │
 │  Safe Smart Wallets (ERC-4337 compatible)       │
 └─────────────────────────────────────────────────┘
 ```
@@ -57,7 +57,7 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 
 | Layer     | Stack                                                                                  | Why                                                                                                             |
 | --------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| L1        | Turnkey MPC + Safe SDK                                                                 | MPC splits keys across shards that never reunite; Safe allows modules that enforce policy on-chain              |
+| L1        | Turnkey + Safe SDK                                                                     | Turnkey creates and uses keys inside secure enclaves, so the backend never holds them; Safe allows modules that enforce policy on-chain (Safe mode is development-only, D19) |
 | L2        | Solidity 0.8.24 + Foundry                                                              | Policy module validates each tx before Safe executes; Executor batches and collects fee in the same transaction; `AgentJobEscrow` escrows a USDC budget per job (ERC-8183) and `ReputationHook` writes ERC-8004 feedback in the settlement transaction |
 | L3        | Node 22 + Fastify 5 + Prisma 5 + Zod + viem 2 (ethers 5 still used by Aave helpers)    | Type-safe API, runtime validation, RPC fallback, decoupled workers                                              |
 | L3 queues | BullMQ on Redis                                                                        | Async tx pipeline, retries, DLQ, daily reputation cron                                                          |
@@ -72,7 +72,7 @@ AgentFi is the **economic infrastructure for non-human intelligence**. Open-sour
 | Service    | Role                                         | Alternatives                                          |
 | ---------- | -------------------------------------------- | ----------------------------------------------------- |
 | Alchemy    | RPC for Ethereum / Base / Arbitrum / Polygon | Infura, QuickNode, Ankr                               |
-| Turnkey    | MPC wallet provisioning + signing            | — (AWS KMS would work but trades MPC for single root) |
+| Turnkey    | Wallet provisioning + signing (secure enclaves) | — (AWS KMS would also keep keys out of the process) |
 | Tenderly   | Pre-broadcast transaction simulation         | Optional — graceful fallback if unset                 |
 | PostgreSQL | Persistence                                  | Neon, Supabase, Railway PG, self-host                 |
 | Redis      | BullMQ queues + rate limit + sim cache       | Upstash, Railway Redis                                |
@@ -200,7 +200,7 @@ Example: an agent swaps 0.1 ETH to USDC on Base.
 8. Job is enqueued in the BullMQ `transactions` queue.
 9. API returns `{ transactionId, status: QUEUED }` immediately.
 10. Worker pulls the job from Redis.
-11. `SubmitterService` signs via Turnkey MPC (private key never enters our process) and broadcasts through Alchemy.
+11. `SubmitterService` signs via Turnkey (the private key never enters our process) and broadcasts through Alchemy.
 12. `MonitorService` polls for the receipt with exponential backoff (2s → 3s → 4.5s → … capped at 30s, up to 20 attempts).
 13. On confirmation: `gasUsed`, `effectiveGasPriceWei`, `confirmedAt` persisted; status `CONFIRMED`.
 14. `FeeService` records a `FeeEvent` linked to `AgentBilling`. If the tx went through `AgentExecutor`, the fee was already collected on-chain atomically to `OPERATOR_FEE_WALLET`.
@@ -253,7 +253,7 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 - **Canonical hosted production** — would violate the "commons, fork it" principle. No hosted instance exists at all (the staging was decommissioned on 2026-05-17).
 - **Landing page / marketing surface** — AgentFi is infrastructure, not a product. Stripe integration is there only so self-hosting operators can charge subscriptions of their _own_ if they want.
 - **Closed-source features** — zero paywalls on core functionality.
-- **Centralized custody** — Turnkey MPC guarantees even the maintainer cannot move agent funds.
+- **Centralized custody** — the maintainer runs no instance and holds no keys; each operator's own Turnkey organisation holds its agents' keys.
 - **Legal personhood wrapper** — explicitly called out in VISION.md as a non-technical problem. Liability sits with the human operator for V1.
 
 ---

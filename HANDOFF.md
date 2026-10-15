@@ -238,11 +238,20 @@ Large features that were in the roadmap but had no external demand (GMX adapter,
 
 ### Repo layout — landing site lives outside this monorepo
 
-The `agentfi.cc` landing site was a **separate repository**, not a workspace
-in this monorepo. As of 2026-10-06 the `felippeyann/agentfi-landing` repo no
-longer exists on GitHub and `agentfi.cc` only returns a redirect; the Vercel
-project `agentfi-admin` returns 403. Treat the landing as gone until the owner
-decides otherwise.
+The landing site (`www.agentfi.cc`; `agentfi.cc` redirects there) is a
+**separate repository**, not a workspace in this monorepo. The 2026-10-06
+note that the repository was gone was wrong. Corrected on 2026-10-15:
+
+- `felippeyann/agentfi-landing` exists and is **private**. Accounts without
+  access just cannot see it.
+- It is linked to the Vercel project `agentfi-landing`. A push to its `main`
+  publishes to production, and a push to any other branch creates a preview.
+  Publish only with the owner's approval.
+- The 2026-10 redesign sits on a local, unpushed branch. Its state is in the
+  owner's notes, not in this repository.
+
+The same 2026-10-06 note said the Vercel project `agentfi-admin` returned 403.
+That was not re-checked on 2026-10-15.
 
 Don't add a `packages/landing/` workspace here. An earlier attempt did
 exactly that and produced redundant deploys + brittle Vercel config that

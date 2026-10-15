@@ -95,8 +95,8 @@ DB/A2A/P&L flows but not for real transactions.
 
 ## 4. Wallet Custody
 
-Production custody uses Turnkey MPC. Keys are split across shards and are not
-reconstructed in the AgentFi process.
+Production custody uses Turnkey. Keys are created and used inside Turnkey's secure enclaves and are not
+held by the AgentFi process.
 
 1. Create an account at <https://app.turnkey.com>.
 2. Create an organization.

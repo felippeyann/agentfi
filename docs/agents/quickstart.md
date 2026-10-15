@@ -139,7 +139,7 @@ owner ([execution plan §5](../project/execution-plan-2026-10.md#5-open-question
 
 ## Security Guarantees
 
-- Private keys never leave Turnkey MPC infrastructure
+- Private keys never leave Turnkey (secure enclaves)
 - All transactions simulated before submission
 - Operator kill switch available per agent
 - Policy whitelists for contracts, tokens, and max values

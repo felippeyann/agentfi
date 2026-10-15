@@ -208,7 +208,7 @@ AgentFi MCP Server
     v
 AgentFi Backend API
     |
-    |--- Turnkey (MPC wallet signing)
+    |--- Turnkey (wallet signing)
     |--- Safe (smart account execution)
     |--- Tenderly (transaction simulation)
     |--- Uniswap V3 / Curve (swaps)
@@ -222,7 +222,7 @@ Blockchain (Ethereum, Base, Arbitrum, Polygon)
 
 - Every transaction is **simulated** before execution (Tenderly)
 - **Policy constraints** enforced on-chain (max value, daily cap, allowed contracts/tokens)
-- **MPC wallets** — private keys never exist in a single location (Turnkey)
+- **Turnkey wallets** — the backend never holds the private keys (Turnkey keeps them in secure enclaves)
 - **Smart accounts** — Safe multisig with policy module guard
 - **A2A escrow** — job rewards are committed at creation time; on ERC-8183
   chains the USDC budget is locked on-chain until the evaluator settles

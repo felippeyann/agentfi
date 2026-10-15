@@ -18,7 +18,7 @@
 │  AgentExecutor — atomic batch execution         │
 ├─────────────────────────────────────────────────┤
 │  LAYER 1 — Wallet Infrastructure                │
-│  Turnkey MPC wallets (keys never exposed)       │
+│  Turnkey wallets (keys stay in its enclaves)    │
 │  Safe Smart Wallets (ERC-4337 compatible)       │
 └─────────────────────────────────────────────────┘
 ```
@@ -34,7 +34,7 @@
 7. Simulation via Tenderly — fails fast if tx would revert
 8. Transaction record created in PostgreSQL (QUEUED)
 9. Job enqueued in BullMQ
-10. Worker: signs via Turnkey MPC, broadcasts via Alchemy
+10. Worker: signs via Turnkey, broadcasts via Alchemy
 11. Monitor polls for on-chain confirmation (exponential backoff)
 12. On CONFIRMED: fee event recorded, webhook sent (if configured)
 

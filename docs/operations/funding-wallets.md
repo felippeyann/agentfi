@@ -116,7 +116,7 @@ Your exchange / personal wallet
 0x61fb281349dB2f4B790472679B65002BbbD90ea3
         (test-agent-1's wallet on Base)
         |
-        | controlled by Turnkey MPC
+        | key held by Turnkey
         | signed by AgentFi backend
         ↓
    DeFi Transactions (Uniswap, Aave, etc.)
