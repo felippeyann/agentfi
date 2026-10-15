@@ -5,8 +5,10 @@ here, anonymised (`O1`, `O2`, `O3`), within a day of the call.
 
 **Gate G4 (plan §1):** at least 3 interviews; at least 2 operators report the
 same recurring problem with a concrete example; at least 1 runs the flow with
-their own funds (Base Sepolia is enough). Checkpoint: Day 30, 2026-11-05.
-Abstract interest in agents does not count.
+their own funds (Base Sepolia is enough). Checked at the go/no-go on
+2027-01-05; Day 30 (2026-11-05) is only an on-track checkpoint (see the end
+of this file). Abstract interest in agents, or agreeing to test, does not
+count as running the flow.
 
 ## Who to talk to
 
@@ -44,7 +46,10 @@ opinions; ask "when was the last time…" rather than "would you…".
    percentage of volume?" (plan §5.4, decision D6)
 6. **Test (3 min).** "Would you run one job on Base Sepolia with test funds,
    or share an anonymised trace of a real case, in the next two weeks?" Record
-   yes or no, and a concrete next step with a date.
+   yes or no, and a concrete next step with a date. Offer a Base Sepolia run
+   only after C4 deploys this build there (still pending, see
+   [c4-c5-checklist.md](../c4-c5-checklist.md)). Until then a run can only be
+   local or on a fork, and does not count for G4.
 
 ## Log template (one file per interview: `O1.md`, `O2.md`, `O3.md`)
 
@@ -60,12 +65,29 @@ opinions; ask "when was the last time…" rather than "would you…".
 - Fit (Q5): <would it have prevented the case? why or why not>
 - Pricing preference: <per guaranteed job / % of volume / other>
 - Willing to test: <yes / no> — next step and date: <…>
+- Ran the flow: <not yet / yes — date, network, evidence (tx hashes or anonymised trace), verified by>
 - Same problem as: <O-ids, or "none">
 ```
 
-## Decision at the checkpoint
+## Decisions: Day 30 checkpoint and the G4 gate
 
-- Same recurring problem with a concrete example in 2 or more interviews, and
-  1 or more operators agreeing to test: G4 passes; continue.
+These are two different decisions. Agreeing to test is a next step, never a
+pass.
+
+- **Day 30 checkpoint (2026-11-05, plan V3): is G4 on track?** On track
+  means two things:
+  - 2 or more interviews describe the same recurring problem with a concrete
+    example;
+  - at least 1 operator has a dated next step to run the flow.
+
+  If two of three operators say "not a problem", stop WS3–WS6 and reassess.
+- **G4 gate (plan §1, checked at the go/no-go on 2027-01-05).** G4 passes only
+  when all three thresholds hold:
+  - at least 3 interviews;
+  - 2 or more operators with the same recurring problem and a concrete
+    example;
+  - at least 1 operator who **has run the flow** with their own funds (Base
+    Sepolia is enough), with verifiable evidence (transaction hashes or an
+    anonymised trace) logged in their `O<n>.md`.
 - Otherwise, record what was heard and apply plan §1. Either stop, or change
   the hypothesis before any more integration work.

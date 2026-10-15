@@ -10,7 +10,7 @@
 
 **Do NOT open a public GitHub issue for security vulnerabilities.**
 
-Instead, please email the maintainers directly at **security@agentfi.io** (or the email listed in `package.json`). We aim to acknowledge reports within **48 hours** and provide a fix or mitigation plan within **7 days**.
+Instead, use GitHub's [private vulnerability reporting form](https://github.com/felippeyann/agentfi/security/advisories/new). Sign in to GitHub and select **Report a vulnerability** in the repository's Security tab. Reports are shared privately with the maintainers, not posted as public issues. We aim to acknowledge reports within **48 hours** and provide a fix or mitigation plan within **7 days**.
 
 ### What to include
 
