@@ -1,7 +1,9 @@
 # C5 — escrow validation on Base Sepolia: plan, runner and acceptance
 
-> Prepared on 2026-10-15 for the owner's approval. **Nothing in this document has been executed on a
-> real network.** The authorisation package to approve is the first section of
+> Prepared on 2026-10-15 for the owner's approval. **No deploy, funding or transaction has been
+> sent to a real network**: on Base Sepolia only read-only RPC calls were made while preparing it
+> (chain id, gas price, blocks, the preflight against non-build addresses, the RPC head age; §2).
+> The authorisation package to approve is the first section of
 > [c4-c5-checklist.md](c4-c5-checklist.md); this file holds the detail behind it. Gate **G2** stays
 > pending until the run below is executed and verified on Base Sepolia.
 
@@ -23,9 +25,25 @@ Three scenarios:
 
 ## 2. Baseline
 
-**Candidate commit:** the merge commit of the PR that adds this file. The contracts are unchanged
-since `162cb06` (#182); the deploy, the backend and the runner all run from that one commit,
-because S9 accepts only contracts whose runtime code is this build's (D16).
+**Candidate commit:** `e6e93bd73020537e9cb4a56a148ac0f3de8ec814`, the merge of #189 that adds this
+file. The contracts are unchanged since `162cb06` (#182); the deploy, the backend and the runner all
+run from that one commit, because S9 accepts only contracts whose runtime code is this build's (D16).
+
+### 2.1 Rehearsed, candidate and re-checked commits
+
+Three different things, not one SHA:
+
+| Role | Commit | What it means |
+|---|---|---|
+| fork rehearsal of the runner (§8) | `75796fb` (final run recorded in §8), repeated on `cc0bb90` | the end-to-end run on the Anvil fork; the repeat on `cc0bb90` after the two #189 review fixes gave the same results (round handoff of 2026-10-15; its run files were not kept in the repository) |
+| candidate for the real run | `e6e93bd` | merge of #189; **same tree as `cc0bb90`** (`git rev-parse cc0bb90^{tree} e6e93bd^{tree}` → both `ce5d0b7d…`), so the second rehearsal ran exactly this code |
+| re-checked afterwards | `e6e93bd` | `contracts:code:check` at merge time and again on 2026-10-15 (orchestrated round): `forge build` + `npm run contracts:code:check` → `matches the artifacts (version ddc6936bc680)`; the runtime keccak of all four artifacts equals the table below |
+
+What changed between the rehearsals and the candidate (`git diff --stat 75796fb..e6e93bd -- packages`):
+only the runner — `scripts/c5/escrow-validation.ts`, `scripts/c5/plan.ts` and its unit test (+39 / −2):
+the preflight rejects an RPC head more than 120 s old on the real network, and a recorded failed
+authority check stops `run contest` and blocks `resolve`. No contract (`git diff 162cb06..e6e93bd --
+packages/contracts` is empty), no other backend source, no database migration.
 
 **Build** (Foundry 1.7.1, `packages/contracts/foundry.toml`): solc 0.8.24, optimizer 200 runs,
 `via_ir = false`, `bytecode_hash = "none"`, `cbor_metadata = false`. Embedded expected code
@@ -51,10 +69,12 @@ Check on the candidate: `cd packages/contracts && forge build && cd ../.. && npm
 | executed | backend unit suite | branch, `e5ae120` | 1 596 passed, 13 skipped (the opt-in fork suites), 80 files; typecheck clean |
 | executed | runner plan + admin route unit tests | `75796fb` | 20 and 10 passed |
 | executed | ERC-8183 fork suite incl. the new authority test | `e5ae120` (test code as committed), Anvil fork of Base Sepolia, block 47 822 000, local wallets | **7 / 7** |
-| executed | the runner end to end (§8) | `75796fb`, same fork, window 60 s (fork mode only) | every scenario PASS, reconcile PASS |
+| executed | the runner end to end (§8) | `75796fb`, repeated on `cc0bb90` (= the candidate's tree); same fork, window 60 s (fork mode only) | every scenario PASS, reconcile PASS, both times |
+| executed | GitHub CI of the PR head | `cc0bb90` | green, `CLEAN` before the merge |
+| executed | re-check of the candidate | `e6e93bd`, local build, 2026-10-15 | `contracts:code:check` OK (`ddc6936bc680`); runtime keccak 4 / 4 = the table above |
 | executed | both deploy scripts as the runbook runs them | Anvil fork of Base Sepolia at block 48 149 958 | gas below (§4.4); `verify-deployment.sh` 5 / 5 |
-| executed | read-only Base Sepolia reads | public RPC, block 48 149 375 | chain id 84532, gas price 0.006 gwei (base fee 0.005), L1 data fee 92–9 931 wei per sampled tx; the runner's preflight against non-build addresses answers 18 FAIL and STOP |
-| skipped | anything on the real network | — | no deploy, funding or transaction |
+| executed | read-only Base Sepolia reads (no signature, nothing broadcast) | public RPC, block 48 149 375; head-age check on `cc0bb90` | chain id 84532, gas price 0.006 gwei (base fee 0.005), L1 data fee 92–9 931 wei per sampled tx; the runner's preflight against non-build addresses answers 18 FAIL and STOP; RPC head 2 s behind the wall clock (PASS, limit 120 s) |
+| skipped | any write on the real network | — | no deploy, funding or transaction |
 | skipped | Turnkey | — | no credentials on this machine; the rehearsals use `WALLET_PROVIDER=local` |
 | skipped | faucets, Etherscan verification, keystore password prompts | — | owner-only steps |
 | skipped | the 3600 s window end to end | — | rehearsed with 60 s; 3600 s is enforced and checked by the runner and only the real run exercises it |
@@ -335,6 +355,11 @@ hook deployed with `DeployEscrow.s.sol`, the real backend with `WALLET_PROVIDER=
 | a second `run cancel` while the first ran | `STOP: another runner … is driving cancel` |
 | `verify` ×3 again, `reconcile` | identical PASS; reconcile **16 / 16**: USDC Δ −2.0 / +1.994 / +0.006, 6 transfers and no other, nonces 12 / 6 / 3, ETH Δ = gas of the found transactions with **0 wei unexplained** for each wallet, `getSummary` (1, 100) `completed` and (1, 0) `rejected` |
 
+The whole rehearsal was repeated on `cc0bb90` after the two #189 review fixes (stale RPC head in the
+preflight, a recorded authority failure stops the run), with the same results; that commit's tree is
+the candidate's (§2.1). With a copy of the state holding a simulated authority failure, `resolve`
+answered STOP.
+
 An earlier run on the same fork (`e5ae120` + working tree) exercised the recovery paths: a runner
 killed after creating the cancel job, its record lost, and the rerun adopted the job by its outbox tag
 (no new job); a lock held by a live process stopped a second runner, and a lock left by a dead
@@ -364,4 +389,10 @@ Found and fixed while rehearsing:
    but it puts the emergency-pause key in the backend's hot `.env`).
 3. **The contest decision** — `refund` + `quality-rejected` (recommended: it exercises the
    rating-0 path; the completed scenario already proves payment), or `pay`.
-4. **The package itself** — the amounts, policies, transactions and criteria above.
+4. **External credentials** — a Turnkey organization with an API key pair and an Alchemy key with
+   Base Sepolia enabled (both required, §3.3). Entered by the owner in a local terminal / `.env`, never
+   in a chat, a note or an issue.
+5. **The package itself** — chain 84532, the six roles, 4.5 USDC and 0.012 ETH from faucets, the
+   policies, the 3600 s window, the 22–23 transactions and the stop / success criteria above.
+
+Open as of 2026-10-15 (orchestrated round): all five. None is answered by this document.

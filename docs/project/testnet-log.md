@@ -315,7 +315,7 @@ Ends with `✓ Escrow cancellation refunded end to end.` (requester refunded in 
 
 ### 5.6 C5 runner rehearsal (2026-10-15) — local fork, no real funds
 
-`npm run c5:escrow` (`packages/backend/src/scripts/c5`) ran the three validation scenarios against the §5.1 stack (fork block 47 822 000, `WALLET_PROVIDER=local`, **window 60 s — fork mode only**; the real run is refused any window but 3600 s). Final run on `75796fb`: completed 37 / 37 checks, contest 39 / 39 (11 / 11 authority checks, held past the window, operator refund), cancel 22 / 22, reconcile 16 / 16 (gas explained to the wei). Details, gas per transaction and the recovery paths exercised: [c5-escrow-validation.md](c5-escrow-validation.md) §8. Not testnet evidence.
+`npm run c5:escrow` (`packages/backend/src/scripts/c5`) ran the three validation scenarios against the §5.1 stack (fork block 47 822 000, `WALLET_PROVIDER=local`, **window 60 s — fork mode only**; the real run is refused any window but 3600 s). Final run on `75796fb`: completed 37 / 37 checks, contest 39 / 39 (11 / 11 authority checks, held past the window, operator refund), cancel 22 / 22, reconcile 16 / 16 (gas explained to the wei); repeated with the same results on `cc0bb90`, whose tree is the candidate `e6e93bd`. Details, gas per transaction and the recovery paths exercised: [c5-escrow-validation.md](c5-escrow-validation.md) §8. Not testnet evidence.
 
 ### 5.5 Dry-run of §2 and §5.4 on 2026-10-08 (H14) — local fork, no real funds
 
