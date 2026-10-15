@@ -65,7 +65,7 @@ Built on top of the transaction pipeline:
 - **Escrow v2** — reward committed to requester's DailyVolume at job creation, released on terminal state (migration 0005)
 - **Reputation Scoring v2.1** — weighted score from real metrics (tx success 40%, job completion 30%, volume 20%, consistency 10%) with 2x time-decay on recent 30 days, recomputed daily via BullMQ cron
 - **Agent P&L Dashboard (v2)** — `GET /v1/agents/me/pnl` computes `breakEven` / `profitable` flags from earnings (A2A rewards received) vs costs (protocol fees + rewards paid + gas: `gasUsed × effectiveGasPriceWei` per CONFIRMED/REVERTED tx)
-- **Persistent identity via ENS** — when `ENS_PARENT_DOMAIN` + controller key are configured, each new agent gets a subdomain (`<slug>.agentfi.eth`) pointing to its Safe address
+- **Persistent identity via ENS** — when `ENS_PARENT_DOMAIN` + controller key are configured, each new agent gets a subdomain (`<slug>.agentfi.eth`) pointing to its wallet address
 
 ## Deployment posture
 

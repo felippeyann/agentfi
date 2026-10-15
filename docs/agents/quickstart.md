@@ -68,8 +68,8 @@ Response includes your `apiKey` — shown **once**, store it securely.
 ## 3. Your Agent Can Now Execute Transactions
 
 The agent receives its own wallet (a key held by Turnkey, or in memory on the
-dev stack's local provider; a Safe smart wallet when the operator sets
-`SAFE_DEPLOYER_PRIVATE_KEY`). Example Claude prompt:
+dev stack's local provider). Safe mode does not work yet (D19 in the
+execution plan), so agents use this wallet as an EOA. Example Claude prompt:
 
 > "Check my ETH balance and swap 0.1 ETH to USDC on Ethereum."
 
