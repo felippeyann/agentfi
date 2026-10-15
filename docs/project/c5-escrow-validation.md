@@ -219,6 +219,10 @@ npm run c5:escrow -- resolve contest       # the operator's decision; settlement
 npm run c5:escrow -- reconcile             # whole run vs the snapshot; prints the testnet-log rows
 ```
 
+Every terminal that runs the runner needs the same `export` lines: keep the five address
+lines in a file under `c5-run/` (git-ignored) and `source` it, and read the two secrets from
+`.env` as shown in each terminal (they are never written anywhere else).
+
 Sequence and duration: C4 about 20 minutes, environment 15, `setup` and faucets 15–30, then the
 three scenarios in parallel for about 75–80 minutes (the contest is held 3600 s + 300 s after its
 `submit`). About 2 h 30 in total. `npm run c5:escrow -- status` shows every job at any time.
