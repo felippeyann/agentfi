@@ -202,15 +202,19 @@ describe('GET /admin/escrow/verification (Q7)', () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it('returns the API process state of each escrow chain WITH the reason, and the TTL / re-check settings', async () => {
+  it('returns the API process state of each escrow chain WITH the reason, the TTL / re-check settings and the contest window', async () => {
     const app = await buildApp();
+    const { env } = await import('../config/env.js');
     const res = await app.inject({ method: 'GET', url: '/admin/escrow/verification', headers: { 'x-admin-secret': ADMIN_SECRET } });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
       process: 'api',
       ttlSeconds: 600,
       recheckSeconds: 120,
+      // C5: the run's preflight compares this with the approved 3600 s (env default 0 here).
+      escrowWindow: { evaluationDelaySeconds: env.ESCROW_EVALUATION_DELAY_SECONDS, jobTtlSeconds: env.ESCROW_JOB_TTL_SECONDS },
       chains: [expect.objectContaining({ chainId: 84532, state: 'unverified', allowed: false, reason: expect.stringContaining('could not be read') })],
     });
+    expect(typeof res.json().escrowWindow.evaluationDelaySeconds).toBe('number');
   });
 });

@@ -10,17 +10,26 @@ Gate: **G2** = ERC-8004 feedback written on Base Sepolia by a settled job,
 with the transaction hashes recorded in `testnet-log.md` §3–4. The fork
 rehearsals (§5.2, §5.5, the C3d fork run) do not count as G2 evidence.
 
-## Authorisation (owner, before anything is executed)
+## Authorisation package (owner, before anything is executed)
 
-This checklist separates the decision to run C4 / C5 from running it. Nothing below §1 is executed until the owner has authorised, explicitly and in writing (the round note or a PR comment):
+This checklist separates the decision to run C4 / C5 from running it. Nothing below §0 is executed until the owner has approved this package, explicitly and in writing (the round note or a PR comment). The detail behind each line — evidence, gas, acceptance matrix, recovery — is in [c5-escrow-validation.md](c5-escrow-validation.md). The package covers the **escrow validation only**: completed work, cancellation, and contest → operator resolution.
 
-- **The commit to deploy:** the merged `main` commit (this file's revision; the round's evidence is on `162cb06`). `npm run contracts:code:check` must report that the embedded code matches the artifacts (0.12) — S9 accepts only contracts deployed from this build (D16).
-- **The addresses:** `OPERATOR_ADDRESS` / `POLICY_OPERATOR_ADDRESS_84532`, `FEE_WALLET`, `TRUSTED_EVALUATOR`.
-- **The funding:** faucet ETH for the deployer and the evaluator (about 0.01 each), and faucet USDC / ETH for the two C5 agents (step 2.7).
-- **The real-network transactions:** the C4 deploy (two scripts) and the C5 runs (happy, cancel, optional D9).
-- **The C5 agents' policies:** the example registers them with a USD cap covering the budget (`maxValuePerTxUsd`) and no cooldown; agents created by hand need `maxValuePerTxUsd` for escrow and `maxOutflowPerTxUsd` for any ordinary outflow (D17).
+| Item | Proposal to approve |
+|---|---|
+| **Commit and build** | The merge commit of the PR that added `c5-escrow-validation.md` (contracts unchanged since `162cb06`). Foundry 1.7.1, solc 0.8.24, optimizer 200, no metadata; expected code version `ddc6936bc680…`. Runtime keccak of the artifacts: escrow `0xe9366fa6…89be`, hook `0xcbe9fd33…f54a` (all four in the doc §2). Gate: `npm run contracts:code:check` matches (0.12); deploy, backend and runner from that same checkout |
+| **Network** | Base Sepolia, chain 84532 only; RPC `https://sepolia.base.org` for the runner's reads, a valid Alchemy key for the backend; mainnet out of scope (its contest window stays open, plan §5-9) |
+| **Contracts** | `AgentJobEscrow` + `ReputationHook` (`DeployEscrow.s.sol`). Recommended: **not** `AgentPolicyModule` / `AgentExecutor` (decision §9-1 of the doc; escrow jobs do not use them) |
+| **Addresses** (all new; public addresses only) | deployer (new keystore key) · operator (new, keystore, in no `.env`) · fee wallet (new, owner-controlled) · evaluator (`cast wallet new`, key only in `packages/backend/.env`) · requester and provider (created by the runner's `setup`, Turnkey, EOA mode). Not reused: Anvil test accounts, the legacy Base Sepolia pair, the Base mainnet deployer / fee wallet. Each address is recorded in testnet-log §1 / §4 as it is created |
+| **Amounts** | escrow budgets: completed **2.0**, contest **1.5**, cancel **1.0** USDC (4.5 locked at most; net requester −2.0, provider +1.994, escrow fee +0.006 kept in the escrow). ETH from faucets: deployer **0.005**, evaluator **0.003**, requester **0.002**, provider **0.002** (0.012 total; measured need at today's 0.006 gwei is < 0.0001) |
+| **Policies** | requester: `maxValuePerTxUsd 2`, `maxDailyVolumeUsd 5`, `cooldownSeconds 0`, `allowedRecipients [provider wallet]`; provider: `maxValuePerTxUsd 1`, `maxDailyVolumeUsd 1`, `cooldownSeconds 0`; both `maxOutflowPerTxUsd` **null** (no ordinary outflow possible) |
+| **Window** | `ESCROW_EVALUATION_DELAY_SECONDS=3600` (Q6 / D12), checked by the runner against the backend before every step and on every settlement (≥ 3600 s after `submit`) |
+| **Transactions** (real network) | C4: 2 (escrow, hook) [+3 with the module / executor]. C5: completed 8 (requester createJob, setBudget, approve, fund; provider ERC-8004 register, setProviderAgentId, submit; evaluator complete) · contest 7 (requester 4; provider setProviderAgentId, submit; evaluator reject) · cancel 5–6 (requester 4; provider setProviderAgentId may land or revert; evaluator reject). 22–23 in total, plus the faucet drips. No transfer from or to any owner wallet; no fee withdrawal |
+| **Contest decision** | `refund` + `quality-rejected` by the operator, after the job has been held past the window (recommended; `pay` is the alternative) |
+| **Missing before C4** | the four owner addresses and their keys (§3.3 of the doc); faucet ETH / USDC; Turnkey organization + API key pair; a valid Alchemy key with Base Sepolia; `API_SECRET` / `ADMIN_SECRET`; the `agentfi_c5` database and an empty Redis index; optional Etherscan API V2 key |
+| **Success** | every scenario `verify` PASS, `reconcile` PASS (doc §7), the authority checks PASS, testnet-log §1 / §3 / §4 filled; then G2 may be marked passed |
+| **Stop** | any runner `STOP` (wrong network; configuration or bytecode not verified; unexpected recipient or party; insufficient balance; event, timing, nonce or ETH divergence; run-integrity breach — doc §5). On a stop nothing more is sent and no new job is created; the owner decides |
 
-Mainnet stays out of scope: no mainnet value is chosen here (the mainnet contest window is still open, plan §5-9).
+Approving this package authorises only what it lists. Anything else (another scenario, a different amount, a fee withdrawal, a mainnet step) needs its own approval.
 
 ## 0. Before you start
 
@@ -45,9 +54,9 @@ Mainnet stays out of scope: no mainnet value is chosen here (the mainnet contest
 |---|---|---|---|
 | 1.1 | `cd packages/contracts && forge test` | `356 tests passed, 0 failed, 2 skipped` | the last line |
 | 1.2 | Export `EXPECTED_CHAIN_ID=84532`, `OPERATOR_ADDRESS`, `FEE_WALLET`, `TRUSTED_EVALUATOR` (the address), `EXECUTOR_FEE_BPS=30` | — | — |
-| 1.3 | `forge script script/Deploy.s.sol --rpc-url base_sepolia --account agentfi-deployer --broadcast [--verify]` | `Executor bound:` = the `AgentExecutor:` line; `Legacy EscrowModule: skip`; copy block with `POLICY_MODULE_ADDRESS_84532`, `EXECUTOR_ADDRESS_84532`, `POLICY_OPERATOR_ADDRESS_84532`, `OPERATOR_FEE_WALLET`. Run it from the commit the backend will run: `npm run contracts:code:check` passes there (S9: only this build's bytecode is accepted) | the copy block; `broadcast/Deploy.s.sol/84532/run-latest.json` |
-| 1.4 | `forge script script/DeployEscrow.s.sol --rpc-url base_sepolia --account agentfi-deployer --broadcast [--verify]` | `Hook gas requirement: 597937`, `Hook bind requirement: 140794`; copy block with `AGENT_JOB_ESCROW_ADDRESS_84532`, `REPUTATION_HOOK_ADDRESS_84532` | the copy block; `broadcast/DeployEscrow.s.sol/84532/run-latest.json` |
-| 1.5 | `bash ../../scripts/verify-deployment.sh …` (§2.7) | `=== Results: 5 passed, 0 failed ===` (incl. the module's `executor()` = the executor) | output |
+| 1.3 | **Only if the package includes the policy module / executor** (doc §9-1; not needed for the escrow validation): `forge script script/Deploy.s.sol --rpc-url base_sepolia --account agentfi-deployer --broadcast [--verify]` | `Executor bound:` = the `AgentExecutor:` line; `Legacy EscrowModule: skip`; copy block with `POLICY_MODULE_ADDRESS_84532`, `EXECUTOR_ADDRESS_84532`, `POLICY_OPERATOR_ADDRESS_84532`, `OPERATOR_FEE_WALLET`. Run it from the commit the backend will run: `npm run contracts:code:check` passes there (S9: only this build's bytecode is accepted). Measured on a fork: 3 txs, 1 939 833 gas | the copy block; `broadcast/Deploy.s.sol/84532/run-latest.json` |
+| 1.4 | `forge script script/DeployEscrow.s.sol --rpc-url base_sepolia --account agentfi-deployer --broadcast [--verify]` | `Hook gas requirement: 597937`, `Hook bind requirement: 140794`; copy block with `AGENT_JOB_ESCROW_ADDRESS_84532`, `REPUTATION_HOOK_ADDRESS_84532`. Measured on a fork: 2 txs, 3 724 419 gas | the copy block; `broadcast/DeployEscrow.s.sol/84532/run-latest.json` |
+| 1.5 | Only with 1.3: `bash ../../scripts/verify-deployment.sh …` (§2.7) | `=== Results: 5 passed, 0 failed ===` (incl. the module's `executor()` = the executor) | output |
 | 1.6 | The `cast call` block of contract-deployment.md "Post-deployment checks" | every value equals its comment: `token()` = USDC `0x036C…CF7e`, hook `acp()` = escrow, `trustedEvaluator()` = your evaluator, `canonicalAgentId` / `penalties` = 0 | output |
 | 1.7 | Record: testnet-log.md §1 (addresses, deploy tx hashes, deployer, constructor params), STATE.md §3, contract-deployment.md registry | — | a docs PR |
 
@@ -57,27 +66,22 @@ Failure stops: `WrongChain` / missing `EXPECTED_CHAIN_ID` / `SignerConflict` mea
 
 | # | Step | Expected result | Evidence to keep |
 |---|---|---|---|
-| 2.1 | `docker compose -f docker-compose.dev.yml up -d postgres redis`; `… stop api`; `… exec -T postgres psql -U agentfi -d postgres -c "CREATE DATABASE agentfi_c5"` | `CREATE DATABASE` | — |
-| 2.2 | Write `packages/backend/.env` from §5.4 step 3: `NODE_ENV=development`, `WALLET_PROVIDER=turnkey`, the three `TURNKEY_*`, the C4 copy blocks, `ESCROW_EVALUATOR_PRIVATE_KEY`, `REDIS_URL=redis://localhost:6379/5`, **`ESCROW_EVALUATION_DELAY_SECONDS=3600`** (contest window on for the whole run, owner decision Q6/D12), **`SYNTHETIC_TEST_PRICES_USD=84532:native=2500,84532:0x036CbD53842c5426634e7929541eC2318f3dCF7e=1`** (testnet-only synthetic prices so the daily limit can count ordinary spends, Q9/D15 — never in production; the boot refuses it there) | file exists, git-ignored (`git status` does not list it) | — |
+| 2.1 | `docker compose -f docker-compose.dev.yml up -d postgres redis`; `… stop api`; `… exec -T postgres psql -U agentfi -d postgres -c "CREATE DATABASE agentfi_c5"`; `… exec -T redis redis-cli -n 5 flushdb` (DB 5 held a stale queue key on 2026-10-15) | `CREATE DATABASE`; `OK`; `… redis-cli -n 5 dbsize` → `0` | — |
+| 2.2 | Write `packages/backend/.env` from §5.4 step 3: `NODE_ENV=development`, `WALLET_PROVIDER=turnkey`, the three `TURNKEY_*`, a **valid** `ALCHEMY_API_KEY` with Base Sepolia enabled (a placeholder makes every "is this transaction known?" lookup uncertain), the C4 copy blocks (without the 1.3 block, leave `POLICY_MODULE_ADDRESS_84532` / `EXECUTOR_ADDRESS_84532` / `POLICY_OPERATOR_ADDRESS_84532` unset), `ESCROW_EVALUATOR_PRIVATE_KEY`, `REDIS_URL=redis://localhost:6379/5`, **`ESCROW_EVALUATION_DELAY_SECONDS=3600`** (contest window on for the whole run, owner decision Q6/D12), **`SYNTHETIC_TEST_PRICES_USD=84532:native=2500,84532:0x036CbD53842c5426634e7929541eC2318f3dCF7e=1`** (testnet-only synthetic prices so the daily limit can count ordinary spends, Q9/D15 — never in production; the boot refuses it there) | file exists, git-ignored (`git status` does not list it) | — |
 | 2.3 | `cd packages/backend && npx prisma generate && npx prisma migrate deploy` | every migration applied, **0001 to 0025** | output |
-| 2.4 | Terminal A: `TRANSACTION_WORKER_ENABLED=false npx tsx src/index.ts` | `ERC-8183 escrow enabled — evaluator signer configured` with `escrowEvaluatorAddress` = `TRUSTED_EVALUATOR`; **`ERC-8183 boot check: escrow (+ ReputationHook where configured) match the configuration`** with `chainIds: [84532]` and **`ERC-8183 configuration verified — escrow signatures allowed on this chain`** with `chainId: 84532` (Q7/D13); **`AgentExecutor / AgentPolicyModule verified against this build — executor-routed transactions and policy syncs allowed`** with `chainId: 84532` (S9: this build's bytecode, bound executor, `POLICY_OPERATOR_ADDRESS_84532`; a mismatch would only log in `development` — check for `would be FATAL`); `AgentFi API running on port 3000` | the log lines |
+| 2.4 | Terminal A: `TRANSACTION_WORKER_ENABLED=false npx tsx src/index.ts` | `ERC-8183 escrow enabled — evaluator signer configured` with `escrowEvaluatorAddress` = `TRUSTED_EVALUATOR`; **`ERC-8183 boot check: escrow (+ ReputationHook where configured) match the configuration`** with `chainIds: [84532]` and **`ERC-8183 configuration verified — escrow signatures allowed on this chain`** with `chainId: 84532` (Q7/D13); only with 1.3: **`AgentExecutor / AgentPolicyModule verified against this build — executor-routed transactions and policy syncs allowed`** with `chainId: 84532` (S9: this build's bytecode, bound executor, `POLICY_OPERATOR_ADDRESS_84532`; a mismatch would only log in `development` — check for `would be FATAL`); `AgentFi API running on port 3000` | the log lines |
 | 2.5 | Terminal B: `TRANSACTION_WORKER_ENABLED=true npx tsx src/worker.ts` | `Transaction worker started`, `Payment recovery worker started`, `Escrow settlement worker started`, `Escrow expiry sweep scheduled`, the same boot-check lines (escrow and S9), **no `CONFIG DRIFT`** | the log lines |
 | 2.6 | `curl http://localhost:3000/health/ready` | `"turnkey":true` and `escrowConfig` with `{"chainId":84532,"state":"verified","allowed":true,…}` | output |
-| 2.7 | Happy path: `AGENTFI_API_URL=http://localhost:3000 AGENTFI_OPERATOR_SECRET=<API_SECRET> node examples/escrow-erc8183/index.mjs`. When it waits: send the requester ≥ 1 USDC (faucet.circle.com) and 0.0005 ETH, the provider 0.0005 ETH. **Expected duration ≈ 70 min**: after `submit` the script logs `waiting for the contest window` and waits about one hour (`escrow.onChainStatus` stays `SUBMITTED`, a progress line every 5 min), then the evaluator completes | `✓ Escrow flow completed end to end.` and `feedback written` | the printed job id, `onChainJobId`, settle tx, fee, provider ERC-8004 agent id; both API keys (keep them private) |
-| 2.8 | Failure path: send the requester 1 USDC again, then `AGENTFI_FLOW=cancel AGENTFI_REQUESTER_API_KEY=… AGENTFI_PROVIDER_API_KEY=… AGENTFI_API_URL=http://localhost:3000 node examples/escrow-erc8183/index.mjs` | `✓ Escrow cancellation refunded end to end.`, full refund, no feedback | job id, `onChainJobId`, reject tx |
-| 2.9 | On Basescan: the hook's `FeedbackWritten` in the happy run's settle tx; the registry's `NewFeedback` (value 100) | events present | tx links |
-| 2.10 | Record testnet-log.md §3 (one row per run) and §4 (provider identity, `register` tx, `agentURI` = `http://localhost:3000/v1/agents/<id>/erc8004.json`) | — | a docs PR |
-| 2.11 | `docker compose -f docker-compose.dev.yml start api` | dev API back | — |
+| 2.7 | Third terminal, `packages/backend`: export `C5_ESCROW`, `C5_HOOK` (C4 copy block), `C5_EVALUATOR`, `C5_OPERATOR`, `C5_FEE_WALLET`, and the two secrets read from `.env` without printing them (doc §6.3); `npm run c5:escrow -- preflight` | every line `PASS` (chain 84532, this build's bytecode, escrow / hook configuration, backend verified, window 3600, TTL, Turnkey, evaluator gas) | the output |
+| 2.8 | `npm run c5:escrow -- setup` | two agents registered with the approved policies; their wallet addresses and the funding request printed; API keys written to `c5-run/agent-keys.secret.json`, never printed | the addresses (testnet-log §4 later) |
+| 2.9 | Faucets: the requester ≥ 4.5 USDC and 0.002 ETH, the provider 0.002 ETH — to the printed addresses only; then `npm run c5:escrow -- snapshot` | the snapshot table (balances, nonces, block) | the output |
+| 2.10 | `npm run c5:escrow -- run happy` (≈ 70 min); once it prints `binding=BOUND`, in two more terminals `run contest` (≈ 70 min, held past the hour) and `run cancel` (≈ 5 min) | each ends `acceptance … all checks passed` (contest: `HELD past the window`, after the authority checks PASS) | `c5-run/evidence/*.json` |
+| 2.11 | When `run contest` prints `HELD`: `npm run c5:escrow -- resolve contest` (refund + `quality-rejected`); optional before it: restart the worker (terminal B) and see the job stay held | 202, then `REJECTED`, `acceptance … all checks passed` | `evidence/contest.json` |
+| 2.12 | `npm run c5:escrow -- reconcile` | `Reconcile … all checks passed` and three testnet-log rows printed | `evidence/reconcile.json` |
+| 2.13 | Record testnet-log.md §1 (C4), §3 (the three rows), §4 (provider identity, `register` tx, `agentURI` = `http://localhost:3000/v1/agents/<id>/erc8004.json`); keep `c5-run/state.json`, `scenarios/` and `evidence/` (no secret in them; never commit `agent-keys.secret.json`) | — | a docs PR |
+| 2.14 | `docker compose -f docker-compose.dev.yml start api` | dev API back | — |
 
-**Optional: D9 on the real network** (stronger evidence; not required by G2).
-1. Nothing to restart: the contest window (`ESCROW_EVALUATION_DELAY_SECONDS=3600`, step 2.2) is on for the whole run.
-2. Run a third job up to `SUBMITTED` by hand through the API, the way the contest scenario of `packages/backend/src/__tests__/e2e/escrow-erc8183.fork.e2e.ts` does. The example script has no contest flow.
-3. Within the hour after `submit` confirms, the requester calls `POST /v1/jobs/<id>/contest` (after it the evaluator has completed the job and the contest is a `409`).
-4. Check that nothing settles while it is held: `escrow.onChainStatus` stays `CONTESTED` and the chain says Submitted.
-5. Resolve with `POST /admin/jobs/<id>/resolve` `{"decision":"refund","verdict":"quality-rejected","note":"C5 contest test"}`, using the `x-admin-secret` header, from localhost.
-6. Expected: `JobRejected(agentfi.quality-rejected)`, full refund, `FeedbackWritten` value 0.
-
-Record it as a separate row.
+A runner `STOP` at any step ends the run there: nothing more is sent, and the owner decides. Rerunning a command after an interruption resumes it without creating a new job (doc §6.4). The `examples/escrow-erc8183` script still works for a demonstration, but it creates new agents and a new job on every run: it is not the validation path.
 
 ## 3. Known behaviour to expect (not defects)
 
@@ -94,7 +98,8 @@ Record it as a separate row.
 
 ## 4. Done when
 
-- [ ] testnet-log.md §1 has the four contract addresses and deploy tx hashes
-- [ ] §3 has the happy row with `feedback written` and the cancel row with `skipped:no-params`
+- [ ] testnet-log.md §1 has the deployed contract addresses (escrow and hook; the module and executor only with 1.3) and their deploy tx hashes
+- [ ] §3 has the three rows printed by `reconcile`: completed (`feedback written`), contest (`written`, resolution `quality-rejected`), cancel (`skipped:no-params`)
 - [ ] §4 has the provider identity
+- [ ] `evidence/happy.json`, `contest.json`, `cancel.json` and `reconcile.json` all `PASS`, kept with the docs PR (secrets excluded)
 - [ ] plan rows C4 and C5 marked done with a link to the docs PR; gate G2 marked passed only then

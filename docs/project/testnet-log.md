@@ -289,6 +289,8 @@ TRANSACTION_WORKER_ENABLED=true npx tsx src/worker.ts
 
 The value on the command line wins over `.env` (dotenv never overrides a variable that is already set), so one `.env` serves both. Expected: the API logs `Transaction worker disabled for this process (TRANSACTION_WORKER_ENABLED=false)`, `ERC-8183 escrow enabled — evaluator signer configured` with `escrowEvaluatorAddress` = your `TRUSTED_EVALUATOR`, and `AgentFi API running on port 3000`; the worker logs `Transaction worker started`, `Payment recovery worker started`, `Escrow settlement worker started`, `Escrow expiry sweep scheduled` and `Transaction worker process is running`. `curl http://localhost:3000/health/ready` answers `"turnkey":true` once the Turnkey credentials work (its `rpc` check reads Ethereum mainnet through Alchemy, so it says `false` with a placeholder `ALCHEMY_API_KEY`; that does not affect Base Sepolia).
 
+**For the validation run (G2), steps 6–8 are done with the C5 runner, not the example:** checklist §2.7–2.13 and [c5-escrow-validation.md](c5-escrow-validation.md) (three scenarios — completed, cancel, contest → operator — resumable, with acceptance checks and a whole-run reconcile). The example below stays as a demonstration; it creates new agents and a new job on every run.
+
 **6. Happy path** (third terminal, repository root):
 
 ```bash
@@ -310,6 +312,10 @@ Ends with `✓ Escrow cancellation refunded end to end.` (requester refunded in 
 **8. Record** one row per run in section 3 (AgentFi job id, `onChainJobId`, settle tx and fee as printed; the fund tx is `proofOfPayment.txHash` in `GET /v1/jobs/<job id>/feedback.json` for the happy run, and the requester wallet's `fund` transaction on <https://sepolia.basescan.org> for both) and the provider's identity in section 4 (the ERC-8004 agent id printed in step 6; its `register` tx on the provider wallet's Basescan page; `agentURI` = `http://localhost:3000/v1/agents/<provider id>/erc8004.json`).
 
 **Local wallet provider: fork rehearsal only.** `WALLET_PROVIDER=local` (the fork harness of §5.1, and the dry-run of §5.5) keeps each agent's key in the memory of the process that created it. Every restart loses the keys, so agents registered before can no longer sign (register new ones), and an API and a worker in separate processes cannot share them: the worker fails with `[local-wallet] wallet … not found`. With the local provider run one process that does both (`TRANSACTION_WORKER_ENABLED=true npx tsx src/index.ts`, no `worker.ts`), as the harness does. `NODE_ENV=production` and `staging` refuse it.
+
+### 5.6 C5 runner rehearsal (2026-10-15) — local fork, no real funds
+
+`npm run c5:escrow` (`packages/backend/src/scripts/c5`) ran the three validation scenarios against the §5.1 stack (fork block 47 822 000, `WALLET_PROVIDER=local`, **window 60 s — fork mode only**; the real run is refused any window but 3600 s). Final run on `75796fb`: completed 37 / 37 checks, contest 39 / 39 (11 / 11 authority checks, held past the window, operator refund), cancel 22 / 22, reconcile 16 / 16 (gas explained to the wei). Details, gas per transaction and the recovery paths exercised: [c5-escrow-validation.md](c5-escrow-validation.md) §8. Not testnet evidence.
 
 ### 5.5 Dry-run of §2 and §5.4 on 2026-10-08 (H14) — local fork, no real funds
 

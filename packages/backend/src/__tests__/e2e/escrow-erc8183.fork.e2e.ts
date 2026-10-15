@@ -22,7 +22,18 @@
 import { spawn } from 'child_process';
 import { join } from 'path';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
-import { getAddress, keccak256, parseEventLogs, toBytes, type Address, type Hex, type Log } from 'viem';
+import {
+  BaseError,
+  ContractFunctionRevertedError,
+  encodeFunctionData,
+  getAddress,
+  keccak256,
+  parseEventLogs,
+  toBytes,
+  type Address,
+  type Hex,
+  type Log,
+} from 'viem';
 import { AGENT_JOB_ESCROW_ABI } from '../../abi/AgentJobEscrow.abi.js';
 import { REPUTATION_HOOK_ABI } from '../../abi/ReputationHook.abi.js';
 import {
@@ -555,8 +566,53 @@ describe.skipIf(!ctx)('ERC-8183 escrow + ERC-8004 reputation on a Base Sepolia f
       return { status: res.status, body: (await res.json()) as Record<string, unknown> };
     }
 
+    /**
+     * C5 acceptance: while the job is held, neither agent can decide it — not through the operator
+     * route (admin secret + loopback), not by moving the job, not through a batch, and not on-chain
+     * (only the evaluator may complete / reject a Submitted job). Nothing here sends a transaction.
+     */
+    async function assertNoAgentCanResolve(requester: Agent, provider: Agent, jobId: string, onChainJobId: string) {
+      for (const [who, apiKey, decision] of [
+        ['provider', provider.apiKey, 'pay'],
+        ['requester', requester.apiKey, 'refund'],
+      ] as const) {
+        const res = await call(backend.url, `/admin/jobs/${jobId}/resolve`, { method: 'POST', apiKey, body: { decision, note: `${who} without the admin credential` } });
+        expect(res.status, `${who} → /admin/jobs/:id/resolve: ${res.raw}`).toBe(401);
+      }
+      const cancel = await call(backend.url, `/v1/jobs/${jobId}`, { method: 'PATCH', apiKey: requester.apiKey, body: { status: 'CANCELLED' } });
+      expect(cancel.status, cancel.raw).toBe(400);
+      const redeliver = await call(backend.url, `/v1/jobs/${jobId}`, { method: 'PATCH', apiKey: provider.apiKey, body: { status: 'COMPLETED', result: { again: true } } });
+      expect(redeliver.status, redeliver.raw).toBe(400);
+      const batch = await call(backend.url, '/v1/transactions/batch', {
+        method: 'POST',
+        apiKey: provider.apiKey,
+        body: {
+          chainId: fork.chainId,
+          actions: [{ to: fork.escrow, data: encodeFunctionData({ abi: AGENT_JOB_ESCROW_ABI, functionName: 'complete', args: [BigInt(onChainJobId), keccak256(toBytes('agentfi.completed')), '0x'] }) }],
+        },
+      });
+      expect(batch.status, `batch: ${batch.raw}`).toBeGreaterThanOrEqual(400);
+
+      const client = forkClient(fork.anvilRpc);
+      for (const account of [provider.address, requester.address]) {
+        for (const functionName of ['complete', 'reject'] as const) {
+          const error = await client
+            .simulateContract({ address: fork.escrow, abi: AGENT_JOB_ESCROW_ABI, functionName, args: [BigInt(onChainJobId), keccak256(toBytes('agentfi.quality-rejected')), '0x'], account })
+            .then(() => null, (err: unknown) => err as BaseError);
+          const reverted = error?.walk((e) => e instanceof ContractFunctionRevertedError) as ContractFunctionRevertedError | null | undefined;
+          expect(reverted?.data?.errorName, `${account} ${functionName}`).toBe('Unauthorized');
+        }
+      }
+
+      const after = await getJob(backend, requester.apiKey, jobId);
+      expect(after.escrow).toMatchObject({ onChainStatus: 'CONTESTED', resolution: null, settleTxHash: null });
+      expect((await readChainJob(fork, onChainJobId)).status).toBe(CHAIN_JOB_STATUS.Submitted);
+      log(`authority: neither agent could resolve job ${jobId} (#${onChainJobId}) — API 401/400, batch refused, on-chain Unauthorized`);
+    }
+
     it('contest → held for review → operator verdict (refund + quality-rejected): refund, the hook writes 0 "rejected"', async () => {
       const { requester, provider, created, onChainJobId, agentId } = await contestedJob('verdict');
+      await assertNoAgentCanResolve(requester, provider, created.id, onChainJobId);
       const feesBefore = await pendingPlatformFees(fork);
 
       const resolved = await adminResolve(created.id, { decision: 'refund', verdict: 'quality-rejected', note: 'fork: deliverable off-brief', operator: 'c5a-operator' });
