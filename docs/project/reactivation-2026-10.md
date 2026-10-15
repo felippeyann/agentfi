@@ -31,7 +31,7 @@
 | npm `@agent_fi/mcp-server` | 0.5.0 publicado em 15/05/2026. Downloads por mês: abr 389, mai 440, jun 128, jul 93, ago 70, set 83 (total 1.204; últimos 30 dias 75). Os picos coincidem com publishes, ou seja, são bots de registries, não usuários. |
 | Fly.io backend (`agentfi-backend.fly.dev`) | Fora do ar (sem resposta), conforme decommission. |
 | Admin Vercel (`agentfi-admin.vercel.app`) | HTTP 403. |
-| Landing `agentfi.cc` | Responde 307 (redirect). O repo `felippeyann/agentfi-landing` citado no HANDOFF **não existe mais** no GitHub. |
+| Landing `agentfi.cc` | Responde 307 (redirect). O repo `felippeyann/agentfi-landing` citado no HANDOFF **não existe mais** no GitHub. *(Corrigido em 2026-10-15: o repo existe e é privado; a conta usada não tinha acesso.)* |
 | Contratos Base Mainnet | `AgentPolicyModule 0x03af…6A6d` e `AgentExecutor 0x5441…24b3` continuam com bytecode on-chain (confirmado via `eth_getCode` hoje). `EscrowModule` nunca foi deployado. |
 | Diretórios MCP | Glama: listagem no ar (200). mcp.so: **404**. awesome-mcp-servers: PR #5091 foi **mergeado em 27/05/2026** (dez dias depois do arquivamento), mas a entrada **já foi removida**: o README atual e a busca de código do GitHub não contêm "agentfi" nem "felippeyann". Listas "awesome" costumam podar repositórios arquivados; desarquivar e reenviar o PR. |
 | Vault `brain/` | AgentFi está fora do escopo do vault desde 16/09/2026. Notas de trabalho em `C:\Users\AAWZ 360\agentfi-notas`. |
