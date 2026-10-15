@@ -34,7 +34,7 @@
  *   C5_OPERATOR_SECRET   secret: the backend API_SECRET, `setup` only
  *   C5_ADMIN_SECRET      secret: the backend ADMIN_SECRET, `preflight` and `resolve`
  */
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, existsSync } from 'fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from 'fs';
 import { dirname, join, resolve as resolvePath } from 'path';
 import { fileURLToPath } from 'url';
 import {
@@ -233,9 +233,27 @@ const scenarioPath = (cfg: Config, scenario: Scenario) => join(cfg.stateDir, 'sc
 const lockPath = (cfg: Config, scenario: Scenario) => join(cfg.stateDir, 'scenarios', `${scenario}.lock`);
 
 function writeJsonAtomic(path: string, value: unknown): void {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, JSON.stringify(value, (_k, v) => (typeof v === 'bigint' ? v.toString() : v), 2));
+  renameSync(tmp, path);
+}
+
+/**
+ * The agents' API keys: owner-only from the first byte (0600 in a 0700
+ * directory, exclusive create, so the file is never readable by others even
+ * briefly). On Windows the modes are advisory; the state dir lives in the
+ * owner's profile or checkout and is git-ignored.
+ */
+function writeSecretJson(path: string, value: unknown): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const tmp = `${path}.${process.pid}.tmp`;
+  const fd = openSync(tmp, 'wx', 0o600);
+  try {
+    writeSync(fd, JSON.stringify(value, null, 2));
+  } finally {
+    closeSync(fd);
+  }
   renameSync(tmp, path);
 }
 
@@ -542,9 +560,9 @@ async function cmdSetup(cfg: Config): Promise<void> {
   };
   // Provider first: the requester's allowedRecipients names the provider wallet.
   const provider = await register('provider', { ...PROVIDER_POLICY });
-  writeJsonAtomic(keysPath(cfg), { providerApiKey: provider.apiKey } satisfies AgentKeys);
+  writeSecretJson(keysPath(cfg), { providerApiKey: provider.apiKey } satisfies AgentKeys);
   const requester = await register('requester', requesterPolicy(provider.record.address));
-  writeJsonAtomic(keysPath(cfg), { providerApiKey: provider.apiKey, requesterApiKey: requester.apiKey } satisfies AgentKeys);
+  writeSecretJson(keysPath(cfg), { providerApiKey: provider.apiKey, requesterApiKey: requester.apiKey } satisfies AgentKeys);
   state.agents = { requester: requester.record, provider: provider.record };
   saveState(cfg, state);
 
