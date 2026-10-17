@@ -2521,13 +2521,29 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(stuckAlerts()).toHaveLength(0);
       setNowOffset(PAST_STUCK_THRESHOLD_MS);
       await sweepTick();
+      // Review P3-1: the refund deadline — the live job of the chain that expires first (ties: lowest id, as the query orders).
+      const [earliest] = [await job(a.jobId), await job(b.jobId)].sort(
+        (x, y) => x.expiresAt!.getTime() - y.expiresAt!.getTime() || (x.id < y.id ? -1 : 1),
+      );
+      const deadline = earliest!.expiresAt!.toISOString();
       expect(stuckAlerts()).toEqual([
         expect.objectContaining({
           chainId: CHAIN_ID,
           jobId: a.jobId,
-          details: expect.objectContaining({ stuckNonce: 0, queued: 2, stuckTxHash: completes[0]!.hash }),
+          details: expect.objectContaining({
+            stuckNonce: 0,
+            queued: 2,
+            stuckTxHash: completes[0]!.hash,
+            earliestExpiresAt: deadline,
+            earliestExpiringJobId: earliest!.id,
+          }),
         }),
       ]);
+      // Funds stay in the escrow only until then: claimRefund is permissionless after expiredAt and accepts a Submitted job.
+      const { message } = stuckAlerts()[0]!;
+      expect(message).toContain(`the earliest among the live escrow jobs on this chain is ${deadline} (job ${earliest!.id})`);
+      expect(message).toMatch(/after it anyone can call claimRefund .*also for work already delivered/);
+      expect(message).not.toContain('Funds stay in the escrow.');
       await sweepTick();
       expect(stuckAlerts()).toHaveLength(1); // not repeated every tick
 

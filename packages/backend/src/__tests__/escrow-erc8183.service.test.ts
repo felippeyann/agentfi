@@ -20,6 +20,8 @@
  *    operator decisions pay / refund / quality-rejected / payout-blocked send
  *    the right call, reason and optParams; receipts surface the rated agent
  *    id and penalties; expiry alerts; delay clamped to the TTL
+ *  - C3f review P3-1: the evaluator-stuck alert states the refund deadline
+ *    (or that there is none) — never a made-up date
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Prisma, type PrismaClient } from '@prisma/client';
@@ -49,9 +51,12 @@ import {
   ALERT_TEXT_MAX_CHARS,
   CHAIN_JOB_STATUS,
   SETTLEMENT_REASONS,
+  EVALUATOR_STUCK_ALERT_AFTER_MS,
   __resetEscrowTokenCacheForTests,
+  __resetEvaluatorBacklogForTests,
   __resetUnconfirmedSendsForTests,
   alertExpiringReviews,
+  checkEvaluatorBacklog,
   contestEscrowJob,
   deliverableHashOf,
   EscrowConfigUnverifiedError,
@@ -1967,5 +1972,47 @@ describe('C3d — evaluation delay vs expiresAt, committed feedback files', () =
       expect(isFeedbackFileCommitted({ onChainStatus, feedbackFile: {} })).toBe(false);
     }
     expect(isFeedbackFileCommitted({ onChainStatus: 'COMPLETED', feedbackFile: null })).toBe(false);
+  });
+});
+
+describe('C3f review P3-1 — the evaluator-stuck alert states the refund deadline', () => {
+  beforeEach(() => __resetEvaluatorBacklogForTests());
+
+  /** The key's lowest pending nonce (5) has not moved past the threshold: the second check alerts. */
+  async function stuckAlert(ctx: ReturnType<typeof makeDeps>): Promise<EscrowAlert> {
+    let now = NOW.getTime();
+    const getTransactionCount = vi.fn(async ({ blockTag }: { blockTag: 'latest' | 'pending' }) => (blockTag === 'pending' ? 6 : 5));
+    const deps: Erc8183Deps = { ...ctx.deps, now: () => new Date(now), publicClient: () => ({ getTransactionCount }) as never };
+    expect(await checkEvaluatorBacklog(deps, CHAIN_ID)).toBeNull(); // first sight
+    now += EVALUATOR_STUCK_ALERT_AFTER_MS + 1_000;
+    expect(await checkEvaluatorBacklog(deps, CHAIN_ID)).toMatchObject({ stuckNonce: 5, queued: 1 });
+    expect(ctx.alert).toHaveBeenCalledTimes(1);
+    return ctx.alert.mock.calls[0]![0] as EscrowAlert;
+  }
+
+  it('no live job with an expiresAt: the alert says so — no date is made up (a final job is no deadline)', async () => {
+    const done = escrowJob({ id: 'job-done', onChainJobId: '8', onChainStatus: 'COMPLETED', status: 'COMPLETED' });
+    const ctx = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'SUBMITTED', status: 'PAYMENT_PENDING', expiresAt: null }), done]);
+    const alert = await stuckAlert(ctx);
+    expect(alert.message).toContain("Funds stay in the escrow only until each job's expiresAt (no live escrow job on this chain has an expiresAt recorded)");
+    expect(alert.message).toMatch(/after it anyone can call claimRefund .*also for work already delivered/);
+    expect(alert.message).not.toContain((done['expiresAt'] as Date).toISOString());
+    expect(alert.message).not.toContain('Invalid Date');
+    expect(alert.details).toMatchObject({ earliestExpiresAt: null, earliestExpiringJobId: null });
+  });
+
+  it('an earliest expiresAt already past is flagged; an unreadable one is said, and the alert is still raised', async () => {
+    const past = new Date(NOW.getTime() - 60_000);
+    const late = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'SUBMITTED', status: 'PAYMENT_PENDING', expiresAt: past })]);
+    const lateAlert = await stuckAlert(late);
+    expect(lateAlert.message).toContain(`the earliest among the live escrow jobs on this chain is ${past.toISOString()} (job job-1, already passed)`);
+    expect(lateAlert.details).toMatchObject({ earliestExpiresAt: past.toISOString(), earliestExpiringJobId: 'job-1' });
+
+    __resetEvaluatorBacklogForTests();
+    const unreadable = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'SUBMITTED', status: 'PAYMENT_PENDING' })]);
+    unreadable.dbMock.job.findMany.mockRejectedValueOnce(new Error('Connection terminated unexpectedly'));
+    const alert = await stuckAlert(unreadable);
+    expect(alert.message).toContain("(the live jobs' expiresAt could not be read): after it anyone can call claimRefund");
+    expect(alert.details).toMatchObject({ earliestExpiresAt: null, earliestExpiringJobId: null });
   });
 });
