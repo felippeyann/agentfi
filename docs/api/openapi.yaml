@@ -786,7 +786,12 @@ paths:
         the operator. S9: while this process has not verified the executor
         against this build (runtime bytecode + bindings), the batch answers
         `503` `{ "code": "CONTRACTS_UNVERIFIED" }` with `Retry-After` before
-        anything is simulated or written.
+        anything is simulated or written. A6d: the batch is sent with
+        `msg.value` = the actions' total `value` plus the executor fee,
+        floor(total × 30 / 10 000) on the sum (the executor's `feeBps()`);
+        that total is what `maxOutflowPerTxUsd` and the daily volume limit
+        count, so a batch whose value alone is exactly at either limit is
+        refused.
       requestBody:
         required: true
         content:
