@@ -1919,6 +1919,12 @@ export interface EvaluatorBacklog {
   /** The job's settlement transaction carrying `stuckNonce`, when one of the live jobs has it. */
   stuckTxHash: Hex | null;
   jobId: string | null;
+  /**
+   * C3f review P3-1: the live escrow job of the chain that expires first (null:
+   * none has an expiresAt, or it could not be read). After its expiresAt anyone
+   * can claimRefund it — also a Submitted job, whose work was delivered.
+   */
+  earliestExpiry: { jobId: string; expiresAt: Date } | null;
 }
 
 /** C3f item 1: the live escrow job whose recorded evaluator transaction carries `nonce`, if any. */
@@ -1943,6 +1949,24 @@ async function evaluatorTxWithNonce(deps: Erc8183Deps, chainId: number, nonce: n
 }
 
 /**
+ * C3f review P3-1: the live escrow job of `chainId` with the earliest
+ * expiresAt (ties: lowest id), or null when none has one. Until then the funds
+ * of the jobs blocked behind the key stay in the escrow; after it
+ * `claimRefund` is permissionless and accepts a Submitted job
+ * (AgentJobEscrow.sol), so anyone can refund the requester for work already
+ * delivered — the date that sets the operator's urgency.
+ */
+async function earliestLiveExpiry(deps: Erc8183Deps, chainId: number): Promise<{ jobId: string; expiresAt: Date } | null> {
+  const [first] = await deps.db.job.findMany({
+    where: { escrowKind: ESCROW_KIND, escrowChainId: chainId, onChainStatus: { notIn: [...FINAL_ON_CHAIN_STATUSES] }, expiresAt: { not: null } },
+    select: { id: true, expiresAt: true },
+    orderBy: [{ expiresAt: 'asc' }, { id: 'asc' }],
+    take: 1,
+  });
+  return first?.expiresAt instanceof Date ? { jobId: first.id, expiresAt: first.expiresAt } : null;
+}
+
+/**
  * C3f item 1 — visibility only. The evaluator signs with the node's `pending`
  * nonce, so one transaction that is never mined (priced below the network,
  * stuck in the mempool) makes every later evaluator transaction of the key —
@@ -1952,9 +1976,11 @@ async function evaluatorTxWithNonce(deps: Erc8183Deps, chainId: number, nonce: n
  * and `pending` transaction counts: a lowest pending nonce that has not moved
  * for EVALUATOR_STUCK_ALERT_AFTER_MS is alerted once (then at most every
  * SETTLEMENT_FAILURE_ALERT_INTERVAL_MS), with the job and transaction that
- * hold it. Nothing is replaced or cancelled: that needs an operator decision
- * (C3f proposal). Without `getTransactionCount` (unit-test clients) or with a
- * node that does not see the mempool, nothing is reported.
+ * hold it and (review P3-1) the earliest expiresAt of the chain's live jobs:
+ * the funds stay in the escrow only until then. Nothing is replaced or
+ * cancelled: that needs an operator decision (C3f proposal). Without
+ * `getTransactionCount` (unit-test clients) or with a node that does not see
+ * the mempool, nothing is reported.
  */
 export async function checkEvaluatorBacklog(deps: Erc8183Deps, chainId: number): Promise<EvaluatorBacklog | null> {
   const evaluator = deps.config.evaluatorAddress;
@@ -1985,6 +2011,14 @@ export async function checkEvaluatorBacklog(deps: Erc8183Deps, chainId: number):
   if (seen.alertedAt !== null && now - seen.alertedAt < SETTLEMENT_FAILURE_ALERT_INTERVAL_MS) return null;
   seen.alertedAt = now;
   const stuck = await evaluatorTxWithNonce(deps, chainId, latest);
+  let expiry: { jobId: string; expiresAt: Date } | null | 'unreadable';
+  try {
+    expiry = await earliestLiveExpiry(deps, chainId);
+  } catch (err) {
+    deps.logger.warn({ chainId, err: errorMessage(err) }, 'ERC-8183 evaluator backlog alert — the earliest expiresAt of the live jobs could not be read');
+    expiry = 'unreadable';
+  }
+  const earliest = expiry === 'unreadable' ? null : expiry;
   const backlog: EvaluatorBacklog = {
     chainId,
     evaluator,
@@ -1993,7 +2027,16 @@ export async function checkEvaluatorBacklog(deps: Erc8183Deps, chainId: number):
     since: new Date(seen.since),
     stuckTxHash: stuck?.hash ?? null,
     jobId: stuck?.jobId ?? null,
+    earliestExpiry: earliest,
   };
+  // Review P3-1: "funds stay in the escrow" holds only until each job's expiresAt — never a made-up date.
+  const deadline =
+    expiry === 'unreadable'
+      ? "the live jobs' expiresAt could not be read"
+      : expiry === null
+        ? 'no live escrow job on this chain has an expiresAt recorded'
+        : `the earliest among the live escrow jobs on this chain is ${expiry.expiresAt.toISOString()} (job ${expiry.jobId}` +
+          `${expiry.expiresAt.getTime() <= now ? ', already passed' : ''})`;
   await raiseAlert(deps, {
     kind: 'evaluator-stuck',
     chainId,
@@ -2002,10 +2045,20 @@ export async function checkEvaluatorBacklog(deps: Erc8183Deps, chainId: number):
       `Evaluator ${evaluator} on chain ${chainId}: transaction nonce ${latest} ` +
       `(${stuck ? `${stuck.hash}, the settlement of job ${stuck.jobId}` : 'not the recorded settlement of a live job'}) ` +
       `has not been mined since ${backlog.since.toISOString()}; ${backlog.queued} evaluator transaction(s) wait behind it ` +
-      '(settlements, cancellation refunds, expiry claims of every job on this chain). Funds stay in the escrow. The backend does ' +
-      'not replace or cancel it on its own: it is mined when the network fee falls back to its price, or the operator replaces ' +
-      'that nonce (C3f proposal).',
-    details: { evaluator, stuckNonce: latest, queued: backlog.queued, stuckTxHash: backlog.stuckTxHash, since: backlog.since.toISOString() },
+      '(settlements, cancellation refunds, expiry claims of every job on this chain). Funds stay in the escrow only until ' +
+      `each job's expiresAt (${deadline}): after it anyone can call claimRefund and refund the requester's budget, also for ` +
+      'work already delivered (a Submitted job), and the provider goes unpaid. The backend does not replace or cancel the stuck ' +
+      'transaction on its own: it is mined when the network fee falls back to its price, or the operator replaces that nonce ' +
+      '(C3f proposal).',
+    details: {
+      evaluator,
+      stuckNonce: latest,
+      queued: backlog.queued,
+      stuckTxHash: backlog.stuckTxHash,
+      since: backlog.since.toISOString(),
+      earliestExpiresAt: earliest?.expiresAt.toISOString() ?? null,
+      earliestExpiringJobId: earliest?.jobId ?? null,
+    },
   });
   return backlog;
 }
@@ -2170,8 +2223,14 @@ export function __resetUnconfirmedSendsForTests(): void {
  *    while it may mine (C3e item 1);
  *  - still unknown to every node: P3-2's verdict stands (never left);
  *  - the nodes cannot tell: nothing is signed, asked again on the next attempt.
- * The adoption is conditional on the hash slot as read, so a contest or a
- * newer attempt that moved the row is never overwritten.
+ * The adoption is conditional on the hash slot as read, so a newer attempt
+ * that recorded its own hash is never overwritten. A contest does not touch
+ * that slot (review P3-3): one accepted in the interval — P3-2 gave the slot
+ * back and the API process cannot see this map — leaves it empty, and the
+ * next attempt, the operator's `resolve` of the CONTESTED job, re-adopts the
+ * known hash and signs nothing while it may still mine. The chain decides:
+ * if it settles against the decision, `reconcileTerminal` alerts
+ * `review-overridden`.
  */
 async function readoptUnconfirmedSend(deps: Erc8183Deps, job: Pick<EscrowJobRow, 'id' | 'settleTxHash' | 'escrowChainId'>): Promise<void> {
   const hash = unconfirmedSends.get(job.id);
