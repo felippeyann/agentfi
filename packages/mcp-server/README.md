@@ -27,7 +27,7 @@ Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) sta
 
 | Tool | Description |
 |------|-------------|
-| `transfer_token` | Transfer ETH or ERC-20 tokens. Native `ETH` only on chains whose native asset is ETH (1, 8453, 84532, 42161): on Polygon (137) it would be POL, so it is refused — use WETH |
+| `transfer_token` | Transfer ETH or ERC-20 tokens. Native `ETH` only on chains whose native asset is ETH (1, 8453, 84532, 42161): on Polygon (137) it would be POL, so it is refused — use WETH. Optional `idempotency_key` (16–128 chars of `[A-Za-z0-9_-]`, as `pay_agent`): reuse it to retry the same transfer (a known key returns the first transfer); a new attempt after a FAILED / REVERTED transfer needs a new key |
 
 ### Yield — Aave V3
 

@@ -1530,6 +1530,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
    *            whitelist, every action with non-empty `data` MUST declare a
    *            token — otherwise 400.
    *   - data:  hex-encoded calldata (e.g. "0x" for plain ETH transfers)
+   *
+   * msg.value = Σ value + the executor fee, floor(Σ value × 30 / 10 000) on
+   * the sum (A6d); that total is what the outflow cap and the daily volume count.
    */
   // -----------------------------------------------------------------------
   // GMX V2 Perpetuals — open position (MarketIncrease order)
@@ -1952,9 +1955,22 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     // transfers meet allowedRecipients / allowedTokens). Only the
     // "authorised contracts" rule for other calldata stays daily-limit-only.
     const dailyLimited = Boolean(policy?.active) && (parsePolicyDecimal(policy?.maxDailyVolumeUsd) ?? 0) > 0;
-    const batchNativeWei = body.actions.reduce((sum, a) => sum + BigInt(a.value), 0n);
+    // A6d: `AgentExecutor.executeBatch` requires msg.value >= ΣV + F, with
+    // F = floor(ΣV × feeBps / 10 000) on the SUM of the action values
+    // (`InsufficientValueForFee` otherwise; before A6d the route sent ΣV, so
+    // any batch with ≥ 334 wei of native value reverted at simulation). F is
+    // the ExecutorService's formula on FEE_BPS — the executor's immutable
+    // feeBps(), verified by S9 before anything is routed through it — never
+    // the tier schedule (feeService.calculateFee: PRO 15 / ENTERPRISE 5 bps
+    // would underpay and revert).
+    const actionsValueWei = body.actions.reduce((sum, a) => sum + BigInt(a.value), 0n);
+    const executorFeeWei = executor.estimateFee(actionsValueWei);
+    const msgValueWei = actionsValueWei + executorFeeWei;
+    // The batch's native outflow is what leaves the wallet: ΣV + F (plan row
+    // A6d: the fee is counted). The same pricing feeds the outflow cap (D17)
+    // and the DailyVolume reservation (D15 / A6) below.
     const components: Array<{ pricing: SpendPricing; actionIndex?: number }> = [
-      { pricing: await priceNativeSpend(batchNativeWei, body.chainId) },
+      { pricing: await priceNativeSpend(msgValueWei, body.chainId) },
     ];
     if (policy) {
       for (let i = 0; i < body.actions.length; i++) {
@@ -2059,7 +2075,6 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       token:  getAddress(a.token) as Address,
       data:   a.data as `0x${string}`,
     }));
-    const totalValueWei = onChainActions.reduce((sum, a) => sum + a.value, 0n);
 
     // AgentExecutor.executeBatch — ABI generated from the Solidity source
     // (packages/backend/src/abi/AgentExecutor.abi.ts, `npm run abi:executor`).
@@ -2069,13 +2084,14 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       args: [onChainActions],
     });
 
-    // Simulate the full batch against the executor contract
+    // Simulate the full batch against the executor contract — with the value
+    // it will be sent with (ΣV + F, A6d); the job and queuePayload carry the same.
     const sim = await simulator.simulate({
       chainId: body.chainId,
       from: getAddress(agent.safeAddress),
       to: contracts.executor,
       data: batchCalldata,
-      value: totalValueWei,
+      value: msgValueWei,
     });
 
     if (!ensureSimulationUsable(sim, reply)) return;
@@ -2086,11 +2102,15 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       });
     }
 
-    const feeCalc = feeService.calculateFee({ grossAmountWei: totalValueWei, tier: request.agentTier });
+    // Display and the recorded bps follow the swap route (tier schedule); the
+    // recorded fee AMOUNT is what the executor collects on-chain (F), as the
+    // swap records `wrapped.feeWei` when routed through the executor.
+    const feeCalc = feeService.calculateFee({ grossAmountWei: actionsValueWei, tier: request.agentTier });
 
-    // The batch's daily-volume spend: its native value (A6) plus, while a
-    // daily limit applies, its recognised ERC-20 transfers (Q9) — priced
-    // above. Its source is `synthetic` when any component is.
+    // The batch's daily-volume spend: its native value with the executor fee
+    // (A6, A6d) plus, while a daily limit applies, its recognised ERC-20
+    // transfers (Q9) — priced above. Its source is `synthetic` when any
+    // component is.
     const tx = await createWithVolumeReservation(reply, {
       agentId: request.agentId,
       pricing,
@@ -2100,7 +2120,8 @@ export async function transactionRoutes(fastify: FastifyInstance) {
         chainId: body.chainId,
         status: 'QUEUED',
         type: 'BATCH',
-        amountIn: totalValueWei.toString(),
+        // The value the actions move (unchanged meaning); the fee is queuePayload.feeAmountWei.
+        amountIn: actionsValueWei.toString(),
         simulation: sim as any,
         metadata: {
           actionCount: body.actions.length,
@@ -2109,8 +2130,8 @@ export async function transactionRoutes(fastify: FastifyInstance) {
           queuePayload: {
             to: contracts.executor,
             data: batchCalldata,
-            value: totalValueWei.toString(),
-            feeAmountWei: feeCalc.feeAmountWei.toString(),
+            value: msgValueWei.toString(),
+            feeAmountWei: executorFeeWei.toString(),
             feeBps: feeCalc.feeBps,
             routedViaExecutor: true,
           },
@@ -2126,10 +2147,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       from: getAddress(agent.safeAddress),
       to: contracts.executor,
       data: batchCalldata,
-      value: totalValueWei.toString(),
+      value: msgValueWei.toString(),
       agentId: request.agentId,
       tier: request.agentTier,
-      feeAmountWei: feeCalc.feeAmountWei.toString(),
+      feeAmountWei: executorFeeWei.toString(),
       feeUsd: '0',
       feeBps: feeCalc.feeBps,
       routedViaExecutor: true,

@@ -1324,7 +1324,7 @@ export interface paths {
         put?: never;
         /**
          * Execute up to 20 actions atomically via the AgentExecutor
-         * @description An action may not target the chain's AgentPolicyModule (403 `POLICY_MODULE_TARGET`, S8): through the executor its admin calls always revert, and its unauthenticated `validateTransaction` would only restart a wallet's on-chain cooldown. The on-chain policy is synced by the operator. S9: while this process has not verified the executor against this build (runtime bytecode + bindings), the batch answers `503` `{ "code": "CONTRACTS_UNVERIFIED" }` with `Retry-After` before anything is simulated or written.
+         * @description An action may not target the chain's AgentPolicyModule (403 `POLICY_MODULE_TARGET`, S8): through the executor its admin calls always revert, and its unauthenticated `validateTransaction` would only restart a wallet's on-chain cooldown. The on-chain policy is synced by the operator. S9: while this process has not verified the executor against this build (runtime bytecode + bindings), the batch answers `503` `{ "code": "CONTRACTS_UNVERIFIED" }` with `Retry-After` before anything is simulated or written. A6d: the batch is sent with `msg.value` = the actions' total `value` plus the executor fee, floor(total × 30 / 10 000) on the sum (the executor's `feeBps()`); that total is what `maxOutflowPerTxUsd` and the daily volume limit count, so a batch whose value alone is exactly at either limit is refused.
          */
         post: {
             parameters: {
@@ -1557,12 +1557,23 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Active token allowances */
+        /**
+         * Active token allowances
+         * @description Without `spender`, the allowances of the chain's common tokens for the
+         *     Uniswap V3 router and the **Aave V3 Pool** — the address `getPool()` of
+         *     the configured PoolAddressesProvider answers, the contract an Aave
+         *     supply calls (S12: the provider itself was checked before, so the Aave
+         *     allowance always read 0). When that Pool cannot be resolved (the
+         *     provider cannot be read or answers no address) the request is `502
+         *     AAVE_POOL_UNAVAILABLE`, never a list without the Aave allowance.
+         */
         get: {
             parameters: {
                 query?: {
                     /** @description EVM chain ID (1=Ethereum, 8453=Base, 42161=Arbitrum, 137=Polygon). */
                     chainId?: components["parameters"]["ChainIdQuery"];
+                    /** @description Check only this spender (the defaults are not read). */
+                    spender?: string;
                 };
                 header?: never;
                 path?: never;
@@ -1579,6 +1590,15 @@ export interface paths {
                         "application/json": {
                             allowances?: components["schemas"]["Allowance"][];
                         };
+                    };
+                };
+                /** @description `AAVE_POOL_UNAVAILABLE`: the Aave V3 Pool could not be resolved from the configured provider. */
+                502: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
                     };
                 };
             };

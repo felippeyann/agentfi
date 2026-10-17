@@ -455,7 +455,8 @@ describeDb('Q9 — trusted prices on the real routes (Postgres)', () => {
       usd: 25,
       priceable: true,
     },
-    { name: 'batch native value', url: '/v1/transactions/batch', body: { ...t, actions: [{ to: RECIPIENT, value: '10000000000000000' }] }, usd: 20, priceable: true },
+    // A6d: 0.01 ETH + the executor's 30 bps (0.00003 ETH) = 20.06 USD.
+    { name: 'batch native value', url: '/v1/transactions/batch', body: { ...t, actions: [{ to: RECIPIENT, value: '10000000000000000' }] }, usd: 20.06, priceable: true },
   ];
 
   /** §5-7: a proven self-returning max withdrawal — accepted, nothing reserved, marked. */
@@ -571,10 +572,10 @@ describeDb('Q9 — trusted prices on the real routes (Postgres)', () => {
       const agent = await mkAgent([TESTNET]);
       const res = await batch(agent.id, [
         { to: USDC_84532, value: '0', data: transferData(LISTED, 30_000_000n) },
-        { to: LISTED, value: '1000000000000000' }, // 0.001 ETH = 2 USD
+        { to: LISTED, value: '1000000000000000' }, // 0.001 ETH = 2 USD, + the executor fee 0.000003 ETH = 0.006 USD (A6d)
       ]);
       expect(res.statusCode, res.body).toBe(202);
-      expect(await onlyRow(agent.id)).toMatchObject({ volumeState: 'RESERVED', volumeReservedUsd: '32.000000', volumePriceSource: 'synthetic' });
+      expect(await onlyRow(agent.id)).toMatchObject({ volumeState: 'RESERVED', volumeReservedUsd: '32.006000', volumePriceSource: 'synthetic' });
     });
 
     it('transferFrom is counted too', async () => {

@@ -18,6 +18,12 @@
  * Faked: the queue (jobs captured), the simulator, notifications, the fee /
  * revenue price oracle and the ERC-8183 runtime. Nothing is broadcast.
  *
+ * X7 (same harness, last blocks): `transfer_token`'s `idempotency_key` — a
+ * retry with the same key is the same transfer, a new key a new one — and
+ * the same for the backend's own MCP surface (`/mcp/sse`, `execute_transfer`
+ * in api/routes/mcp.ts), driven through a real MCP client over an in-memory
+ * transport into `createMcpServer` (its zod dispatch and proxy handler).
+ *
  * Skipped (with a warning) when DATABASE_URL is not a reachable, migrated
  * database; on CI (`CI` set) an unreachable database fails the suite.
  */
@@ -45,6 +51,8 @@ const h = vi.hoisted(() => {
   const apiUrl = 'http://agentfi-backend.x5.test:3000';
   process.env['AGENTFI_API_URL'] = apiUrl;
   process.env['AGENTFI_API_KEY'] = 'agfi_live_x5_contract_test_key';
+  // The backend's own MCP surface (/mcp/sse, api/routes/mcp.ts) proxies to API_BASE_URL.
+  process.env['API_BASE_URL'] = apiUrl;
   return {
     apiUrl,
     queued: [] as Array<{ name: string; data: Record<string, unknown> }>,
@@ -239,38 +247,40 @@ function payAgent(args: Record<string, unknown>) {
   }, { log: () => undefined });
 }
 
+// File-level hooks: the X5 and X7 groups below share the harness.
+beforeAll(async () => {
+  if (!DB_READY) return;
+  const [db, routes, handler] = await Promise.all([
+    import('../db/client.js'),
+    import('../api/routes/transactions.js'),
+    import('../api/errors/handler.js'),
+  ]);
+  const here = dirname(fileURLToPath(import.meta.url));
+  const mcp = (await import(resolve(here, '../../../mcp-server/src/server.ts'))) as { callTool: CallTool };
+  m = {
+    db: db.db,
+    transactionRoutes: routes.transactionRoutes,
+    registerErrorHandler: handler.registerErrorHandler,
+    callTool: mcp.callTool,
+  };
+  vi.stubGlobal('fetch', fetchViaInject);
+  await wipe();
+});
+
+afterAll(async () => {
+  vi.unstubAllGlobals();
+  await backend?.close();
+  if (!m) return;
+  await wipe();
+  await m.db.$disconnect();
+});
+
+beforeEach(() => {
+  h.queued.length = 0;
+  h.exchanges.length = 0;
+});
+
 describeDb('X5 — MCP pay_agent against the real transfer route (Postgres)', () => {
-  beforeAll(async () => {
-    const [db, routes, handler] = await Promise.all([
-      import('../db/client.js'),
-      import('../api/routes/transactions.js'),
-      import('../api/errors/handler.js'),
-    ]);
-    const here = dirname(fileURLToPath(import.meta.url));
-    const mcp = (await import(resolve(here, '../../../mcp-server/src/server.ts'))) as { callTool: CallTool };
-    m = {
-      db: db.db,
-      transactionRoutes: routes.transactionRoutes,
-      registerErrorHandler: handler.registerErrorHandler,
-      callTool: mcp.callTool,
-    };
-    vi.stubGlobal('fetch', fetchViaInject);
-    await wipe();
-  });
-
-  afterAll(async () => {
-    vi.unstubAllGlobals();
-    await backend?.close();
-    if (!m) return;
-    await wipe();
-    await m.db.$disconnect();
-  });
-
-  beforeEach(() => {
-    h.queued.length = 0;
-    h.exchanges.length = 0;
-  });
-
   it('native ETH on Base Sepolia: 202, one TRANSFER row paying the recipient, its value queued to it', async () => {
     const agent = await mkAgent();
     await serveAs(agent.id);
@@ -349,5 +359,217 @@ describeDb('X5 — MCP pay_agent against the real transfer route (Postgres)', ()
     expect(textOf(result)).toMatchObject({ code: 'INVALID_INPUT' });
     expect(h.exchanges, JSON.stringify(h.exchanges)).toHaveLength(0);
     expect(await m.db.transaction.count({ where: { agentId: agent.id } })).toBe(0);
+  });
+});
+
+/**
+ * X7 — the MCP `transfer_token` tool (same harness: the stdio server's own
+ * dispatcher and HTTP client, the real transfer route, real Postgres). Before
+ * X7 the tool had no `idempotency_key`, so a client retry after a timeout
+ * created a second transfer.
+ */
+describeDb('X7 — MCP transfer_token idempotency against the real transfer route (Postgres)', () => {
+  function transferToken(args: Record<string, unknown>) {
+    return m.callTool('transfer_token', { to: RECIPIENT, token: USDC_84532, amount: '1.5', chain_id: BASE_SEPOLIA, ...args }, {
+      log: () => undefined,
+    });
+  }
+
+  /** Today's DailyVolume for the agent (USD), as reserved by the route. */
+  async function reservedToday(agentId: string): Promise<number> {
+    const rows = await m.db.dailyVolume.findMany({ where: { agentId } });
+    return rows.reduce((sum, r) => sum + Number(r.volumeUsd), 0);
+  }
+
+  it('a retry with the same idempotency_key is the same transfer: 202 then 200, one row, one reservation, one job, the same transactionId', async () => {
+    const agent = await mkAgent();
+    await serveAs(agent.id);
+    const key = `x7-retry-${RUN}-0000000000`;
+
+    const first = await transferToken({ idempotency_key: key });
+    const second = await transferToken({ idempotency_key: key });
+
+    // The key reached the route both times (it was dropped before X7).
+    expect(h.exchanges.map((e) => (e.request as Record<string, unknown>)['idempotencyKey'])).toEqual([key, key]);
+    expect(h.exchanges.map((e) => e.status), JSON.stringify(h.exchanges)).toEqual([202, 200]);
+    expect(first.isError).toBeFalsy();
+    expect(second.isError).toBeFalsy();
+    const rows = await m.db.transaction.findMany({ where: { agentId: agent.id } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ type: 'TRANSFER', idempotencyKey: key, volumeState: 'RESERVED' });
+    expect(Number(rows[0]!.volumeReservedUsd)).toBeCloseTo(1.5, 6);
+    expect(await reservedToday(agent.id)).toBeCloseTo(1.5, 6); // reserved once, not 3.0
+    expect(h.queued).toHaveLength(1);
+    // The replay is answered with the stored row (`id`, HTTP 200): the tool still reports its id.
+    expect(textOf(first)['transactionId']).toBe(rows[0]!.id);
+    expect(textOf(second)['transactionId']).toBe(rows[0]!.id);
+  });
+
+  it('a new key is a new transfer: two rows, two reservations, two jobs', async () => {
+    const agent = await mkAgent();
+    await serveAs(agent.id);
+
+    const a = await transferToken({ idempotency_key: `x7-first-${RUN}-00000000` });
+    const b = await transferToken({ idempotency_key: `x7-second-${RUN}-0000000` });
+
+    expect(h.exchanges.map((e) => e.status), JSON.stringify(h.exchanges)).toEqual([202, 202]);
+    const rows = await m.db.transaction.findMany({ where: { agentId: agent.id }, orderBy: { createdAt: 'asc' } });
+    expect(rows).toHaveLength(2);
+    expect(new Set([textOf(a)['transactionId'], textOf(b)['transactionId']])).toEqual(new Set(rows.map((r) => r.id)));
+    expect(await reservedToday(agent.id)).toBeCloseTo(3, 6);
+    expect(h.queued).toHaveLength(2);
+  });
+
+  it('without a key every call is a new transfer (why the key matters on a retry)', async () => {
+    const agent = await mkAgent();
+    await serveAs(agent.id);
+
+    await transferToken({});
+    await transferToken({});
+
+    expect(h.exchanges.map((e) => e.status)).toEqual([202, 202]);
+    expect(h.exchanges.every((e) => !('idempotencyKey' in (e.request as Record<string, unknown>)))).toBe(true);
+    expect(await m.db.transaction.count({ where: { agentId: agent.id } })).toBe(2);
+    expect(h.queued).toHaveLength(2);
+  });
+
+  it('a malformed key never reaches the backend', async () => {
+    const agent = await mkAgent();
+    await serveAs(agent.id);
+
+    const result = await transferToken({ idempotency_key: 'too-short' });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatchObject({ code: 'INVALID_INPUT' });
+    expect(h.exchanges).toHaveLength(0);
+    expect(await m.db.transaction.count({ where: { agentId: agent.id } })).toBe(0);
+  });
+});
+
+/**
+ * X7 on the backend's own MCP surface: `/mcp/sse`'s `execute_transfer`
+ * (api/routes/mcp.ts) proxies its arguments to POST /v1/transactions/transfer
+ * — but its zod schema did not define `idempotencyKey`, so zod dropped it and
+ * a client retry transferred twice. Its tools take the route's own
+ * (camelCase) field names, so the key is `idempotencyKey`, with the stdio
+ * tools' rule (16-128 chars of [A-Za-z0-9_-]).
+ */
+describeDb('X7 — /mcp/sse execute_transfer idempotency against the real transfer route (Postgres)', () => {
+  /** A real MCP client over an in-memory transport into createMcpServer (the /mcp/sse server). */
+  async function withSseClient<T>(use: (client: import('@modelcontextprotocol/sdk/client/index.js').Client) => Promise<T>): Promise<T> {
+    const [{ createMcpServer }, { Client }, { InMemoryTransport }] = await Promise.all([
+      import('../api/routes/mcp.js'),
+      import('@modelcontextprotocol/sdk/client/index.js'),
+      import('@modelcontextprotocol/sdk/inMemory.js'),
+    ]);
+    const server = createMcpServer('agfi_live_x7_sse_contract_test_key', { logError: () => undefined });
+    const client = new Client({ name: 'x7-sse-test', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      return await use(client);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }
+
+  async function executeTransfer(args: Record<string, unknown>) {
+    return withSseClient(async (client) => {
+      const result = await client.callTool({
+        name: 'execute_transfer',
+        arguments: { to: RECIPIENT, token: USDC_84532, amount: '1.5', chainId: BASE_SEPOLIA, ...args },
+      });
+      const content = result.content as Array<{ type: string; text: string }>;
+      return { isError: result.isError === true, payload: JSON.parse(content[0]!.text) as Record<string, unknown> };
+    });
+  }
+
+  async function reservedToday(agentId: string): Promise<number> {
+    const rows = await m.db.dailyVolume.findMany({ where: { agentId } });
+    return rows.reduce((sum, r) => sum + Number(r.volumeUsd), 0);
+  }
+
+  it('a retry with the same idempotencyKey is the same transfer: 202 then 200, one row, one reservation, one job, the same transactionId', async () => {
+    const agent = await mkAgent();
+    await serveAs(agent.id);
+    const key = `x7-sse-retry-${RUN}-000000`;
+
+    const first = await executeTransfer({ idempotencyKey: key });
+    const second = await executeTransfer({ idempotencyKey: key });
+
+    // The key reached the route both times (zod dropped it before).
+    expect(h.exchanges.map((e) => (e.request as Record<string, unknown>)['idempotencyKey'])).toEqual([key, key]);
+    expect(h.exchanges.map((e) => e.status), JSON.stringify(h.exchanges)).toEqual([202, 200]);
+    expect(first.isError).toBe(false);
+    expect(second.isError).toBe(false);
+    const rows = await m.db.transaction.findMany({ where: { agentId: agent.id } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ type: 'TRANSFER', idempotencyKey: key, volumeState: 'RESERVED' });
+    expect(await reservedToday(agent.id)).toBeCloseTo(1.5, 6); // reserved once, not 3.0
+    expect(h.queued).toHaveLength(1);
+    // The replay is answered with the stored row (`id`, HTTP 200): the tool still reports transactionId.
+    expect(first.payload['transactionId']).toBe(rows[0]!.id);
+    expect(second.payload['transactionId']).toBe(rows[0]!.id);
+    expect(second.payload['id']).toBe(rows[0]!.id);
+  });
+
+  it('a new key is a new transfer: two rows, two reservations, two jobs', async () => {
+    const agent = await mkAgent();
+    await serveAs(agent.id);
+
+    const a = await executeTransfer({ idempotencyKey: `x7-sse-first-${RUN}-00000` });
+    const b = await executeTransfer({ idempotencyKey: `x7-sse-second-${RUN}-0000` });
+
+    expect(h.exchanges.map((e) => e.status), JSON.stringify(h.exchanges)).toEqual([202, 202]);
+    const rows = await m.db.transaction.findMany({ where: { agentId: agent.id } });
+    expect(rows).toHaveLength(2);
+    expect(new Set([a.payload['transactionId'], b.payload['transactionId']])).toEqual(new Set(rows.map((r) => r.id)));
+    expect(await reservedToday(agent.id)).toBeCloseTo(3, 6);
+    expect(h.queued).toHaveLength(2);
+  });
+
+  it('a refusal is relayed unchanged (no transactionId invented): a recipient outside allowedRecipients is 403, nothing created', async () => {
+    const agent = await mkAgent({ allowedRecipients: [OTHER] });
+    await serveAs(agent.id);
+
+    const result = await executeTransfer({ idempotencyKey: `x7-sse-refused-${RUN}-000` });
+
+    expect(h.exchanges.map((e) => e.status)).toEqual([403]);
+    expect(result.payload).not.toHaveProperty('transactionId');
+    expect(String(result.payload['error'])).toMatch(/allowed recipients whitelist/);
+    expect(await m.db.transaction.count({ where: { agentId: agent.id } })).toBe(0);
+  });
+
+  it.each([
+    ['too short (15 chars)', 'abcdefghijklmno'],
+    ['too long (129 chars)', 'a'.repeat(129)],
+    ['a character outside [A-Za-z0-9_-]', 'x7-sse-2026-10-17/0001'],
+  ])('a malformed key (%s) is INVALID_INPUT and never reaches the backend — the same rule as the stdio tools', async (_label, key) => {
+    const agent = await mkAgent();
+    await serveAs(agent.id);
+
+    const result = await executeTransfer({ idempotencyKey: key });
+
+    expect(result.isError).toBe(true);
+    expect(result.payload).toMatchObject({ code: 'INVALID_INPUT', tool: 'execute_transfer' });
+    expect(h.exchanges).toHaveLength(0);
+    // The stdio transfer_token refuses the same value.
+    const stdio = await m.callTool('transfer_token', { to: RECIPIENT, token: USDC_84532, amount: '1', chain_id: BASE_SEPOLIA, idempotency_key: key }, { log: () => undefined });
+    expect(textOf(stdio)).toMatchObject({ code: 'INVALID_INPUT' });
+    expect(h.exchanges).toHaveLength(0);
+    expect(await m.db.transaction.count({ where: { agentId: agent.id } })).toBe(0);
+  });
+
+  it('tools/list: execute_transfer has an optional idempotencyKey whose description says to reuse it on a retry', async () => {
+    const tools = await withSseClient(async (client) => (await client.listTools()).tools);
+    const tool = tools.find((t) => t.name === 'execute_transfer');
+    expect(tool?.inputSchema.required ?? []).not.toContain('idempotencyKey');
+    const property = (tool?.inputSchema.properties ?? {})['idempotencyKey'] as { type?: string; description?: string } | undefined;
+    expect(property).toMatchObject({ type: 'string' });
+    expect(property?.description).toMatch(/16-128/);
+    expect(property?.description).toMatch(/same key/i);
+    expect(tool?.description).toMatch(/idempotencyKey/);
+    expect(tool?.description).toMatch(/reuse/i);
   });
 });

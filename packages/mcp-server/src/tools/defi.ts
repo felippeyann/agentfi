@@ -1,8 +1,13 @@
 import { z } from 'zod';
 import { api } from '../api-client.js';
+import type { components } from '../api.generated.js';
 import { addressSchema } from '../addresses.js';
 import { invalidInput } from '../input-error.js';
 import { isNativeEthLiteral, nativeEthRefusal, resolveAssetToken, resolveTransferToken } from './token-map.js';
+
+type TransferRequest = components['schemas']['TransferRequest'];
+type TransactionAccepted = components['schemas']['TransactionAccepted'];
+type Transaction = components['schemas']['Transaction'];
 
 export const defiTools = [
   {
@@ -10,7 +15,12 @@ export const defiTools = [
     description:
       'Transfers ETH or an ERC-20 token to any Ethereum address. ' +
       'Use "ETH" as the token identifier to send native ETH, or provide a contract address for ERC-20. ' +
-      'Native "ETH" is refused on chains whose native asset is not ETH (Polygon 137: POL) — use WETH there.',
+      'Native "ETH" is refused on chains whose native asset is not ETH (Polygon 137: POL) — use WETH there. ' +
+      'Pass an idempotency_key and reuse the same key when you retry this same transfer (e.g. after a timeout), or a ' +
+      'retry transfers twice: a known key returns the transfer already created instead of sending again. Reuse a key ' +
+      'only to repeat the same request — the backend answers a known key with its first transfer even when the new ' +
+      'request differs — and once that transfer has failed (FAILED or REVERTED in get_transaction_status) a new ' +
+      'attempt needs a new key.',
     inputSchema: z.object({
       token: z
         .string()
@@ -24,25 +34,36 @@ export const defiTools = [
         .string()
         .describe('Amount in human-readable units. Example: "100" for 100 USDC.'),
       chain_id: z.number().default(1).describe('Chain ID. Default: 1 (Ethereum mainnet).'),
+      // X7: the same format and validation as pay_agent's idempotency_key (tools/agent.ts).
+      idempotency_key: z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{16,128}$/, 'must be 16-128 chars of [A-Za-z0-9_-]')
+        .optional()
+        .describe(
+          'Idempotency key (16-128 chars of [A-Za-z0-9_-]), sent as the route\'s idempotencyKey. A retry with the same ' +
+            'key returns the first transfer instead of transferring again. One key per transfer request: the same key ' +
+            'with different fields still returns the first transfer.',
+        ),
     }),
-    handler: async (input: { token: string; to: string; amount: string; chain_id: number }) => {
+    handler: async (input: { token: string; to: string; amount: string; chain_id: number; idempotency_key?: string }) => {
       // The route reads "ETH" as the chain's native asset: POL on Polygon.
       const nativeRefusal = isNativeEthLiteral(input.token) ? nativeEthRefusal(input.chain_id) : undefined;
       if (nativeRefusal !== undefined) throw invalidInput('token', nativeRefusal);
       const token = resolveTransferToken(input.token, input.chain_id);
 
-      const result = await api.post<{ transactionId: string; status: string }>(
-        '/v1/transactions/transfer',
-        {
-          token,
-          to: input.to,
-          amount: input.amount,
-          chainId: input.chain_id,
-        },
-      );
+      const body: TransferRequest = {
+        token,
+        to: input.to,
+        amount: input.amount,
+        chainId: input.chain_id,
+        ...(input.idempotency_key !== undefined ? { idempotencyKey: input.idempotency_key } : {}),
+      };
+      // A new transfer is 202 TransactionAccepted (`transactionId`); a known
+      // idempotencyKey is answered 200 with the stored Transaction (`id`).
+      const result = await api.post<TransactionAccepted & Pick<Transaction, 'id'>>('/v1/transactions/transfer', body);
 
       return {
-        transactionId: result.transactionId,
+        transactionId: result.transactionId ?? result.id,
         status: result.status,
         next: 'Call get_transaction_status to track confirmation.',
       };

@@ -204,7 +204,8 @@ const AAVE_PROVIDER_ABI = [
 /** Reads `IPoolAddressesProvider.getPool()`. Injectable for tests. */
 export type AavePoolReader = (chainId: number, provider: Address) => Promise<string>;
 
-const readAavePoolOnChain: AavePoolReader = async (chainId, provider) =>
+/** The chain's public client reading `getPool()` — also the allowances route's source of the Pool (S12). */
+export const readAavePoolOnChain: AavePoolReader = async (chainId, provider) =>
   createChainPublicClient(chainId).readContract({ address: provider, abi: AAVE_PROVIDER_ABI, functionName: 'getPool' });
 
 /**

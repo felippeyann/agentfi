@@ -287,7 +287,7 @@ because it could not be priced:
 | `deposit` / `withdraw` (Aave), `supply-compound` / `withdraw-compound`, `deposit-erc4626` / `withdraw-erc4626` | the asset amount; a `"max"` withdrawal's amount is unknown before it executes, so it is **unpriced** (send an explicit amount while a daily limit applies) — except a `"max"` withdrawal from Aave or Compound that the backend proves, from the calldata it built, returns everything to the agent's own wallet from the trusted protocol contract (the pool the configured Aave provider reports, the configured Comet) with no native value, signed by the agent's own wallet (not in Safe mode): **nothing**, marked `metadata.volumeExemption` (`max-withdrawal-to-own-wallet`). An ERC-4626 vault is chosen by the agent and never exempt |
 | `gmx-open` | the collateral amount (the keeper execution fee is checked against `maxValuePerTxEth` and not counted) |
 | `gmx-close` | nothing (a close returns value to the agent) |
-| `batch` | its native value; while a daily limit applies also every action whose calldata is exactly an ERC-20 `transfer` / `transferFrom` (see below) |
+| `batch` | its native value plus the executor fee (the `msg.value` it is sent with: the actions' total value + floor(total × 30 / 10 000), A6d — a batch whose value alone is exactly at `maxOutflowPerTxUsd` or at the remaining daily room is refused); while a daily limit applies also every action whose calldata is exactly an ERC-20 `transfer` / `transferFrom` (see below) |
 | paid job, legacy reward | the reward, at creation (`POST /v1/jobs`) |
 | paid job, ERC-8183 escrow / x402 `pay-resource` | the USDC amount at exactly 1.00 USD (`usdc-peg`) |
 
