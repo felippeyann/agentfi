@@ -1795,8 +1795,9 @@ paths:
       description: |
         This API process's verification state of each escrow chain, with the
         reason when new escrow operations are blocked, and the TTL / re-check
-        settings. The worker verifies on its own (its state changes are logged
-        and sent as `ESCROW_ALERT` notifications). While a chain is not
+        settings. The worker verifies on its own; `worker` is its state as it
+        last published it (read-only: nothing is gated on it, and `missing` /
+        `unreadable` / `stale` never mean verified). While a chain is not
         verified, NEW escrow-dependent signatures wait: escrow job creation and
         escrow delivery / cancellation answer `503 ESCROW_CONFIG_UNVERIFIED`,
         queued escrow steps, ERC-8004 identity transactions and evaluator
@@ -1814,9 +1815,40 @@ paths:
                   process: { type: string, enum: [api] }
                   ttlSeconds: { type: integer }
                   recheckSeconds: { type: integer }
+                  escrowWindow:
+                    type: object
+                    description: This process's contest window and job TTL (C5 preflight).
+                    properties:
+                      evaluationDelaySeconds: { type: integer }
+                      jobTtlSeconds: { type: integer }
                   chains:
                     type: array
                     items: { $ref: '#/components/schemas/EscrowVerificationView' }
+                  worker:
+                    description: |
+                      The worker's own verification as it last published it to Redis
+                      after a check (C3f). Each chain is as of `publishedAt`.
+                      Read-only diagnostics: no gate depends on it.
+                    oneOf:
+                      - type: object
+                        required: [state, role, host, publishedAt, ageSeconds, stale, ttlSeconds, recheckSeconds, chains]
+                        properties:
+                          state: { type: string, enum: [reported] }
+                          role: { type: string, enum: [worker] }
+                          host: { type: string }
+                          publishedAt: { type: string, format: date-time }
+                          ageSeconds: { type: integer }
+                          stale: { type: boolean, description: Older than two re-check periods. }
+                          ttlSeconds: { type: integer }
+                          recheckSeconds: { type: integer }
+                          chains:
+                            type: array
+                            items: { $ref: '#/components/schemas/EscrowVerificationView' }
+                      - type: object
+                        required: [state, reason]
+                        properties:
+                          state: { type: string, enum: [missing, unreadable] }
+                          reason: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
   /admin/agents/{id}/pnl:
