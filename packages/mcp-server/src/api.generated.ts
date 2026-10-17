@@ -1557,12 +1557,23 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Active token allowances */
+        /**
+         * Active token allowances
+         * @description Without `spender`, the allowances of the chain's common tokens for the
+         *     Uniswap V3 router and the **Aave V3 Pool** — the address `getPool()` of
+         *     the configured PoolAddressesProvider answers, the contract an Aave
+         *     supply calls (S12: the provider itself was checked before, so the Aave
+         *     allowance always read 0). When that Pool cannot be resolved (the
+         *     provider cannot be read or answers no address) the request is `502
+         *     AAVE_POOL_UNAVAILABLE`, never a list without the Aave allowance.
+         */
         get: {
             parameters: {
                 query?: {
                     /** @description EVM chain ID (1=Ethereum, 8453=Base, 42161=Arbitrum, 137=Polygon). */
                     chainId?: components["parameters"]["ChainIdQuery"];
+                    /** @description Check only this spender (the defaults are not read). */
+                    spender?: string;
                 };
                 header?: never;
                 path?: never;
@@ -1579,6 +1590,15 @@ export interface paths {
                         "application/json": {
                             allowances?: components["schemas"]["Allowance"][];
                         };
+                    };
+                };
+                /** @description `AAVE_POOL_UNAVAILABLE`: the Aave V3 Pool could not be resolved from the configured provider. */
+                502: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Error"];
                     };
                 };
             };
