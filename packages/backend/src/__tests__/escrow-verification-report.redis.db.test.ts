@@ -104,6 +104,26 @@ describeRedis('C3f item 4 — the worker\'s Q7 verification state in GET /admin/
     await redis.del(WORKER_KEY);
     redis.disconnect();
     await app?.close();
+    const runtime = await import('../config/escrow-verification-report.runtime.js').catch(() => null);
+    runtime?.__closeEscrowVerificationReportForTests();
+  });
+
+  it('the worker publishes its snapshot after a check: reasons sanitized, readable for three re-check periods', async () => {
+    const { publishEscrowVerificationReport } = await import('../config/escrow-verification-report.runtime.js');
+    const keyedRpc = 'https://base-sepolia.g.alchemy.com/v2/abcdefghijklmnopqrstuvwxyz012345';
+    const written = await publishEscrowVerificationReport(
+      'worker',
+      [{ chainId: 84532, state: 'unverified', allowed: false, verifiedAt: null, validUntil: null, since: '2026-10-17T08:50:00.000Z', reason: `HTTP request failed. URL: ${keyedRpc}` }] as never,
+      { ttlSeconds: 600, recheckSeconds: 120 },
+    );
+    expect(written).toBe(true);
+    const ttl = await redis.ttl(WORKER_KEY);
+    expect(ttl).toBeGreaterThan(350);
+    expect(ttl).toBeLessThanOrEqual(360);
+    const stored = await redis.get(WORKER_KEY);
+    expect(stored).not.toContain('abcdefghijklmnopqrstuvwxyz012345');
+    const body = (await get()).json();
+    expect(body.worker).toMatchObject({ state: 'reported', role: 'worker', stale: false, recheckSeconds: 120, chains: [expect.objectContaining({ chainId: 84532, state: 'unverified' })] });
   });
 
   const get = () => app.inject({ method: 'GET', url: '/admin/escrow/verification', headers: { 'x-admin-secret': ADMIN_SECRET } });

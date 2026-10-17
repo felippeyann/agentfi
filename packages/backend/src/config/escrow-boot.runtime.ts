@@ -28,9 +28,11 @@ import {
 import {
   escrowExpectations,
   escrowVerificationSettings,
+  escrowVerificationSnapshot,
   recordEscrowChecks,
   type VerificationTransition,
 } from './escrow-verification.runtime.js';
+import { publishEscrowVerificationReport } from './escrow-verification-report.runtime.js';
 import {
   capabilityDrift,
   describeCapabilities,
@@ -110,6 +112,16 @@ async function reportTransitions(role: ProcessRole, transitions: readonly Verifi
   }
 }
 
+/**
+ * C3f item 4: after every check, this process's verification state goes to
+ * Redis, so `GET /admin/escrow/verification` on the API can show the
+ * worker's (the process that signs settlements and sends escrow steps).
+ * Best effort, never awaited by the gate.
+ */
+function publishState(role: ProcessRole): void {
+  void publishEscrowVerificationReport(role, escrowVerificationSnapshot({ withReason: true }), escrowVerificationSettings()).catch(() => undefined);
+}
+
 let recheckTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
@@ -137,6 +149,7 @@ function startRecheckLoop(role: ProcessRole): void {
         timeoutMs: Math.min(10_000, intervalMs),
       });
       const transitions = recordEscrowChecks(checks, chains);
+      publishState(role);
       applyVerdict(role, escrowBootVerdict(env.NODE_ENV, checks), { quietUnreadable: true });
       for (const check of checks) {
         if (check.unreadable) logger.warn({ role, chainId: check.chainId, err: check.unreadable }, 'ERC-8183 configuration re-check failed — chain unverified');
@@ -169,6 +182,7 @@ export async function runEscrowBootCheck(role: ProcessRole): Promise<EscrowBootV
     const checks = await checkEscrowDeployments({ chains, reader, chainIdReader, codeReader });
     verdict = escrowBootVerdict(env.NODE_ENV, checks);
     const transitions = recordEscrowChecks(checks, chains);
+    publishState(role);
     applyVerdict(role, verdict);
     await reportTransitions(role, transitions);
   } catch (err) {

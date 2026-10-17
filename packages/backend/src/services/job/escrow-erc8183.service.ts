@@ -2154,6 +2154,11 @@ async function assertNoPendingSettlement(deps: Erc8183Deps, job: Pick<EscrowJobR
  */
 const unconfirmedSends = new Map<string, Hex>();
 
+/** Testing hook. */
+export function __resetUnconfirmedSendsForTests(): void {
+  unconfirmedSends.clear();
+}
+
 /**
  * C3f item 3: before a new evaluator signature for `job`, the hash of its
  * last send that threw while unknown to every node is asked about again:
