@@ -28,6 +28,7 @@ import {
   requiredEthWei,
   settlementChecks,
   windowCheck,
+  workerVerificationCheck,
   type DecodedEvent,
   type JobSnapshot,
   type Scenario,
@@ -145,6 +146,28 @@ describe('window and hold', () => {
   it('a settlement earlier than the window fails the check (the window was shorter than approved)', () => {
     expect(windowCheck(1_000n, 4_600n).ok).toBe(true);
     expect(windowCheck(1_000n, 4_599n).ok).toBe(false);
+  });
+});
+
+describe("the worker's own Q7 state (C3f item 4) — unknown is never verified", () => {
+  const view = (state: string, allowed: boolean, chainId = 84532) => ({ chainId, state, allowed, verifiedAt: null, validUntil: null, since: null });
+  const reported = (chains: unknown[], stale = false) => ({ state: 'reported', stale, ageSeconds: stale ? 900 : 10, role: 'worker', recheckSeconds: 300, chains });
+
+  it('passes only on a current report with this chain verified and allowed', () => {
+    expect(workerVerificationCheck(reported([view('verified', true)])).ok).toBe(true);
+  });
+
+  it('fails when the worker has not reported, the report is unreadable, or the field is absent', () => {
+    expect(workerVerificationCheck({ state: 'missing', reason: 'no verification report' }).ok).toBe(false);
+    expect(workerVerificationCheck({ state: 'unreadable', reason: 'redis down' }).ok).toBe(false);
+    expect(workerVerificationCheck(undefined).actual).toBe('absent');
+  });
+
+  it('fails on a stale report even if it said verified, and on a blocked or missing chain', () => {
+    expect(workerVerificationCheck(reported([view('verified', true)], true)).ok).toBe(false);
+    expect(workerVerificationCheck(reported([view('unverified', false)])).ok).toBe(false);
+    expect(workerVerificationCheck(reported([view('verified', false)])).ok).toBe(false);
+    expect(workerVerificationCheck(reported([view('verified', true, 8453)])).ok).toBe(false);
   });
 });
 

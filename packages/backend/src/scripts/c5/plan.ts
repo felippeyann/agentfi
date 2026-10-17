@@ -373,6 +373,26 @@ export function windowCheck(submittedAt: bigint, settledAt: bigint, windowSecond
 }
 
 /**
+ * The worker's own Q7 state, as `GET /admin/escrow/verification` shows it
+ * under `worker` (C3f item 4). The worker signs every evaluator settlement
+ * and sends the queued escrow steps, and it verifies on its own: the API
+ * being verified does not mean the worker is. Passes only on a current
+ * (`reported`, not `stale`) report in which this chain is `verified` and
+ * allowed; `missing`, `unreadable`, an absent field (a backend without the
+ * report) or a stale report fail — unknown is never verified.
+ */
+export function workerVerificationCheck(worker: unknown, chainId = C5_CHAIN_ID): Check {
+  const name = `worker escrow configuration verified (Q7, chain ${chainId})`;
+  const w = worker as { state?: unknown; stale?: unknown; ageSeconds?: unknown; reason?: unknown; chains?: unknown } | null | undefined;
+  if (!w || typeof w !== 'object') return check(name, 'reported / verified / allowed', 'absent', false);
+  if (w.state !== 'reported') return check(name, 'reported / verified / allowed', `${String(w.state)}${w.reason ? ` (${String(w.reason)})` : ''}`, false);
+  if (w.stale !== false) return check(name, 'reported / verified / allowed', `stale report (${String(w.ageSeconds)} s old)`, false);
+  const view = Array.isArray(w.chains) ? (w.chains as Array<{ chainId?: unknown; state?: unknown; allowed?: unknown }>).find((v) => v?.chainId === chainId) : undefined;
+  if (!view) return check(name, 'reported / verified / allowed', 'chain absent from the report', false);
+  return check(name, 'reported / verified / allowed', `reported / ${String(view.state)} / ${String(view.allowed)}`, view.state === 'verified' && view.allowed === true);
+}
+
+/**
  * Nonce accounting for the whole run: how many transactions each wallet may
  * have sent between the setup snapshot and the end. More means a transaction
  * this plan does not explain (stop and investigate); fewer means a step did
