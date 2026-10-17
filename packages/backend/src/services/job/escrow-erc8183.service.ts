@@ -266,7 +266,7 @@ export interface Erc8183Config {
 }
 
 export type EscrowPublicClient = Pick<PublicClient, 'getTransactionReceipt' | 'readContract'> &
-  Partial<Pick<PublicClient, 'getBalance' | 'getTransaction'>>;
+  Partial<Pick<PublicClient, 'getBalance' | 'getTransaction' | 'getTransactionCount'>>;
 
 export interface SettlementEnqueue {
   add(data: EscrowSettlementJobData, opts?: { delayMs?: number }): Promise<void>;
@@ -288,7 +288,9 @@ export interface EscrowAlert {
     | 'review-overridden'
     | 'settlement-failed'
     /** G1 review P2-1: past expiresAt, a delivery accepted in time is waiting for its submit / settlement — not refunded. */
-    | 'delivery-held';
+    | 'delivery-held'
+    /** C3f item 1: the evaluator key's lowest pending transaction has not been mined for a while — every later evaluator transaction waits behind it. */
+    | 'evaluator-stuck';
   message: string;
   jobId?: string;
   chainId?: number | null;
@@ -1898,6 +1900,145 @@ async function checkEvaluatorBalance(deps: Erc8183Deps, chainId: number): Promis
 }
 
 /**
+ * C3f item 1: how long the evaluator key's lowest pending nonce may stay
+ * unmined before the operator is told (the receipt wait is 180 s; a Base block
+ * is 2 s — ten minutes without that nonce moving is a stuck key, not a busy one).
+ */
+export const EVALUATOR_STUCK_ALERT_AFTER_MS = 10 * 60_000;
+/** Per chain: the evaluator key's lowest pending nonce, since when it has not moved, and when it was alerted. */
+const evaluatorBacklogs = new Map<number, { nonce: number; since: number; alertedAt: number | null }>();
+
+export interface EvaluatorBacklog {
+  chainId: number;
+  evaluator: Address;
+  /** The nonce every later evaluator transaction waits behind (`latest` transaction count). */
+  stuckNonce: number;
+  /** Evaluator transactions known to the node and not mined (`pending` − `latest`), the stuck one included. */
+  queued: number;
+  since: Date;
+  /** The job's settlement transaction carrying `stuckNonce`, when one of the live jobs has it. */
+  stuckTxHash: Hex | null;
+  jobId: string | null;
+}
+
+/** C3f item 1: the live escrow job whose recorded evaluator transaction carries `nonce`, if any. */
+async function evaluatorTxWithNonce(deps: Erc8183Deps, chainId: number, nonce: number): Promise<{ jobId: string; hash: Hex } | null> {
+  const client = deps.publicClient(chainId);
+  if (!client.getTransaction) return null;
+  const candidates = await deps.db.job.findMany({
+    where: { escrowKind: ESCROW_KIND, escrowChainId: chainId, settleTxHash: { not: null }, onChainStatus: { notIn: [...FINAL_ON_CHAIN_STATUSES] } },
+    select: { id: true, settleTxHash: true },
+    orderBy: { updatedAt: 'desc' },
+    take: 100,
+  });
+  for (const candidate of candidates) {
+    try {
+      const tx = await client.getTransaction({ hash: candidate.settleTxHash as Hex });
+      if (Number(tx.nonce) === nonce) return { jobId: candidate.id, hash: candidate.settleTxHash as Hex };
+    } catch {
+      // unknown or unreadable: not this one
+    }
+  }
+  return null;
+}
+
+/**
+ * C3f item 1 — visibility only. The evaluator signs with the node's `pending`
+ * nonce, so one transaction that is never mined (priced below the network,
+ * stuck in the mempool) makes every later evaluator transaction of the key —
+ * other jobs' settlements, cancellation refunds, expiry claims — queue behind
+ * it; each of those jobs then fails on its own (`settlement-failed`) and
+ * nothing named the transaction that blocks them. Compares the key's `latest`
+ * and `pending` transaction counts: a lowest pending nonce that has not moved
+ * for EVALUATOR_STUCK_ALERT_AFTER_MS is alerted once (then at most every
+ * SETTLEMENT_FAILURE_ALERT_INTERVAL_MS), with the job and transaction that
+ * hold it. Nothing is replaced or cancelled: that needs an operator decision
+ * (C3f proposal). Without `getTransactionCount` (unit-test clients) or with a
+ * node that does not see the mempool, nothing is reported.
+ */
+export async function checkEvaluatorBacklog(deps: Erc8183Deps, chainId: number): Promise<EvaluatorBacklog | null> {
+  const evaluator = deps.config.evaluatorAddress;
+  const client = deps.publicClient(chainId);
+  if (!evaluator || !client.getTransactionCount) return null;
+  let latest: number;
+  let pending: number;
+  try {
+    [latest, pending] = await Promise.all([
+      client.getTransactionCount({ address: evaluator, blockTag: 'latest' }),
+      client.getTransactionCount({ address: evaluator, blockTag: 'pending' }),
+    ]);
+  } catch {
+    return null;
+  }
+  const now = nowOf(deps).getTime();
+  if (pending <= latest) {
+    evaluatorBacklogs.delete(chainId);
+    return null;
+  }
+  const seen = evaluatorBacklogs.get(chainId);
+  if (!seen || seen.nonce !== latest) {
+    // First sight of this nonce at the head of the backlog: a busy key, not (yet) a stuck one.
+    evaluatorBacklogs.set(chainId, { nonce: latest, since: now, alertedAt: null });
+    return null;
+  }
+  if (now - seen.since < EVALUATOR_STUCK_ALERT_AFTER_MS) return null;
+  if (seen.alertedAt !== null && now - seen.alertedAt < SETTLEMENT_FAILURE_ALERT_INTERVAL_MS) return null;
+  seen.alertedAt = now;
+  const stuck = await evaluatorTxWithNonce(deps, chainId, latest);
+  const backlog: EvaluatorBacklog = {
+    chainId,
+    evaluator,
+    stuckNonce: latest,
+    queued: pending - latest,
+    since: new Date(seen.since),
+    stuckTxHash: stuck?.hash ?? null,
+    jobId: stuck?.jobId ?? null,
+  };
+  await raiseAlert(deps, {
+    kind: 'evaluator-stuck',
+    chainId,
+    ...(stuck ? { jobId: stuck.jobId } : {}),
+    message:
+      `Evaluator ${evaluator} on chain ${chainId}: transaction nonce ${latest} ` +
+      `(${stuck ? `${stuck.hash}, the settlement of job ${stuck.jobId}` : 'not the recorded settlement of a live job'}) ` +
+      `has not been mined since ${backlog.since.toISOString()}; ${backlog.queued} evaluator transaction(s) wait behind it ` +
+      '(settlements, cancellation refunds, expiry claims of every job on this chain). Funds stay in the escrow. The backend does ' +
+      'not replace or cancel it on its own: it is mined when the network fee falls back to its price, or the operator replaces ' +
+      'that nonce (C3f proposal).',
+    details: { evaluator, stuckNonce: latest, queued: backlog.queued, stuckTxHash: backlog.stuckTxHash, since: backlog.since.toISOString() },
+  });
+  return backlog;
+}
+
+/** C3f item 1: the backlog check of every chain that has a live escrow job (run by the expiry sweep). */
+async function checkEvaluatorBacklogs(deps: Erc8183Deps): Promise<void> {
+  let chains: Array<{ escrowChainId: number | null }>;
+  try {
+    chains = await deps.db.job.findMany({
+      where: { escrowKind: ESCROW_KIND, escrowChainId: { not: null }, onChainStatus: { notIn: [...FINAL_ON_CHAIN_STATUSES] } },
+      select: { escrowChainId: true },
+      distinct: ['escrowChainId'],
+    });
+  } catch (err) {
+    deps.logger.warn({ err: errorMessage(err) }, 'ERC-8183 evaluator backlog check skipped — live escrow chains could not be read');
+    return;
+  }
+  for (const { escrowChainId } of chains) {
+    if (escrowChainId === null) continue;
+    try {
+      await checkEvaluatorBacklog(deps, escrowChainId);
+    } catch (err) {
+      deps.logger.warn({ chainId: escrowChainId, err: errorMessage(err) }, 'ERC-8183 evaluator backlog check failed for a chain');
+    }
+  }
+}
+
+/** Testing hook. */
+export function __resetEvaluatorBacklogForTests(): void {
+  evaluatorBacklogs.clear();
+}
+
+/**
  * Q7: an evaluator settlement refused because the on-chain configuration of
  * its chain is not verified in this process. Not a settlement failure: the
  * settlement worker reschedules the job after `retryAfterMs` without
@@ -2200,6 +2341,8 @@ export async function processSettlementJob(deps: Erc8183Deps, jobLike: Settlemen
   const { data } = jobLike;
   if (data.action === 'sweep') {
     const enqueued = await sweepExpiredEscrows(deps);
+    // C3f item 1: on the same cadence, tell the operator when the evaluator key is stuck behind one transaction.
+    await checkEvaluatorBacklogs(deps);
     return { outcome: 'swept', enqueued };
   }
 

@@ -2502,6 +2502,8 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
     const stuckAlerts = () => sim.alerts.filter((a) => a.kind === ('evaluator-stuck' as EscrowAlert['kind']));
     /** Longer than the "stuck" threshold (10 min): a backlog that has not moved for that long. */
     const PAST_STUCK_THRESHOLD_MS = 11 * 60_000;
+    // The backlog memory is per chain and per process; every test starts a new simulated chain.
+    beforeEach(() => (m.svc as { __resetEvaluatorBacklogForTests?: () => void }).__resetEvaluatorBacklogForTests?.());
 
     it('item 1: one evaluator transaction stuck pending blocks every later one of the key — the operator is told WHICH (nonce, hash, job) once, not only that each job fails', async () => {
       const a = await delivered();
