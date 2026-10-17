@@ -2000,6 +2000,69 @@ async function assertNoPendingSettlement(deps: Erc8183Deps, job: Pick<EscrowJobR
 }
 
 /**
+ * C3f item 3: evaluator sends that threw and that no RPC node knew at that
+ * moment — P3-2 gave their job's hash slot back ("never left"). A node can
+ * learn a transaction a moment after the send reported an error
+ * (propagation, a load-balanced node behind), and a retry used to sign a
+ * second settlement that queued behind the first by nonce and reverted once
+ * it mined (evaluator gas; `settleTxHash` lost the transaction that settled,
+ * so its hook outcome and fee were not recorded). The next attempt of the
+ * job asks about that hash again before signing (`readoptUnconfirmedSend`).
+ * In memory: the settlement worker (concurrency 1) is the only sender; after
+ * a restart the nodes' "not found" stands, as before C3f.
+ */
+const unconfirmedSends = new Map<string, Hex>();
+
+/**
+ * C3f item 3: before a new evaluator signature for `job`, the hash of its
+ * last send that threw while unknown to every node is asked about again:
+ *  - mined: a revert changed nothing (forgotten); a success is adopted as the
+ *    job's settlement transaction and nothing new is signed (the next read of
+ *    the chain finds the job settled and records that transaction's outcome);
+ *  - no receipt and a node knows it now: it left — adopted (P3-2's own rule:
+ *    "a node knows it → in flight, hash kept") and nothing new is signed
+ *    while it may mine (C3e item 1);
+ *  - still unknown to every node: P3-2's verdict stands (never left);
+ *  - the nodes cannot tell: nothing is signed, asked again on the next attempt.
+ * The adoption is conditional on the hash slot as read, so a contest or a
+ * newer attempt that moved the row is never overwritten.
+ */
+async function readoptUnconfirmedSend(deps: Erc8183Deps, job: Pick<EscrowJobRow, 'id' | 'settleTxHash' | 'escrowChainId'>): Promise<void> {
+  const hash = unconfirmedSends.get(job.id);
+  if (!hash || job.escrowChainId === null) return;
+  if (hash === job.settleTxHash) {
+    unconfirmedSends.delete(job.id);
+    return;
+  }
+  const adopt = async (detail: string): Promise<never> => {
+    const adopted = await deps.db.job.updateMany({ where: { id: job.id, settleTxHash: job.settleTxHash }, data: { settleTxHash: hash } });
+    unconfirmedSends.delete(job.id);
+    deps.logger.warn(
+      { jobId: job.id, txHash: hash, adopted: adopted.count > 0 },
+      `ERC-8183 settlement send reported failed earlier and no node knew it then — ${detail}: kept as the job's settlement, nothing new signed`,
+    );
+    throw new SettlementStillPendingError(hash, detail);
+  };
+  try {
+    const receipt = await deps.publicClient(job.escrowChainId).getTransactionReceipt({ hash });
+    if (receipt.status === 'success') await adopt('it was mined');
+    unconfirmedSends.delete(job.id); // reverted: it changed nothing
+    return;
+  } catch (err) {
+    if (err instanceof SettlementStillPendingError) throw err;
+    if (!errorNamed(err, 'TransactionReceiptNotFoundError')) throw new SettlementStillPendingError(hash, 'its receipt could not be read');
+  }
+  let known: boolean | null;
+  try {
+    known = await isEvaluatorTxKnown(deps, job.escrowChainId, hash);
+  } catch {
+    throw new SettlementStillPendingError(hash, 'the RPC nodes cannot tell whether a send reported failed earlier left');
+  }
+  if (known) await adopt('a node knows it now (it left after all)');
+  unconfirmedSends.delete(job.id);
+}
+
+/**
  * G1 review P3-2: thrown from the broadcast hook — nothing is sent — when the
  * conditional write of the signed hash finds the job changed since it was
  * read: another attempt recorded its own transaction, or (for a claimed
@@ -2045,6 +2108,7 @@ async function sendEvaluatorTx(
 ): Promise<{ signer: EvaluatorSigner; txHash: Hex }> {
   const chainId = job.escrowChainId!;
   assertEscrowConfigVerified(deps, chainId);
+  await readoptUnconfirmedSend(deps, job);
   await assertNoPendingSettlement(deps, job);
   await checkEvaluatorBalance(deps, chainId);
   const signer = deps.evaluatorSigner(chainId);
@@ -2102,6 +2166,8 @@ async function resolveFailedSend(
   try {
     if (known === false) {
       await deps.db.job.updateMany({ where: { id: jobId, settleTxHash: hash }, data: { settleTxHash: previous, settleAttemptAt: null } });
+      // C3f item 3: a node may still learn it (propagation) — asked again before the job's next signature.
+      unconfirmedSends.set(jobId, hash);
       deps.logger.warn(
         { jobId, txHash: hash, err: publicErrorMessage(failure.err) },
         'ERC-8183 settlement send failed and no RPC node knows the transaction — never sent: settle-attempt stamp cleared',
