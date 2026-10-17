@@ -2223,8 +2223,14 @@ export function __resetUnconfirmedSendsForTests(): void {
  *    while it may mine (C3e item 1);
  *  - still unknown to every node: P3-2's verdict stands (never left);
  *  - the nodes cannot tell: nothing is signed, asked again on the next attempt.
- * The adoption is conditional on the hash slot as read, so a contest or a
- * newer attempt that moved the row is never overwritten.
+ * The adoption is conditional on the hash slot as read, so a newer attempt
+ * that recorded its own hash is never overwritten. A contest does not touch
+ * that slot (review P3-3): one accepted in the interval — P3-2 gave the slot
+ * back and the API process cannot see this map — leaves it empty, and the
+ * next attempt, the operator's `resolve` of the CONTESTED job, re-adopts the
+ * known hash and signs nothing while it may still mine. The chain decides:
+ * if it settles against the decision, `reconcileTerminal` alerts
+ * `review-overridden`.
  */
 async function readoptUnconfirmedSend(deps: Erc8183Deps, job: Pick<EscrowJobRow, 'id' | 'settleTxHash' | 'escrowChainId'>): Promise<void> {
   const hash = unconfirmedSends.get(job.id);

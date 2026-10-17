@@ -2630,5 +2630,44 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
       expect(sim.chain.evaluatorBroadcasts.filter((x) => x.outcome === 'reverted')).toHaveLength(0);
     });
+
+    it('item 3 (review P3-3): a contest in the interval — the operator\'s resolve re-adopts the known hash on the CONTESTED job and signs nothing while it may mine; "review-overridden" when it settles', async () => {
+      const { requester, provider, jobId } = await delivered();
+      sim.chain.evaluatorHold = () => true;
+      sim.chain.evaluatorSendLostAnswer = ({ functionName }) => functionName === 'complete';
+      const realKnown = sim.deps.isKnownTransaction!;
+      let lagging = 1;
+      sim.deps.isKnownTransaction = async (chainId, hash) => (lagging-- > 0 ? false : realKnown(chainId, hash));
+      // The send that fails is the settle's last attempt (two earlier ones failed for another reason): the failed
+      // handler hands the job back to SUBMITTED, and the interval before the next attempt opens.
+      sim.settlements.get(`settle-${jobId}`)!.attempts = 2;
+      await sim.drive(1);
+      const completes = sim.chain.evaluatorBroadcasts.filter((x) => x.functionName === 'complete');
+      expect(completes.map((x) => x.outcome)).toEqual(['pending']); // the node took it, the answer was lost
+      // P3-2 gave the hash slot back (every node said "not found" then); the API cannot see the worker's memory.
+      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', settleTxHash: null, settleAttemptAt: null });
+
+      // The contest lands in the interval (pre-existing residual: accepted while that complete may still mine).
+      expect((await contestAs(requester.id, jobId)).statusCode).toBe(200);
+      sim.settlements.clear();
+      expect(await decide(jobId, 'refund')).toMatchObject({ outcome: 'scheduled', previousOnChainStatus: 'CONTESTED' });
+      await sim.drive(); // the resolve is the next attempt: it asks again, a node knows the hash now → re-adopted, nothing signed
+      expect(sim.chain.evaluatorBroadcasts.map((x) => x.functionName)).toEqual(['complete']); // no reject
+      expect(await job(jobId)).toMatchObject({ onChainStatus: 'CONTESTED', resolution: 'refund', settleTxHash: completes[0]!.hash });
+      expect((await job(jobId)).contestedAt).not.toBeNull();
+      // While it may mine, another decision is refused too.
+      expect(await decide(jobId, 'pay')).toMatchObject({ outcome: 'refused', code: 'SETTLEMENT_IN_PROGRESS' });
+
+      // The chain decides: the complete mines; the DB follows it and the overridden decision is alerted.
+      sim.chain.evaluatorHold = null;
+      sim.chain.releaseEvaluator();
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', resolution: 'refund', settleTxHash: completes[0]!.hash, feedbackStatus: 'written', platformFeeAmount: FEE.toString() });
+      expect(sim.alerts.filter((x) => x.kind === 'review-overridden' && x.jobId === jobId)).toHaveLength(1);
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+      expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC - BUDGET);
+      expect(sim.chain.evaluatorBroadcasts.filter((x) => x.outcome === 'reverted')).toHaveLength(0);
+    });
   });
 });
