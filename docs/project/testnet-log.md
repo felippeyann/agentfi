@@ -245,6 +245,8 @@ TURNKEY_ORGANIZATION_ID=<step 1>
 SAFE_DEPLOYER_PRIVATE_KEY=
 # C4 copy blocks (§2.5, §2.6)
 OPERATOR_FEE_WALLET=<FEE_WALLET>
+# Only if Deploy.s.sol was run (c5-escrow-validation.md §9-1). With the recommended
+# escrow-only scope, leave these three unset: the escrow validation does not use them.
 POLICY_MODULE_ADDRESS_84532=<§2.5>
 EXECUTOR_ADDRESS_84532=<§2.5>
 POLICY_OPERATOR_ADDRESS_84532=<§2.5>

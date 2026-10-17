@@ -336,7 +336,7 @@ cast call $HOOK   "supportsInterface(bytes4)(bool)" 0x7ff6bc9e --rpc-url $RPC  #
 cast call $HOOK   "supportsInterface(bytes4)(bool)" 0xffffffff --rpc-url $RPC  # false (the escrow probes this too)
 ```
 
-Then the policy module and executor of `Deploy.s.sol` (from `packages/contracts`; arguments: RPC, policy module, executor, operator, fee wallet, executor fee bps; prints `=== Results: 4 passed, 0 failed ===`):
+Then the policy module and executor of `Deploy.s.sol` (from `packages/contracts`; arguments: RPC, policy module, executor, operator, fee wallet, executor fee bps; prints `=== Results: 5 passed, 0 failed ===` since D18 added the `executor()` binding check; 6 with the legacy EscrowModule argument):
 
 ```bash
 bash ../../scripts/verify-deployment.sh "$RPC" <POLICY_MODULE_ADDRESS> <EXECUTOR_ADDRESS> "$OPERATOR_ADDRESS" "$FEE_WALLET" "$EXECUTOR_FEE_BPS"
