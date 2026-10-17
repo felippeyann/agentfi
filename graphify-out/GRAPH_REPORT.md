@@ -1,17 +1,17 @@
-# Graph Report - fb-c3f  (2026-10-17)
+# Graph Report - rc-1017  (2026-10-17)
 
 ## Corpus Check
-- 465 files · ~629,095 words
+- 469 files · ~644,237 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 25 file(s) not represented in the graph (top: (none) 12, .toml 5, .example 1)
 
 ## Summary
-- 4610 nodes · 9757 edges · 231 communities (217 shown, 14 thin omitted)
-- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 431 edges (avg confidence: 0.92)
+- 4684 nodes · 9918 edges · 228 communities (216 shown, 12 thin omitted)
+- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 441 edges (avg confidence: 0.92)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `c3e83963`
+- Built from commit: `6e03bf2e`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -26,7 +26,7 @@
 - agents.ts
 - mcp-server/package.json
 - HANDOFF — AgentFi
-- transaction.e2e.ts
+- TransactionBuilder
 - 7. Backend flow (R2)
 - fastify
 - transaction.queue.ts
@@ -43,12 +43,12 @@
 - AgentFiClient
 - Dossiê de Retomada — AgentFi (06/10/2026)
 - preflight.ts
-- OperatorService
+- @prisma/client
 - next
 - compilerOptions
-- builder.service.ts
+- executor.service.ts
 - Sinais de mercado — agentes transacionando (status em 06/10/2026)
-- resource-payment.service.ts
+- publicErrorMessage
 - price.service.ts
 - viem
 - compilerOptions
@@ -75,7 +75,7 @@
 - scripts
 - broadcast-outcome.db.test.ts
 - lucide-react
-- x402-fixture.ts
+- resource-payment.routes.test.ts
 - a2a-collab/index.mjs
 - a2a-collab/package.json
 - delegation-chain/package.json
@@ -84,19 +84,19 @@
 - @agentfi/adapters
 - dashboard/page.tsx
 - jobs/[id]/page.tsx
-- logger.ts
-- agentRoutes
+- notification.service.ts
+- ref_vitest
 - erc8004-identity.service.ts
 - AgentFi Production Release and Rollback Runbook
 - errors.ts
 - escrow-verification-report.runtime.ts
 - StripeService
-- @prisma/client
-- token-map.ts
+- escrow-boot-check.ts
+- defi.ts
 - AgentFi
 - AgentFi — Project State
 - Contributing to AgentFi
-- @agent_fi/backend
+- api-reference.md
 - x402-client.service.ts
 - AgentFi Documentation Standards (v1)
 - AgentFi Architecture
@@ -109,12 +109,12 @@
 - AgentFi Example — A2A Collaboration
 - AgentFi Example — Delegation Chain
 - adapters/tsconfig.json
-- pnl.service.ts
-- SubmitterService
+- Erc8183Deps
+- wallet-lane.test.ts
 - backend/tsconfig.json
 - mcp-server/tsconfig.json
 - Reporting a Vulnerability
-- PolicyService
+- [Unreleased]
 - swap-planner/index.mjs
 - bug_report.md
 - scripts
@@ -132,11 +132,11 @@
 - submitter.service.ts
 - uniswap.service.ts
 - Session Notes — 2026-10-15
-- ResourcePaymentService
+- resource-payment.service.ts
 - AgentFi Remediation Plan and Execution
 - spend-pricing.ts
-- policy-units.migration.db.test.ts
-- Sim
+- transactions.batch.anvil.ts
+- simulator.service.ts
 - feature_request.md
 - vercel.json
 - backend/src/index.ts
@@ -157,8 +157,8 @@
 - mcp.ts
 - transaction.processor.ts
 - TurnkeyService
-- PaymentFailedError
-- escrow-settlement.queue.ts
+- contract-identity.test.ts
+- escrow-settlement.queue.test.ts
 - middleware/auth.ts
 - escrow-fork.harness.ts
 - env.ts
@@ -167,93 +167,90 @@
 - max-withdrawal-proof.ts
 - annotations.ts
 - health.ts
-- stranded-queued.bullmq.db.test.ts
+- Assisted pilot on Base Sepolia — operational checklist (gate G4)
 - resource-payment.target-policy.test.ts
 - agent.ts
 - mcpRoutes
-- escrow-fork.global-setup.ts
+- startEscrowFork
 - daily-volume.db.test.ts
 - ref_modelcontextprotocol_sdk
-- handshake.oracle.test.ts
+- jobs.routes.erc8183.test.ts
 - release-v1.mjs
-- REPUTATION_HOOK_ABI
+- hook-state.ts
 - path-ids.test.ts
 - escrow-erc8183/package.json
 - spend-pricing.routes.db.test.ts
-- anvil-contracts.ts
+- policy-sync.contracts.anvil.ts
 - Local validation — every check, by layer
 - policy-stack-verification.runtime.ts
-- resource-payment.routes.test.ts
+- handler.ts
 - reconcileEscrowJob
 - tsconfig.build.json
 - mcp.sessions.test.ts
-- resource-payment.ledger.db.test.ts
+- agents.erc8004.routes.test.ts
 - broadcast-tx-hash.migration.db.test.ts
 - claimRefund
 - policy-sync/route.ts
 - contracts.ts
 - settle-attempt.migration.db.test.ts
 - ref_node_path
-- policy-sync.contracts.anvil.ts
-- ref_node_crypto
-- .getAddress
+- OnChainPolicyService
+- abi.erc8183.test.ts
+- C4 / C5 checklist — Base Sepolia (owner)
 - server.ts
 - AgentFi API Reference
-- 2. C4 runbook (owner runs it; the agent prepared it)
+- 7. Acceptance matrix
 - errors.sanitize.sync.test.ts
-- ref_vitest
+- local-validation.docs.test.ts
 - lib/auth.ts
 - fake-escrow-chain.ts
 - policy-sync.routes.anvil.ts
-- local-request.ts
-- admin.pause.routes.test.ts
-- transaction.worker.test.ts
+- Execution Plan — AgentFi reactivation (Q4 2026)
+- wallets.ts
+- 6. Execution
 - transaction.repoll.test.ts
 - escrow-spend-policy.db.test.ts
 - demo-claude-mcp.mjs
 - batch-calldata.test.ts
-- handshake.test.ts
+- handshake.oracle.test.ts
 - [0.5.0] — 2026-05-15
-- PnLService
+- AgentFi Example — ERC-8183 escrow with ERC-8004 feedback
 - 🚀 New Features
 - daily-volume.ts
 - Operator interviews (WS7, gate G4)
 - approval-day.db.test.ts
 - ref_node_fs
 - startBackend
-- LocalChain
+- 3. Roles and addresses
 - x402.ts
-- AgentFi Smart Contracts
+- 2. Baseline
 - policy-review-followups.db.test.ts
 - max-withdrawal.routes.db.test.ts
 - outflow-cap.routes.db.test.ts
 - escrow.service.ts
 - chains.ts
-- transaction.queue.multinode.test.ts
 - max-withdrawal.fork.test.ts
 - pay-agent.mcp.db.test.ts
 - contract-identity.executor.anvil.ts
-- escrow-boot-check.ts
-- gmxService
+- escrow-boot-check.test.ts
 - contract-identity.module.anvil.ts
 - transfer-input.routes.db.test.ts
-- payment-finalizer.snapshot.test.ts
 - outflow-cap.migration.db.test.ts
 - gen-contract-code.mjs
-- pnl.service.test.ts
+- pnl.service.ts
 - admin.batch.routes.test.ts
 - go-no-go.md
 
 ## God Nodes (most connected - your core abstractions)
-1. `viem` - 131 edges
-2. `@prisma/client` - 60 edges
-3. `transactionRoutes()` - 51 edges
-4. `fastify` - 50 edges
+1. `viem` - 135 edges
+2. `@prisma/client` - 61 edges
+3. `fastify` - 53 edges
+4. `transactionRoutes()` - 52 edges
 5. `ResourcePaymentService` - 43 edges
 6. `FakeEscrowChain` - 42 edges
-7. `sanitizeText()` - 37 edges
-8. `createChainPublicClient()` - 35 edges
-9. `claimRefund()` - 35 edges
+7. `sanitizeText()` - 39 edges
+8. `claimRefund()` - 36 edges
+9. `createChainPublicClient()` - 35 edges
 10. `X402ClientService` - 35 edges
 
 ## Surprising Connections (you probably didn't know these)
@@ -263,19 +260,19 @@
   docs/project/c5-escrow-validation.md → packages/backend/src/__tests__/approval-day.db.test.ts
 - `7.4 No agent can resolve the dispute` --references--> `reject()`  [INFERRED]
   docs/project/c5-escrow-validation.md → packages/backend/src/__tests__/approval-day.db.test.ts
+- `7. After the session: verification and records` --references--> `reject()`  [INFERRED]
+  docs/project/pilot-checklist.md → packages/backend/src/__tests__/approval-day.db.test.ts
 - `What it does` --references--> `reject()`  [INFERRED]
   examples/escrow-erc8183/README.md → packages/backend/src/__tests__/approval-day.db.test.ts
-- `4.1 USDC (Circle's testnet USDC `0x036C…CF7e`, 6 decimals)` --references--> `pendingPlatformFees()`  [INFERRED]
-  docs/project/c5-escrow-validation.md → packages/backend/src/__tests__/e2e/escrow-erc8183.fork.e2e.ts
 
 ## Import Cycles
 - None detected.
 
-## Communities (231 total, 14 thin omitted)
+## Communities (228 total, 12 thin omitted)
 
 ### Community 0 - "escrow-validation.ts"
 Cohesion: 0.05
-Nodes (108): addressEnv(), adoptOrCreate(), AgentKeys, AgentRecord, api(), ApiResult, APPROVAL_TOPIC, authorityChecks() (+100 more)
+Nodes (109): addressEnv(), adoptOrCreate(), AgentKeys, AgentRecord, api(), ApiResult, APPROVAL_TOPIC, authorityChecks() (+101 more)
 
 ### Community 1 - "PROMPT PARA CLAUDE CODE — AgentFi: Infraestrutura de Transações Cripto para Agentes de IA"
 Cohesion: 0.04
@@ -286,8 +283,8 @@ Cohesion: 0.16
 Nodes (18): attemptsByKey, AttemptState, buildAttemptKey(), clearLoginFailures(), getClientIp(), getLoginAttemptContext(), getMaxLoginAttempts(), HeaderMap (+10 more)
 
 ### Community 3 - "escrow-erc8183.runtime.ts"
-Cohesion: 0.07
-Nodes (44): 6.3 Settlement, feedback file and contest, contestJobSchema, createJobSchema, errorMessage(), refuseUnverifiedEscrow(), reputationService, REWARD_CHAIN_ID_REQUIRED, REWARD_TOKEN_REQUIRED (+36 more)
+Cohesion: 0.10
+Nodes (39): contestJobSchema, createJobSchema, errorMessage(), jobRoutes(), refuseUnverifiedEscrow(), reputationService, REWARD_CHAIN_ID_REQUIRED, REWARD_TOKEN_REQUIRED (+31 more)
 
 ### Community 4 - "scripts"
 Cohesion: 0.05
@@ -295,7 +292,7 @@ Nodes (40): devDependencies, eslint, prettier, tsx, typescript, engines, node, t
 
 ### Community 5 - "policy-authority.ts"
 Cohesion: 0.08
-Nodes (27): BLOCKED, changedPolicyFields(), classifyPolicyChange(), DECIMAL_LIMIT_READINGS, DecimalLimitField, decimalLimitLoosens(), effectiveCooldown(), effectiveExpiry() (+19 more)
+Nodes (30): agentRoutes(), validationFailed(), BLOCKED, changedPolicyFields(), classifyPolicyChange(), DECIMAL_LIMIT_READINGS, DecimalLimitField, decimalLimitLoosens() (+22 more)
 
 ### Community 6 - "adapters/package.json"
 Cohesion: 0.06
@@ -313,33 +310,33 @@ Nodes (36): bin, agentfi-mcp, dependencies, dotenv, @modelcontextprotocol/sdk, @
 Cohesion: 0.06
 Nodes (31): 1. Snapshot, 2. Required reading order, 3.1 Owner-only items (summary; details in the plan), 3.2 Defects fixed and in flight, 3.3 Blocked externally, 3.4 The meta-guidance, 3. Pending work, 4. Credentials inventory (+23 more)
 
-### Community 10 - "transaction.e2e.ts"
+### Community 10 - "TransactionBuilder"
 Cohesion: 0.09
-Nodes (7): Added, Phase 3: A2A Economy Primitives, transactionQueue, TransactionBuilder, ANVIL_PRIVATE_KEY, waitForDailyVolume(), waitForFeeEvent()
+Nodes (15): Added, Phase 1: Bootstrap & Architectural Foundation (complete), Phase 2.5: Go-Live Hardening (Completed — April 2026), Phase 2: Scale & Operational Predictability, Phase 3: A2A Economy Primitives, Phase 4: Self-Sustaining Agents (~40%), Phase 5: Adoption Model Evolution ("AgentFi-as-a-Service"), Phase 6: The Frontier Market and Autonomous Volume (+7 more)
 
 ### Community 11 - "7. Backend flow (R2)"
-Cohesion: 0.14
-Nodes (14): 1. Registries and addresses, 2. Identity Registry (what AgentFi writes) — verified 2026-10-07, 3. Reputation Registry (current signature, verbatim), 5. What we do not do, 6. Decisions (owner, 2026-10-06), 7.1 Enablement, 7.2 Step chain, 7.3 Concurrency and ordering (+6 more)
+Cohesion: 0.13
+Nodes (15): 1. Registries and addresses, 2. Identity Registry (what AgentFi writes) — verified 2026-10-07, 3. Reputation Registry (current signature, verbatim), 4. AgentFi design: feedback written by the escrow hook, 5. What we do not do, 6. Decisions (owner, 2026-10-06), 7.1 Enablement, 7.2 Step chain (+7 more)
 
 ### Community 12 - "fastify"
 Cohesion: 0.20
 Nodes (11): RAW_BODY_ROUTES, registerJsonBodyParser(), RATE_LIMITS, rateLimitErrorResponse(), redis, registerRateLimit(), { ALCHEMY_KEY }, buildApp() (+3 more)
 
 ### Community 13 - "transaction.queue.ts"
-Cohesion: 0.08
-Nodes (28): RepollOptions, RepollSummary, connection, deadLetterQueue, feeService, inFlightMonitors, isKnownTransaction(), isRedisQuotaExceededError() (+20 more)
+Cohesion: 0.07
+Nodes (22): deferBullJob(), connection, deadLetterQueue, feeService, inFlightMonitors, isKnownTransaction(), isRedisQuotaExceededError(), monitor (+14 more)
 
 ### Community 14 - "outbound-target.ts"
-Cohesion: 0.10
-Nodes (30): Security, RFC-2765, RFC-8215, assertPublicTarget(), createPinnedDispatcher(), effectivePort(), embeddedIpv4(), ipv4FromGroups() (+22 more)
+Cohesion: 0.08
+Nodes (34): Security, RFC-2765, RFC-8215, assertPublicTarget(), createPinnedDispatcher(), effectivePort(), embeddedIpv4(), ipv4FromGroups() (+26 more)
 
 ### Community 15 - "admin.ts"
-Cohesion: 0.15
-Nodes (16): adminRoutes(), batchAdminSchema, KillSwitchAgent, killSwitchSync(), operatorService, parseKillSwitchBody(), pauseAgentSchema, pnlService (+8 more)
+Cohesion: 0.08
+Nodes (30): RFC-7239, addressOf(), forwardedAddresses(), FORWARDING_HEADERS, isLocalOnlyRequest(), isLoopbackAddress(), LocalRequestLike, adminRoutes() (+22 more)
 
 ### Community 16 - "backend/package.json"
 Cohesion: 0.07
-Nodes (27): dotenv, @modelcontextprotocol/sdk, tsx, @types/node, typescript, vitest, zod, license (+19 more)
+Nodes (28): dotenv, @modelcontextprotocol/sdk, tsx, @types/node, typescript, vitest, zod, license (+20 more)
 
 ### Community 18 - "admin/package.json"
 Cohesion: 0.07
@@ -366,8 +363,8 @@ Cohesion: 0.07
 Nodes (28): dependencies, @aave/contract-helpers, @aave/math-utils, bullmq, dotenv, ethers, fastify, @fastify/cors (+20 more)
 
 ### Community 24 - "transactions.ts"
-Cohesion: 0.07
-Nodes (45): policySync, builder, createWithVolumeReservation(), depositSchema, enqueueOrFail(), ensureChainAllowed(), ERC20_DECIMALS_ABI, erc4626DepositSchema (+37 more)
+Cohesion: 0.06
+Nodes (47): 2. The 3-phase plan, Phase 1.5 — Worker-driven Job finalization (issue #81, branch `fix/issue-81-payment-lifecycle`), Phase 1 — Robust status transitions (this PR: `fix/a2a-revenue-integrity`), Phase 2 — Revenue snapshots (separate PR), Phase 3 — PnLService refactor (separate PR), SanitizeContext, builder, createWithVolumeReservation() (+39 more)
 
 ### Community 25 - "AgentFiClient"
 Cohesion: 0.16
@@ -381,9 +378,9 @@ Nodes (20): 0. Veredito em cinco linhas, 10. Registro desta sessão (06/10/2026)
 Cohesion: 0.20
 Nodes (19): CHAIN_CONFIGS, ChainContractConfig, check(), checkContracts(), checkDatabase(), checkEnvVars(), checkOperatorWallet(), checkRedis() (+11 more)
 
-### Community 28 - "OperatorService"
-Cohesion: 0.10
-Nodes (5): Added (Phase 3/4 roadmap — merged 2026-05-13), TransactionProcessorDeps, OperatorService, FeeService, ConfirmationOutcome
+### Community 28 - "@prisma/client"
+Cohesion: 0.06
+Nodes (13): OperatorService, FEE_BPS, FeeCalculation, FeeService, SUBSCRIPTION_PRICE_USD, TX_LIMITS, LIVE_STATES, QueuePayload (+5 more)
 
 ### Community 29 - "next"
 Cohesion: 0.12
@@ -393,33 +390,33 @@ Nodes (6): LoginForm(), LoginPage(), config, isLoopbackHost(), middleware(), nex
 Cohesion: 0.11
 Nodes (18): compilerOptions, allowJs, esModuleInterop, incremental, isolatedModules, jsx, lib, module (+10 more)
 
-### Community 31 - "builder.service.ts"
-Cohesion: 0.08
-Nodes (21): AGENT_EXECUTOR_ABI, AAVE_POOL_ABI, COMPOUND_COMET_ABI, CURVE_STABLESWAP_ABI, ERC20_ABI, ERC4626_VAULT_ABI, GMX_EXCHANGE_ROUTER_ABI, isNativeWeth() (+13 more)
+### Community 31 - "executor.service.ts"
+Cohesion: 0.07
+Nodes (29): PATCH /v1/agents/:id/policy, AGENT_EXECUTOR_ABI, AAVE_POOL_ABI, COMPOUND_COMET_ABI, CURVE_STABLESWAP_ABI, ERC20_ABI, ERC4626_VAULT_ABI, GMX_EXCHANGE_ROUTER_ABI (+21 more)
 
 ### Community 32 - "Sinais de mercado — agentes transacionando (status em 06/10/2026)"
 Cohesion: 0.11
 Nodes (18): 0. Leitura em uma frase, 10. Implicação para o AgentFi, 1. Protocolos e padrões abertos, 2. Trilhos, carteiras e plataformas, 3. Redes de cartão, bancos e reguladores bancários, 4. Big techs e plataformas de LLM, 5. Economias agente-a-agente e DeFAI (o que é real), 6. Regulação (+10 more)
 
-### Community 33 - "resource-payment.service.ts"
-Cohesion: 0.06
-Nodes (37): SanitizeOptions, OutboundTargetPolicy, AttemptContext, AttemptState, destroyDispatcher(), firstOption(), isRedirect(), JobBudget (+29 more)
+### Community 33 - "publicErrorMessage"
+Cohesion: 0.10
+Nodes (39): 6.8 Contest → operator review, escrow policy, boot checks (C3d), 6.9 Contest window and unverified on-chain configuration (Q6, Q7 — owner decisions 2026-10-14), publicErrorMessage(), alertDeliveryHeld(), alertExpiringReviews(), alertReviewExpired(), alertText(), assertEscrowConfigVerified() (+31 more)
 
 ### Community 34 - "price.service.ts"
-Cohesion: 0.27
-Nodes (7): CHAIN_NATIVE_TOKEN, CHAIN_PLATFORM, clearPriceCache(), fetchPrice(), priceCache, weiToUsd(), mockFetch
+Cohesion: 0.09
+Nodes (22): rewardRowToUsd(), resolveRewardUsd(), RewardPriceResult, ZERO_RESULT, rewardToUsd(), CHAIN_NATIVE_TOKEN, CHAIN_PLATFORM, clearPriceCache() (+14 more)
 
 ### Community 35 - "viem"
-Cohesion: 0.09
-Nodes (18): WalletService, __clearLocalWallets(), __localWalletCount(), LocalWalletEntry, LocalWalletService, randomPrivateKey(), randomWalletId(), wallets (+10 more)
+Cohesion: 0.10
+Nodes (17): WalletService, __clearLocalWallets(), __localWalletCount(), LocalWalletEntry, LocalWalletService, randomPrivateKey(), randomWalletId(), wallets (+9 more)
 
 ### Community 36 - "compilerOptions"
 Cohesion: 0.11
 Nodes (17): compilerOptions, declaration, declarationMap, esModuleInterop, exactOptionalPropertyTypes, forceConsistentCasingInFileNames, lib, module (+9 more)
 
 ### Community 37 - "global-setup.ts"
-Cohesion: 0.13
-Nodes (15): ANVIL_BIN, ANVIL_CHAIN_ID, ANVIL_PORT, ANVIL_RPC, DEPLOYER_ADDRESS, DEPLOYER_PRIVATE_KEY, execAsync, FORGE_BIN (+7 more)
+Cohesion: 0.14
+Nodes (13): ANVIL_BIN, ANVIL_CHAIN_ID, ANVIL_PORT, ANVIL_RPC, DEPLOYER_ADDRESS, DEPLOYER_PRIVATE_KEY, execAsync, FORGE_BIN (+5 more)
 
 ### Community 38 - "dependencies"
 Cohesion: 0.12
@@ -427,35 +424,35 @@ Nodes (17): dependencies, autoprefixer, clsx, date-fns, framer-motion, lucide-re
 
 ### Community 39 - "policy-sync.ts"
 Cohesion: 0.09
-Nodes (29): AGENT_POLICY_MODULE_ABI_FULL, AGENT_POLICY_MODULE_ABI, DbPolicyInput, desiredOnChainPolicy, DesiredPolicyResult, encodeFlag(), encodeSetPolicy(), encodeWhitelist() (+21 more)
+Nodes (28): AGENT_POLICY_MODULE_ABI_FULL, AGENT_POLICY_MODULE_ABI, DbPolicyInput, DesiredPolicyResult, encodeFlag(), encodeSetPolicy(), encodeWhitelist(), ethDecimalToWei() (+20 more)
 
 ### Community 40 - "env.example.test.ts"
 Cohesion: 0.29
 Nodes (6): bootWith(), CI_REQUIRED, EXAMPLE_FILE, here, restoreEnv(), savedEnv
 
 ### Community 41 - "ens.service.ts"
-Cohesion: 0.11
-Nodes (16): Phase 1: Bootstrap & Architectural Foundation (complete), Phase 2.5: Go-Live Hardening (Completed — April 2026), Phase 2: Scale & Operational Predictability, Phase 4: Self-Sustaining Agents (~40%), Phase 5: Adoption Model Evolution ("AgentFi-as-a-Service"), Phase 6: The Frontier Market and Autonomous Volume, ROADMAP — AgentFi, buildSubdomainCandidate() (+8 more)
+Cohesion: 0.17
+Nodes (9): buildSubdomainCandidate(), DEFAULT_PUBLIC_RESOLVER, ENS_REGISTRY_ABI, EnsConfig, EnsService, normalizeEnsLabel(), PUBLIC_RESOLVER_ABI, readEnsConfig() (+1 more)
 
 ### Community 42 - "AgentFi — Operator Setup Checklist"
 Cohesion: 0.12
 Nodes (16): 0. Choose Your Mode, 10. Stripe Billing, 11. Install and Run Locally With Real Credentials, 12. Production Hosting, 13. Verification, 1. Local Environment File, 2. Required Secrets, 3. RPC Provider (+8 more)
 
 ### Community 43 - "Fixed"
-Cohesion: 0.13
-Nodes (18): Fixed, isProductionLikeEnv(), PRODUCTION_LIKE_ENVS, assertSimulationUsable(), ensureSimulationUsable(), isSimulationUsable(), SIMULATION_UNAVAILABLE_MESSAGE, SimulationUnavailableError (+10 more)
+Cohesion: 0.26
+Nodes (10): Fixed, isProductionLikeEnv(), PRODUCTION_LIKE_ENVS, assertSimulationUsable(), ensureSimulationUsable(), isSimulationUsable(), SIMULATION_UNAVAILABLE_MESSAGE, SimulationUnavailableError (+2 more)
 
 ### Community 44 - "e2e-issue-81.mjs"
 Cohesion: 0.33
 Nodes (11): api(), c, createPaidJob(), getJob(), log(), main(), patchJob(), POLL_TIMEOUT_SEC (+3 more)
 
 ### Community 45 - "sanitize.ts"
-Cohesion: 0.10
-Nodes (35): errorHandler(), explicitStatus(), INTERNAL_ERROR_CODE, INTERNAL_ERROR_MESSAGE, InternalErrorBody, isPlainHeaders(), statusFor(), addSecret() (+27 more)
+Cohesion: 0.11
+Nodes (30): addSecret(), CLOSER_TO_OPENER, DescribedError, describeError(), DROPPED_KEYS, ERROR_TEXT_KEYS, escapeRegExp(), INFRA_URL_ENV (+22 more)
 
 ### Community 46 - "resource-payment-ledger.ts"
-Cohesion: 0.16
-Nodes (17): 10. Job-scoped payments (P2) and the ledger state machine (P5 subset), ALWAYS_COUNTED_STATUSES, countedWhere(), isLiveRefusal(), isRetryable(), LedgerReader, LEGACY_REFUSAL_WINDOW_SECONDS, legacyCutoff() (+9 more)
+Cohesion: 0.13
+Nodes (19): 10. Job-scoped payments (P2) and the ledger state machine (P5 subset), ALWAYS_COUNTED_STATUSES, countedWhere(), LedgerReader, LEGACY_REFUSAL_WINDOW_SECONDS, legacyCutoff(), liveRefusalWhere(), RefusalFields (+11 more)
 
 ### Community 47 - "Release Guide - @agent_fi/mcp-server"
 Cohesion: 0.13
@@ -470,20 +467,20 @@ Cohesion: 0.05
 Nodes (42): ABI versioning, Address registry, Admin dashboard, Arbitrum One (Chain 42161) — NOT DEPLOYED, Automated verification script, Backend ABI — single source of truth, Base Mainnet (Chain 8453) — DEPLOYED, **LEGACY (old `Action` struct) — redeploy pending**, Base Sepolia (Chain 84532) — **LEGACY (old `Action` struct) — redeploy pending** (+34 more)
 
 ### Community 50 - "C5 — escrow validation on Base Sepolia: plan, runner and acceptance"
-Cohesion: 0.06
-Nodes (36): 0. Before you start, 1. C4 — deploy (testnet-log.md §2), 2. C5 — backend on Base Sepolia (testnet-log.md §5.4), 3. Known behaviour to expect (not defects), 4. Done when, Authorisation package (owner, before anything is executed), C4 / C5 checklist — Base Sepolia (owner), 1. Scope (+28 more)
+Cohesion: 0.20
+Nodes (11): 1. Scope, 4.1 USDC (Circle's testnet USDC `0x036C…CF7e`, 6 decimals), 4.2 Agent policies (registered by `setup`; the preflight re-reads them before every run), 4.3 ETH (Base Sepolia) and gas, 4. Financial plan (a proposal for approval — not an authorisation to spend), 5. Stop criteria, 8. Fork rehearsal of the runner, 9. Decisions for the owner (asked once, with a recommendation) (+3 more)
 
 ### Community 51 - "pre-submit-guard.ts"
-Cohesion: 0.14
-Nodes (20): vetBindBeforeBroadcast(), policySyncMetadataOf(), syncHistory(), AgentSnapshot, BIND_SKIPPED_BEFORE_SUBMISSION, BroadcastRecheck, contractsDeferral(), escrowConfigDeferral() (+12 more)
+Cohesion: 0.09
+Nodes (27): policySyncMetadataOf(), AgentSnapshot, BIND_SKIPPED_BEFORE_SUBMISSION, BroadcastRecheck, contractsDeferral(), escrowConfigDeferral(), OUTCOME_LEFT_TO_CHAIN, PAUSED_BEFORE_SUBMISSION (+19 more)
 
 ### Community 52 - "How to deposit ETH to Base — Full Tutorial"
 Cohesion: 0.15
 Nodes (12): FAQ, How to deposit ETH to Base — Full Tutorial, How to verify it arrived, Official Base Bridge (Safest), OPTION A — You already have ETH on an exchange (Binance, Coinbase, etc.), OPTION B — You have ETH on Ethereum mainnet and want to move it to Base, OPTION C — You have USDC or another stablecoin, Step 1 — Add the Base network to your wallet (+4 more)
 
 ### Community 53 - "Issue #71 — A2A Revenue Integrity (Execution Plan)"
-Cohesion: 0.15
-Nodes (12): 2. The 3-phase plan, 3. Acceptance criteria per phase, 4. Follow-up tickets to file, 5. Status, Issue #71 — A2A Revenue Integrity (Execution Plan), Phase 1, Phase 1.5 — Worker-driven Job finalization (issue #81, branch `fix/issue-81-payment-lifecycle`), Phase 1 — Robust status transitions (this PR: `fix/a2a-revenue-integrity`) (+4 more)
+Cohesion: 0.17
+Nodes (11): 1.1 Ghost completions — fire-and-forget payment, 1.2 Silent zero from price oracle, 1.3 Real-time price (no historical snapshot), 1. Bug surface (what's broken today), 3. Acceptance criteria per phase, 4. Follow-up tickets to file, 5. Status, Issue #71 — A2A Revenue Integrity (Execution Plan) (+3 more)
 
 ### Community 54 - "agents/[id]/page.tsx"
 Cohesion: 0.18
@@ -509,9 +506,9 @@ Nodes (21): ADMIN, Broadcast, depsFor(), DUE_NOW, failDeps(), get(), h, jobOf() 
 Cohesion: 0.09
 Nodes (28): 🛠️ Technical Changes, Agent, AgentsPage(), getAgents(), NETWORK_COLORS, NETWORK_NAMES, TIER_STYLES, FILTER_CHIPS (+20 more)
 
-### Community 60 - "x402-fixture.ts"
-Cohesion: 0.09
-Nodes (32): 8. Tests and what they do not prove, DEFAULT_MAX_BODY_BYTES, MAX_PAYMENT_REQUIRED_BYTES, accountSigner(), BASE_MAINNET, CachedReply, Counts, expiredOffers() (+24 more)
+### Community 60 - "resource-payment.routes.test.ts"
+Cohesion: 0.05
+Nodes (53): 8. Tests and what they do not prove, DEFAULT_MAX_BODY_BYTES, MAX_PAYMENT_REQUIRED_BYTES, accountSigner(), BASE_MAINNET, CachedReply, Counts, expiredOffers() (+45 more)
 
 ### Community 61 - "a2a-collab/index.mjs"
 Cohesion: 0.45
@@ -545,17 +542,17 @@ Nodes (19): DashboardPage(), DashboardStats, getStats(), metadata, RootLayout(),
 Cohesion: 0.15
 Nodes (13): CHAIN_NAMES, FINAL_ON_CHAIN, getJob(), Job, JobDetailPage(), needsReview(), STATUS_CONFIG, JobReconcileActions() (+5 more)
 
-### Community 69 - "logger.ts"
-Cohesion: 0.09
-Nodes (23): logger, stripeService, COMMON_TOKENS, ERC20_READ_ABI, db, connection, reputationQueue, startReputationWorker() (+15 more)
+### Community 69 - "notification.service.ts"
+Cohesion: 0.33
+Nodes (9): escapeHtml(), fetchAndAssertOk(), formatTelegramHtml(), NotificationPayload, notificationService, sendDiscord(), sendGenericWebhook(), sendTelegram() (+1 more)
 
-### Community 70 - "agentRoutes"
-Cohesion: 0.12
-Nodes (14): agentRoutes(), validationFailed(), identityView(), db, SEARCH_AGENT_IDS, AgentsModule, AuthModule, buildApp() (+6 more)
+### Community 70 - "ref_vitest"
+Cohesion: 0.07
+Nodes (14): db, SEARCH_AGENT_IDS, AgentsModule, buildApp(), DEFAULT_POLICY, { mockDb, createWalletMock }, h, RUN (+6 more)
 
 ### Community 71 - "erc8004-identity.service.ts"
-Cohesion: 0.06
-Nodes (56): AGENT_JOB_ESCROW_ABI, IDENTITY_REGISTRY_ABI, DEFAULT_IDENTITY_REGISTRIES, advanceBinding(), agentUriFor(), BindingJob, BindingStatus, bindIntentId() (+48 more)
+Cohesion: 0.08
+Nodes (46): advanceBinding(), agentUriFor(), BindingJob, BindingStatus, bindIntentId(), endBinding(), ensureIdentity(), errorMessage() (+38 more)
 
 ### Community 72 - "AgentFi Production Release and Rollback Runbook"
 Cohesion: 0.20
@@ -566,16 +563,16 @@ Cohesion: 0.11
 Nodes (28): buildToolErrorPayload(), CLOSER_TO_OPENER, DescribedError, describeError(), DROPPED_KEYS, escapeRegExp(), isCredentialLikeSegment(), isPrivateHostname() (+20 more)
 
 ### Community 74 - "escrow-verification-report.runtime.ts"
-Cohesion: 0.24
-Nodes (12): EscrowVerificationSettings, EscrowVerificationView, EscrowVerificationReport, escrowVerificationReportKey(), peerVerificationView, reportTtlSeconds(), publishEscrowVerificationReport(), readEscrowVerificationReport() (+4 more)
+Cohesion: 0.23
+Nodes (13): HealthRoutesOptions, EscrowVerificationSettings, EscrowVerificationView, EscrowVerificationReport, escrowVerificationReportKey(), peerVerificationView, reportTtlSeconds(), publishEscrowVerificationReport() (+5 more)
 
-### Community 76 - "@prisma/client"
-Cohesion: 0.17
-Nodes (7): FEE_BPS, FeeCalculation, SUBSCRIPTION_PRICE_USD, TX_LIMITS, h, RUN, @prisma/client
+### Community 76 - "escrow-boot-check.ts"
+Cohesion: 0.09
+Nodes (33): PRODUCTION_LIKE, ChainIdReader, checkEscrowDeployments(), codeIdentityProblems(), CodeReader, compareEscrowDeployment(), ContractReader, DEFINITIVE_ERROR_NAMES (+25 more)
 
-### Community 77 - "token-map.ts"
-Cohesion: 0.20
-Nodes (14): invalidInput(), defiTools, ChainTokenMap, isNativeEthLiteral(), NATIVE_ETH_CHAIN_IDS, nativeEthRefusal(), NON_ETH_NATIVE_ASSETS, normalizeToken() (+6 more)
+### Community 77 - "defi.ts"
+Cohesion: 0.16
+Nodes (17): invalidInput(), defiTools, Transaction, TransactionAccepted, TransferRequest, ChainTokenMap, isNativeEthLiteral(), NATIVE_ETH_CHAIN_IDS (+9 more)
 
 ### Community 78 - "AgentFi"
 Cohesion: 0.20
@@ -589,13 +586,13 @@ Nodes (16): 1. Purpose, 2. Four-Layer Stack, 3. Supported Networks, 4.1 Core DeF
 Cohesion: 0.22
 Nodes (9): Contributing to AgentFi, License, Making a change, PR expectations, Project structure, Reporting bugs, Security issues, Setup (+1 more)
 
-### Community 81 - "@agent_fi/backend"
-Cohesion: 0.29
-Nodes (6): @agent_fi/backend, API Reference, Architecture, Local Development, Scripts, Stack
+### Community 81 - "api-reference.md"
+Cohesion: 0.11
+Nodes (13): 1. Discovery (Agent Yellow Pages), 2.1 Handshake envelope (v1), 2. Cryptographic Trust & Identity, 3. Communication & Job Queue, 4. Automated Reputation, 5. Intent-Aware Economy, Agent-to-Agent (A2A) Interoperability Protocol, @agent_fi/backend (+5 more)
 
 ### Community 82 - "x402-client.service.ts"
-Cohesion: 0.08
-Nodes (34): AttemptState, clip(), decodeBody(), DEFAULT_REQUEST_TIMEOUT_MS, describeAuthorization(), discardBody(), hasPaymentHeader(), headersToRecord() (+26 more)
+Cohesion: 0.07
+Nodes (44): Added, 1. What the service does, 2. Spend controls — three gates before a signature exists, 3. Idempotency — `payment-identifier` — and what it does not do, 4. Receipts — `offer-receipt`, 5. Errors, 6. Facilitators, 9. Still off-chain / unproven — explicit list (+36 more)
 
 ### Community 83 - "AgentFi Documentation Standards (v1)"
 Cohesion: 0.33
@@ -610,7 +607,7 @@ Cohesion: 0.53
 Nodes (8): api(), createJob(), getTrust(), log(), main(), patchJob(), publishManifest(), registerAgent()
 
 ### Community 86 - "AgentFi Example — Swap Planner"
-Cohesion: 0.20
+Cohesion: 0.22
 Nodes (9): Against the dev stack (default), Against your own instance, AgentFi Example — Swap Planner, Expected output, Files, Graduating to real execution, Run, What it does (+1 more)
 
 ### Community 87 - "deploy"
@@ -622,7 +619,7 @@ Cohesion: 0.21
 Nodes (3): filepath, RELEASE_DIR, today
 
 ### Community 89 - "Contributor Covenant Code of Conduct"
-Cohesion: 0.25
+Cohesion: 0.29
 Nodes (7): Attribution, Contributor Covenant Code of Conduct, Enforcement, Enforcement Responsibilities, Our Pledge, Our Standards, Scope
 
 ### Community 90 - "Claude Desktop MCP Demo"
@@ -634,20 +631,20 @@ Cohesion: 0.25
 Nodes (8): Against the dev stack (default), Against your own instance, AgentFi Example — A2A Collaboration, Expected output, Files, Run, Taking it further, What it does
 
 ### Community 92 - "AgentFi Example — Delegation Chain"
-Cohesion: 0.22
+Cohesion: 0.25
 Nodes (8): Against the dev stack (default), Against your own instance, AgentFi Example — Delegation Chain, Expected output (abbreviated), Files, Making it economic (the self-sustaining loop), Run, Scenario
 
 ### Community 93 - "adapters/tsconfig.json"
 Cohesion: 0.25
 Nodes (7): compilerOptions, outDir, rootDir, exclude, extends, include, ../../tsconfig.base.json
 
-### Community 94 - "pnl.service.ts"
-Cohesion: 0.23
-Nodes (8): PnLBreakdown, resolveRewardUsd(), RewardJson, RewardPriceResult, ZERO_RESULT, rewardToUsd(), isNativeTokenSymbol(), mockFetch
+### Community 94 - "Erc8183Deps"
+Cohesion: 0.09
+Nodes (14): EVALUATOR_GAS_HEADROOM, EVALUATOR_RECEIPT_TIMEOUT_MS, evaluatorGasLimit(), EvaluatorSigner, EvaluatorWriteParams, signers, Erc8183Deps, LaneLock (+6 more)
 
-### Community 95 - "SubmitterService"
-Cohesion: 0.18
-Nodes (8): SubmitterService, InMemoryNonceStore, FakeWallets, SIM_USDC, approveCall(), setup(), SPENDER, setup()
+### Community 95 - "wallet-lane.test.ts"
+Cohesion: 0.13
+Nodes (13): SubmitterService, InMemoryLaneLock, InMemoryNonceStore, Sim, FakeWallets, SIM_USDC, approveCall(), setup() (+5 more)
 
 ### Community 96 - "backend/tsconfig.json"
 Cohesion: 0.25
@@ -661,9 +658,9 @@ Nodes (7): compilerOptions, outDir, rootDir, exclude, extends, include, ../../ts
 Cohesion: 0.25
 Nodes (8): Out of Scope, Process, Reporting a Vulnerability, Scope, Security Best Practices, Security Policy, Supported Versions, What to include
 
-### Community 99 - "PolicyService"
-Cohesion: 0.09
-Nodes (20): Changed (C4/C5 preparation — "max" withdrawals under a daily limit, plan §5-7; no migration), Changed (Q8 — explicit policy units and separate recipients; migration `0021`), Changed (Q9 — trusted prices for daily limits, no spend counted as zero; migration `0022`), Changed (S9 — contract identity before authority or value; AgentPolicyModule fix; Safe mode refused; no migration), Fixed (G1 review — admin batch signer), Fixed (G1 review — adversarial review of the combined diff: P2-1, P3-1 to P3-4; no migration), Fixed (review follow-ups of #178 / #180; no migration), Fixed (review follow-ups to #181 / #183 / #184; no migration) (+12 more)
+### Community 99 - "[Unreleased]"
+Cohesion: 0.15
+Nodes (13): Added (C4/C5 preparation — USD cap on ordinary outflows, plan §5-6; migration 0025), Changed (C4/C5 preparation — "max" withdrawals under a daily limit, plan §5-7; no migration), Changed (Q6 / Q7 — contest window, unverified on-chain escrow configuration), Changed (Q8 — explicit policy units and separate recipients; migration `0021`), Changed (Q9 — trusted prices for daily limits, no spend counted as zero; migration `0022`), Fixed (C4/C5 preparation — operator approval on a later UTC day, A6c / plan §5-8; no migration), Fixed (G1 review — admin batch signer), Fixed (review follow-ups of #178 / #180; no migration) (+5 more)
 
 ### Community 100 - "swap-planner/index.mjs"
 Cohesion: 0.62
@@ -683,7 +680,7 @@ Nodes (6): @agentfi/admin, Authentication, Features, Local Development, Scripts,
 
 ### Community 104 - "FakeEscrowChain"
 Cohesion: 0.13
-Nodes (4): FakeEscrowChain, lower(), makeLog(), Revert
+Nodes (5): WS1 — Correctness and safety fixes (Week 0–1), FakeEscrowChain, lower(), makeLog(), Revert
 
 ### Community 105 - "devDependencies"
 Cohesion: 0.29
@@ -694,36 +691,36 @@ Cohesion: 0.38
 Nodes (3): aaveService, @aave/contract-helpers, ethers
 
 ### Community 107 - "contracts.addresses.routes.db.test.ts"
-Cohesion: 0.07
-Nodes (21): DATASTORE_ABI, GMX_CONTRACTS, GMX_MARKETS, GmxExecutionFeeResult, GmxMarketInfo, READER_ABI, GET_POOL, GMX_ABI (+13 more)
+Cohesion: 0.06
+Nodes (22): DATASTORE_ABI, GMX_CONTRACTS, GMX_MARKETS, GmxExecutionFeeResult, GmxMarketInfo, gmxService, READER_ABI, GET_POOL (+14 more)
 
 ### Community 108 - "escrow-erc8183.service.test.ts"
-Cohesion: 0.05
-Nodes (53): sanitizeStoredError(), jobRoutes(), EvaluatorWriteParams, ALERT_TEXT_MAX_CHARS, EscrowAlert, expiryMarginMs(), FeedbackFile, feedbackHashOf() (+45 more)
+Cohesion: 0.07
+Nodes (38): ALERT_TEXT_MAX_CHARS, EscrowAlert, FeedbackFile, isEscrowTokenReward(), isFeedbackFileCommitted(), __resetEscrowTokenCacheForTests(), __resetUnconfirmedSendsForTests(), SETTLEMENT_REASONS (+30 more)
 
 ### Community 109 - "policy-sync.service.ts"
 Cohesion: 0.10
-Nodes (20): OFF_CHAIN_ONLY_POLICY_FIELDS, PolicyModuleReader, PolicySyncCallName, PolicySyncMetadata, PolicySyncPlan, readOnChainPolicy(), Assessment, dbView() (+12 more)
+Nodes (21): 5.4 C5 runbook — Base Sepolia (owner runs it after C4), isDefinitiveContractError(), desiredOnChainPolicy, PolicyModuleReader, PolicySyncCallName, PolicySyncPlan, Assessment, dbView() (+13 more)
 
 ### Community 110 - "AgentFi Agent Quickstart"
 Cohesion: 0.29
 Nodes (7): 1. Connect to the MCP Server, 2. Register an Agent (get your API key), 3. Your Agent Can Now Execute Transactions, 4. Hire Another Agent with On-Chain Escrow, AgentFi Agent Quickstart, Fee Structure, Security Guarantees
 
 ### Community 111 - "escrow-boot.runtime.ts"
-Cohesion: 0.13
-Nodes (26): configuredPolicyModule(), getContracts(), resolveIdentityRegistry(), resolveReputationRegistry(), escrowBootVerdict, applyVerdict(), chainIdReader(), codeReader() (+18 more)
+Cohesion: 0.12
+Nodes (28): resolveIdentityRegistry(), resolveReputationRegistry(), configuredEscrowChainIds, escrowEvaluatorAddress, escrowBootVerdict, applyVerdict(), CAPABILITIES_KEY(), chainIdReader() (+20 more)
 
 ### Community 112 - "escrow-erc8183.service.ts"
-Cohesion: 0.03
-Nodes (89): 6.10 Settlements in flight and escrow steps stamped for broadcast (C3e, A6b 6d — 2026-10-14), 6.11 Adversarial review of the G1 combined diff (2026-10-14), publicErrorMessage(), EvaluatorSigner, alertDeliveryHeld(), alertExpiringReviews(), alertText(), assertNoPendingSettlement() (+81 more)
+Cohesion: 0.04
+Nodes (67): CancellationReason, ChainJob, ContestOutcome, DEFAULT_REVIEW_ALERT_BEFORE_EXPIRY_SECONDS, DELIVERY_PENDING_ON_CHAIN, DeliveryHoldJob, ERC20_APPROVE_ABI, Erc8183Config (+59 more)
 
 ### Community 113 - "PULL_REQUEST_TEMPLATE.md"
 Cohesion: 0.33
 Nodes (5): Changes, Checklist, Summary, Testing, Type
 
 ### Community 114 - "submitter.service.ts"
-Cohesion: 0.09
-Nodes (21): SubmissionResult, SubmitParams, SubmitterClient, SubmitterDeps, InMemoryLaneLock, LANE_TTL_MS, LANE_WAIT_MS, LaneLock (+13 more)
+Cohesion: 0.10
+Nodes (15): SubmissionResult, SubmitParams, SubmitterClient, SubmitterDeps, LANE_TTL_MS, LANE_WAIT_MS, LaneRedis, LaneTimeoutError (+7 more)
 
 ### Community 115 - "uniswap.service.ts"
 Cohesion: 0.40
@@ -733,9 +730,9 @@ Nodes (3): QuoteResult, SWAP_ROUTER, uniswapService
 Cohesion: 0.50
 Nodes (4): Next session (do this first), Session Notes — 2026-10-15, What this round did, Where we are right now
 
-### Community 117 - "ResourcePaymentService"
-Cohesion: 0.17
-Nodes (10): refusalLiveUntil(), clip(), iso(), isUniqueViolation(), redirectLocation(), ResourcePaymentError, ResourcePaymentService, unixSecondsToDate() (+2 more)
+### Community 117 - "resource-payment.service.ts"
+Cohesion: 0.08
+Nodes (36): SanitizeOptions, isLiveRefusal(), isRetryable(), refusalLiveUntil(), AttemptContext, AttemptState, clip(), destroyDispatcher() (+28 more)
 
 ### Community 118 - "AgentFi Remediation Plan and Execution"
 Cohesion: 0.40
@@ -743,15 +740,15 @@ Nodes (4): AgentFi Remediation Plan and Execution, Deterministic Decisions, Exec
 
 ### Community 119 - "spend-pricing.ts"
 Cohesion: 0.14
-Nodes (30): isMainnetChain(), isTestnetChain(), TESTNET_CHAIN_IDS, syntheticPricesProblem(), NATIVE_ASSET, parseSyntheticTestPrices(), SYNTHETIC_PRICES_ENV, syntheticPriceKey() (+22 more)
+Nodes (29): isMainnetChain(), isTestnetChain(), TESTNET_CHAIN_IDS, syntheticPricesProblem(), NATIVE_ASSET, parseSyntheticTestPrices(), SYNTHETIC_PRICES_ENV, syntheticPriceKey() (+21 more)
 
-### Community 120 - "policy-units.migration.db.test.ts"
-Cohesion: 0.15
-Nodes (11): DB_DIR, here, migrateDeploy(), NOW, PreRow, PRISMA_CLI, RENAMED, scratchUrl() (+3 more)
+### Community 120 - "transactions.batch.anvil.ts"
+Cohesion: 0.09
+Nodes (10): EthCallSimulator, FEE_WALLET, h, Modules, Params, Result, REVERTER, RUN (+2 more)
 
-### Community 121 - "Sim"
-Cohesion: 0.40
-Nodes (3): EscrowSettlementJobData, QueuedSettlement, Sim
+### Community 121 - "simulator.service.ts"
+Cohesion: 0.19
+Nodes (8): describeSimulationError(), findExecutionRevert(), isRpcTransportFailure(), SimulationParams, SimulationProvider, SimulationResult, SimulatorService, TenderlySimulationRequest
 
 ### Community 122 - "feature_request.md"
 Cohesion: 0.40
@@ -762,16 +759,16 @@ Cohesion: 0.40
 Nodes (4): buildCommand, devCommand, framework, installCommand
 
 ### Community 124 - "backend/src/index.ts"
-Cohesion: 0.16
-Nodes (23): billingRoutes(), resourcePaymentRoutes(), walletRoutes(), configuredEscrowChainIds, env, escrowEvaluatorAddress, announceProcessCapabilities(), CAPABILITIES_KEY() (+15 more)
+Cohesion: 0.08
+Nodes (43): logger, billingRoutes(), stripeService, walletRoutes(), env, announceProcessCapabilities(), processCapabilities(), fastify (+35 more)
 
 ### Community 125 - "escrow-chain-truth.db.test.ts"
 Cohesion: 0.08
-Nodes (32): BUDGET, contest(), delivered(), deliveredInWindow(), deliverInTime(), fundedJob(), get(), job() (+24 more)
+Nodes (34): TransactionJobData, BUDGET, contest(), delivered(), deliveredInWindow(), deliverInTime(), fundedJob(), get() (+26 more)
 
 ### Community 126 - "escrow-erc8183.fork.e2e.ts"
 Cohesion: 0.11
-Nodes (28): Agent, assertNoAgentCanResolve(), CHAIN_JOB_STATUS, contestedJob(), createUsdcJob(), ctx, EscrowView, fundedPair() (+20 more)
+Nodes (30): Agent, assertNoAgentCanResolve(), CHAIN_JOB_STATUS, contestedJob(), createUsdcJob(), ctx, EscrowView, fundedPair() (+22 more)
 
 ### Community 127 - "health/page.tsx"
 Cohesion: 0.53
@@ -786,55 +783,55 @@ Cohesion: 0.67
 Nodes (3): Archive, Rule for future archives, What's in here
 
 ### Community 133 - "escrow-verification.ts"
-Cohesion: 0.11
-Nodes (22): EscrowChainCheck, EscrowChainExpectation, ESCROW_WORDING, EscrowGateBlock, escrowGateVerdict, expectationFingerprint(), lower(), stateAfterCheck() (+14 more)
+Cohesion: 0.12
+Nodes (21): EscrowChainExpectation, ESCROW_WORDING, EscrowGateBlock, escrowGateVerdict, expectationFingerprint(), lower(), stateAfterCheck(), CheckOutcome (+13 more)
 
 ### Community 136 - "2. Workstreams and tasks"
-Cohesion: 0.10
-Nodes (21): 1. Goal and gates, 2. Workstreams and tasks, 3. Calendar, 4. Working agreement, 5. Open questions (ask the owner, do not assume), 6. Risks, Appendix — Environment on the maintainer's machine (2026-10-06), Execution Plan — AgentFi reactivation (Q4 2026) (+13 more)
+Cohesion: 0.20
+Nodes (11): 2. Workstreams and tasks, WS0 — Housekeeping (Week 0), WS2 — Contracts: ERC-8183 compatible escrow and redeploy (Days 1–30), WS3 — Reputation: ERC-8004 anchored in settled escrow (Days 15–45), WS4 — Payments client: pay for 402 resources inside a job budget (Days 15–45), WS5 — Wallet providers as adapters (Days 30–60), WS6 — Demo and distribution (Days 45–60), WS7 — Demand validation (owner, Days 1–30, continues) (+3 more)
 
 ### Community 140 - "erc8004-identity.test.ts"
-Cohesion: 0.10
-Nodes (23): CHAIN_JOB_STATUS, BUDGET, config, ESCROW, EVALUATOR, HOOK, makeDeps(), confirm() (+15 more)
+Cohesion: 0.08
+Nodes (28): AGENT_JOB_ESCROW_ABI, IDENTITY_REGISTRY_ABI, REPUTATION_HOOK_ABI, DEFAULT_IDENTITY_REGISTRIES, CHAIN_JOB_STATUS, toJobResponse(), BUDGET, config (+20 more)
 
 ### Community 141 - "escrow-erc8183/index.mjs"
 Cohesion: 0.18
 Nodes (22): api(), API_URL, BUDGET_UNITS, CHAIN_ID, CHAINS, color(), ensureFunded(), ethBalance() (+14 more)
 
 ### Community 142 - "mcp.ts"
-Cohesion: 0.09
-Nodes (24): API_KEY_IN_QUERY, buildProxyTools(), createMcpServer(), getRequiredFields(), headerApiKey(), inferJsonSchemaType(), McpRoutesOptions, McpServerOptions (+16 more)
+Cohesion: 0.08
+Nodes (26): API_KEY_IN_QUERY, buildProxyTools(), createMcpServer(), getRequiredFields(), headerApiKey(), IDEMPOTENCY_KEY_PATTERN, inferJsonSchemaType(), McpRoutesOptions (+18 more)
 
 ### Community 143 - "transaction.processor.ts"
-Cohesion: 0.12
-Nodes (26): ContractsUnverifiedAtBroadcastError, EarlierBroadcastLiveError, handleFailedTransactionJob(), isLastAttempt(), PolicySyncSupersededError, PostConfirmationDeps, PostConfirmationInput, postConfirmationInputOf() (+18 more)
+Cohesion: 0.06
+Nodes (43): ContractsUnverifiedAtBroadcastError, EarlierBroadcastLiveError, handleFailedTransactionJob(), isLastAttempt(), PolicySyncSupersededError, PostConfirmationDeps, PostConfirmationInput, postConfirmationInputOf() (+35 more)
 
 ### Community 144 - "TurnkeyService"
-Cohesion: 0.27
-Nodes (3): 7. Wallet signing, getTurnkeyClient(), TurnkeyService
+Cohesion: 0.20
+Nodes (5): 7. Wallet signing, signingAddressOf(), getWalletService(), getTurnkeyClient(), TurnkeyService
 
-### Community 145 - "PaymentFailedError"
-Cohesion: 0.18
-Nodes (13): Added, 1. What the service does, 2. Spend controls — three gates before a signature exists, 3. Idempotency — `payment-identifier` — and what it does not do, 4. Receipts — `offer-receipt`, 5. Errors, 6. Facilitators, 9. Still off-chain / unproven — explicit list (+5 more)
+### Community 145 - "contract-identity.test.ts"
+Cohesion: 0.25
+Nodes (8): EXPECTED_CONTRACT_CODE, EXPECTED_CONTRACT_CODE_VERSION, ExpectedContractCode, VerifiedContractName, codeIdentityProblem(), maskImmutables(), here, NAMES
 
-### Community 146 - "escrow-settlement.queue.ts"
-Cohesion: 0.09
-Nodes (18): deferBullJob(), addSettlementJob(), connection, ESCROW_SETTLEMENT_QUEUE_NAME, escrowSettlementQueue, runSettlementJob(), settlementJobId(), assertEscrowConfigVerified() (+10 more)
+### Community 146 - "escrow-settlement.queue.test.ts"
+Cohesion: 0.12
+Nodes (11): addSettlementJob(), ESCROW_SETTLEMENT_QUEUE_NAME, settlementJobId(), EscrowSettlementJobData, QueuedSettlement, bullmqAccepts(), FakeQueue, { fakeQueues } (+3 more)
 
 ### Community 147 - "middleware/auth.ts"
-Cohesion: 0.19
-Nodes (11): Added, authMiddleware, authPlugin(), fastify, FastifyRequest, generateApiKey(), hashApiKey(), isOperatorKey() (+3 more)
+Cohesion: 0.12
+Nodes (16): Added, authMiddleware, authPlugin(), fastify, FastifyRequest, generateApiKey(), hashApiKey(), isOperatorKey() (+8 more)
 
 ### Community 148 - "escrow-fork.harness.ts"
-Cohesion: 0.08
-Nodes (23): ANVIL_ACCOUNTS, ApiResult, assertPortFree(), BACKEND_DIR, BASE_SEPOLIA_CHAIN_ID, CONTRACTS_DIR, DEFAULT_ESCROW_FORK_BLOCK, deployEnv() (+15 more)
+Cohesion: 0.09
+Nodes (17): ANVIL_ACCOUNTS, ApiResult, BACKEND_DIR, BASE_SEPOLIA_CHAIN_ID, CONTRACTS_DIR, DEFAULT_ESCROW_FORK_BLOCK, ERC20_ABI, EscrowForkConfig (+9 more)
 
 ### Community 149 - "env.ts"
 Cohesion: 0.06
-Nodes (51): RFC-1918, blankToUndefined(), configuredEscrowChains, envSchema, ESCROW_CHAIN_IDS, escrowAddressFields, evaluationDelayProblem, CONTAINER_ENV_MARKERS (+43 more)
+Nodes (50): RFC-1918, blankToUndefined(), configuredEscrowChains, envSchema, ESCROW_CHAIN_IDS, escrowAddressFields, evaluationDelayProblem, CONTAINER_ENV_MARKERS (+42 more)
 
 ### Community 150 - "x402.middleware.ts"
-Cohesion: 0.24
+Cohesion: 0.22
 Nodes (9): createChallenge(), ERC20_TRANSFER_ABI, FEE_WALLET, NETWORK_CHAIN_ID, requirePayment(), USDC_ADDRESS, verifyPayment(), X402Challenge (+1 more)
 
 ### Community 152 - "max-withdrawal-proof.ts"
@@ -843,55 +840,55 @@ Nodes (28): AAVE_PROVIDER_ABI, AAVE_V3_WITHDRAW_ABI, AAVE_V3_WITHDRAW_SELECTOR, 
 
 ### Community 153 - "annotations.ts"
 Cohesion: 0.16
-Nodes (13): AgentFiToolAnnotations, AnnotatedToolName, annotationsFor(), CAUTIOUS_DEFAULT_ANNOTATIONS, hasAnnotations(), MOVES_FUNDS, READ_OPEN_WORLD, READ_OWN_RECORDS (+5 more)
+Nodes (14): AgentFiToolAnnotations, AnnotatedToolName, annotationsFor(), CAUTIOUS_DEFAULT_ANNOTATIONS, hasAnnotations(), MOVES_FUNDS, READ_OPEN_WORLD, READ_OWN_RECORDS (+6 more)
 
 ### Community 154 - "health.ts"
-Cohesion: 0.16
-Nodes (16): checkDatabase(), checkRedis(), checkRpc(), checkTurnkey(), healthRoutes(), probe(), readiness(), HealthRoutesOptions (+8 more)
+Cohesion: 0.17
+Nodes (15): checkDatabase(), checkRedis(), checkRpc(), checkTurnkey(), healthRoutes(), probe(), readiness(), InProcessWindowLimiter (+7 more)
 
-### Community 155 - "stranded-queued.bullmq.db.test.ts"
-Cohesion: 0.10
-Nodes (9): TransactionJobData, LIVE_STATES, QueuePayload, StrandedSweepDeps, SWEPT_TYPES, QueuedTx, Modules, quietLogger (+1 more)
+### Community 155 - "Assisted pilot on Base Sepolia — operational checklist (gate G4)"
+Cohesion: 0.20
+Nodes (10): 1. Entry gates: no date is offered before both pass, 2.1 Where the alternative, a backend hosted by the maintainer, breaks, 2.2 Steps for the operator, with the commands that exist, 2. Recommended path, conditional on decision R3: the operator hosts everything, 3. Timing, 6. Stop criteria (R10), 7. After the session: verification and records, 8. Decisions this checklist leaves open (owner) (+2 more)
 
 ### Community 156 - "resource-payment.target-policy.test.ts"
-Cohesion: 0.12
-Nodes (12): TARGET_REFUSAL_CODES, payResourceSchema, ResourcePaymentRoutesOptions, TargetLookup, buildApp(), calls, { mockDb }, open (+4 more)
+Cohesion: 0.11
+Nodes (13): OutboundTargetPolicy, TargetLookup, ResourcePaymentServiceDeps, TypedDataSigner, AppOptions, buildApp(), calls, { mockDb } (+5 more)
 
 ### Community 157 - "agent.ts"
 Cohesion: 0.10
 Nodes (21): addressSchema(), isStrictAddress(), toChecksumAddress(), components, $defs, operations, paths, webhooks (+13 more)
 
 ### Community 158 - "mcpRoutes"
-Cohesion: 0.23
-Nodes (4): mcpRoutes(), McpSessionRegistry, sha256(), start()
+Cohesion: 0.25
+Nodes (3): mcpRoutes(), McpSessionRegistry, sha256()
 
-### Community 159 - "escrow-fork.global-setup.ts"
-Cohesion: 0.44
-Nodes (8): setup(), teardown(), databaseName(), flushTestRedis(), readEscrowForkConfig(), resetTestDatabase(), main(), stopAnvil()
+### Community 159 - "startEscrowFork"
+Cohesion: 0.27
+Nodes (12): setup(), teardown(), assertPortFree(), databaseName(), deployEnv(), flushTestRedis(), parseDeployOutput(), readEscrowForkConfig() (+4 more)
 
 ### Community 160 - "daily-volume.db.test.ts"
 Cohesion: 0.08
 Nodes (8): ADMIN, Broadcast, DUE_NOW, h, Modules, quietLogger, Receipt, RUN
 
 ### Community 161 - "ref_modelcontextprotocol_sdk"
-Cohesion: 0.09
-Nodes (16): main(), server, startSSEServer(), callTool(), createServer(), apiMock, log, pay() (+8 more)
+Cohesion: 0.06
+Nodes (24): request(), ApiError, main(), server, startSSEServer(), callTool(), createServer(), getRequiredFields() (+16 more)
 
-### Community 162 - "handshake.oracle.test.ts"
-Cohesion: 0.12
-Nodes (15): registerErrorHandler(), AgentsModule, { ALCHEMY_KEY, TURNKEY_PRIVATE_KEY }, buildApp(), { mockDb, walletMock, rpcUrls, loggerMock }, SIGNER, buildApp(), { mockDb, loggerMock, walletHolder, verifyHashCalls } (+7 more)
+### Community 162 - "jobs.routes.erc8183.test.ts"
+Cohesion: 0.09
+Nodes (16): registerErrorHandler(), AgentsModule, { ALCHEMY_KEY, TURNKEY_PRIVATE_KEY }, buildApp(), { mockDb, walletMock, rpcUrls, loggerMock }, SIGNER, AuthModule, buildApp() (+8 more)
 
 ### Community 163 - "release-v1.mjs"
 Cohesion: 0.33
 Nodes (12): buildCommandLine(), getDirtyPaths(), hasEnv(), IGNORE_DIRTY_PREFIXES, main(), parseVersion(), printUsage(), quoteArg() (+4 more)
 
-### Community 164 - "REPUTATION_HOOK_ABI"
-Cohesion: 0.22
-Nodes (9): REPUTATION_HOOK_ABI, cache, __clearHookStateCache(), HOOK_STATE_CACHE_MS, HookReputationView, HookStateDeps, readHookReputation(), readUint() (+1 more)
+### Community 164 - "hook-state.ts"
+Cohesion: 0.24
+Nodes (8): cache, __clearHookStateCache(), HOOK_STATE_CACHE_MS, HookReputationView, HookStateDeps, readHookReputation(), readUint(), HOOK
 
 ### Community 165 - "path-ids.test.ts"
-Cohesion: 0.12
-Nodes (12): request(), ApiError, PATH_ID_PATTERN, getRequiredFields(), inferJsonSchemaType(), listTools(), apiMock, log (+4 more)
+Cohesion: 0.29
+Nodes (5): PATH_ID_PATTERN, apiMock, HOSTILE_IDS, log, unwrap()
 
 ### Community 166 - "escrow-erc8183/package.json"
 Cohesion: 0.18
@@ -901,25 +898,25 @@ Nodes (10): description, engines, node, main, name, private, scripts, start (+2 
 Cohesion: 0.12
 Nodes (7): expectExempt(), h, Modules, onlyRow(), Op, RUN, volume()
 
-### Community 168 - "anvil-contracts.ts"
-Cohesion: 0.15
-Nodes (13): EVALUATOR_STUCK_ALERT_AFTER_MS, __resetEvaluatorBacklogForTests(), init(), LOOT, ROGUE, SafeKit, thief, evaluator (+5 more)
+### Community 168 - "policy-sync.contracts.anvil.ts"
+Cohesion: 0.06
+Nodes (33): EVALUATOR_STUCK_ALERT_AFTER_MS, __resetEvaluatorBacklogForTests(), init(), LOOT, ROGUE, SafeKit, thief, startAnvil() (+25 more)
 
 ### Community 169 - "Local validation — every check, by layer"
 Cohesion: 0.29
 Nodes (6): 1. One-time setup, 2. The checks, in CI order, 3. Known local quirks, 4. Item 7 — the joint DB suite crashed on Windows (resolved: `pool: 'forks'`), Local validation — every check, by layer, disconnect()
 
 ### Community 170 - "policy-stack-verification.runtime.ts"
-Cohesion: 0.07
-Nodes (48): refuseUnverifiedContracts(), ChainIdReader, CodeReader, ContractReader, applyVerdict(), chainIdReader(), codeReader(), reader() (+40 more)
+Cohesion: 0.08
+Nodes (42): refuseUnverifiedContracts(), createChainPublicClient(), getChain(), getPrimaryRpcUrl(), getContracts(), applyVerdict(), chainIdReader(), codeReader() (+34 more)
 
-### Community 171 - "resource-payment.routes.test.ts"
-Cohesion: 0.13
-Nodes (11): LANDING_PATH, neverFetch(), NONCE_32, buildApp(), fixture(), LedgerRow, { mockDb, ledger }, open (+3 more)
+### Community 171 - "handler.ts"
+Cohesion: 0.31
+Nodes (9): errorHandler(), explicitStatus(), INTERNAL_ERROR_CODE, INTERNAL_ERROR_MESSAGE, InternalErrorBody, isPlainHeaders(), statusFor(), isZodLikeError() (+1 more)
 
 ### Community 172 - "reconcileEscrowJob"
-Cohesion: 0.11
-Nodes (49): 6.7 Chain as the source of truth: reconciliation, lanes, recovery (C3c), 6.8 Contest → operator review, escrow policy, boot checks (C3d), resumeBinding(), advanceToFunded(), advanceToSubmitted(), afterBudgetSet(), alertReviewExpired(), awaitingEvaluation() (+41 more)
+Cohesion: 0.13
+Nodes (37): 6.7 Chain as the source of truth: reconciliation, lanes, recovery (C3c), resumeBinding(), advanceToFunded(), advanceToSubmitted(), afterBudgetSet(), awaitingEvaluation(), buildFeedbackFile(), closeUnfundedExpired() (+29 more)
 
 ### Community 173 - "tsconfig.build.json"
 Cohesion: 0.50
@@ -927,27 +924,27 @@ Nodes (3): exclude, extends, ./tsconfig.json
 
 ### Community 174 - "mcp.sessions.test.ts"
 Cohesion: 0.16
-Nodes (8): redactUrl(), requestSerializer(), SerializableRequest, SerializableSocket, SerializedRequest, McpSessionLimits, mcpSessionLimitsFromEnv(), openStreams
+Nodes (9): redactUrl(), requestSerializer(), SerializableRequest, SerializableSocket, SerializedRequest, McpSessionLimits, mcpSessionLimitsFromEnv(), openStreams (+1 more)
 
-### Community 175 - "resource-payment.ledger.db.test.ts"
-Cohesion: 0.14
-Nodes (10): FixtureOptions, loopbackOnly(), createdAgents, fixture(), open, payer, service(), tag (+2 more)
+### Community 175 - "agents.erc8004.routes.test.ts"
+Cohesion: 0.22
+Nodes (8): buildRegistrationFile(), REGISTRATION_FILE_TYPE, registrationAgentId(), AGENT, AgentsModule, AuthModule, buildApp(), { mockDb }
 
 ### Community 176 - "broadcast-tx-hash.migration.db.test.ts"
 Cohesion: 0.18
 Nodes (9): DB_DIR, here, migrateDeploy(), OLD_HASH, PRISMA_CLI, Row, scratchUrl(), SEEDS (+1 more)
 
 ### Community 177 - "claimRefund"
-Cohesion: 0.10
-Nodes (39): Changed (Q6 / Q7 — contest window, unverified on-chain escrow configuration), Fixed (C3e — C3d review leftovers; 6d — A6b review; migration `0023`), 4. AgentFi design: feedback written by the escrow hook, 1. What the standard defines, 2. Mapping AgentFi → ERC-8183, 3. Contract: `AgentJobEscrow.sol` (as implemented, review R2 applied 2026-10-06), 4. Known pitfalls and version drift, 5. Decisions (owner, 2026-10-06) (+31 more)
+Cohesion: 0.05
+Nodes (58): Fixed (C3e — C3d review leftovers; 6d — A6b review; migration `0023`), 1. What the standard defines, 2. Mapping AgentFi → ERC-8183, 3. Contract: `AgentJobEscrow.sol` (as implemented, review R2 applied 2026-10-06), 4. Known pitfalls and version drift, 5. Decisions (owner, 2026-10-06), 6.10 Settlements in flight and escrow steps stamped for broadcast (C3e, A6b 6d — 2026-10-14), 6.11 Adversarial review of the G1 combined diff (2026-10-14) (+50 more)
 
 ### Community 178 - "policy-sync/route.ts"
 Cohesion: 0.18
 Nodes (10): GET(), { hasAdminSessionMock }, POST(), { hasAdminSessionMock }, GET(), POST(), proxy(), ctx (+2 more)
 
 ### Community 179 - "contracts.ts"
-Cohesion: 0.14
-Nodes (18): ChainContracts, ContractEnvSource, contractEnvVar(), DEFAULT_REPUTATION_REGISTRIES, describeLegacyContract(), executorFromEnv(), findLegacyContractConfig(), isLegacyContractAddress() (+10 more)
+Cohesion: 0.11
+Nodes (22): ChainContracts, CONTRACT_ADDRESSES, ContractEnvSource, contractEnvVar(), DEFAULT_REPUTATION_REGISTRIES, describeLegacyContract(), executorFromEnv(), findLegacyContractConfig() (+14 more)
 
 ### Community 180 - "settle-attempt.migration.db.test.ts"
 Cohesion: 0.18
@@ -955,38 +952,38 @@ Nodes (8): DB_DIR, here, migrateDeploy(), PRISMA_CLI, REVERTED, Row, scratchUrl(
 
 ### Community 181 - "ref_node_path"
 Cohesion: 0.10
-Nodes (13): __dirname, nextConfig, SCRIPT, TOOL_ANNOTATIONS, packageDir, RpcMessage, CONTRACTS, CONTRACTS_DIR (+5 more)
+Nodes (13): __dirname, nextConfig, TokenMapModule, SCRIPT, packageDir, RpcMessage, CONTRACTS, CONTRACTS_DIR (+5 more)
 
-### Community 182 - "policy-sync.contracts.anvil.ts"
-Cohesion: 0.13
-Nodes (9): Changed, OnChainPolicyService, agent, deployer, onChain, operator, otherAgent, setPolicyCalldata() (+1 more)
+### Community 182 - "OnChainPolicyService"
+Cohesion: 0.32
+Nodes (3): Changed, OnChainPolicyService, setPolicyCalldata()
 
-### Community 183 - "ref_node_crypto"
-Cohesion: 0.19
-Nodes (8): CONTRACT_ADDRESSES, UNISWAP_V3_QUOTER_V2, listKnownTokens(), AddressModule, caseFlips(), corpus(), pseudoRandomAddresses(), TokenMapModule
+### Community 183 - "abi.erc8183.test.ts"
+Cohesion: 0.25
+Nodes (7): ARTIFACTS, ESCROW_ABI, ESCROW_EVENTS, ESCROW_FUNCTIONS, here, HOOK_ABI, HOOK_EVENTS
 
-### Community 184 - ".getAddress"
-Cohesion: 0.24
-Nodes (6): ESCROW_MODULE_ABI, EscrowLockTx, onChainEscrowService, queueOnChainEscrowRefund(), queueOnChainEscrowRelease(), resolveEscrowOperatorWallet()
+### Community 184 - "C4 / C5 checklist — Base Sepolia (owner)"
+Cohesion: 0.29
+Nodes (7): 0. Before you start, 1. C4 — deploy (testnet-log.md §2), 2. C5 — backend on Base Sepolia (testnet-log.md §5.4), 3. Known behaviour to expect (not defects), 4. Done when, Authorisation package (owner, before anything is executed), C4 / C5 checklist — Base Sepolia (owner)
 
 ### Community 185 - "server.ts"
-Cohesion: 0.21
-Nodes (11): api, ErrorLogger, CallToolOptions, RegisteredTool, SERVER_NAME, SERVER_VERSION, toolRegistry, gmxTools (+3 more)
+Cohesion: 0.19
+Nodes (12): api, ErrorLogger, CallToolOptions, RegisteredTool, SERVER_NAME, SERVER_VERSION, toolRegistry, agentTools (+4 more)
 
 ### Community 186 - "AgentFi API Reference"
-Cohesion: 0.07
-Nodes (26): 1. Discovery (Agent Yellow Pages), 2.1 Handshake envelope (v1), 2. Cryptographic Trust & Identity, 3. Communication & Job Queue, 4. Automated Reputation, 5. Intent-Aware Economy, Agent-to-Agent (A2A) Interoperability Protocol, AgentFi API Reference (+18 more)
+Cohesion: 0.12
+Nodes (17): AgentFi API Reference, Agents, Authentication, Billing, Error Responses, GET /v1/agents/me/pnl, Health, Jobs (Agent-to-Agent) (+9 more)
 
-### Community 187 - "2. C4 runbook (owner runs it; the agent prepared it)"
-Cohesion: 0.15
-Nodes (13): 1. Deployments (task C4), 2.0 Prerequisites, 2.2 Signer: the keystore *or* `PRIVATE_KEY`, never both, 2.3 Tests, 2.4 Environment (same shell for both scripts), 2.5 Policy module + executor, 2.6 Escrow + hook, 2.7 Post-deployment checks (+5 more)
+### Community 187 - "7. Acceptance matrix"
+Cohesion: 0.29
+Nodes (7): 7.1 Completed work (budget 2.0 USDC), 7.2 Cancellation (budget 1.0 USDC), 7.3 Contest → operator resolution (budget 1.5 USDC), 7.4 No agent can resolve the dispute, 7.5 Whole run (`reconcile`, against the snapshot), 7.6 After a restart or a repeated query, 7. Acceptance matrix
 
 ### Community 188 - "errors.sanitize.sync.test.ts"
 Cohesion: 0.22
 Nodes (6): BACKEND_ERRORS, CORPUS, ctx, here, MCP_ERRORS, SanitizeModule
 
-### Community 189 - "ref_vitest"
-Cohesion: 0.15
+### Community 189 - "local-validation.docs.test.ts"
+Cohesion: 0.29
 Nodes (5): created, e2eCommands, lines, PAGE, text
 
 ### Community 190 - "lib/auth.ts"
@@ -1001,21 +998,21 @@ Nodes (11): ERC20_ABI, JobStatus, PendingTx, REASON_PAYOUT_BLOCKED, REASON_QUALI
 Cohesion: 0.10
 Nodes (12): hasPolicy(), readPolicy(), adminHeaders, C1, C2, contractAllowedRaw(), h, hasPolicy() (+4 more)
 
-### Community 193 - "local-request.ts"
-Cohesion: 0.26
-Nodes (9): RFC-7239, addressOf(), forwardedAddresses(), FORWARDING_HEADERS, isLocalOnlyRequest(), isLoopbackAddress(), LocalRequestLike, requireAdmin() (+1 more)
+### Community 193 - "Execution Plan — AgentFi reactivation (Q4 2026)"
+Cohesion: 0.29
+Nodes (7): 1. Goal and gates, 3. Calendar, 4. Working agreement, 5. Open questions (ask the owner, do not assume), 6. Risks, Appendix — Environment on the maintainer's machine (2026-10-06), Execution Plan — AgentFi reactivation (Q4 2026)
 
-### Community 194 - "admin.pause.routes.test.ts"
-Cohesion: 0.18
-Nodes (8): AdminModule, AgentRow, buildApp(), GuardModule, { mockDb, finalizeMock, syncMock, viewMock }, PolicyModule, PolicyRow, QUEUED
+### Community 194 - "wallets.ts"
+Cohesion: 0.40
+Nodes (5): COMMON_TOKENS, ERC20_READ_ABI, resolveAavePool(), readAavePoolOnChain(), getAllowances()
 
-### Community 195 - "transaction.worker.test.ts"
-Cohesion: 0.15
-Nodes (9): TransactionJobLike, { finalizeMock, weiToUsdMock, escrowOutcomeMock, volume }, gate, JOB_DATA, makeDb(), makeDeps(), stackGate, TX_HASH (+1 more)
+### Community 195 - "6. Execution"
+Cohesion: 0.40
+Nodes (5): 6.1 C4 — deploy (owner, about 20 minutes), 6.2 C5 environment (owner, about 15 minutes), 6.3 The runner (third terminal, `packages/backend`), 6.4 Following the run and recovering from an interruption, 6. Execution
 
 ### Community 196 - "transaction.repoll.test.ts"
-Cohesion: 0.15
-Nodes (11): MonitorService, recordReceiptOnce(), feeService, { finalizeMock, weiToUsdMock, escrowOutcomeMock, volume }, HASH, logger, makeDb(), NOW (+3 more)
+Cohesion: 0.11
+Nodes (16): candidateClients, isNotFound(), isTransactionKnownOnAnyRpc(), isTransactionKnownToAny(), TX_LOOKUP_RETRY_COUNT, TX_LOOKUP_TIMEOUT_MS, TxLookupClient, feeService (+8 more)
 
 ### Community 197 - "escrow-spend-policy.db.test.ts"
 Cohesion: 0.20
@@ -1029,25 +1026,25 @@ Nodes (10): api(), main(), mcpCommand(), mcpServer(), printJson(), printPrompt()
 Cohesion: 0.31
 Nodes (8): BatchCalldataClass, classifyBatchCalldata(), decodeStrictErc20Transfer(), ERC20_TRANSFER_FROM_SELECTOR, ERC20_TRANSFER_SELECTOR, approve, transfer, transferFrom
 
-### Community 200 - "handshake.test.ts"
-Cohesion: 0.33
-Nodes (9): buildHandshakeTypedData(), HANDSHAKE_DOMAIN, HANDSHAKE_MESSAGE_MAX_LENGTH, HANDSHAKE_PRIMARY_TYPE, HANDSHAKE_TYPES, handshakeDigest(), HandshakeFields, handshakeTypedDataJson() (+1 more)
+### Community 200 - "handshake.oracle.test.ts"
+Cohesion: 0.18
+Nodes (14): buildHandshakeTypedData(), HANDSHAKE_DOMAIN, HANDSHAKE_MESSAGE_MAX_LENGTH, HANDSHAKE_PRIMARY_TYPE, HANDSHAKE_TYPES, handshakeDigest(), HandshakeFields, handshakeTypedDataJson() (+6 more)
 
 ### Community 201 - "[0.5.0] — 2026-05-15"
-Cohesion: 0.17
-Nodes (12): [0.1.0] - 2026-03-25, [0.5.0] — 2026-05-15, Added, Changed, Changed, Changed (breaking — mcp-server 0.2.0 → 0.3.0), Changelog, Fixed (+4 more)
+Cohesion: 0.13
+Nodes (13): [0.1.0] - 2026-03-25, [0.5.0] — 2026-05-15, Added, Added (Phase 3/4 roadmap — merged 2026-05-13), Changed, Changed, Changed (breaking — mcp-server 0.2.0 → 0.3.0), Changelog (+5 more)
 
-### Community 202 - "PnLService"
-Cohesion: 0.25
-Nodes (6): 1.1 Ghost completions — fire-and-forget payment, 1.2 Silent zero from price oracle, 1.3 Real-time price (no historical snapshot), 1. Bug surface (what's broken today), PnLService, rewardRowToUsd()
+### Community 202 - "AgentFi Example — ERC-8183 escrow with ERC-8004 feedback"
+Cohesion: 0.40
+Nodes (5): AgentFi Example — ERC-8183 escrow with ERC-8004 feedback, Files, Run it against Base Sepolia (task C5, after C4), Run it against the fork harness (now), What it does
 
 ### Community 203 - "🚀 New Features"
 Cohesion: 0.33
 Nodes (5): 1. Human-in-the-Loop (HITL) Approval System, 2. Public Transaction Explorer, 3. Operator Notification Service, 🚀 New Features, Release Notes — HITL & Transaction Transparency (April 2026)
 
 ### Community 204 - "daily-volume.ts"
-Cohesion: 0.12
-Nodes (17): ApprovalRefusal, ApprovalRefusalCode, ApprovalResult, BroadcastNotAllowedError, CreateWithVolumeResult, isPlainObject(), markBroadcastAttempt(), refuseApproval() (+9 more)
+Cohesion: 0.13
+Nodes (22): ApprovalRefusal, ApprovalRefusalCode, ApprovalResult, approvePendingTransaction(), BroadcastNotAllowedError, createTransactionWithVolume(), CreateWithVolumeResult, isLegacyA2APayment() (+14 more)
 
 ### Community 205 - "Operator interviews (WS7, gate G4)"
 Cohesion: 0.33
@@ -1058,24 +1055,24 @@ Cohesion: 0.10
 Nodes (8): ADMIN, h, mkAgent(), Modules, pendingTransfer(), RUN, setClock(), x402Payment()
 
 ### Community 207 - "ref_node_fs"
-Cohesion: 0.11
-Nodes (15): ARTIFACTS, ESCROW_ABI, ESCROW_EVENTS, ESCROW_FUNCTIONS, here, HOOK_ABI, HOOK_EVENTS, contractViolations() (+7 more)
+Cohesion: 0.22
+Nodes (7): FlatObjectSchema, indentOf(), readComponentSchema(), SPEC_PATH, codegenArgs, original, updated
 
 ### Community 208 - "startBackend"
 Cohesion: 0.50
 Nodes (3): backendEnv(), BackendHandle, startBackend()
 
-### Community 209 - "LocalChain"
-Cohesion: 0.29
-Nodes (3): deployPolicyStack(), LocalChain, readArtifact()
+### Community 209 - "3. Roles and addresses"
+Cohesion: 0.50
+Nodes (4): 3.1 Machine inventory (2026-10-15, without printing any secret), 3.2 Every address the run uses, 3.3 What only the owner can enter, in a terminal of your own (never in a chat), 3. Roles and addresses
 
 ### Community 210 - "x402.ts"
 Cohesion: 0.39
 Nodes (6): chainIdToNetwork(), getX402FacilitatorUrl(), networkToChainId(), X402_FACILITATOR_DEFAULTS, { envState }, @x402/core
 
-### Community 211 - "AgentFi Smart Contracts"
-Cohesion: 0.33
-Nodes (5): AgentFi Smart Contracts, Chain Support, Deployment, Development, Security
+### Community 211 - "2. Baseline"
+Cohesion: 0.67
+Nodes (3): 2.1 Rehearsed, candidate and re-checked commits, 2. Baseline, Evidence by class
 
 ### Community 212 - "policy-review-followups.db.test.ts"
 Cohesion: 0.11
@@ -1090,76 +1087,72 @@ Cohesion: 0.11
 Nodes (6): h, Modules, NOT_OUTFLOWS, Op, OUTFLOWS, RUN
 
 ### Community 215 - "escrow.service.ts"
-Cohesion: 0.09
-Nodes (39): Added (C4/C5 preparation — USD cap on ordinary outflows, plan §5-6; migration 0025), Fixed (C4/C5 preparation — operator approval on a later UTC day, A6c / plan §5-8; no migration), WS1 — Correctness and safety fixes (Week 0–1), approvePendingTransaction(), createTransactionWithVolume(), isLegacyA2APayment(), microToUsd6(), addDailyVolume() (+31 more)
+Cohesion: 0.05
+Nodes (52): Changed (S9 — contract identity before authority or value; AgentPolicyModule fix; Safe mode refused; no migration), Fixed (S8 — on-chain policy sync through the authority the module defines; no migration), Admin (Operator), Emergency pause, 0. Decisions locked on 2026-10-06 (owner), addDailyVolume(), EscrowSpendRefusal, EscrowSpendResult (+44 more)
 
 ### Community 216 - "chains.ts"
-Cohesion: 0.06
-Nodes (43): getQuotedAmountOut(), CHAIN_IDS, createChainPublicClient(), FALLBACK_RPC_URLS, getChain(), getPrimaryRpcUrl(), getRpcCandidates(), getRpcOverride() (+35 more)
-
-### Community 217 - "transaction.queue.multinode.test.ts"
-Cohesion: 0.25
-Nodes (5): h, listen(), PENDING_TX, primary, secondary
+Cohesion: 0.16
+Nodes (17): Fixed (G1 review — adversarial review of the combined diff: P2-1, P3-1 to P3-4; no migration), CHAIN_IDS, FALLBACK_RPC_URLS, getRpcCandidates(), getRpcOverride(), getSecondaryRpcUrl(), isNetworkOrRateLimitError(), isUsableRpcUrl() (+9 more)
 
 ### Community 218 - "max-withdrawal.fork.test.ts"
 Cohesion: 0.13
 Nodes (12): chain, COMET_ABI, EVENTS_ABI, freshAgent(), POOL_ABI, PORT, pub, rpc() (+4 more)
 
 ### Community 219 - "pay-agent.mcp.db.test.ts"
-Cohesion: 0.13
-Nodes (6): CallTool, close(), h, Modules, RUN, serveAs()
+Cohesion: 0.10
+Nodes (8): CallTool, close(), executeTransfer(), h, Modules, RUN, serveAs(), withSseClient()
 
 ### Community 220 - "contract-identity.executor.anvil.ts"
 Cohesion: 0.13
 Nodes (11): agent, AMOUNT, deployer, EXECUTOR_ARTIFACT, FEE_WALLET, FOREIGN_CONTRACT, LEGACY, LOOKALIKE (+3 more)
 
-### Community 221 - "escrow-boot-check.ts"
-Cohesion: 0.06
-Nodes (34): EXPECTED_CONTRACT_CODE, EXPECTED_CONTRACT_CODE_VERSION, ExpectedContractCode, VerifiedContractName, codeIdentityProblem(), maskImmutables(), checkEscrowDeployments(), codeIdentityProblems() (+26 more)
+### Community 221 - "escrow-boot-check.test.ts"
+Cohesion: 0.10
+Nodes (16): capabilityDrift(), chainKey(), describeCapabilities(), EscrowChainCapability, ProcessCapabilities, ESCROW, EVALUATOR, expected (+8 more)
 
 ### Community 223 - "contract-identity.module.anvil.ts"
-Cohesion: 0.15
-Nodes (13): agent, deployer, EXECUTOR_ARTIFACT, MODULE_ARTIFACT, NO_CODE, operator, reader(), send() (+5 more)
+Cohesion: 0.13
+Nodes (14): readOnChainPolicy(), agent, deployer, EXECUTOR_ARTIFACT, MODULE_ARTIFACT, NO_CODE, operator, reader() (+6 more)
 
 ### Community 224 - "transfer-input.routes.db.test.ts"
 Cohesion: 0.20
 Nodes (6): close(), h, mkAgent(), Modules, RUN, transfer()
 
-### Community 225 - "payment-finalizer.snapshot.test.ts"
-Cohesion: 0.40
-Nodes (3): jobFindUniqueMock, jobUpdateMock, mockFetch
-
 ### Community 226 - "outflow-cap.migration.db.test.ts"
-Cohesion: 0.18
-Nodes (8): DB_DIR, here, migrateDeploy(), NOW, PRISMA_CLI, scratchUrl(), SEEDS, serviceOver()
+Cohesion: 0.20
+Nodes (7): DB_DIR, here, migrateDeploy(), NOW, PRISMA_CLI, scratchUrl(), SEEDS
 
 ### Community 227 - "gen-contract-code.mjs"
 Cohesion: 0.25
 Nodes (8): body, CONTRACTS, entries, load(), OUT_DIR, ROOT, TARGET, version
+
+### Community 228 - "pnl.service.ts"
+Cohesion: 0.22
+Nodes (5): PnLBreakdown, PnLService, RewardJson, mockFetch, MockOpts
 
 ### Community 229 - "admin.batch.routes.test.ts"
 Cohesion: 0.25
 Nodes (6): ACTIONS, AdminModule, buildApp(), { mockDb, queueAdd, contractsGate }, named, other
 
 ## Knowledge Gaps
-- **1794 isolated node(s):** `name`, `version`, `private`, `type`, `description` (+1789 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 2246 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **14 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **1830 isolated node(s):** `name`, `version`, `private`, `type`, `description` (+1825 more)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 2302 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **12 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `viem` connect `viem` to `escrow-validation.ts`, `escrow-erc8183.runtime.ts`, `agents.ts`, `transaction.e2e.ts`, `fastify`, `transaction.queue.ts`, `admin.ts`, `backend/package.json`, `transactions.ts`, `builder.service.ts`, `resource-payment.service.ts`, `price.service.ts`, `global-setup.ts`, `policy-sync.ts`, `ens.service.ts`, `Fixed`, `sanitize.ts`, `broadcast-outcome.db.test.ts`, `x402-fixture.ts`, `logger.ts`, `agentRoutes`, `erc8004-identity.service.ts`, `@prisma/client`, `x402-client.service.ts`, `pnl.service.ts`, `SubmitterService`, `contracts.addresses.routes.db.test.ts`, `escrow-erc8183.service.test.ts`, `policy-sync.service.ts`, `escrow-boot.runtime.ts`, `escrow-erc8183.service.ts`, `submitter.service.ts`, `spend-pricing.ts`, `policy-units.migration.db.test.ts`, `escrow-chain-truth.db.test.ts`, `escrow-erc8183.fork.e2e.ts`, `escrow-verification.ts`, `erc8004-identity.test.ts`, `mcp.ts`, `transaction.processor.ts`, `escrow-settlement.queue.ts`, `escrow-fork.harness.ts`, `env.ts`, `x402.middleware.ts`, `max-withdrawal-proof.ts`, `stranded-queued.bullmq.db.test.ts`, `daily-volume.db.test.ts`, `handshake.oracle.test.ts`, `REPUTATION_HOOK_ABI`, `spend-pricing.routes.db.test.ts`, `anvil-contracts.ts`, `policy-stack-verification.runtime.ts`, `resource-payment.routes.test.ts`, `resource-payment.ledger.db.test.ts`, `broadcast-tx-hash.migration.db.test.ts`, `contracts.ts`, `settle-attempt.migration.db.test.ts`, `policy-sync.contracts.anvil.ts`, `ref_node_crypto`, `.getAddress`, `ref_vitest`, `fake-escrow-chain.ts`, `policy-sync.routes.anvil.ts`, `transaction.worker.test.ts`, `transaction.repoll.test.ts`, `escrow-spend-policy.db.test.ts`, `batch-calldata.test.ts`, `handshake.test.ts`, `ref_node_fs`, `policy-review-followups.db.test.ts`, `max-withdrawal.routes.db.test.ts`, `outflow-cap.routes.db.test.ts`, `escrow.service.ts`, `chains.ts`, `transaction.queue.multinode.test.ts`, `max-withdrawal.fork.test.ts`, `pay-agent.mcp.db.test.ts`, `contract-identity.executor.anvil.ts`, `escrow-boot-check.ts`, `contract-identity.module.anvil.ts`, `transfer-input.routes.db.test.ts`?**
-  _High betweenness centrality (0.180) - this node is a cross-community bridge._
-- **Are the 16 inferred relationships involving `transactionRoutes()` (e.g. with `.buildAaveSupply()` and `.buildAaveWithdraw()`) actually correct?**
-  _`transactionRoutes()` has 16 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `viem` connect `viem` to `escrow-validation.ts`, `escrow-erc8183.runtime.ts`, `policy-authority.ts`, `escrow-verification.ts`, `agents.ts`, `erc8004-identity.test.ts`, `transaction.queue.ts`, `fastify`, `admin.ts`, `backend/package.json`, `contract-identity.test.ts`, `transaction.processor.ts`, `mcp.ts`, `escrow-fork.harness.ts`, `env.ts`, `x402.middleware.ts`, `outbound-target.ts`, `transactions.ts`, `max-withdrawal-proof.ts`, `@prisma/client`, `executor.service.ts`, `daily-volume.db.test.ts`, `price.service.ts`, `jobs.routes.erc8183.test.ts`, `hook-state.ts`, `global-setup.ts`, `policy-sync.ts`, `policy-sync.contracts.anvil.ts`, `ens.service.ts`, `policy-stack-verification.runtime.ts`, `Fixed`, `spend-pricing.routes.db.test.ts`, `sanitize.ts`, `broadcast-tx-hash.migration.db.test.ts`, `contracts.ts`, `settle-attempt.migration.db.test.ts`, `ref_node_path`, `abi.erc8183.test.ts`, `broadcast-outcome.db.test.ts`, `resource-payment.routes.test.ts`, `fake-escrow-chain.ts`, `policy-sync.routes.anvil.ts`, `wallets.ts`, `transaction.repoll.test.ts`, `escrow-spend-policy.db.test.ts`, `ref_vitest`, `erc8004-identity.service.ts`, `handshake.oracle.test.ts`, `batch-calldata.test.ts`, `escrow-boot-check.ts`, `x402-client.service.ts`, `policy-review-followups.db.test.ts`, `max-withdrawal.routes.db.test.ts`, `outflow-cap.routes.db.test.ts`, `escrow.service.ts`, `chains.ts`, `max-withdrawal.fork.test.ts`, `pay-agent.mcp.db.test.ts`, `contract-identity.executor.anvil.ts`, `escrow-boot-check.test.ts`, `Erc8183Deps`, `contract-identity.module.anvil.ts`, `wallet-lane.test.ts`, `transfer-input.routes.db.test.ts`, `contracts.addresses.routes.db.test.ts`, `escrow-erc8183.service.test.ts`, `policy-sync.service.ts`, `escrow-boot.runtime.ts`, `escrow-erc8183.service.ts`, `submitter.service.ts`, `resource-payment.service.ts`, `spend-pricing.ts`, `transactions.batch.anvil.ts`, `simulator.service.ts`, `escrow-chain-truth.db.test.ts`, `escrow-erc8183.fork.e2e.ts`?**
+  _High betweenness centrality (0.196) - this node is a cross-community bridge._
+- **Are the 17 inferred relationships involving `transactionRoutes()` (e.g. with `.buildAaveSupply()` and `.buildAaveWithdraw()`) actually correct?**
+  _`transactionRoutes()` has 17 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `name`, `version`, `private` to the rest of the system?**
-  _1794 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _1830 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `escrow-validation.ts` be split into smaller, more focused modules?**
-  _Cohesion score 0.05388748419721871 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.053563111318118306 - nodes in this community are weakly interconnected._
 - **Why does `next` connect `next` to `dashboard/page.tsx`, `jobs/[id]/page.tsx`, `policy-sync/route.ts`, `admin/package.json`, `lucide-react`, `lib/auth.ts`?**
   _High betweenness centrality (0.069) - this node is a cross-community bridge._
 - **Should `PROMPT PARA CLAUDE CODE — AgentFi: Infraestrutura de Transações Cripto para Agentes de IA` be split into smaller, more focused modules?**
   _Cohesion score 0.043478260869565216 - nodes in this community are weakly interconnected._
-- **Why does `PolicyService` connect `PolicyService` to `admin.pause.routes.test.ts`, `outflow-cap.migration.db.test.ts`, `transaction.repoll.test.ts`, `policy-authority.ts`, `agents.ts`, `Fixed`, `resource-payment-ledger.ts`, `admin.ts`, `AgentFi — Project State`, `policy-sync.contracts.anvil.ts`, `escrow.service.ts`, `transactions.ts`, `lucide-react`, `policy-units.migration.db.test.ts`?**
-  _High betweenness centrality (0.037) - this node is a cross-community bridge._
+- **Why does `PolicyService` connect `escrow.service.ts` to `outflow-cap.migration.db.test.ts`, `policy-authority.ts`, `agents.ts`, `TransactionBuilder`, `Fixed`, `resource-payment-ledger.ts`, `admin.ts`, `AgentFi — Project State`, `pre-submit-guard.ts`, `OnChainPolicyService`, `transactions.ts`, `lucide-react`?**
+  _High betweenness centrality (0.033) - this node is a cross-community bridge._
