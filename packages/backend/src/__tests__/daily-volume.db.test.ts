@@ -672,9 +672,35 @@ describeDb('A6 — DailyVolume of ordinary transactions on Postgres', () => {
       payload: { chainId: CHAIN_ID, actions: [{ to: RECIPIENT, value: '20000000000000000' }, { to: RECIPIENT, value: '10000000000000000' }] }, // 40 + 20 USD
     });
     expect(fits.statusCode).toBe(202);
-    expect(await volume(agent.id)).toBeCloseTo(60, 6);
+    // A6d: counted with the executor fee it sends — 0.03 ETH × 30 bps = 0.00009 ETH = 0.18 USD.
+    expect(await volume(agent.id)).toBeCloseTo(60.18, 6);
     await runJob(jobOf(fits.json().transactionId), { receipt: 'success' });
-    expect(await volume(agent.id)).toBeCloseTo(60, 6);
+    expect(await volume(agent.id)).toBeCloseTo(60.18, 6);
+  });
+
+  it('A6d: the batch reservation is its value plus the executor fee — a value that exactly fills the daily limit no longer fits; value + fee does', async () => {
+    const exact = await mkAgent({ maxDailyVolumeUsd: '20' });
+    const refused = await (await app(exact.id)).inject({
+      method: 'POST',
+      url: '/v1/transactions/batch',
+      payload: { chainId: CHAIN_ID, actions: [{ to: RECIPIENT, value: '10000000000000000' }] }, // 20 USD + 0.06 USD fee
+    });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json().error).toMatch(/Daily volume limit/);
+    expect(refused.json().error).toMatch(/requested: 20\.06/);
+    expect(await volume(exact.id)).toBeCloseTo(0, 6);
+
+    const room = await mkAgent({ maxDailyVolumeUsd: '20.06' });
+    const fits = await (await app(room.id)).inject({
+      method: 'POST',
+      url: '/v1/transactions/batch',
+      payload: { chainId: CHAIN_ID, actions: [{ to: RECIPIENT, value: '10000000000000000' }] },
+    });
+    expect(fits.statusCode, fits.body).toBe(202);
+    expect(await volume(room.id)).toBeCloseTo(20.06, 6);
+    // Released in full when the batch reverts after one signed broadcast (A6).
+    await runJob(jobOf(fits.json().transactionId), { receipt: 'reverted' });
+    expect(await volume(room.id)).toBeCloseTo(0, 6);
   });
 
   it('S9: an unverified executor → 503 CONTRACTS_UNVERIFIED; nothing is reserved, written or queued', async () => {
