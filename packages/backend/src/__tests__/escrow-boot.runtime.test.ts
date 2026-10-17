@@ -289,6 +289,26 @@ describe('Q7 — per-process verification state, forever re-check, gate', () => 
   });
 });
 
+describe('C3f item 4 — every check publishes this process\'s verification state (read by GET /admin/escrow/verification)', () => {
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+  it('a matching boot of the worker publishes its chains as verified', async () => {
+    await runEscrowBootCheck('worker');
+    await flush();
+    const report = JSON.parse(redisStore.get('agentfi:escrow-verification:worker') ?? 'null');
+    expect(report).toMatchObject({ role: 'worker', recheckSeconds: expect.any(Number), chains: [expect.objectContaining({ chainId: 84532, state: 'verified', allowed: true })] });
+    expect(Date.parse(report.publishedAt)).not.toBeNaN();
+  });
+
+  it('an unreadable chain is published as unverified, with its reason', async () => {
+    state.readFails = true;
+    await runEscrowBootCheck('worker');
+    await flush();
+    const report = JSON.parse(redisStore.get('agentfi:escrow-verification:worker') ?? 'null');
+    expect(report.chains).toEqual([expect.objectContaining({ chainId: 84532, state: 'unverified', allowed: false, reason: expect.any(String) })]);
+  });
+});
+
 describe('announceProcessCapabilities', () => {
   it('logs what the process runs; the second process to boot reports drift with the first', async () => {
     // The worker booted without the evaluator key (no settlement worker) …

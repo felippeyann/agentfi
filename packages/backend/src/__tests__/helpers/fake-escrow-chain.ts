@@ -224,6 +224,10 @@ export class FakeEscrowChain {
   }
 
   getTransactionCount(address: string, blockTag: 'latest' | 'pending' = 'latest'): number {
+    // C3f: the evaluator key's own nonce sequence (mined evaluator transactions; pending ones queue behind).
+    if (this.evaluatorAddress && lower(address) === lower(this.evaluatorAddress)) {
+      return blockTag === 'pending' ? this.evaluatorMined + this.evaluatorPending.length : this.evaluatorMined;
+    }
     const latest = this.latestNonce.get(lower(address)) ?? 0;
     return blockTag === 'pending' ? latest + this.pendingCount(address) : latest;
   }
@@ -315,10 +319,11 @@ export class FakeEscrowChain {
   }
 
   getTransaction(hash: Hex): { hash: Hex; nonce: number } {
-    // C3e: evaluator transactions — known while pending (no blockNumber) or once mined.
-    if (this.evaluatorTxPending(hash)) return { hash, nonce: 0, blockNumber: null } as { hash: Hex; nonce: number };
+    // C3e: evaluator transactions — known while pending (no blockNumber) or once mined. C3f: with their nonce.
+    const evaluatorNonce = this.evaluatorNonceOf.get(hash) ?? 0;
+    if (this.evaluatorTxPending(hash)) return { hash, nonce: evaluatorNonce, blockNumber: null } as { hash: Hex; nonce: number };
     if (this.evaluatorBroadcasts.some((b) => b.hash === hash && b.outcome !== 'dropped' && b.outcome !== 'pending') && this.receipts.has(hash)) {
-      return { hash, nonce: 0, blockNumber: 1n } as { hash: Hex; nonce: number };
+      return { hash, nonce: evaluatorNonce, blockNumber: 1n } as { hash: Hex; nonce: number };
     }
     const tx = this.known.get(hash);
     const pending = this.mempool.some((p) => p.hash === hash);
@@ -352,6 +357,8 @@ export class FakeEscrowChain {
       getTransactionReceipt: async ({ hash }: { hash: Hex }) => this.getReceipt(hash),
       getTransaction: async ({ hash }: { hash: Hex }) => this.getTransaction(hash),
       getBalance: async ({ address }: { address: Address }) => this.nativeBalances.get(lower(address)) ?? 10n ** 18n,
+      getTransactionCount: async ({ address, blockTag }: { address: Address; blockTag?: 'latest' | 'pending' }) =>
+        this.getTransactionCount(address, blockTag === 'pending' ? 'pending' : 'latest'),
     };
   }
 
@@ -381,11 +388,16 @@ export class FakeEscrowChain {
   private readonly evaluatorPending: Array<{ hash: Hex; from: Address; to: Address; data: Hex }> = [];
   /** Every evaluator broadcast, in order, with what became of it. */
   readonly evaluatorBroadcasts: Array<{ hash: Hex; functionName: string; outcome: 'pending' | 'success' | 'reverted' | 'dropped' }> = [];
+  /** C3f: the evaluator key (set by `evaluatorSigner`), its mined transaction count and each broadcast's nonce. */
+  private evaluatorAddress: Address | null = null;
+  private evaluatorMined = 0;
+  private readonly evaluatorNonceOf = new Map<Hex, number>();
 
   /** Mines every pending evaluator transaction, in nonce order. */
   releaseEvaluator(): void {
     for (const tx of this.evaluatorPending.splice(0)) {
       const { status, logs } = this.execute(tx.from, tx.to, tx.data, tx.hash);
+      this.evaluatorMined++;
       this.receipts.set(tx.hash, this.receipt(tx.hash, status, logs));
       const entry = this.evaluatorBroadcasts.find((b) => b.hash === tx.hash);
       if (entry) entry.outcome = status;
@@ -419,6 +431,7 @@ export class FakeEscrowChain {
 
   /** The evaluator signer (operator key): simulates, signs, then broadcasts; mined at once unless held (C3e). */
   evaluatorSigner(evaluator: Address) {
+    this.evaluatorAddress = evaluator;
     return {
       address: evaluator,
       chainId: SIM_CHAIN_ID,
@@ -449,11 +462,14 @@ export class FakeEscrowChain {
             ? { reason: params.args[1] as Hex, optParams: params.args[2] as Hex }
             : {}),
         });
+        // C3f: the next nonce of the key — behind every pending evaluator transaction.
+        this.evaluatorNonceOf.set(hash, this.evaluatorMined + this.evaluatorPending.length);
         if (this.evaluatorHold?.({ functionName: params.functionName }) || this.evaluatorPending.length > 0) {
           this.evaluatorPending.push({ hash, from: evaluator, to: params.address, data });
           this.evaluatorBroadcasts.push({ hash, functionName: params.functionName, outcome: 'pending' });
         } else {
           const { status, logs } = this.execute(evaluator, params.address, data, hash);
+          this.evaluatorMined++;
           this.receipts.set(hash, this.receipt(hash, status, logs));
           this.evaluatorBroadcasts.push({ hash, functionName: params.functionName, outcome: status });
         }

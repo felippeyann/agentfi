@@ -3126,8 +3126,9 @@ export interface paths {
          * On-chain configuration verification state of each ERC-8183 chain (Q7)
          * @description This API process's verification state of each escrow chain, with the
          *     reason when new escrow operations are blocked, and the TTL / re-check
-         *     settings. The worker verifies on its own (its state changes are logged
-         *     and sent as `ESCROW_ALERT` notifications). While a chain is not
+         *     settings. The worker verifies on its own; `worker` is its state as it
+         *     last published it (read-only: nothing is gated on it, and `missing` /
+         *     `unreadable` / `stale` never mean verified). While a chain is not
          *     verified, NEW escrow-dependent signatures wait: escrow job creation and
          *     escrow delivery / cancellation answer `503 ESCROW_CONFIG_UNVERIFIED`,
          *     queued escrow steps, ERC-8004 identity transactions and evaluator
@@ -3155,7 +3156,36 @@ export interface paths {
                             process?: "api";
                             ttlSeconds?: number;
                             recheckSeconds?: number;
+                            /** @description This process's contest window and job TTL (C5 preflight). */
+                            escrowWindow?: {
+                                evaluationDelaySeconds?: number;
+                                jobTtlSeconds?: number;
+                            };
                             chains?: components["schemas"]["EscrowVerificationView"][];
+                            /**
+                             * @description The worker's own verification as it last published it to Redis
+                             *     after a check (C3f). Each chain is as of `publishedAt`.
+                             *     Read-only diagnostics: no gate depends on it.
+                             */
+                            worker?: {
+                                /** @enum {string} */
+                                state: "reported";
+                                /** @enum {string} */
+                                role: "worker";
+                                host: string;
+                                /** Format: date-time */
+                                publishedAt: string;
+                                ageSeconds: number;
+                                /** @description Older than two re-check periods. */
+                                stale: boolean;
+                                ttlSeconds: number;
+                                recheckSeconds: number;
+                                chains: components["schemas"]["EscrowVerificationView"][];
+                            } | {
+                                /** @enum {string} */
+                                state: "missing" | "unreadable";
+                                reason: string;
+                            };
                         };
                     };
                 };

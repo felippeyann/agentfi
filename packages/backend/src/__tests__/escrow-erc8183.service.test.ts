@@ -50,6 +50,7 @@ import {
   CHAIN_JOB_STATUS,
   SETTLEMENT_REASONS,
   __resetEscrowTokenCacheForTests,
+  __resetUnconfirmedSendsForTests,
   alertExpiringReviews,
   contestEscrowJob,
   deliverableHashOf,
@@ -343,6 +344,8 @@ function lastQueued(queue: { add: ReturnType<typeof vi.fn> }) {
 
 beforeEach(() => {
   __resetEscrowTokenCacheForTests();
+  // C3f item 3: the worker's memory of sends no node knew (keyed by job id — every test here reuses `job-1`).
+  __resetUnconfirmedSendsForTests();
 });
 
 // ── Enablement + token ─────────────────────────────────────────────────────

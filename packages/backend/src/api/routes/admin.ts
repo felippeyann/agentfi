@@ -679,19 +679,25 @@ export async function adminRoutes(fastify: FastifyInstance) {
   /**
    * GET /admin/escrow/verification — Q7: this API process's verification
    * state of each ERC-8183 chain, with the reason when new escrow operations
-   * are blocked (`/health/ready` shows the same without reasons). The worker
-   * verifies on its own; its state is in its logs and ESCROW_ALERT notifications.
+   * are blocked (`/health/ready` shows the same without reasons).
    * `escrowWindow` is this process's contest window and job TTL, so a run can
    * confirm the approved window before it starts (C5: 3600 s, Q6 / D12).
+   * C3f item 4: `worker` is the worker's own verification (it verifies on its
+   * own and is the process that signs settlements and sends escrow steps), as
+   * it last published it to Redis — `reported` (with its age; `stale` past
+   * two re-check periods), `missing` (no report for three re-check periods)
+   * or `unreadable`.
    */
   fastify.get('/admin/escrow/verification', async (request, reply) => {
     if (!requireAdmin(request, reply)) return;
     const { escrowVerificationSnapshot, escrowVerificationSettings } = await import('../../config/escrow-verification.runtime.js');
+    const { readEscrowVerificationReport } = await import('../../config/escrow-verification-report.runtime.js');
     return {
       process: 'api',
       ...escrowVerificationSettings(),
       escrowWindow: { evaluationDelaySeconds: env.ESCROW_EVALUATION_DELAY_SECONDS, jobTtlSeconds: env.ESCROW_JOB_TTL_SECONDS },
       chains: escrowVerificationSnapshot({ withReason: true }),
+      worker: await readEscrowVerificationReport('worker'),
     };
   });
 
