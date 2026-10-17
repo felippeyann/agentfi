@@ -2479,4 +2479,138 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(await decide(jobId, 'pay')).toMatchObject({ outcome: 'scheduled' });
     });
   });
+
+  // ── C3f (C3e residuals, round 2026-10-17): reproduced before any fix ──
+
+  describe('C3f — a stuck evaluator key, stamps of refused sends, a second settlement after a false "not found"', () => {
+    const FEE = (BUDGET * 30n) / 10_000n;
+
+    async function delivered() {
+      const { requester, provider, jobId } = await fundedJob();
+      expect((await patchJob(provider.id, jobId, { status: 'ACCEPTED' })).statusCode).toBe(200);
+      expect((await patchJob(provider.id, jobId, { status: 'COMPLETED', result: { answer: 42 } })).statusCode).toBe(200);
+      await sim.drive(1);
+      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED' });
+      return { requester, provider, jobId };
+    }
+    const contestAs = async (requesterId: string, jobId: string) =>
+      (await sim.app(requesterId)).inject({ method: 'POST', url: `/v1/jobs/${jobId}/contest`, payload: { reason: 'c3f' } });
+    const decide = (jobId: string, decision: 'pay' | 'refund') =>
+      m.svc.resolveEscrowJob(sim.deps, { jobId, decision, note: `c3f ${decision}`, operator: 'ops@test' });
+    /** The repeatable expiry sweep of the settlement queue (every PAYMENT_RECOVERY_INTERVAL_SEC). */
+    const sweepTick = () => m.svc.processSettlementJob(sim.deps, { data: { jobId: '*', action: 'sweep' }, attemptsMade: 0, opts: { attempts: 3 } });
+    const stuckAlerts = () => sim.alerts.filter((a) => a.kind === ('evaluator-stuck' as EscrowAlert['kind']));
+    /** Longer than the "stuck" threshold (10 min): a backlog that has not moved for that long. */
+    const PAST_STUCK_THRESHOLD_MS = 11 * 60_000;
+
+    it('item 1: one evaluator transaction stuck pending blocks every later one of the key — the operator is told WHICH (nonce, hash, job) once, not only that each job fails', async () => {
+      const a = await delivered();
+      sim.chain.evaluatorHold = () => true; // A's complete never mines (underpriced, stuck in the mempool)
+      await sim.drive(); // 3 attempts, no second complete; the failed handler hands A back to SUBMITTED
+      const b = await delivered();
+      await sim.drive(); // B's complete is broadcast and queues behind A's (nonce order)
+      const completes = sim.chain.evaluatorBroadcasts.filter((x) => x.functionName === 'complete');
+      expect(completes.map((x) => x.outcome)).toEqual(['pending', 'pending']);
+      expect(await job(b.jobId)).toMatchObject({ status: 'PAYMENT_PENDING' });
+      // Before C3f: one `settlement-failed` per job, nothing names the transaction that blocks the key.
+      expect(sim.alerts.filter((x) => x.kind === 'settlement-failed').map((x) => x.jobId).sort()).toEqual([a.jobId, b.jobId].sort());
+
+      await sweepTick(); // first sight of the backlog: recorded, not alerted (a busy key is not a stuck one)
+      expect(stuckAlerts()).toHaveLength(0);
+      setNowOffset(PAST_STUCK_THRESHOLD_MS);
+      await sweepTick();
+      expect(stuckAlerts()).toEqual([
+        expect.objectContaining({
+          chainId: CHAIN_ID,
+          jobId: a.jobId,
+          details: expect.objectContaining({ stuckNonce: 0, queued: 2, stuckTxHash: completes[0]!.hash }),
+        }),
+      ]);
+      await sweepTick();
+      expect(stuckAlerts()).toHaveLength(1); // not repeated every tick
+
+      // Nothing is replaced or cancelled by the backend (C3f proposal): once the stuck transaction mines, both settle.
+      expect(sim.chain.evaluatorBroadcasts.filter((x) => x.functionName === 'complete')).toHaveLength(2);
+      sim.chain.evaluatorHold = null;
+      sim.chain.releaseEvaluator();
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(await job(a.jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED' });
+      expect(await job(b.jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED' });
+      expect(sim.chain.usdcOf(a.provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+      expect(sim.chain.usdcOf(b.provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+    });
+
+    it('item 1: a key that is only busy (the backlog moves between ticks) is never alerted', async () => {
+      const a = await delivered();
+      sim.chain.evaluatorHold = () => true;
+      await sim.drive(1);
+      await sweepTick();
+      sim.chain.evaluatorHold = null;
+      sim.chain.releaseEvaluator(); // mined: the key moves on
+      setNowOffset(PAST_STUCK_THRESHOLD_MS);
+      await sweepTick();
+      expect(stuckAlerts()).toHaveLength(0);
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(await job(a.jobId)).toMatchObject({ status: 'COMPLETED' });
+    });
+
+    it('item 2 (not reproduced since G1 review P3-2): a send every node refused leaves no stamp — once the claim is handed back, contest and resolve are accepted', async () => {
+      const { requester, jobId } = await delivered();
+      sim.chain.evaluatorSendFails = ({ functionName }) => functionName === 'complete';
+      await sim.drive(1); // one attempt, refused at send: no stamp, no hash (the job stays claimed while BullMQ retries)
+      expect(await job(jobId)).toMatchObject({ onChainStatus: 'SETTLING', settleAttemptAt: null, settleTxHash: null });
+      await sim.drive(); // the remaining attempts are refused too; the failed handler hands the job back
+      expect(await job(jobId)).toMatchObject({ onChainStatus: 'SUBMITTED', settleAttemptAt: null, settleTxHash: null });
+      sim.chain.evaluatorSendFails = null;
+      expect((await contestAs(requester.id, jobId)).statusCode).toBe(200);
+      sim.settlements.clear();
+      expect(await decide(jobId, 'refund')).toMatchObject({ outcome: 'scheduled' });
+    });
+
+    it('item 2 (by design): a refused send no node could be asked about keeps the stamp (it may have left) until the next attempt, which settles it once', async () => {
+      const { requester, provider, jobId } = await delivered();
+      sim.chain.evaluatorSendFails = ({ functionName }) => functionName === 'complete';
+      const realKnown = sim.deps.isKnownTransaction!;
+      sim.deps.isKnownTransaction = async () => {
+        throw new Error('fetch failed (an RPC node could not be asked)');
+      };
+      await sim.drive(1);
+      const stamped = await job(jobId);
+      expect(stamped.settleAttemptAt).not.toBeNull();
+      expect(stamped.settleTxHash).not.toBeNull();
+      expect((await contestAs(requester.id, jobId)).statusCode).toBe(409); // the C3e race rule: it may still mine
+
+      // The nodes answer again and the send was in fact refused: the next attempt signs once and settles.
+      sim.deps.isKnownTransaction = realKnown;
+      sim.chain.evaluatorSendFails = null;
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', settleAttemptAt: null });
+      expect(sim.chain.evaluatorBroadcasts.filter((x) => x.functionName === 'complete')).toHaveLength(1);
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+    });
+
+    it('item 3: a send whose answer is lost and that no node knows YET (propagation) — the retry signs no second settlement and the job keeps that transaction', async () => {
+      const { provider, jobId } = await delivered();
+      sim.chain.evaluatorHold = () => true;
+      sim.chain.evaluatorSendLostAnswer = ({ functionName }) => functionName === 'complete';
+      // The node took the complete, but the first "is it known" reaches nodes it has not propagated to yet.
+      const realKnown = sim.deps.isKnownTransaction!;
+      let lagging = 1;
+      sim.deps.isKnownTransaction = async (chainId, hash) => (lagging-- > 0 ? false : realKnown(chainId, hash));
+      await sim.drive();
+      const completes = sim.chain.evaluatorBroadcasts.filter((x) => x.functionName === 'complete');
+      expect(completes).toHaveLength(1); // before C3f: 2 — the hash slot was given back and the retry signed again
+      expect((await job(jobId)).settleTxHash).toBe(completes[0]!.hash);
+
+      sim.chain.evaluatorHold = null;
+      sim.chain.releaseEvaluator();
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', settleTxHash: completes[0]!.hash, feedbackStatus: 'written', platformFeeAmount: FEE.toString() });
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+      expect(sim.chain.evaluatorBroadcasts.filter((x) => x.outcome === 'reverted')).toHaveLength(0);
+    });
+  });
 });
