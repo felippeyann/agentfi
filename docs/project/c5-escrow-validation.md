@@ -195,7 +195,7 @@ existing job.
 | Condition | Where it is checked |
 |---|---|
 | **Wrong network**: RPC chain id ≠ 84532; an Anvil fork in `testnet` mode; an RPC head more than 2 minutes behind the wall clock | preflight; contest hold |
-| **Configuration not verified**: escrow / hook runtime code ≠ this build; escrow `token`, `platformFeeBP` (30), `evaluatorFeeBP` (0), `operator`, `feeWallet`, `paused`; hook `acp`, `trustedEvaluator`, registries, `minFeedbackBudget`; backend Q7 state not `verified / allowed`; backend window ≠ 3600 s; job TTL clamping the window; Turnkey not ready; no admin secret | preflight (before `setup`, `run`, `resolve`) |
+| **Configuration not verified**: escrow / hook runtime code ≠ this build; escrow `token`, `platformFeeBP` (30), `evaluatorFeeBP` (0), `operator`, `feeWallet`, `paused`; hook `acp`, `trustedEvaluator`, registries, `minFeedbackBudget`; backend Q7 state not `verified / allowed`; the worker's own Q7 report (`worker` in `GET /admin/escrow/verification`, C3f) not `reported`, `stale`, or without 84532 `verified / allowed` (real run only: the fork rehearsal runs API and worker in one process); backend window ≠ 3600 s; job TTL clamping the window; Turnkey not ready; no admin secret | preflight (before `setup`, `run`, `resolve`) |
 | **Unexpected recipient or party**: the job's escrow, evaluator, budget, token or provider ≠ the approved ones; the on-chain job's client / provider / evaluator / hook / budget ≠ the approved; USDC from the escrow to any address other than the two agents; any USDC transfer touching the agents outside the six expected; a transaction from another sender | per job (once funded); settlement checks; reconcile |
 | **Insufficient balance**: requester USDC < the scenario budget; any wallet's ETH < max(floor, planned gas × current price × 3) | snapshot; before creating each job; preflight |
 | **Event divergence**: missing / extra / wrong settlement events (decision event and reason, payout, fee, refund, `FeedbackWritten` / `FeedbackSkipped` / `NewFeedback`, `FeedbackFailed`); a settlement sooner than 3600 s after `submit`; the contested job settling without the operator; an authority check failing; nonce counts outside the plan; ETH not explained by gas | per scenario (`verify`), contest hold, reconcile |
@@ -265,6 +265,19 @@ three scenarios in parallel for about 75–80 minutes (the contest is held 3600 
   (Q7); the runner's preflight stops.
 - **A failed identity binding**: the runner stops before `submit` (the feedback would be
   skipped). The job stays funded; deciding it (cancel → refund) is an owner decision.
+- **The evaluator key stuck behind an unmined transaction** (C3f item 1, since the 2026-10-17
+  round): every later settlement from that key waits behind it, however well it is priced. The
+  worker raises one `ESCROW_ALERT evaluator-stuck` after 10 minutes with the same pending nonce,
+  naming the earliest `expiresAt` among the live jobs. Nothing is replaced automatically. The
+  runner keeps waiting (its hold and timing checks still apply). Unblocking the key (a
+  same-nonce replacement signed with the evaluator key) is an owner decision (plan C3g, proposal
+  A; A1, a manual operator script with dry-run, is the recommendation and does not exist yet).
+  Until it does, stop the run and decide. Mind the deadline: after a job's `expiresAt`,
+  `claimRefund` is permissionless and refunds the requester even for delivered work.
+- **A settlement send whose answer was lost** (C3f item 3): before signing another settlement,
+  the worker asks again about the earlier hash and re-adopts it if it mined or a node knows it,
+  so a second `complete` is not sent in the same process (after a worker restart the residual
+  remains: plan C3g, proposal C). Only one settlement can ever succeed on-chain.
 - **Worst case**: an escrow that nobody settles is refunded to the requester after its 7-day TTL
   by the evaluator's expiry sweep (`claimRefund`).
 
