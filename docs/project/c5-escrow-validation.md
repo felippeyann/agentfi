@@ -25,9 +25,19 @@ Three scenarios:
 
 ## 2. Baseline
 
-**Candidate commit:** `e6e93bd73020537e9cb4a56a148ac0f3de8ec814`, the merge of #189 that adds this
-file. The contracts are unchanged since `162cb06` (#182); the deploy, the backend and the runner all
-run from that one commit, because S9 accepts only contracts whose runtime code is this build's (D16).
+**Candidate commit (updated 2026-10-17):** the merge on `main` of the 2026-10-17 round. Its code
+is the local integration branch `rc/2026-10-17` at **`38ddb4f`**; no PR was opened in that round
+(no push). Every later commit of the round changes no file under `packages/`. **Gate before C4:**
+`git diff 38ddb4f <merged main commit> -- packages` prints nothing; otherwise the rehearsal below
+is repeated on the merged commit. The contracts are unchanged since `162cb06` (#182). The deploy,
+the backend and the runner all run from that one commit, because S9 accepts only contracts whose
+runtime code is this build's (D16).
+
+The previous candidate `e6e93bd` is **superseded**. The round changed the evaluator's settlement
+path (C3f items 1, 3, 4 and the review's P3-1 / P3-3), the runner's preflight (the worker's own Q7
+report) and, outside the C5 path, the batch, transfer, allowances and `/mcp/sse` routes (A6d, X7,
+S12). `git diff --stat e6e93bd 38ddb4f -- packages/contracts` is empty, and so is the migrations
+directory: no contract, no migration, no dependency changed.
 
 ### 2.1 Rehearsed, candidate and re-checked commits
 
