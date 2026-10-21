@@ -21,6 +21,14 @@
  * processor by the test), notifications, the fee oracle (2000 USD / ETH,
  * fees only) and FeeEvent persistence (captured).
  *
+ * S14(1) — `POST /admin/transactions/batch` on the same harness: it queued
+ * value 0 and feeAmountWei 0 ("Admin txs are free"), so every admin batch
+ * carrying native value reverted `InsufficientValueForFee(0, ΣV + F)` at the
+ * submitter's gas estimation (the admin route does not simulate; nothing was
+ * sent). It now follows the A6d rule (ΣV + F in the job and `queuePayload`,
+ * feeAmountWei = F); its authority is unchanged — no USD pricing, outflow cap
+ * or DailyVolume reservation, before or after.
+ *
  * Skipped with a warning when DATABASE_URL is not a reachable, migrated
  * database (fails on CI). Anvil: `anvilTestPort(6)` (default 8751).
  */
@@ -144,10 +152,12 @@ const T2 = getAddress('0x00000000000000000000000000000000000a6d02');
 const REVERTER = getAddress('0x00000000000000000000000000000000000a6dff');
 /** floor(ΣV × 30 / 10 000): the executor's own formula (AgentExecutor.calculateFee). */
 const feeOf = (sum: bigint) => (sum * 30n) / 10_000n;
+const ADMIN_SECRET = process.env['ADMIN_SECRET']!;
 
 type Modules = {
   db: typeof import('../db/client.js')['db'];
   transactionRoutes: typeof import('../api/routes/transactions.js')['transactionRoutes'];
+  adminRoutes: typeof import('../api/routes/admin.js')['adminRoutes'];
   registerErrorHandler: typeof import('../api/errors/handler.js')['registerErrorHandler'];
   processor: typeof import('../queues/transaction.processor.js');
   stranded: typeof import('../services/transaction/stranded-queued.js');
@@ -179,6 +189,7 @@ beforeAll(async () => {
   m = {
     db: (await import('../db/client.js')).db,
     transactionRoutes: (await import('../api/routes/transactions.js')).transactionRoutes,
+    adminRoutes: (await import('../api/routes/admin.js')).adminRoutes,
     registerErrorHandler: (await import('../api/errors/handler.js')).registerErrorHandler,
     processor: await import('../queues/transaction.processor.js'),
     stranded: await import('../services/transaction/stranded-queued.js'),
@@ -199,6 +210,7 @@ beforeAll(async () => {
     (request as unknown as { agentId: string }).agentId = callerId;
   });
   await app.register(m.transactionRoutes);
+  await app.register(m.adminRoutes);
   await app.ready();
 });
 
@@ -270,6 +282,29 @@ function postBatch(values: string[], targets: Address[] = [T1, T2]) {
   });
 }
 
+/** An admin batch (`POST /admin/transactions/batch`) signed by `agentId`'s wallet. */
+function postAdminBatch(agentId: string, values: string[], targets: Address[] = [T1, T2]) {
+  return app.inject({
+    method: 'POST',
+    url: '/admin/transactions/batch',
+    headers: { 'x-admin-secret': ADMIN_SECRET },
+    payload: { agentId, chainId: CHAIN_ID, actions: values.map((value, i) => ({ to: targets[i % targets.length], value, data: '0x' })) },
+  });
+}
+
+/** The executor's custom error carried by a failed submit (e.g. the gas-estimation revert), as `Name(arg, …)`. */
+function executorRevert(err: unknown): string | undefined {
+  if (!(err instanceof BaseError)) return undefined;
+  const data = (err.walk((e) => typeof (e as { data?: unknown }).data === 'string') as { data?: Hex } | null)?.data;
+  if (!data) return undefined;
+  try {
+    const decoded = decodeErrorResult({ abi: EXECUTOR_ABI, data });
+    return `${decoded.errorName}(${(decoded.args ?? []).map(String).join(', ')})`;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Runs every captured job through the real processor (guard → submitter → Anvil) and waits for the receipts. */
 async function drain(): Promise<Array<{ txHash: Hex | null; error?: string }>> {
   const jobs = h.queued.splice(0);
@@ -301,7 +336,8 @@ async function drain(): Promise<Array<{ txHash: Hex | null; error?: string }>> {
       );
       results.push({ txHash: out.txHash });
     } catch (err) {
-      results.push({ txHash: null, error: (err as Error).message });
+      const revert = executorRevert(err);
+      results.push({ txHash: null, error: revert ? `reverted ${revert} — ${(err as Error).message}` : (err as Error).message });
     }
   }
   await Promise.all(monitors);
@@ -479,5 +515,139 @@ describeDb('A6d on Anvil — the USD policy counts ΣV + F (D15 / D17 / A6)', ()
     expect(res.json().error).toMatch(/Daily volume limit/);
     expect(await volume(agent.id)).toBeCloseTo(20.06, 6);
     expect(h.queued).toEqual([]);
+  });
+});
+
+describeDb('S14(1) on Anvil — POST /admin/transactions/batch sends ΣV + F and the executor collects F', () => {
+  it('the contract: msg.value 0 (what the admin route sent before S14) reverts InsufficientValueForFee(0, 335)', async () => {
+    const agent = await mkAgent();
+    const data = encodeFunctionData({
+      abi: EXECUTOR_ABI,
+      functionName: 'executeBatch',
+      args: [[{ target: T1, value: 334n, token: zeroAddress, data: '0x' }]],
+    });
+    let revertData: Hex | undefined;
+    try {
+      await chain.publicClient.call({ account: agent.eoa, to: executor, data, value: 0n });
+    } catch (err) {
+      revertData = ((err as BaseError).walk((e) => typeof (e as { data?: unknown }).data === 'string') as { data?: Hex } | null)?.data;
+    }
+    expect(revertData).toBeDefined();
+    const decoded = decodeErrorResult({ abi: EXECUTOR_ABI, data: revertData! });
+    expect(decoded.errorName).toBe('InsufficientValueForFee');
+    expect(decoded.args).toEqual([0n, 335n]);
+  });
+
+  it.each([
+    ['334 wei (the threshold)', ['334']],
+    ['200 + 200 wei (fee on the sum: 401 sent)', ['200', '200']],
+    ['0.01 ETH', ['10000000000000000']],
+    ['0.004 + 0.006 ETH', ['4000000000000000', '6000000000000000']],
+  ])('%s: the batch is mined with ΣV + F, each target gets its value, the fee wallet gets exactly F, the FeeEvent records F', async (_label, values) => {
+    const agent = await mkAgent();
+    const sum = values.reduce((s, v) => s + BigInt(v), 0n);
+    const fee = feeOf(sum);
+    const before = { t1: await balance(T1), t2: await balance(T2), fee: await balance(FEE_WALLET) };
+
+    const res = await postAdminBatch(agent.id, values);
+
+    expect(res.statusCode, res.body).toBe(200);
+    expect(h.simulations).toEqual([]); // the admin route does not simulate: the submitter's gas estimation is its dry run
+    expect(h.queued).toHaveLength(1);
+    const job = h.queued[0]!.data;
+
+    // Before S14 the job carried value 0: eth_estimateGas reverted
+    // InsufficientValueForFee(0, ΣV + F) and nothing was signed or sent.
+    const [result] = await drain();
+    expect(result).toEqual({ txHash: expect.stringMatching(/^0x[0-9a-f]{64}$/) }); // a failure shows the decoded revert
+    expect(job).toMatchObject({ to: executor, value: (sum + fee).toString(), feeAmountWei: fee.toString(), routedViaExecutor: true });
+    const receipt = await chain.publicClient.getTransactionReceipt({ hash: result!.txHash! });
+    expect(receipt.status).toBe('success');
+    const sent = await chain.publicClient.getTransaction({ hash: result!.txHash! });
+    expect(sent.value).toBe(sum + fee);
+    expect(getAddress(sent.to!)).toBe(getAddress(executor));
+    expect(getAddress(sent.from)).toBe(agent.eoa);
+
+    const perTarget = (target: Address) => values.reduce((s, v, i) => s + ([T1, T2][i % 2] === target ? BigInt(v) : 0n), 0n);
+    expect((await balance(T1)) - before.t1).toBe(perTarget(T1));
+    expect((await balance(T2)) - before.t2).toBe(perTarget(T2));
+    expect((await balance(FEE_WALLET)) - before.fee).toBe(fee);
+
+    const row = await m.db.transaction.findFirstOrThrow({ where: { agentId: agent.id } });
+    expect(row).toMatchObject({ status: 'CONFIRMED', type: 'BATCH' });
+    expect((row.metadata as { admin?: boolean; queuePayload?: Record<string, unknown> }).queuePayload).toMatchObject({
+      value: (sum + fee).toString(),
+      feeAmountWei: fee.toString(),
+      routedViaExecutor: true,
+    });
+    // Revenue: the FeeEvent is what the executor collected on-chain (FREE tier: 30 bps recorded, as the agent batch).
+    expect(h.feeEvents).toEqual(fee > 0n ? [{ transactionId: row.id, feeAmountWei: fee, feeBps: 30 }] : []);
+  });
+
+  it('a batch without native value is unchanged: value 0, fee 0, mined, nothing to the fee wallet, no FeeEvent', async () => {
+    const agent = await mkAgent();
+    const before = await balance(FEE_WALLET);
+
+    const res = await postAdminBatch(agent.id, ['0', '0']);
+
+    expect(res.statusCode, res.body).toBe(200);
+    expect(h.queued[0]!.data).toMatchObject({ value: '0', feeAmountWei: '0', routedViaExecutor: true });
+    const [result] = await drain();
+    expect(result).toEqual({ txHash: expect.stringMatching(/^0x[0-9a-f]{64}$/) });
+    expect((await chain.publicClient.getTransactionReceipt({ hash: result!.txHash! })).status).toBe('success');
+    expect((await chain.publicClient.getTransaction({ hash: result!.txHash! })).value).toBe(0n);
+    expect((await balance(FEE_WALLET)) - before).toBe(0n);
+    expect(h.feeEvents).toEqual([]);
+  });
+
+  it('the stranded-QUEUED sweep re-enqueues an admin batch from queuePayload with the same ΣV + F, and it is mined', async () => {
+    const agent = await mkAgent();
+    const sum = 10_000_000_000_000_000n;
+    const fee = feeOf(sum);
+    const before = await balance(FEE_WALLET);
+
+    const res = await postAdminBatch(agent.id, [sum.toString()]);
+    expect(res.statusCode, res.body).toBe(200);
+    h.queued.length = 0; // the crash between the row and the enqueue: the job is lost
+
+    const requeued: Array<{ name: string; data: Record<string, unknown> }> = [];
+    await m.stranded.recoverStrandedQueuedTransactions(
+      {
+        db: m.db,
+        queue: { add: async (name: string, data: Record<string, unknown>) => { requeued.push({ name, data }); return {} as never; }, getJob: async () => undefined } as never,
+        logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      },
+      { olderThan: new Date(Date.now() + 60_000), limit: 100 },
+    );
+    const mine = requeued.filter((j) => j.data['agentId'] === agent.id);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]!.data).toMatchObject({ value: (sum + fee).toString(), feeAmountWei: fee.toString(), routedViaExecutor: true });
+
+    h.queued.push(...mine);
+    const [result] = await drain();
+    expect(result).toEqual({ txHash: expect.stringMatching(/^0x[0-9a-f]{64}$/) });
+    expect((await chain.publicClient.getTransactionReceipt({ hash: result!.txHash! })).status).toBe('success');
+    expect((await balance(FEE_WALLET)) - before).toBe(fee);
+  });
+
+  it('authority unchanged: the admin batch is outside the agent USD policy (no pricing, outflow cap or DailyVolume), before and after S14', async () => {
+    // Limits the same 0.01 ETH would break on the agent route (20.06 USD > 10).
+    const agent = await mkAgent({ maxOutflowPerTxUsd: '10', maxDailyVolumeUsd: '10' });
+    const agentRoute = await postBatch(['10000000000000000']);
+    expect(agentRoute.statusCode, agentRoute.body).toBe(403);
+    expect(h.queued).toEqual([]);
+
+    const res = await postAdminBatch(agent.id, ['10000000000000000']);
+
+    expect(res.statusCode, res.body).toBe(200);
+    const row = await m.db.transaction.findFirstOrThrow({ where: { agentId: agent.id } });
+    expect(row).toMatchObject({ status: 'QUEUED', amountIn: '0', volumeState: null, volumeReservedUsd: null });
+    expect(await volume(agent.id)).toBe(0);
+
+    const [result] = await drain();
+    expect(result).toEqual({ txHash: expect.stringMatching(/^0x[0-9a-f]{64}$/) });
+    expect((await chain.publicClient.getTransactionReceipt({ hash: result!.txHash! })).status).toBe('success');
+    expect(await m.db.transaction.findFirstOrThrow({ where: { agentId: agent.id } })).toMatchObject({ status: 'CONFIRMED', volumeState: null });
+    expect(await volume(agent.id)).toBe(0);
   });
 });

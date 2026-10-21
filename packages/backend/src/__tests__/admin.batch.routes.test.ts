@@ -147,6 +147,86 @@ describe('POST /admin/transactions/batch — the signing agent is always named',
   });
 });
 
+/**
+ * S14(1): `AgentExecutor.executeBatch` reverts `InsufficientValueForFee(sent,
+ * required)` unless msg.value >= ΣV + F, F = floor(ΣV × 30 / 10 000) on the
+ * SUM of the action values. The admin route queued value '0' and
+ * feeAmountWei '0' ("Admin txs are free"), so every admin batch carrying
+ * native value reverted at the submitter's gas estimation (nothing was sent).
+ * The A6d rule of the agent batch applies: the job and `queuePayload` carry
+ * ΣV + F, feeAmountWei = F (what the executor collects on-chain); the recorded
+ * bps follows the agent's tier as on the agent batch (A6e).
+ */
+describe('POST /admin/transactions/batch — S14(1): msg.value = ΣV + F, feeAmountWei = F (the A6d rule)', () => {
+  const T1 = '0x0000000000000000000000000000000000000a01';
+  const T2 = '0x0000000000000000000000000000000000000a02';
+  const actionsOf = (values: string[]) => values.map((value, i) => ({ to: i % 2 === 0 ? T1 : T2, value, data: '0x' }));
+
+  it.each([
+    ['334 wei (the threshold: F = 1)', ['334'], 335n, 1n],
+    ['200 + 200 wei (F on the sum = 1; per action it would be 0 + 0)', ['200', '200'], 401n, 1n],
+    ['0.01 ETH', ['10000000000000000'], 10_030_000_000_000_000n, 30_000_000_000_000n],
+    ['0.004 + 0.006 ETH', ['4000000000000000', '6000000000000000'], 10_030_000_000_000_000n, 30_000_000_000_000n],
+  ])('%s: the job and queuePayload carry the same ΣV + F and feeAmountWei F', async (_label, values, msgValue, fee) => {
+    const app = await buildApp();
+    const res = await post(app, { chainId: 8453, actions: actionsOf(values), agentId: named.id });
+    expect(res.statusCode, res.body).toBeLessThan(300);
+
+    expect(queueAdd).toHaveBeenCalledTimes(1);
+    const [, job] = queueAdd.mock.calls[0];
+    expect(job).toMatchObject({
+      to: '0x00000000000000000000000000000000000000E1',
+      value: msgValue.toString(),
+      feeAmountWei: fee.toString(),
+      feeBps: 30, // FREE tier — the agent batch's recorded bps (A6d / A6e)
+      routedViaExecutor: true,
+    });
+    const { metadata } = mockDb.transaction.create.mock.calls[0][0].data;
+    expect(metadata.queuePayload).toEqual({
+      to: job.to,
+      data: job.data,
+      value: msgValue.toString(),
+      feeAmountWei: fee.toString(),
+      feeBps: 30,
+      routedViaExecutor: true,
+    });
+    await app.close();
+  });
+
+  it('a batch without native value is unchanged: value 0, fee 0', async () => {
+    const app = await buildApp();
+    const res = await post(app, { chainId: 8453, actions: actionsOf(['0', '0']), agentId: named.id });
+    expect(res.statusCode, res.body).toBeLessThan(300);
+    const [, job] = queueAdd.mock.calls[0];
+    expect(job).toMatchObject({ value: '0', feeAmountWei: '0', routedViaExecutor: true });
+    expect(mockDb.transaction.create.mock.calls[0][0].data.metadata.queuePayload).toMatchObject({ value: '0', feeAmountWei: '0' });
+    await app.close();
+  });
+
+  it('the recorded bps follows the agent tier as on the agent batch (PRO: 15), while F stays the executor\'s 30 bps', async () => {
+    mockDb.agent.findUnique.mockResolvedValue({ ...named, tier: 'PRO' });
+    const app = await buildApp();
+    const res = await post(app, { chainId: 8453, actions: actionsOf(['10000000000000000']), agentId: named.id });
+    expect(res.statusCode, res.body).toBeLessThan(300);
+    const [, job] = queueAdd.mock.calls[0];
+    expect(job).toMatchObject({ value: '10030000000000000', feeAmountWei: '30000000000000', feeBps: 15, tier: 'PRO' });
+    await app.close();
+  });
+
+  it('authority unchanged: the row is written directly as before (QUEUED, amountIn 0, no USD reservation), the response is the same', async () => {
+    const app = await buildApp();
+    const res = await post(app, { chainId: 8453, actions: actionsOf(['10000000000000000']), agentId: named.id });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toEqual({ transactionId: 'tx-1', status: 'QUEUED' });
+    expect(mockDb.transaction.create).toHaveBeenCalledTimes(1);
+    const { data } = mockDb.transaction.create.mock.calls[0][0];
+    expect(data).toMatchObject({ agentId: named.id, status: 'QUEUED', type: 'BATCH', amountIn: '0', metadata: { admin: true, actionCount: 1 } });
+    expect(data).not.toHaveProperty('volumeState');
+    expect(data).not.toHaveProperty('volumeReservedUsd');
+    await app.close();
+  });
+});
+
 describe('POST /admin/transactions/batch — S9: only through a verified executor', () => {
   it.each(['not-verified-yet', 'unverified', 'mismatch', 'expired'] as const)(
     'gate %s → 503 CONTRACTS_UNVERIFIED with Retry-After; nothing written or queued',
