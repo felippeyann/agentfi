@@ -47,9 +47,21 @@ export interface EvaluatorSigner {
    * refusal at send): the caller asks the nodes about that hash.
    */
   writeContract(params: EvaluatorWriteParams, opts?: { onBeforeBroadcast?: (signedTxHash: Hex) => Promise<void> }): Promise<Hex>;
-  /** Waits for the receipt of a tx this signer sent (status 'success' | 'reverted'). */
-  waitForTransactionReceipt(hash: Hex): Promise<TransactionReceipt>;
+  /**
+   * Waits for the receipt of a tx this signer sent (status 'success' | 'reverted').
+   *
+   * C3h D2: viem's wait follows a same-nonce REPLACEMENT (`checkReplacement`,
+   * on by default in viem 2.57.3): when another transaction of the key is
+   * mined in that nonce, it resolves with THAT transaction's receipt
+   * (`replacedReason` set here: `cancelled` / `repriced` / `replaced`). A
+   * caller must compare `receipt.transactionHash` with the hash it waited for
+   * before reading anything from it (`awaitOwnReceipt` in the orchestrator).
+   */
+  waitForTransactionReceipt(hash: Hex): Promise<EvaluatorReceipt>;
 }
+
+/** C3h D2: a receipt from `waitForTransactionReceipt`; `replacedReason` is set when it is a replacement's receipt. */
+export type EvaluatorReceipt = TransactionReceipt & { replacedReason?: 'cancelled' | 'repriced' | 'replaced' };
 
 /** How long the settlement worker waits for a settlement tx to be mined before letting BullMQ retry. */
 export const EVALUATOR_RECEIPT_TIMEOUT_MS = 180_000;
@@ -127,8 +139,17 @@ export function createEvaluatorSigner(chainId: number, privateKey: Hex): Evaluat
       await wallet.sendRawTransaction({ serializedTransaction });
       return signedTxHash;
     },
-    waitForTransactionReceipt(hash) {
-      return publicClient.waitForTransactionReceipt({ hash, timeout: EVALUATOR_RECEIPT_TIMEOUT_MS });
+    async waitForTransactionReceipt(hash) {
+      let replacedReason: EvaluatorReceipt['replacedReason'];
+      const receipt = await publicClient.waitForTransactionReceipt({
+        hash,
+        timeout: EVALUATOR_RECEIPT_TIMEOUT_MS,
+        // C3h D2: recorded, never trusted — the caller compares the receipt's hash with `hash`.
+        onReplaced: (replacement) => {
+          replacedReason = replacement.reason;
+        },
+      });
+      return replacedReason ? { ...receipt, replacedReason } : receipt;
     },
   };
 }

@@ -306,7 +306,8 @@ function makeDeps(
     address: EVALUATOR,
     chainId: CHAIN_ID,
     writeContract: vi.fn(async (_params: EvaluatorWriteParams) => SETTLE_HASH),
-    waitForTransactionReceipt: vi.fn(async () => ({ status: opts.settleStatus ?? 'success', logs: opts.settleLogs ?? [] })),
+    // C3h D2: the receipt of the transaction the signer sent (its own hash).
+    waitForTransactionReceipt: vi.fn(async (hash: Hex) => ({ status: opts.settleStatus ?? 'success', logs: opts.settleLogs ?? [], transactionHash: hash })),
   };
   const releaseJobEscrow = vi.fn().mockResolvedValue(undefined);
   const finalize = vi.fn().mockResolvedValue(undefined);
@@ -665,6 +666,22 @@ function completeLogs(feedback: 'written' | 'skipped' | 'failed' | 'none' = 'wri
   return logs;
 }
 
+/** C3h D2: the escrow events of a `reject` of on-chain job 7 (the outcome is read from them, never inferred). */
+function rejectedLogs(reason: Hex): Log[] {
+  return [
+    makeLog(AGENT_JOB_ESCROW_ABI, 'JobRejected', { jobId: 7n, rejector: EVALUATOR, reason }, ESCROW),
+    makeLog(AGENT_JOB_ESCROW_ABI, 'Refunded', { jobId: 7n, client: REQUESTER.safeAddress, amount: BUDGET }, ESCROW),
+  ];
+}
+
+/** C3h D2: the escrow events of a `claimRefund` of on-chain job 7. */
+function expiredLogs(): Log[] {
+  return [
+    makeLog(AGENT_JOB_ESCROW_ABI, 'JobExpired', { jobId: 7n }, ESCROW),
+    makeLog(AGENT_JOB_ESCROW_ABI, 'Refunded', { jobId: 7n, client: REQUESTER.safeAddress, amount: BUDGET }, ESCROW),
+  ];
+}
+
 function rejectLogs(): Log[] {
   return [
     makeLog(AGENT_JOB_ESCROW_ABI, 'JobRejected', { jobId: 7n, rejector: EVALUATOR, reason: SETTLEMENT_REASONS.contested }, ESCROW),
@@ -807,7 +824,7 @@ describe('processSettlementJob — settle', () => {
     const { deps, jobs, signer, getTransactionReceipt, settlement } = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: rejectLogs() });
     // Attempt 1: complete is sent but reverts. settleTxHash is now set, the
     // feedback file says "completed", nothing was mined.
-    signer.waitForTransactionReceipt.mockResolvedValueOnce({ status: 'reverted', logs: [] } as never);
+    signer.waitForTransactionReceipt.mockResolvedValueOnce({ status: 'reverted', logs: [], transactionHash: SETTLE_HASH } as never);
     const first = settleJob(3);
     await expect(processSettlementJob(deps, first)).rejects.toThrow(/reverted on-chain/);
     await handleFailedSettlementJob(deps, first, new Error('reverted'));
@@ -935,6 +952,7 @@ describe('processSettlementJob — reject (cancellation) and claimRefund (expiry
     const failed = makeDeps([SUBMITTED_JOB({ onChainStatus: 'FUNDED' })], {
       chainStatus: CHAIN_JOB_STATUS.Funded,
       txs: [stepTx('submit', 'job-1', { status: 'FAILED', txHash: null })],
+      settleLogs: expiredLogs(),
     });
     expect(await processSettlementJob(failed.deps, { data: { jobId: 'job-1', action: 'claimRefund' } })).toMatchObject({ outcome: 'settled', action: 'claimRefund' });
   });
@@ -1167,9 +1185,12 @@ describe('sweepExpiredEscrows', () => {
         escrowJob({ id: 'held-submitted', onChainJobId: '4', onChainStatus: 'SUBMITTED', ...delivered }),
         // An operator "pay" on a held delivery is not overtaken by a refund.
         escrowJob({ id: 'held-pay', onChainJobId: '9', onChainStatus: 'SUBMITTED', resolution: 'pay', ...delivered }),
-        // Unchanged: the submit failed for good (no attempt in flight), a contest, a refund decision, no delivery.
+        // C3h D1: a recorded "pay" is held whatever the contest or the job status (it used to be refunded here).
+        escrowJob({ id: 'contested-pay', onChainJobId: '6', onChainStatus: 'CONTESTED', contestedAt: past, resolution: 'pay', ...delivered }),
+        escrowJob({ id: 'cancelled-pay', onChainJobId: '10', onChainStatus: 'SUBMITTED', resolution: 'pay', ...delivered, status: 'CANCELLED' }),
+        // Unchanged: the submit failed for good (no attempt in flight), an undecided contest, a refund decision, no delivery.
         escrowJob({ id: 'failed-submit', onChainJobId: '5', onChainStatus: 'FUNDED', ...delivered }),
-        escrowJob({ id: 'contested', onChainJobId: '6', onChainStatus: 'CONTESTED', contestedAt: past, resolution: 'pay', ...delivered }),
+        escrowJob({ id: 'contested', onChainJobId: '11', onChainStatus: 'CONTESTED', contestedAt: past, ...delivered }),
         escrowJob({ id: 'decided', onChainJobId: '7', onChainStatus: 'SUBMITTED', resolution: 'refund', ...delivered }),
         escrowJob({ id: 'undelivered', onChainJobId: '8', onChainStatus: 'FUNDED', status: 'ACCEPTED', expiresAt: past }),
       ],
@@ -1186,9 +1207,17 @@ describe('sweepExpiredEscrows', () => {
     expect(settlement.add.mock.calls.map((call) => (call[0] as { jobId: string }).jobId).sort()).toEqual(
       ['contested', 'decided', 'failed-submit', 'undelivered'].sort(),
     );
+    // C3h D1: the claim action re-checks the hold of a recorded "pay" (a claim queued before the fix, an older process).
+    for (const id of ['contested-pay', 'cancelled-pay']) {
+      expect(await processSettlementJob(deps, { data: { jobId: id, action: 'claimRefund' } })).toMatchObject({ outcome: 'noop', reason: expect.stringContaining('"pay"') });
+    }
     const held = alert.mock.calls.map((call) => call[0] as EscrowAlert).filter((a) => a.kind === 'delivery-held');
-    expect(held.map((a) => a.jobId).sort()).toEqual(['held-binding', 'held-broadcast', 'held-pay', 'held-queued', 'held-submitted']);
-    expect(held.find((a) => a.jobId === 'held-pay')!.message).toMatch(/operator decision "pay" has not settled/);
+    expect(held.map((a) => a.jobId).sort()).toEqual(['cancelled-pay', 'contested-pay', 'held-binding', 'held-broadcast', 'held-pay', 'held-queued', 'held-submitted']);
+    for (const id of ['held-pay', 'contested-pay', 'cancelled-pay']) {
+      const payHeld = held.find((a) => a.jobId === id)!;
+      expect(payHeld.message).toMatch(/operator decision "pay" recorded and not executed.*does NOT sign claimRefund.*permissionless/s);
+      expect(payHeld.details).toMatchObject({ resolution: 'pay', expiresAt: past.toISOString() });
+    }
     expect(held.find((a) => a.jobId === 'held-queued')!.message).toMatch(/QUEUED.*claimRefund is permissionless/s);
     expect(jobs.get('held-queued')!['reviewAlertedAt']).toEqual(NOW);
 
@@ -1386,6 +1415,7 @@ describe('C3c — expiry, refusal and evaluator gas', () => {
     const low = { ...config, evaluatorMinBalanceWei: 10n ** 15n };
     const { deps, signer, alert, getBalance } = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'FUNDED', status: 'CANCELLED' })], {
       chainStatus: CHAIN_JOB_STATUS.Funded,
+      settleLogs: rejectedLogs(SETTLEMENT_REASONS.cancelled),
     });
     getBalance.mockResolvedValue(10n ** 12n);
     const d = { ...deps, config: low };
@@ -1613,7 +1643,7 @@ describe('C3d — resolveEscrowJob + the resolve settlement', () => {
   it('refund without verdict → reject(agentfi.contested, "0x"): nothing rated, an earlier unmined file is dropped', async () => {
     const { deps, jobs, signer } = makeDeps(
       [CONTESTED_JOB({ onChainStatus: 'SETTLING', resolution: 'refund', feedbackFile: { outcome: 'completed', stale: true } })],
-      { settleLogs: [hookLog('FeedbackSkipped', { jobId: 7n, reason: stringToHex('no-params', { size: 32 }) })] },
+      { settleLogs: [...rejectedLogs(SETTLEMENT_REASONS.contested), hookLog('FeedbackSkipped', { jobId: 7n, reason: stringToHex('no-params', { size: 32 }) })] },
     );
     expect(await processSettlementJob(deps, resolveJob())).toMatchObject({ outcome: 'settled', onChainStatus: 'REJECTED', feedbackStatus: 'skipped:no-params' });
     expect(signer.writeContract.mock.calls[0]![0].args).toEqual([7n, SETTLEMENT_REASONS.contested, '0x']);
@@ -1621,7 +1651,9 @@ describe('C3d — resolveEscrowJob + the resolve settlement', () => {
   });
 
   it('payout-blocked → reject(REASON_PAYOUT_BLOCKED, "0x") for a PAYMENT_PENDING job whose complete keeps reverting', async () => {
-    const { deps, jobs, signer, getTransactionReceipt, settlement, finalize } = makeDeps([SUBMITTED_JOB({ settleTxHash: SETTLE_HASH, escrowError: 'settle failed after 3 attempts' })]);
+    const { deps, jobs, signer, getTransactionReceipt, settlement, finalize } = makeDeps([SUBMITTED_JOB({ settleTxHash: SETTLE_HASH, escrowError: 'settle failed after 3 attempts' })], {
+      settleLogs: rejectedLogs(SETTLEMENT_REASONS.payoutBlocked),
+    });
     getTransactionReceipt.mockResolvedValueOnce({ status: 'reverted', logs: [] } as never); // the last complete reverted
     expect(await resolveEscrowJob(deps, { jobId: 'job-1', decision: 'payout-blocked', note: 'provider blacklisted by USDC', operator: 'ops' })).toMatchObject({ outcome: 'scheduled' });
     expect(settlement.add).toHaveBeenCalledWith({ jobId: 'job-1', action: 'resolve' });
@@ -1643,7 +1675,7 @@ describe('C3d — resolveEscrowJob + the resolve settlement', () => {
     expect(paid.jobs.get('job-1')).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED' });
     expect(paid.finalize).not.toHaveBeenCalled();
 
-    const refunded = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'SUBMITTED', status: 'CANCELLED' })]);
+    const refunded = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'SUBMITTED', status: 'CANCELLED' })], { settleLogs: rejectedLogs(SETTLEMENT_REASONS.cancelled) });
     await resolveEscrowJob(refunded.deps, { jobId: 'job-1', decision: 'refund', note: 'requester right', operator: 'ops' });
     await processSettlementJob(refunded.deps, resolveJob());
     expect(refunded.signer.writeContract.mock.calls[0]![0].args).toEqual([7n, SETTLEMENT_REASONS.cancelled, '0x']);
@@ -1777,21 +1809,26 @@ describe('C3d — expiry and contradictions', () => {
   });
 
   it('review P3-2: a job that expires with a recorded decision (its settlement kept failing) is alerted "review-overridden", not "review-expired"', async () => {
-    for (const decision of ['pay', 'quality-rejected'] as const) {
-      const { deps, jobs, alert } = makeDeps([CONTESTED_JOB({ resolution: decision, escrowError: 'resolve failed after 3 attempts' })]);
-      expect(await processSettlementJob(deps, { data: { jobId: 'job-1', action: 'claimRefund' } })).toMatchObject({ onChainStatus: 'EXPIRED' });
-      expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'EXPIRED', resolution: decision });
-      const kinds = alert.mock.calls.map(([a]) => (a as { kind: string }).kind);
-      expect(kinds).toEqual(['review-overridden']);
-      const message = (alert.mock.calls[0]![0] as { message: string }).message;
-      expect(message).toMatch(new RegExp(`expired on-chain before the operator decision "${decision}" was executed`));
-      expect(message.includes('NOT paid')).toBe(decision === 'pay');
-    }
-    // The same when the expiry is found by a reconciliation (chain already Expired).
+    const { deps, jobs, alert } = makeDeps([CONTESTED_JOB({ resolution: 'quality-rejected', escrowError: 'resolve failed after 3 attempts' })], { settleLogs: expiredLogs() });
+    expect(await processSettlementJob(deps, { data: { jobId: 'job-1', action: 'claimRefund' } })).toMatchObject({ onChainStatus: 'EXPIRED' });
+    expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'EXPIRED', resolution: 'quality-rejected' });
+    expect(alert.mock.calls.map(([a]) => (a as { kind: string }).kind)).toEqual(['review-overridden']);
+    const message = (alert.mock.calls[0]![0] as { message: string }).message;
+    expect(message).toMatch(/expired on-chain before the operator decision "quality-rejected" was executed/);
+    expect(message.includes('NOT paid')).toBe(false);
+
+    // C3h D1: a recorded "pay" is never refunded by the backend — the claim is dropped, nothing is signed.
+    const pay = makeDeps([CONTESTED_JOB({ resolution: 'pay', escrowError: 'resolve failed after 3 attempts' })], { settleLogs: expiredLogs() });
+    expect(await processSettlementJob(pay.deps, { data: { jobId: 'job-1', action: 'claimRefund' } })).toMatchObject({ outcome: 'noop' });
+    expect(pay.signer.writeContract).not.toHaveBeenCalled();
+    expect(pay.jobs.get('job-1')).toMatchObject({ onChainStatus: 'CONTESTED', resolution: 'pay' });
+
+    // A third party's claimRefund (chain already Expired) is found by a reconciliation: mirrored and alerted.
     const found = makeDeps([CONTESTED_JOB({ resolution: 'pay' })], { chainStatus: CHAIN_JOB_STATUS.Expired });
     expect(await reconcileHeldReview(found.deps, 'job-1')).toBe('skipped'); // decided → not the read-only pass's job
     await processSettlementJob(found.deps, resolveJob());
-    expect(found.alert).toHaveBeenCalledWith(expect.objectContaining({ kind: 'review-overridden' }));
+    expect(found.alert).toHaveBeenCalledWith(expect.objectContaining({ kind: 'review-overridden', message: expect.stringContaining('NOT paid') }));
+    expect(found.alert).toHaveBeenCalledWith(expect.objectContaining({ kind: 'provider-unpaid', jobId: 'job-1' }));
     expect(found.alert).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'review-expired' }));
   });
 
@@ -1871,13 +1908,51 @@ describe('C3d — receipt surfacing', () => {
       ],
       ESCROW,
       HOOK,
+      7n,
     );
     expect(parsed).toMatchObject({ feedbackStatus: 'failed:penalized', ratedAgentId: '9', penalties: '2' });
   });
 
+  it('C3h D2: only the events of THIS job count — another job\'s JobCompleted, fee and hook outcome in the receipt are ignored', () => {
+    const otherJob = [
+      makeLog(AGENT_JOB_ESCROW_ABI, 'JobCompleted', { jobId: 8n, evaluator: EVALUATOR, reason: SETTLEMENT_REASONS.completed }, ESCROW),
+      makeLog(AGENT_JOB_ESCROW_ABI, 'PlatformFeeAccrued', { jobId: 8n, amount: 37_500n }, ESCROW),
+      makeLog(REPUTATION_HOOK_ABI, 'FeedbackWritten', { jobId: 8n, agentId: 3n, value: 100n }, HOOK),
+    ];
+    expect(parseSettlementReceipt(otherJob, ESCROW, HOOK, 7n)).toMatchObject({ completed: false, rejected: false, expired: false, platformFee: null, feedbackStatus: null, ratedAgentId: null });
+    expect(parseSettlementReceipt([...otherJob, ...completeLogs('written')], ESCROW, HOOK, 7n)).toMatchObject({ completed: true, platformFee: 37_500n, feedbackStatus: 'written', ratedAgentId: '3' });
+  });
+
+  it('C3h D2: a replacement\'s receipt is never read as the outcome; the job\'s own receipt without its terminal event is never "REJECTED"', async () => {
+    const OTHER = '0xdead000000000000000000000000000000000000000000000000000000000001' as Hex;
+    const replaced = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    replaced.signer.waitForTransactionReceipt.mockResolvedValueOnce({ status: 'success', logs: [], transactionHash: OTHER, replacedReason: 'cancelled' } as never);
+    await expect(processSettlementJob(replaced.deps, settleJob())).rejects.toThrow(/replaced in its nonce/);
+    expect(replaced.jobs.get('job-1')).toMatchObject({ onChainStatus: 'SETTLING', settleTxHash: SETTLE_HASH, platformFeeAmount: null });
+    expect(replaced.finalize).not.toHaveBeenCalled();
+    expect(replaced.alert).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'evaluator-replaced', jobId: 'job-1', details: expect.objectContaining({ txHash: SETTLE_HASH, replacedBy: OTHER, replacedReason: 'cancelled' }) }),
+    );
+
+    // The chain already terminal when the replacement is seen (a speed-up of this complete): mirrored from the chain.
+    const spedUp = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    spedUp.signer.waitForTransactionReceipt.mockResolvedValueOnce({ status: 'success', logs: completeLogs('written'), transactionHash: OTHER, replacedReason: 'repriced' } as never);
+    let getJobReads = 0;
+    spedUp.readContract.mockImplementation(async ({ functionName }: { functionName: string }) =>
+      functionName === 'getJob' ? { status: getJobReads++ === 0 ? CHAIN_JOB_STATUS.Submitted : CHAIN_JOB_STATUS.Completed, budget: BUDGET } : USDC,
+    );
+    await expect(processSettlementJob(spedUp.deps, settleJob())).resolves.toEqual({ outcome: 'reconciled', onChainStatus: 'COMPLETED' });
+
+    const silent = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: [] });
+    await expect(processSettlementJob(silent.deps, settleJob())).rejects.toThrow(/without a terminal event for this job/);
+    expect(silent.jobs.get('job-1')!['onChainStatus']).toBe('SETTLING');
+    expect(silent.finalize).not.toHaveBeenCalled();
+    expect(silent.alert).toHaveBeenCalledWith(expect.objectContaining({ kind: 'settlement-unproven', jobId: 'job-1' }));
+  });
+
   it('FeedbackSkipped reasons from C2b are surfaced verbatim (not-verdict, payout-blocked, penalized)', () => {
     for (const reason of ['not-verdict', 'payout-blocked', 'penalized', 'agent-not-provider']) {
-      const parsed = parseSettlementReceipt([hookLog('FeedbackSkipped', { jobId: 7n, reason: stringToHex(reason, { size: 32 }) })], ESCROW, HOOK);
+      const parsed = parseSettlementReceipt([hookLog('FeedbackSkipped', { jobId: 7n, reason: stringToHex(reason, { size: 32 }) })], ESCROW, HOOK, 7n);
       expect(parsed.feedbackStatus).toBe(`skipped:${reason}`);
       expect(parsed.ratedAgentId).toBeNull();
     }

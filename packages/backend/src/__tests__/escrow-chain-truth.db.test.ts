@@ -1339,7 +1339,15 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       sim.chain.time = onChain(held.onChainJobId).expiredAt + 1n;
       await m.svc.processSettlementJob(sim.deps, { data: { jobId: '*', action: 'sweep' } });
       await sim.drive();
+      // C3h D1: the backend no longer refunds a recorded "pay" itself (it used to sign claimRefund here) …
+      expect(sim.chain.evaluatorCalls.filter((c) => c.functionName === 'claimRefund')).toHaveLength(0);
+      expect(await job(jobId)).toMatchObject({ onChainStatus: 'CONTESTED', resolution: 'pay' });
+      // … but claimRefund is permissionless after expiredAt: the requester refunds itself, the reconciliation mirrors it.
+      sim.chain.thirdPartyCall(requester.safeAddress as Address, 'claimRefund', [BigInt(held.onChainJobId!)]);
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
       expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_FAILED', onChainStatus: 'EXPIRED', resolution: 'pay' });
+      expect(sim.alerts.filter((x) => x.kind === ('provider-unpaid' as EscrowAlert['kind']) && x.jobId === jobId)).toHaveLength(1);
       expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC);
       expect(sim.alerts.filter((x) => x.kind === 'review-overridden')).toEqual([
         expect.objectContaining({ jobId, message: expect.stringMatching(/expired on-chain before the operator decision "pay" was executed.*NOT paid/) }),
