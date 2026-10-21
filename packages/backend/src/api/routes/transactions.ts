@@ -625,7 +625,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     const { getContracts } = await import('../../config/contracts.js');
     const contracts = getContracts(body.chainId);
 
-    // First: approve Aave pool to spend tokens
+    // No approval is sent here: this route queues only Pool.supply. The
+    // Pool's ERC-20 allowance must already exist — given by an earlier batch
+    // or from outside AgentFi; GET /v1/wallet/allowances reports it (spender:
+    // the Aave V3 Pool, S12). Without it the supply simulation fails (422).
     const decimals = await getTokenDecimals(body.asset, body.chainId);
     const amountWei = parseUnits(body.amount, decimals);
 
