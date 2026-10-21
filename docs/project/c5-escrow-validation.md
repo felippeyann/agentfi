@@ -389,7 +389,7 @@ Checked by the runner right after the contest, and by the fork suite (`escrow-er
 | provider / requester API key on `POST /admin/jobs/:id/resolve` | 401 |
 | requester `PATCH status CANCELLED` | 400 (no transition from `PAYMENT_PENDING`) |
 | provider `PATCH status COMPLETED` again | 400 |
-| provider `POST /v1/transactions/batch` calling `escrow.complete` | refused (400) |
+| provider `POST /v1/transactions/batch` calling `escrow.complete` | refused (400). In C5 the refusal is "AgentExecutor not deployed" (`EXECUTOR_ADDRESS_84532` unset), not a guard on the escrow target; with an executor, `complete` / `reject` revert `Unauthorized` at simulation, but `claimRefund` after `expiresAt` would be reachable — plan S15 |
 | `complete` / `reject` from the provider or the requester wallet | revert `Unauthorized` (only the evaluator may decide a Submitted job) |
 | afterwards | still `CONTESTED`, no resolution, no settle tx; chain status Submitted |
 
@@ -467,7 +467,7 @@ Found and fixed while rehearsing:
    Base Sepolia enabled (both required, §3.3). Entered by the owner in a local terminal / `.env`, never
    in a chat, a note or an issue.
 5. **The package itself** — chain 84532, the six roles, 4.5 USDC and 0.012 ETH from faucets, the
-   policies, the 3600 s window, the 22–23 transactions and the stop / success criteria above.
+   policies, the 3600 s window, the 22–23 transactions (C4 2 + C5 20–21) and the stop / success criteria above.
 
 Open as of 2026-10-15 (orchestrated round): all five. None is answered by this document.
 
