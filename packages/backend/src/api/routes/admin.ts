@@ -19,6 +19,8 @@ import { transactionQueue } from '../../queues/transaction.queue.js';
 import { transactionJobId } from '../../queues/transaction-job-id.js';
 import { getContracts } from '../../config/contracts.js';
 import { env } from '../../config/env.js';
+import { executorBatchValue } from '../../services/transaction/executor.service.js';
+import { FEE_BPS as TIER_FEE_BPS } from '../../services/policy/fee.service.js';
 import {
   PolicyService,
   type OperatorResumeOutcome,
@@ -231,6 +233,14 @@ export async function adminRoutes(fastify: FastifyInstance) {
    * a wallet's on-chain cooldown). An action targeting the configured module
    * is refused (403 `POLICY_MODULE_TARGET`); use
    * POST /admin/agents/:id/policy/sync.
+   *
+   * Value (S14, the A6d rule of the agent batch): `executeBatch` is sent
+   * ΣV + F, F = floor(ΣV × 30 / 10 000) on the sum of the action values (the
+   * executor's fee, collected on-chain to the fee wallet). No AgentFi tier fee
+   * is added. Authority is unchanged: the operator credential's batch is not
+   * priced in USD nor counted against the agent's outflow cap or daily volume
+   * (no DailyVolume reservation), and the route does not simulate — the
+   * submitter's gas estimation is its dry run.
    */
   fastify.post('/admin/transactions/batch', async (request, reply) => {
     if (!requireAdmin(request, reply)) return;
@@ -281,6 +291,25 @@ export async function adminRoutes(fastify: FastifyInstance) {
       args: [onChainActions],
     });
 
+    // S14: msg.value = ΣV + F (A6d). Before, the batch was queued with value 0
+    // ("Admin txs are free"), and `executeBatch` reverted
+    // InsufficientValueForFee(0, ΣV + F) at gas estimation for any native
+    // value. F is the executor's on-chain fee — the one `executorBatchValue`
+    // computation the agent batch uses — never the tier schedule.
+    const { feeWei, msgValueWei } = executorBatchValue(onChainActions.map((a) => a.value));
+    // feeAmountWei = F: what the fee wallet receives, recorded as the FeeEvent
+    // on confirmation. The recorded bps follows the agent's tier, as on the
+    // agent batch (A6d; plan row A6e (2): the executor charges 30 bps on
+    // every tier).
+    const queuePayload = {
+      to: contracts.executor,
+      data: batchCalldata,
+      value: msgValueWei.toString(),
+      feeAmountWei: feeWei.toString(),
+      feeBps: TIER_FEE_BPS[agent.tier],
+      routedViaExecutor: true,
+    };
+
     const tx = await db.transaction.create({
       data: {
         agentId: agent.id,
@@ -292,7 +321,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
           admin: true,
           actionCount: body.actions.length,
           // A6b: what the stranded-QUEUED sweep re-enqueues after a crash before the add.
-          queuePayload: { to: contracts.executor, data: batchCalldata, value: '0', feeAmountWei: '0', feeBps: 0, routedViaExecutor: true },
+          queuePayload,
         },
       },
     });
@@ -304,14 +333,16 @@ export async function adminRoutes(fastify: FastifyInstance) {
         chainId: body.chainId,
         walletId: agent.walletId,
         from: getAddress(agent.safeAddress),
-        to: contracts.executor,
-        data: batchCalldata,
-        value: '0',
+        to: queuePayload.to,
+        data: queuePayload.data,
+        value: queuePayload.value,
         agentId: agent.id,
         tier: agent.tier,
-        feeAmountWei: '0', // Admin txs are free
+        // No AgentFi tier fee is charged on an admin batch; the executor's
+        // on-chain fee F is, and is recorded (FeeEvent) like any other.
+        feeAmountWei: queuePayload.feeAmountWei,
         feeUsd: '0',
-        feeBps: 0,
+        feeBps: queuePayload.feeBps,
         routedViaExecutor: true,
       },
       { jobId: transactionJobId(tx.id) },

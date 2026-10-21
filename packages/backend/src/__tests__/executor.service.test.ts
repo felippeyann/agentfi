@@ -20,7 +20,12 @@ import {
   type Hex,
 } from 'viem';
 import { AGENT_EXECUTOR_ABI } from '../abi/AgentExecutor.abi.js';
-import { ExecutorService, toExecutorAction } from '../services/transaction/executor.service.js';
+import {
+  ExecutorService,
+  executorBatchValue,
+  executorFeeWei,
+  toExecutorAction,
+} from '../services/transaction/executor.service.js';
 import { TransactionBuilder } from '../services/transaction/builder.service.js';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
@@ -187,6 +192,30 @@ describe('ExecutorService', () => {
 
   it('estimateFee mirrors the on-chain 30 bps', () => {
     expect(svc.estimateFee(1_000_000n)).toBe(3_000n);
+  });
+
+  // A6d / S14: the one msg.value computation of every executeBatch (agent and admin routes, wrapBatch).
+  describe('executorBatchValue', () => {
+    it.each([
+      ['nothing', [], 0n, 0n],
+      ['value 0', [0n, 0n], 0n, 0n],
+      ['333 wei: below the first wei of fee', [333n], 0n, 333n],
+      ['334 wei: the threshold', [334n], 1n, 335n],
+      ['200 + 200 wei: F on the sum (1), not per action (0 + 0)', [200n, 200n], 1n, 401n],
+      ['0.004 + 0.006 ETH', [4_000_000_000_000_000n, 6_000_000_000_000_000n], 30_000_000_000_000n, 10_030_000_000_000_000n],
+    ])('%s → F and ΣV + F', (_label, values, fee, msgValue) => {
+      const sum = values.reduce((s, v) => s + v, 0n);
+      expect(executorBatchValue(values)).toEqual({ actionsValueWei: sum, feeWei: fee, msgValueWei: msgValue });
+      expect(executorFeeWei(sum)).toBe(fee);
+    });
+
+    it('wrapBatch carries the same value and fee', () => {
+      const wrapped = svc.wrapBatch(CHAIN_ID, [
+        { to: TARGET, data: '0x', value: 200n },
+        { to: SAFE, data: '0x', value: 200n },
+      ]);
+      expect({ value: wrapped.value, feeWei: wrapped.feeWei }).toEqual({ value: 401n, feeWei: 1n });
+    });
   });
 
   describe('legacy executor (pre-October-2026 Action struct)', () => {
