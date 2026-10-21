@@ -135,7 +135,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { PrismaClient } from '@prisma/client';
 import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { encodeFunctionData, erc20Abi, parseUnits, TransactionNotFoundError, TransactionReceiptNotFoundError, type Hex } from 'viem';
+import { encodeFunctionData, erc20Abi, parseUnits, TransactionNotFoundError, TransactionReceiptNotFoundError, type Address, type Hex } from 'viem';
 import { FakeEscrowChain, FakeWallets, JobStatus, SIM_ESCROW, SIM_USDC } from './helpers/fake-escrow-chain.js';
 import { setSimConfigUnverified, setSimDeps, setSimRepoll, simConfig, simGate, SIM_EVALUATOR, SIM_GATE_RETRY_SECONDS } from './helpers/escrow-sim-registry.js';
 import { InMemoryLaneLock, InMemoryNonceStore } from '../services/transaction/wallet-lane.js';
@@ -2668,6 +2668,319 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
       expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC - BUDGET);
       expect(sim.chain.evaluatorBroadcasts.filter((x) => x.outcome === 'reverted')).toHaveLength(0);
+    });
+  });
+
+  describe('C3h — a recorded "pay" refunded by the sweep (D1), a replacement read as the outcome (D2), no "provider-unpaid" alert (D3)', () => {
+    const FEE = (BUDGET * 30n) / 10_000n;
+    const PAST_EXPIRY_MS = simConfig.jobTtlSeconds * 1000 + 60_000;
+    const sweep = () => m.svc.processSettlementJob(sim.deps, { data: { jobId: '*', action: 'sweep' }, attemptsMade: 0, opts: { attempts: 3 } });
+    const contestAs = async (requesterId: string, jobId: string) =>
+      (await sim.app(requesterId)).inject({ method: 'POST', url: `/v1/jobs/${jobId}/contest`, payload: { reason: 'c3h' } });
+    const decide = (jobId: string, decision: 'pay' | 'refund' | 'quality-rejected' | 'payout-blocked') =>
+      m.svc.resolveEscrowJob(sim.deps, { jobId, decision, note: `c3h ${decision}`, operator: 'ops@test' });
+    const alertsOf = (kind: string, jobId: string) => sim.alerts.filter((a) => a.kind === (kind as EscrowAlert['kind']) && a.jobId === jobId);
+    const evaluatorClaims = () => sim.chain.evaluatorCalls.filter((c) => c.functionName === 'claimRefund');
+
+    /** Moves the backend clock and the chain past the job's expiresAt. */
+    async function pastExpiry(jobId: string): Promise<void> {
+      setNowOffset(PAST_EXPIRY_MS);
+      sim.chain.time = onChain((await job(jobId)).onChainJobId).expiredAt + 1n;
+    }
+
+    /** A job whose deliverable is Submitted on-chain; its settle is queued but not run yet. */
+    async function delivered() {
+      const { requester, provider, jobId } = await fundedJob();
+      expect((await patchJob(provider.id, jobId, { status: 'ACCEPTED' })).statusCode).toBe(200);
+      expect((await patchJob(provider.id, jobId, { status: 'COMPLETED', result: { answer: 42 } })).statusCode).toBe(200);
+      await sim.drive(1);
+      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED' });
+      return { requester, provider, jobId };
+    }
+
+    // ── D1 ──────────────────────────────────────────────────────────────────
+
+    it('D1: contested → "pay" whose complete never mined (3 attempts, then dropped) — past expiresAt the sweep signs no claimRefund, a stale claimRefund is dropped, the hold is alerted; the recovery then pays', async () => {
+      const { requester, provider, jobId } = await delivered();
+      expect((await contestAs(requester.id, jobId)).statusCode).toBe(200);
+      sim.settlements.clear();
+      sim.chain.evaluatorHold = () => true;
+      expect(await decide(jobId, 'pay')).toMatchObject({ outcome: 'scheduled' });
+      await sim.drive(); // every attempt waits behind the pending complete; the decision goes back to its hold
+      expect(await job(jobId)).toMatchObject({ onChainStatus: 'CONTESTED', resolution: 'pay' });
+      for (const b of sim.chain.evaluatorBroadcasts.filter((x) => x.outcome === 'pending')) sim.chain.dropEvaluator(b.hash);
+      sim.chain.evaluatorHold = null;
+
+      await pastExpiry(jobId);
+      await sweep();
+      expect(sim.settlements.has(`claimRefund-${jobId}`)).toBe(false);
+      // A claimRefund enqueued before the hold (an earlier sweep, an older process) is dropped right before signing.
+      expect(await m.svc.processSettlementJob(sim.deps, { data: { jobId, action: 'claimRefund' }, attemptsMade: 0, opts: { attempts: 3 } })).toMatchObject({
+        outcome: 'noop',
+      });
+      await sim.drive();
+      expect(evaluatorClaims()).toHaveLength(0);
+      expect(onChain((await job(jobId)).onChainJobId).status).toBe(JobStatus.Submitted);
+      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'CONTESTED', resolution: 'pay' });
+      expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC - BUDGET);
+      const held = alertsOf('delivery-held', jobId);
+      expect(held).toHaveLength(1);
+      expect(held[0]!.message).toMatch(/"pay"/);
+      expect(held[0]!.message).toMatch(/claimRefund/);
+      expect(held[0]!.details).toMatchObject({ resolution: 'pay', expiresAt: expect.any(String) });
+      await sweep(); // the next tick, within the hour: not alerted again
+      expect(alertsOf('delivery-held', jobId)).toHaveLength(1);
+
+      // The recorded decision is still executed (complete is valid after expiredAt while Submitted).
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', resolution: 'pay' });
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+      expect(evaluatorClaims()).toHaveLength(0);
+    });
+
+    it('D1: a CANCELLED job delivered on-chain with the decision "pay" whose complete keeps reverting — past expiresAt the backend never refunds it; a third party\'s claimRefund is mirrored and alerted (the residual)', async () => {
+      const { requester, provider, jobId } = await fundedJob();
+      expect((await patchJob(provider.id, jobId, { status: 'ACCEPTED' })).statusCode).toBe(200);
+      expect((await patchJob(provider.id, jobId, { status: 'COMPLETED', result: { ok: 4 } })).statusCode).toBe(200);
+      await sim.drive(1);
+      sim.settlements.clear();
+      await m.db.job.update({ where: { id: jobId }, data: { status: 'ACCEPTED', onChainStatus: 'FUNDED' } });
+      expect((await patchJob(requester.id, jobId, { status: 'CANCELLED' })).statusCode).toBe(200);
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'CANCELLED', onChainStatus: 'SUBMITTED' });
+
+      sim.chain.blockedPayees.add(provider.safeAddress.toLowerCase()); // complete reverts: every attempt fails
+      expect(await decide(jobId, 'pay')).toMatchObject({ outcome: 'scheduled', previousStatus: 'CANCELLED' });
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'CANCELLED', onChainStatus: 'SUBMITTED', resolution: 'pay' });
+
+      await pastExpiry(jobId);
+      await sweep();
+      await sim.drive();
+      await m.runPaymentRecoveryTick(); // the reconciliation retries the decision (still reverting) — never a refund
+      await sim.drive();
+      await sweep();
+      await sim.drive();
+      expect(evaluatorClaims()).toHaveLength(0);
+      expect(sim.chain.evaluatorCalls.filter((c) => c.functionName === 'reject')).toHaveLength(0);
+      expect(onChain((await job(jobId)).onChainJobId).status).toBe(JobStatus.Submitted);
+      expect(await job(jobId)).toMatchObject({ status: 'CANCELLED', onChainStatus: 'SUBMITTED', resolution: 'pay' });
+      expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC - BUDGET);
+      expect(alertsOf('delivery-held', jobId)).toHaveLength(1);
+
+      // The residual the backend cannot remove: claimRefund is permissionless after expiredAt.
+      const onChainJobId = (await job(jobId)).onChainJobId!;
+      const refund = sim.chain.thirdPartyCall(requester.safeAddress as Address, 'claimRefund', [BigInt(onChainJobId)]);
+      expect(refund.status).toBe('success');
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'CANCELLED', onChainStatus: 'EXPIRED', resolution: 'pay' });
+      expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC);
+      expect(alertsOf('review-overridden', jobId)).toHaveLength(1);
+      const unpaid = alertsOf('provider-unpaid', jobId);
+      expect(unpaid).toHaveLength(1);
+      expect(unpaid[0]!.details).toMatchObject({
+        onChainJobId,
+        refundTxHash: refund.hash,
+        refundedBy: requester.safeAddress,
+        refundEvent: 'JobExpired',
+        resolution: 'pay',
+        expiresAt: expect.any(String),
+      });
+    });
+
+    // ── D2 ──────────────────────────────────────────────────────────────────
+
+    it('D2: a 0-value cancel mined in the nonce of the pending complete while the worker waits — nothing terminal recorded, nothing finalized, alerted; the retry pays with its own transaction', async () => {
+      const { requester, provider, jobId } = await delivered();
+      sim.chain.evaluatorHold = () => true;
+      let cancel: Hex | null = null;
+      sim.chain.onEvaluatorWait = (hash) => {
+        cancel = sim.chain.replaceEvaluator(hash, { kind: 'cancel' });
+        sim.chain.evaluatorHold = null;
+      };
+      await sim.drive(1); // attempt 1: the complete is sent, a cancel takes its nonce while the worker waits
+      const after = await job(jobId);
+      expect(after.onChainStatus).not.toBe('REJECTED');
+      expect(after).toMatchObject({ status: 'PAYMENT_PENDING', reservationStatus: 'PENDING', platformFeeAmount: null, feedbackStatus: null });
+      expect(onChain(after.onChainJobId).status).toBe(JobStatus.Submitted);
+      const replaced = alertsOf('evaluator-replaced', jobId);
+      expect(replaced).toHaveLength(1);
+      expect(replaced[0]!.details).toMatchObject({ replacedBy: cancel, onChainJobId: after.onChainJobId });
+
+      await sim.drive(); // the retry reads the chain (still Submitted) and settles with a new complete
+      const done = await job(jobId);
+      expect(done).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', feedbackStatus: 'written', platformFeeAmount: FEE.toString() });
+      const completes = sim.chain.evaluatorBroadcasts.filter((b) => b.functionName === 'complete');
+      expect(completes.map((b) => b.outcome)).toEqual(['replaced', 'success']);
+      expect(done.settleTxHash).toBe(completes[1]!.hash);
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+      expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC - BUDGET);
+    });
+
+    it('D2: another job\'s complete mined in this job\'s nonce (a second worker, a manual send) — this job is not marked paid by it; the retry pays it with its own transaction', async () => {
+      const x = await delivered();
+      sim.settlements.clear();
+      const y = await delivered();
+      sim.settlements.clear(); // Y's complete is sent by "another worker" below, in X's nonce
+      await sim.deps.settlement.add({ jobId: x.jobId, action: 'settle' });
+      const yOnChainId = BigInt((await job(y.jobId)).onChainJobId!);
+      sim.chain.evaluatorHold = () => true;
+      let other: Hex | null = null;
+      sim.chain.onEvaluatorWait = (hash) => {
+        other = sim.chain.replaceEvaluator(hash, { kind: 'call', functionName: 'complete', args: [yOnChainId, m.svc.SETTLEMENT_REASONS.completed, '0x'] });
+        sim.chain.evaluatorHold = null;
+      };
+      await sim.drive(1);
+      const after = await job(x.jobId);
+      expect(after.onChainStatus).not.toBe('COMPLETED');
+      expect(after).toMatchObject({ status: 'PAYMENT_PENDING', reservationStatus: 'PENDING', platformFeeAmount: null });
+      expect(onChain(after.onChainJobId).status).toBe(JobStatus.Submitted);
+      expect(onChain((await job(y.jobId)).onChainJobId).status).toBe(JobStatus.Completed);
+      expect(alertsOf('evaluator-replaced', x.jobId)).toEqual([expect.objectContaining({ details: expect.objectContaining({ replacedBy: other }) })]);
+
+      await sim.drive();
+      const done = await job(x.jobId);
+      expect(done).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', platformFeeAmount: FEE.toString() });
+      expect(done.settleTxHash).not.toBe(other);
+      expect(onChain(done.onChainJobId).status).toBe(JobStatus.Completed);
+      expect(sim.chain.usdcOf(x.provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+      // Y follows its own chain state through the reconciliation.
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(await job(y.jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED' });
+      expect(sim.chain.usdcOf(y.provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+    });
+
+    it('D2: a replacement that reverted — not read as this job\'s revert; alerted; the retry pays', async () => {
+      const { provider, jobId } = await delivered();
+      const onChainJobId = BigInt((await job(jobId)).onChainJobId!);
+      sim.chain.evaluatorHold = () => true;
+      sim.chain.onEvaluatorWait = (hash) => {
+        // claimRefund before expiredAt reverts (NotExpired): a failed transaction in the nonce
+        sim.chain.replaceEvaluator(hash, { kind: 'call', functionName: 'claimRefund', args: [onChainJobId] });
+        sim.chain.evaluatorHold = null;
+      };
+      await sim.drive(1);
+      expect(sim.chain.evaluatorBroadcasts.filter((b) => b.outcome === 'reverted')).toHaveLength(1);
+      expect((await job(jobId)).status).toBe('PAYMENT_PENDING');
+      expect(alertsOf('evaluator-replaced', jobId)).toHaveLength(1);
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED' });
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+    });
+
+    it('D2: a send whose answer was lost, its nonce then cancelled before the retry — the retry signs a new settlement, no outcome is invented', async () => {
+      const { provider, jobId } = await delivered();
+      sim.chain.evaluatorHold = () => true;
+      sim.chain.evaluatorSendLostAnswer = ({ functionName }) => functionName === 'complete';
+      await sim.drive(1); // the node took the complete, the answer was lost: kept as in flight
+      const [pending] = sim.chain.evaluatorBroadcasts.filter((b) => b.outcome === 'pending');
+      expect(pending).toBeDefined();
+      expect((await job(jobId)).settleTxHash).toBe(pending!.hash);
+      sim.chain.replaceEvaluator(pending!.hash, { kind: 'cancel' });
+      sim.chain.evaluatorHold = null;
+      await sim.drive();
+      const done = await job(jobId);
+      expect(done).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED' });
+      expect(done.settleTxHash).not.toBe(pending!.hash);
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+    });
+
+    it('D2: the worker restarts while its complete is pending and a cancel takes that nonce — on restart the job follows the chain (still Submitted) and is paid', async () => {
+      const { provider, jobId } = await delivered();
+      sim.chain.evaluatorHold = () => true;
+      await sim.drive(1); // attempt 1: complete pending, the wait times out
+      sim.settlements.clear(); // the worker process dies
+      m.svc.__resetUnconfirmedSendsForTests();
+      const [pending] = sim.chain.evaluatorBroadcasts.filter((b) => b.outcome === 'pending');
+      sim.chain.replaceEvaluator(pending!.hash, { kind: 'cancel' });
+      sim.chain.evaluatorHold = null;
+      expect((await job(jobId)).onChainStatus).toBe('SETTLING');
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED' });
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+    });
+
+    // ── D3 ──────────────────────────────────────────────────────────────────
+
+    it('D3: a delivery accepted in time (PAYMENT_PENDING, Submitted, automatic settlement not run) refunded by a third party after expiresAt — "provider-unpaid" once, with context; later passes do not repeat it', async () => {
+      const { requester, jobId } = await delivered();
+      sim.settlements.clear(); // the settlement worker is down
+      await pastExpiry(jobId);
+      const onChainJobId = (await job(jobId)).onChainJobId!;
+      const refund = sim.chain.thirdPartyCall(requester.safeAddress as Address, 'claimRefund', [BigInt(onChainJobId)]);
+      expect(refund.status).toBe('success');
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_FAILED', onChainStatus: 'EXPIRED' });
+      const unpaid = alertsOf('provider-unpaid', jobId);
+      expect(unpaid).toHaveLength(1);
+      expect(unpaid[0]).toMatchObject({ chainId: CHAIN_ID });
+      expect(unpaid[0]!.details).toMatchObject({
+        onChainJobId,
+        refundTxHash: refund.hash,
+        refundedBy: requester.safeAddress,
+        refundEvent: 'JobExpired',
+        resolution: null,
+        previousStatus: 'PAYMENT_PENDING',
+        previousOnChainStatus: 'SUBMITTED',
+        expiresAt: expect.any(String),
+      });
+      expect(unpaid[0]!.message).toMatch(/not paid/i);
+
+      // A redelivered settlement, the next ticks: the row is final — no second alert.
+      await m.svc.processSettlementJob(sim.deps, { data: { jobId, action: 'settle' }, attemptsMade: 0, opts: { attempts: 3 } });
+      await m.runPaymentRecoveryTick();
+      await sweep();
+      await sim.drive();
+      expect(alertsOf('provider-unpaid', jobId)).toHaveLength(1);
+    });
+
+    it('D3 (R2-c): PAYMENT_PENDING + FUNDED with its submit in flight at expiresAt, refunded by a third party — "provider-unpaid"', async () => {
+      const { requester, provider, jobId } = await fundedJob();
+      expect((await patchJob(provider.id, jobId, { status: 'ACCEPTED' })).statusCode).toBe(200);
+      sim.chain.hold = ({ functionName }) => functionName === 'submit'; // broadcast, stays in the mempool
+      expect((await patchJob(provider.id, jobId, { status: 'COMPLETED', result: { answer: 7 } })).statusCode).toBe(200);
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'FUNDED' });
+
+      await pastExpiry(jobId);
+      const onChainJobId = (await job(jobId)).onChainJobId!;
+      const refund = sim.chain.thirdPartyCall(requester.safeAddress as Address, 'claimRefund', [BigInt(onChainJobId)]);
+      expect(refund.status).toBe('success');
+      sim.chain.hold = null;
+      for (const b of sim.chain.broadcasts.filter((x) => x.functionName === 'submit')) sim.chain.release(b.hash); // reverts: the job is Expired
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(await job(jobId)).toMatchObject({ onChainStatus: 'EXPIRED' });
+      const unpaid = alertsOf('provider-unpaid', jobId);
+      expect(unpaid).toHaveLength(1);
+      expect(unpaid[0]!.details).toMatchObject({ refundTxHash: refund.hash, previousStatus: 'PAYMENT_PENDING', previousOnChainStatus: 'FUNDED' });
+    });
+
+    it('D3: no "provider-unpaid" where the refund is the policy — an undecided contest, a job never delivered', async () => {
+      const contested = await delivered();
+      expect((await contestAs(contested.requester.id, contested.jobId)).statusCode).toBe(200);
+      const idle = await fundedJob();
+      expect((await patchJob(idle.provider.id, idle.jobId, { status: 'ACCEPTED' })).statusCode).toBe(200);
+
+      await pastExpiry(idle.jobId); // the later of the two expiries
+      for (const { requester, jobId } of [contested, idle]) {
+        const refund = sim.chain.thirdPartyCall(requester.safeAddress as Address, 'claimRefund', [BigInt((await job(jobId)).onChainJobId!)]);
+        expect(refund.status).toBe('success');
+      }
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      await sweep();
+      await sim.drive();
+      for (const { jobId } of [contested, idle]) {
+        expect((await job(jobId)).onChainStatus).toBe('EXPIRED');
+        expect(alertsOf('provider-unpaid', jobId)).toHaveLength(0);
+      }
+      expect(alertsOf('review-expired', contested.jobId)).toHaveLength(1);
     });
   });
 });
