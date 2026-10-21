@@ -314,7 +314,7 @@ three scenarios in parallel for about 75–80 minutes (the contest is held 3600 
   runner keeps waiting (its hold and timing checks still apply). Unblocking the key (a
   same-nonce replacement signed with the evaluator key) is an owner decision (plan C3g, proposal
   A; A1, a manual operator script with dry-run, is the recommendation and does not exist yet).
-  Until it does, stop the run and decide. Mind the deadline: after a job's `expiresAt`,
+  Until it does, stop the run and decide. **Do not replace an evaluator transaction by hand (for example with `cast send --nonce …`) while the worker is running** (plan C3h, D2, found 2026-10-21). The worker's receipt wait follows replacements: it would record the job `REJECTED`, or paid, from another transaction's receipt while the job stays Submitted on-chain. Stop the worker first, then reconcile. Mind the deadline: after a job's `expiresAt`,
   `claimRefund` is permissionless and refunds the requester even for delivered work.
 - **A settlement send whose answer was lost** (C3f item 3): before signing another settlement,
   the worker asks again about the earlier hash and re-adopts it if it mined or a node knows it,
