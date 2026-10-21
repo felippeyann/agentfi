@@ -417,7 +417,7 @@ transaction stays `PENDING_APPROVAL` with its reservation where it was.
 |--------|------|------|-------------|
 | GET | `/v1/wallet/address` | Agent | Safe + EOA addresses |
 | GET | `/v1/wallet/balance?chainId=` | Agent | ETH + ERC-20 balances |
-| GET | `/v1/wallet/allowances?chainId=` | Agent | Active token allowances |
+| GET | `/v1/wallet/allowances?chainId=` | Agent | Active token allowances: a bare array `[{ token, symbol, spender, allowance, allowanceFormatted }]`, non-zero entries only; default spenders the Uniswap V3 router and the Aave V3 Pool (`?spender=` checks only that one); `502 AAVE_POOL_UNAVAILABLE` when the Pool cannot be resolved |
 
 ---
 
