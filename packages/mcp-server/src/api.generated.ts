@@ -1566,6 +1566,9 @@ export interface paths {
          *     allowance always read 0). When that Pool cannot be resolved (the
          *     provider cannot be read or answers no address) the request is `502
          *     AAVE_POOL_UNAVAILABLE`, never a list without the Aave allowance.
+         *
+         *     The response is a bare array with one entry per (token, spender) pair
+         *     whose allowance is not zero (`[]` when there is none).
          */
         get: {
             parameters: {
@@ -1581,15 +1584,13 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description Allowances. */
+                /** @description The non-zero allowances, as a bare array (zero allowances are omitted). */
                 200: {
                     headers: {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": {
-                            allowances?: components["schemas"]["Allowance"][];
-                        };
+                        "application/json": components["schemas"]["Allowance"][];
                     };
                 };
                 /** @description `AAVE_POOL_UNAVAILABLE`: the Aave V3 Pool could not be resolved from the configured provider. */
@@ -3309,7 +3310,7 @@ export interface paths {
         put?: never;
         /**
          * Operator batch execution
-         * @description Queues an operator maintenance batch signed by the named agent's wallet and run through the AgentExecutor. `agentId` is required: there is no fallback agent. Not for the on-chain policy (S8): inside the executor the executor is `msg.sender` and `AgentPolicyModule` answers `Unauthorized`, so an action targeting the chain's policy module is refused (403 `POLICY_MODULE_TARGET`) — use `POST /admin/agents/{id}/policy/sync`.
+         * @description Queues an operator maintenance batch signed by the named agent's wallet and run through the AgentExecutor. `agentId` is required: there is no fallback agent. Not for the on-chain policy (S8): inside the executor the executor is `msg.sender` and `AgentPolicyModule` answers `Unauthorized`, so an action targeting the chain's policy module is refused (403 `POLICY_MODULE_TARGET`) — use `POST /admin/agents/{id}/policy/sync`. S14: the batch is sent with `msg.value` = the actions' total `value` plus the executor fee, floor(total × 30 / 10 000) on the sum (the executor's `feeBps()`, collected on-chain to the fee wallet and recorded as a fee event); no AgentFi tier fee is added. An operator batch is not priced in USD nor counted against the agent's `maxOutflowPerTxUsd` or daily volume limit.
          */
         post: {
             parameters: {
@@ -3337,11 +3338,17 @@ export interface paths {
             };
             responses: {
                 /** @description Batch queued. */
-                202: {
+                200: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": {
+                            transactionId: string;
+                            /** @enum {string} */
+                            status: "QUEUED";
+                        };
+                    };
                 };
                 /** @description Invalid body — including a missing or empty `agentId`. */
                 400: {
@@ -4520,9 +4527,16 @@ export interface components {
             }[];
         };
         Allowance: {
-            token?: string;
-            spender?: string;
-            amount?: string;
+            /** @description The ERC-20 token address. */
+            token: string;
+            /** @description The token symbol. */
+            symbol: string;
+            /** @description The spender: the Uniswap V3 router, the Aave V3 Pool (getPool() of the configured provider), or the `spender` queried. */
+            spender: string;
+            /** @description The allowance in the token's base units (an integer string, never "0"). */
+            allowance: string;
+            /** @description The allowance in token units (allowance / 10^decimals). */
+            allowanceFormatted: string;
         };
         BillingStatus: {
             tier?: components["schemas"]["AgentTier"];
