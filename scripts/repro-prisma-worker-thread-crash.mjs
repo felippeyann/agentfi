@@ -20,6 +20,9 @@
  *   nodisconnect          thread: connect, query, ends by itself (client left open)
  *   terminate             thread: connect, query; the parent worker.terminate()s it
  *   disconnect-terminate  thread: connect, query, $disconnect(); then terminate()d
+ *   instantiate-terminate thread: `new PrismaClient()` only (no connect, no
+ *                         query), terminate()d — what a unit file does that
+ *                         reaches src/db/client.ts unmocked (T2, 2026-10-21)
  *   noprisma-terminate    control — a thread that never loads Prisma, terminate()d
  *   proc-disconnect       control — the `disconnect` body in a child PROCESS
  *
@@ -51,6 +54,15 @@ async function body(mode, notify) {
   const require = createRequire(join(ROOT, 'packages/backend/package.json'));
   const { PrismaClient } = require('@prisma/client');
   const prisma = new PrismaClient();
+  if (mode === 'instantiate-terminate') {
+    // Prisma 5's LibraryEngine constructor already loads the Node-API engine
+    // (instantiateLibrary: dlopen + new QueryEngine). Wait for that internal
+    // promise so the thread ends with the engine loaded, never connected.
+    await prisma._engine.libraryInstantiationPromise;
+    notify('queried');
+    setInterval(() => undefined, 1000);
+    return;
+  }
   await prisma.$queryRaw`SELECT 1`;
   await prisma.agent.count();
   notify('queried');
@@ -94,7 +106,9 @@ if (process.argv[2] === '--child') {
         void worker.terminate();
       }, 15_000);
       worker.on('message', async (msg) => {
-        if (msg === 'queried' && (mode === 'terminate' || mode === 'noprisma-terminate')) await worker.terminate();
+        if (msg === 'queried' && (mode === 'terminate' || mode === 'noprisma-terminate' || mode === 'instantiate-terminate')) {
+          await worker.terminate();
+        }
         if (msg === 'disconnected' && mode === 'disconnect-terminate') await worker.terminate();
       });
       worker.on('error', reject);
