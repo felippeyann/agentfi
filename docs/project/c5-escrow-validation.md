@@ -56,11 +56,9 @@ directory: no contract, no migration, no dependency changed.
 | Foundry; `contracts:code:check`; typecheck; `spec:lint` / `spec:check` | 356 / 0 / 2; `ddc6936bc680`; clean; OK (the `spec:check` drift was line endings only, and the regenerated file is identical) |
 | mcp-server | 163 / 163 |
 | ERC-8183 fork suite (Base Sepolia fork) | 7 / 7 |
-| **C5 runner end to end** | **not re-run on `51f00a6`.** The 2026-10-18 run belongs to `38ddb4f` and is **not** carried over. The escrow, runner and contract files are unchanged, but the shared fee helper is new code in the backend that both run. Repeat it on the candidate the owner chooses before C4 (the harness and instructions are in the owner's notes, `c5-rehearsal-2026-10-18/harness/`). |
+| **C5 runner end to end** (window 60 s, fork mode only, `WALLET_PROVIDER=local`; run of its own, not carried over from `38ddb4f`) | **2026-10-21, on `51f00a6`.** It ran from worktree `rc-1021` at HEAD `8d08150`, whose `packages` tree equals `51f00a6`'s: tree `8e9baab8…` in both, and `git diff 51f00a6 8d08150 -- packages package-lock.json` is empty. Isolated resources: a dedicated Redis container (removed afterwards), a new database, and ports 8560 / 3170. Preflight: all PASS. Completed 37 / 37, contest 39 / 39, cancel 22 / 22, reconcile 16 / 16. USDC moved −2.0 / +1.994 / +0.006 with exactly 6 transfers. Fee wallet: 0. Gas: **0 wei unexplained** per wallet. `getSummary` (1, 100) `completed` and (1, 0) `rejected` |
 
-The owner chooses which candidate C4 deploys from:
-- `38ddb4f`: closed, with the full fork evidence below;
-- `51f00a6`: newer; it needs the runner run.
+On a local fork, both candidates now have the full evidence: `38ddb4f` (runner on 2026-10-18) and `51f00a6` (runner on 2026-10-21). The owner chooses which one C4 deploys from. Evidence files live in the owner's notes, in `c5-rehearsal-2026-10-21/51f00a6-runner/`: logs, evidence JSON, the harness used and SHA-256 sums; no secret is kept.
 
 **Current candidate, code `38ddb4f`** (local branch `rc/2026-10-17`; later commits touch no file under `packages/` — `git diff 38ddb4f HEAD -- packages package-lock.json` is empty, re-checked 2026-10-21). Every row below ran on a **local** machine or a **local Anvil fork**: none is a Base Sepolia transaction, none uses Turnkey, none counts for G2.
 
