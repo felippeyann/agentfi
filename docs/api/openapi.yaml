@@ -1913,7 +1913,13 @@ paths:
         the executor is `msg.sender` and `AgentPolicyModule` answers
         `Unauthorized`, so an action targeting the chain's policy module is
         refused (403 `POLICY_MODULE_TARGET`) — use
-        `POST /admin/agents/{id}/policy/sync`.
+        `POST /admin/agents/{id}/policy/sync`. S14: the batch is sent with
+        `msg.value` = the actions' total `value` plus the executor fee,
+        floor(total × 30 / 10 000) on the sum (the executor's `feeBps()`,
+        collected on-chain to the fee wallet and recorded as a fee event); no
+        AgentFi tier fee is added. An operator batch is not priced in USD nor
+        counted against the agent's `maxOutflowPerTxUsd` or daily volume
+        limit.
       security:
         - adminSecret: []
       requestBody:
@@ -1941,7 +1947,16 @@ paths:
                       value: { type: string, default: '0' }
                       data: { type: string, pattern: '^0x[0-9a-fA-F]*$', default: '0x' }
       responses:
-        '202': { description: Batch queued. }
+        '200':
+          description: Batch queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [transactionId, status]
+                properties:
+                  transactionId: { type: string }
+                  status: { type: string, enum: [QUEUED] }
         '400': { description: Invalid body — including a missing or empty `agentId`. }
         '403': { description: "`POLICY_MODULE_TARGET`: an action targets the chain's AgentPolicyModule." }
         '503': { description: "`CONTRACTS_UNVERIFIED` (S9): the chain's AgentExecutor / AgentPolicyModule is not verified against this build in this process — nothing was written; retry after `Retry-After`." }
