@@ -166,4 +166,23 @@ describe('evaluator signer (C5a gas limit, P3-2 sign → record → send)', () =
     await expect(signer.writeContract(complete, { onBeforeBroadcast: hook })).rejects.toThrow(/insufficient funds/);
     expect(hook).toHaveBeenCalledWith(keccak256(signed[0]!));
   });
+
+  it("C3h D2: the receipt wait keeps viem's replacement detection and marks a replacement's receipt (the caller compares the hash)", async () => {
+    const MINE = `0x${'11'.repeat(32)}` as Hex;
+    const OTHER = `0x${'22'.repeat(32)}` as Hex;
+    const signer = createEvaluatorSigner(84532, EVALUATOR_KEY);
+
+    publicClient.waitForTransactionReceipt.mockResolvedValueOnce({ status: 'success', logs: [], transactionHash: MINE });
+    expect(await signer.waitForTransactionReceipt(MINE)).toEqual({ status: 'success', logs: [], transactionHash: MINE });
+    const params = publicClient.waitForTransactionReceipt.mock.calls[0]![0] as { hash: Hex; checkReplacement?: boolean; onReplaced?: unknown };
+    expect(params).toMatchObject({ hash: MINE });
+    expect(params.checkReplacement).toBeUndefined(); // viem's default (true): a replacement resolves the wait
+    expect(typeof params.onReplaced).toBe('function');
+
+    publicClient.waitForTransactionReceipt.mockImplementationOnce(async (p: { onReplaced: (r: { reason: string }) => void }) => {
+      p.onReplaced({ reason: 'cancelled' });
+      return { status: 'success', logs: [], transactionHash: OTHER };
+    });
+    expect(await signer.waitForTransactionReceipt(MINE)).toEqual({ status: 'success', logs: [], transactionHash: OTHER, replacedReason: 'cancelled' });
+  });
 });

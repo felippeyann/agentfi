@@ -318,11 +318,14 @@ export class FakeEscrowChain {
     return receipt;
   }
 
-  getTransaction(hash: Hex): { hash: Hex; nonce: number } {
+  getTransaction(hash: Hex): { hash: Hex; nonce: number; from?: Address } {
     // C3e: evaluator transactions — known while pending (no blockNumber) or once mined. C3f: with their nonce.
     const evaluatorNonce = this.evaluatorNonceOf.get(hash) ?? 0;
     if (this.evaluatorTxPending(hash)) return { hash, nonce: evaluatorNonce, blockNumber: null } as { hash: Hex; nonce: number };
-    if (this.evaluatorBroadcasts.some((b) => b.hash === hash && b.outcome !== 'dropped' && b.outcome !== 'pending') && this.receipts.has(hash)) {
+    if (
+      this.evaluatorBroadcasts.some((b) => b.hash === hash && b.outcome !== 'dropped' && b.outcome !== 'pending' && b.outcome !== 'replaced') &&
+      this.receipts.has(hash)
+    ) {
       return { hash, nonce: evaluatorNonce, blockNumber: 1n } as { hash: Hex; nonce: number };
     }
     const tx = this.known.get(hash);
@@ -330,10 +333,10 @@ export class FakeEscrowChain {
     if (!tx || this.hidden.has(hash) || (!pending && !this.receipts.has(hash))) {
       throw new TransactionNotFoundError({ hash });
     }
-    return { hash, nonce: tx.nonce };
+    return { hash, nonce: tx.nonce, from: tx.from };
   }
 
-  private receipt(hash: Hex, status: 'success' | 'reverted', logs: Log[]): TransactionReceipt {
+  private receipt(hash: Hex, status: 'success' | 'reverted', logs: Log[], from?: Address): TransactionReceipt {
     return {
       status,
       logs,
@@ -341,7 +344,42 @@ export class FakeEscrowChain {
       effectiveGasPrice: 1n,
       transactionHash: hash,
       blockNumber: 1n,
+      ...(from ? { from } : {}),
     } as unknown as TransactionReceipt;
+  }
+
+  /**
+   * C3h D3: `eth_getLogs` for one escrow event of one job (`args.jobId`), over every receipt the
+   * fake node holds (block ranges are not modelled).
+   */
+  getLogs(params: { address: Address; event: { name: string }; args?: Record<string, unknown> }): Log[] {
+    const topics = encodeEventTopics({ abi: [params.event] as unknown as Abi, eventName: params.event.name, args: params.args } as never) as Hex[];
+    const out: Log[] = [];
+    for (const receipt of this.receipts.values()) {
+      for (const log of receipt.logs) {
+        if (lower(log.address) !== lower(params.address)) continue;
+        if (topics.some((topic, i) => topic !== null && log.topics[i] !== topic)) continue;
+        out.push(log);
+      }
+    }
+    return out;
+  }
+
+  // ── third parties (C3h) ──────────────────────────────────────────────────
+
+  private externalTxSeq = 0n;
+
+  /**
+   * C3h: an escrow call by someone other than the evaluator worker — e.g. the requester (or anyone)
+   * calling the permissionless `claimRefund` after `expiredAt` — mined at once. Returns its hash.
+   */
+  thirdPartyCall(from: Address, functionName: string, args: readonly unknown[]): { hash: Hex; status: 'success' | 'reverted' } {
+    const hash = `0x${(++this.externalTxSeq).toString(16).padStart(64, 'd')}` as Hex;
+    const data = encodeFunctionData({ abi: AGENT_JOB_ESCROW_ABI, functionName, args } as never);
+    const { status, logs } = this.execute(getAddress(from), SIM_ESCROW, data, hash);
+    this.known.set(hash, { hash, from: getAddress(from), nonce: 0, to: SIM_ESCROW, data });
+    this.receipts.set(hash, this.receipt(hash, status, logs, getAddress(from)));
+    return { hash, status };
   }
 
   /** viem-shaped read client used by the orchestrator and the re-poll. */
@@ -359,6 +397,8 @@ export class FakeEscrowChain {
       getBalance: async ({ address }: { address: Address }) => this.nativeBalances.get(lower(address)) ?? 10n ** 18n,
       getTransactionCount: async ({ address, blockTag }: { address: Address; blockTag?: 'latest' | 'pending' }) =>
         this.getTransactionCount(address, blockTag === 'pending' ? 'pending' : 'latest'),
+      getLogs: async (params: { address: Address; event: { name: string }; args?: Record<string, unknown> }) => this.getLogs(params),
+      getBlockNumber: async () => 1n,
     };
   }
 
@@ -387,7 +427,7 @@ export class FakeEscrowChain {
   evaluatorHold: ((call: { functionName: string }) => boolean) | null = null;
   private readonly evaluatorPending: Array<{ hash: Hex; from: Address; to: Address; data: Hex }> = [];
   /** Every evaluator broadcast, in order, with what became of it. */
-  readonly evaluatorBroadcasts: Array<{ hash: Hex; functionName: string; outcome: 'pending' | 'success' | 'reverted' | 'dropped' }> = [];
+  readonly evaluatorBroadcasts: Array<{ hash: Hex; functionName: string; outcome: 'pending' | 'success' | 'reverted' | 'dropped' | 'replaced' }> = [];
   /** C3f: the evaluator key (set by `evaluatorSigner`), its mined transaction count and each broadcast's nonce. */
   private evaluatorAddress: Address | null = null;
   private evaluatorMined = 0;
@@ -414,6 +454,46 @@ export class FakeEscrowChain {
 
   private evaluatorTxPending(hash: Hex): boolean {
     return this.evaluatorPending.some((tx) => tx.hash === hash);
+  }
+
+  /** C3h D2: the transaction that took a replaced evaluator transaction's nonce, by the replaced hash. */
+  private readonly replacedBy = new Map<Hex, Hex>();
+  /**
+   * C3h D2: runs once when the worker starts waiting for an evaluator receipt — the moment a
+   * same-nonce replacement can be mined behind its back (a manual `cast send --nonce`, a second
+   * worker). Cleared before it runs.
+   */
+  onEvaluatorWait: ((hash: Hex) => void) | null = null;
+
+  /**
+   * C3h D2: a transaction signed with the evaluator key in the nonce of the pending evaluator
+   * transaction `hash` (which must be the head of the key's queue) is mined instead of it: a
+   * `cancel` (0-value transfer to itself — no logs) or an escrow `call` (e.g. another job's
+   * `complete`). The replaced transaction never mines and no node knows it any more; viem's
+   * receipt wait for it resolves with the REPLACEMENT's receipt (`checkReplacement`, the default),
+   * which `evaluatorSigner().waitForTransactionReceipt` reproduces. Returns the replacement hash.
+   */
+  replaceEvaluator(
+    hash: Hex,
+    replacement: { kind: 'cancel' } | { kind: 'call'; functionName: 'complete' | 'reject' | 'claimRefund'; args: readonly unknown[] },
+  ): Hex {
+    if (this.evaluatorPending[0]?.hash !== hash) throw new Error('FakeEscrowChain: only the pending head of the evaluator key can be replaced');
+    const original = this.evaluatorPending.shift()!;
+    const newHash = `0x${(++this.evaluatorTxSeq).toString(16).padStart(64, 'f')}` as Hex;
+    this.evaluatorNonceOf.set(newHash, this.evaluatorNonceOf.get(hash) ?? this.evaluatorMined);
+    let status: 'success' | 'reverted' = 'success';
+    let logs: Log[] = [];
+    if (replacement.kind === 'call') {
+      const data = encodeFunctionData({ abi: AGENT_JOB_ESCROW_ABI, functionName: replacement.functionName, args: replacement.args } as never);
+      ({ status, logs } = this.execute(original.from, SIM_ESCROW, data, newHash));
+    }
+    this.evaluatorMined++;
+    this.receipts.set(newHash, this.receipt(newHash, status, logs, original.from));
+    const entry = this.evaluatorBroadcasts.find((b) => b.hash === hash);
+    if (entry) entry.outcome = 'replaced';
+    this.evaluatorBroadcasts.push({ hash: newHash, functionName: replacement.kind === 'cancel' ? 'cancel' : replacement.functionName, outcome: status });
+    this.replacedBy.set(hash, newHash);
+    return newHash;
   }
 
   /**
@@ -477,6 +557,14 @@ export class FakeEscrowChain {
         return hash;
       },
       waitForTransactionReceipt: async (hash: Hex) => {
+        const onWait = this.onEvaluatorWait;
+        if (onWait) {
+          this.onEvaluatorWait = null;
+          onWait(hash);
+        }
+        // C3h D2: viem follows a same-nonce replacement and resolves with ITS receipt.
+        const replacement = this.replacedBy.get(hash);
+        if (replacement) return this.getReceipt(replacement);
         if (this.evaluatorReceiptTimeouts > 0) {
           this.evaluatorReceiptTimeouts--;
           throw new Error(`Timed out while waiting for transaction with hash "${hash}" to be confirmed.`);
