@@ -319,6 +319,15 @@ Ends with `✓ Escrow cancellation refunded end to end.` (requester refunded in 
 
 `npm run c5:escrow` (`packages/backend/src/scripts/c5`) ran the three validation scenarios against the §5.1 stack (fork block 47 822 000, `WALLET_PROVIDER=local`, **window 60 s — fork mode only**; the real run is refused any window but 3600 s). Final run on `75796fb`: completed 37 / 37 checks, contest 39 / 39 (11 / 11 authority checks, held past the window, operator refund), cancel 22 / 22, reconcile 16 / 16 (gas explained to the wei); repeated with the same results on `cc0bb90`, whose tree is the candidate `e6e93bd`. Details, gas per transaction and the recovery paths exercised: [c5-escrow-validation.md](c5-escrow-validation.md) §8. Not testnet evidence.
 
+### 5.7 C5 runner and fork suite on the 2026-10-17 candidate (`38ddb4f`) — local fork, no real funds
+
+The same §5.1 stack (fork block 47 822 000, `WALLET_PROVIDER=local`, window 60 s, fork mode only).
+- **Runner, 2026-10-18:** completed 37 / 37, contest 39 / 39, cancel 22 / 22, reconcile 16 / 16, with gas explained to the wei. These are the same counts as §5.6.
+- **ERC-8183 fork suite, 2026-10-21:** 7 / 7.
+- **Runner refusals, 2026-10-17:** a second `setup` and `fund` after the snapshot were both refused.
+
+The `reconcile` printed rows "for §3", but they are fork transactions and are **not** recorded in §3. Evidence matrix by SHA: [c5-escrow-validation.md](c5-escrow-validation.md) §2.1. Not testnet evidence.
+
 ### 5.5 Dry-run of §2 and §5.4 on 2026-10-08 (H14) — local fork, no real funds
 
 The two runbooks above were executed as written on `main` 90bb831 + the H14 branch, against `anvil --fork-url https://sepolia.base.org --chain-id 84532 --port 8548` (fork of block 47 860 069). Substitutions, and nothing else: the RPC (`http://127.0.0.1:8548` for `base_sepolia` / `https://sepolia.base.org`); a throwaway keystore holding Anvil account 0 (`cast wallet import … --private-key … --unsafe-password …`, then `--account … --password …`, because a coding agent has no terminal for the prompts; deleted afterwards); fresh `cast wallet new` keys for the evaluator (= operator) and the fee wallet; faucets → `anvil_setBalance` and the example's `AGENTFI_FORK_FUNDING=true`; no `--verify` and no Etherscan key; **`WALLET_PROVIDER=local` instead of Turnkey** (no Turnkey credentials exist for the dry-run); the dev stack was left running, so the step-2 alternative was used (`API_PORT=3160`, `BACKEND_PUBLIC_URL=http://localhost:3160`), with database `agentfi_h14` and Redis DB 6.

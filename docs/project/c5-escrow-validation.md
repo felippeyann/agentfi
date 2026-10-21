@@ -41,12 +41,25 @@ directory: no contract, no migration, no dependency changed.
 
 ### 2.1 Rehearsed, candidate and re-checked commits
 
-Three different things, not one SHA:
+**Current candidate, code `38ddb4f`** (local branch `rc/2026-10-17`; later commits touch no file under `packages/` — `git diff 38ddb4f HEAD -- packages package-lock.json` is empty, re-checked 2026-10-21). Every row below ran on a **local** machine or a **local Anvil fork**: none is a Base Sepolia transaction, none uses Turnkey, none counts for G2.
+
+| Evidence | Code it ran | Date | Result | Kept at (owner notes, not the repository) |
+|---|---|---|---|---|
+| backend unit, real Postgres, Anvil with real contracts, mcp-server, typecheck | `38ddb4f` | 2026-10-17 (orchestrator, and again by the independent reviewer in a separate worktree) | unit 1624 passed / 13 skipped; Postgres 388 / 388; Anvil 55 passed / 3 skipped; mcp 163 / 163; clean | round note `2026-10-17-retomada-validacao.md`, review `2026-10-17-revisao-independente.md` |
+| Foundry, `contracts:code:check`, `spec:check` / `spec:lint` | `38ddb4f` | 2026-10-17; `contracts:code:check` again on 2026-10-18 | 356 passed / 0 failed / 2 skipped; `ddc6936bc680`; OK | same |
+| ERC-8183 fork suite (`npm run test:e2e:escrow-fork`, block 47 822 000) | `6e03bf2`, then **`38ddb4f`** | 2026-10-17; **2026-10-21** | 7 / 7 both times (the escrow service changed between the two: the C3f review P3s) | `c5-rehearsal-2026-10-17/`, `c5-rehearsal-2026-10-21/38ddb4f-fork-suite.log` |
+| C5 runner end to end, window 60 s (fork mode only), `WALLET_PROVIDER=local` | `38ddb4f` (worktree at `a18f620` + an untracked harness, archived) | 2026-10-18 (checked 2026-10-19 and 2026-10-21) | preflight all PASS; completed 37 / 37, contest 39 / 39, cancel 22 / 22, reconcile 16 / 16; USDC −2.0 / +1.994 / +0.006, 6 transfers, nonces 12 / 6 / 3, **0 wei unexplained** per wallet — identical to the `75796fb` / `cc0bb90` references | `c5-rehearsal-2026-10-18/` (logs, evidence JSON, `harness/` with instructions and SHA-256 sums) |
+| Runner refusals: second `setup`, `fund` after the snapshot; the `worker` field on a fork | `38ddb4f` | 2026-10-17 (rehearsal kit; it then stopped on a bug in the kit itself, not in the code) | both refused with `STOP` as designed; `worker` = `missing` (API and worker in one process on a fork — why the preflight check applies to the real run only) | `C:\Users\AAWZ 360\agentfi-c5-rehearsal\runs\38ddb4f-20261017-111752\` |
+| Runner lock (a second runner on a scenario), interruption and adoption by the outbox tag | `75796fb` / `e5ae120` (historical, §8) | 2026-10-15 | as in §8 | runner code unchanged in those paths since: `git diff e6e93bd 38ddb4f -- packages/backend/src/scripts/c5` is only the additive worker check `2a3e9c2` |
+
+The evidence JSON files do not record the code SHA: the link to `38ddb4f` comes from where the run happened and the Git state checked afterwards. Not covered by any row: Turnkey, the real 3600 s window, a worker restart during the contest hold, a real network.
+
+Historical 2026-10-15 evidence (the candidate in this table is superseded by §2):
 
 | Role | Commit | What it means |
 |---|---|---|
 | fork rehearsal of the runner (§8) | `75796fb` (final run recorded in §8), repeated on `cc0bb90` | the end-to-end run on the Anvil fork; the repeat on `cc0bb90` after the two #189 review fixes gave the same results (round handoff of 2026-10-15; its run files were not kept in the repository) |
-| candidate for the real run | `e6e93bd` | merge of #189; **same tree as `cc0bb90`** (`git rev-parse cc0bb90^{tree} e6e93bd^{tree}` → both `ce5d0b7d…`), so the second rehearsal ran exactly this code |
+| previous candidate for the real run | `e6e93bd` | merge of #189; **same tree as `cc0bb90`** (`git rev-parse cc0bb90^{tree} e6e93bd^{tree}` → both `ce5d0b7d…`), so the second rehearsal ran exactly this code |
 | re-checked afterwards | `e6e93bd` | `contracts:code:check` at merge time and again on 2026-10-15 (orchestrated round): `forge build` + `npm run contracts:code:check` → `matches the artifacts (version ddc6936bc680)`; the runtime keccak of all four artifacts equals the table below |
 
 What changed between the rehearsals and the candidate (`git diff --stat 75796fb..e6e93bd -- packages`):
@@ -71,7 +84,7 @@ version `ddc6936bc680adbddc474d63216850b5d936ec0d6ef68896e18aed6220dfbe1d`
 Check on the candidate: `cd packages/contracts && forge build && cd ../.. && npm run contracts:code:check`
 → `matches the artifacts (version ddc6936bc680)`.
 
-### Evidence by class
+### Historical evidence by class (2026-10-15)
 
 | Class | What | Commit / layer | Result |
 |---|---|---|---|
@@ -380,7 +393,7 @@ hook deployed with `DeployEscrow.s.sol`, the real backend with `WALLET_PROVIDER=
 
 The whole rehearsal was repeated on `cc0bb90` after the two #189 review fixes (stale RPC head in the
 preflight, a recorded authority failure stops the run), with the same results; that commit's tree is
-the candidate's (§2.1). With a copy of the state holding a simulated authority failure, `resolve`
+the previous candidate `e6e93bd`'s (§2.1). With a copy of the state holding a simulated authority failure, `resolve`
 answered STOP.
 
 An earlier run on the same fork (`e5ae120` + working tree) exercised the recovery paths: a runner
@@ -419,3 +432,12 @@ Found and fixed while rehearsing:
    policies, the 3600 s window, the 22–23 transactions and the stop / success criteria above.
 
 Open as of 2026-10-15 (orchestrated round): all five. None is answered by this document.
+
+Still open on 2026-10-17, and two more before C4:
+
+6. **Publishing the round:** the push and PR of `rc/2026-10-17`. Its merge on `main` is the candidate (§2), and that round had no authorisation to push.
+7. **The stuck-evaluator procedure** (plan C3g, proposal A; §6.4):
+   - **A1 (recommended):** a manual operator recovery procedure, implemented and tested on Anvil before C4. This requires persistent tracking and reconciliation of all candidate hashes/nonces, contest/resolve protection while any candidate may mine, a reviewed persistence design (possibly a migration), and a script with dry-run and explicit confirmation. It is not a runbook-only change.
+   - **A0:** keep today's alert only. A stuck key then stops the run, and the owner decides without a procedure.
+
+   Mind the deadline: after `expiresAt`, anyone can `claimRefund` a job, even when the work was delivered.
