@@ -9,7 +9,7 @@ import {
   assertSimulationUsable,
   ensureSimulationUsable,
 } from '../../services/transaction/simulation-guard.js';
-import { ExecutorService } from '../../services/transaction/executor.service.js';
+import { ExecutorService, executorBatchValue } from '../../services/transaction/executor.service.js';
 import { AGENT_EXECUTOR_ABI } from '../../abi/AgentExecutor.abi.js';
 import { PolicyService, type PolicyValidationResult } from '../../services/policy/policy.service.js';
 import { createTransactionWithVolume, settleVolumeAfterFailure } from '../../services/policy/daily-volume.js';
@@ -1959,13 +1959,15 @@ export async function transactionRoutes(fastify: FastifyInstance) {
     // F = floor(ΣV × feeBps / 10 000) on the SUM of the action values
     // (`InsufficientValueForFee` otherwise; before A6d the route sent ΣV, so
     // any batch with ≥ 334 wei of native value reverted at simulation). F is
-    // the ExecutorService's formula on FEE_BPS — the executor's immutable
+    // `executorBatchValue` on FEE_BPS — the executor's immutable
     // feeBps(), verified by S9 before anything is routed through it — never
     // the tier schedule (feeService.calculateFee: PRO 15 / ENTERPRISE 5 bps
-    // would underpay and revert).
-    const actionsValueWei = body.actions.reduce((sum, a) => sum + BigInt(a.value), 0n);
-    const executorFeeWei = executor.estimateFee(actionsValueWei);
-    const msgValueWei = actionsValueWei + executorFeeWei;
+    // would underpay and revert). One computation with the admin batch (S14).
+    const {
+      actionsValueWei,
+      feeWei: executorFeeWei,
+      msgValueWei,
+    } = executorBatchValue(body.actions.map((a) => BigInt(a.value)));
     // The batch's native outflow is what leaves the wallet: ΣV + F (plan row
     // A6d: the fee is counted). The same pricing feeds the outflow cap (D17)
     // and the DailyVolume reservation (D15 / A6) below.
