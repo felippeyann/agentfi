@@ -41,6 +41,27 @@ directory: no contract, no migration, no dependency changed.
 
 ### 2.1 Rehearsed, candidate and re-checked commits
 
+**Newer candidate, 2026-10-21 round: code `51f00a6`** (local branch `rc/2026-10-21`, not on `main`). It is `38ddb4f` plus S14 and T2:
+- S14: the admin batch sends and records the executor fee through a shared fee helper, also used by the swaps and the agent batch;
+- S14: the allowances OpenAPI describes the real response, and a comment was corrected;
+- T2: the unit test pass runs on `pool: 'forks'`.
+
+`git diff --name-only 38ddb4f 51f00a6 -- packages` touches no escrow service, C5 runner, contract or migration. Independent review: approved with P3 caveats only (owner note `2026-10-21-revisao-codigo.md`).
+
+| Evidence on `51f00a6` (2026-10-21, local) | Result |
+|---|---|
+| backend unit (now `forks`) | 1638 passed / 13 skipped (81 files) |
+| real Postgres | 388 / 388 |
+| Anvil with real contracts | 63 passed / 3 skipped (the admin batch with native value mines; the fee wallet receives F) |
+| Foundry; `contracts:code:check`; typecheck; `spec:lint` / `spec:check` | 356 / 0 / 2; `ddc6936bc680`; clean; OK (the `spec:check` drift was line endings only, and the regenerated file is identical) |
+| mcp-server | 163 / 163 |
+| ERC-8183 fork suite (Base Sepolia fork) | 7 / 7 |
+| **C5 runner end to end** | **not re-run on `51f00a6`.** The 2026-10-18 run belongs to `38ddb4f` and is **not** carried over. The escrow, runner and contract files are unchanged, but the shared fee helper is new code in the backend that both run. Repeat it on the candidate the owner chooses before C4 (the harness and instructions are in the owner's notes, `c5-rehearsal-2026-10-18/harness/`). |
+
+The owner chooses which candidate C4 deploys from:
+- `38ddb4f`: closed, with the full fork evidence below;
+- `51f00a6`: newer; it needs the runner run.
+
 **Current candidate, code `38ddb4f`** (local branch `rc/2026-10-17`; later commits touch no file under `packages/` — `git diff 38ddb4f HEAD -- packages package-lock.json` is empty, re-checked 2026-10-21). Every row below ran on a **local** machine or a **local Anvil fork**: none is a Base Sepolia transaction, none uses Turnkey, none counts for G2.
 
 | Evidence | Code it ran | Date | Result | Kept at (owner notes, not the repository) |

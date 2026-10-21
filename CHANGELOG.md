@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (2026-10-21 round: S14, T2; no migration, no contract change)
+
+- **An admin batch with native value works and records the executor fee (S14).** `POST /admin/transactions/batch` sent `value 0`. The executor's on-chain fee always applies, so any admin batch whose actions carried native value reverted with `InsufficientValueForFee`.
+  - It now sends ΣV + ⌊ΣV × 30 / 10 000⌋ and records that fee (`feeAmountWei`, `FeeEvent`), through the same helper the agent batch and the swaps use.
+  - **Behaviour change:** the operator's revenue share is now computed from that fee.
+  - **Unchanged:** the admin batch stays outside the agent's USD and daily limits, as before.
+- **OpenAPI `GET /v1/wallet/allowances`** documents the response the route actually returns: a bare array of `{ token, symbol, spender, allowance, allowanceFormatted }`.
+- **The Aave deposit route** no longer claims to send an approval. It never did: the Pool allowance comes from a batch or from outside.
+- **Windows: the backend unit suite no longer segfaults (T2).** It runs on `pool: 'forks'`, because Prisma's engine crashes in terminated worker threads. The test set is unchanged.
+
 ### Fixed (2026-10-17 round: X7, A6d, S12, C3f; no migration, no contract change)
 
 - **A retried MCP transfer cannot transfer twice (X7).** The stdio `transfer_token` tool takes an optional `idempotency_key`, and the backend `/mcp/sse` `execute_transfer` tool an optional `idempotencyKey`. Both use `pay_agent`'s pattern (16–128 characters of `[A-Za-z0-9_-]`, `INVALID_INPUT` before any request) and forward the key to the transfer route. A replay answers with the first transfer's `transactionId`. Before, both transports dropped the key, so a client retry after a timeout queued a second transfer. Reuse a key only to repeat the same request: a different body with the same key still returns the first transfer (a `409` for that case is plan X7b).
