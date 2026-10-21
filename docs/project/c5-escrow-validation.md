@@ -41,6 +41,25 @@ directory: no contract, no migration, no dependency changed.
 
 ### 2.1 Rehearsed, candidate and re-checked commits
 
+**Newest candidate: C3h round, code `67ba588`** (local branch `rc/2026-10-21b`, not on `main`). It is `51f00a6` plus the C3h settlement fixes (plan row C3h):
+- D1: no backend refund against a recorded `pay`;
+- D2: a result is recorded only from its own receipt and this job's event;
+- D3: the `provider-unpaid` alert.
+
+Contracts are unchanged (`ddc6936bc680`). Independent review: P3 only (owner note `2026-10-21-revisao-c3h.md`). **No evidence of `51f00a6` or `38ddb4f` is carried over**: everything below ran on `67ba588`, on 2026-10-21, locally.
+
+| Evidence on `67ba588` | Result |
+|---|---|
+| backend unit | 1641 passed / 13 skipped. The first run had 4 `agent.search` failures, because the suite ran before its database was migrated (a script-order issue, not the code); rerun on the migrated database: green |
+| real Postgres | 398 / 398 |
+| Anvil with real contracts | 65 passed / 3 skipped, incl. the D2 replacement tests |
+| E2E | 3 passed / 4 skipped (by design) |
+| ERC-8183 fork suite | 7 / 7 |
+| **C5 runner end to end** (fork, window 60 s, isolated Redis container and database, ports 8561 / 3171) | preflight all PASS. Completed 37 / 37, contest 39 / 39, cancel 22 / 22, reconcile 16 / 16. **0 wei unexplained**. Alerts: only the expected `contested` one; no `provider-unpaid`, `evaluator-replaced`, `settlement-unproven` or `delivery-held` on the happy, refund or cancel paths |
+| Foundry; `contracts:code:check`; typecheck; `spec:lint` / `spec:check`; mcp | 356 / 0 / 2; `ddc6936bc680`; clean; OK (`spec:check` drift = line endings only); 163 |
+
+The runner covers the paths that must stay unchanged. The defects themselves are proven by their own tests: real Postgres for D1 and D3, Anvil with the real escrow for D2. Evidence files are in the owner's notes, `c5-rehearsal-2026-10-21/67ba588-runner/`, with SHA-256 sums and no secret.
+
 **Newer candidate, 2026-10-21 round: code `51f00a6`** (local branch `rc/2026-10-21`, not on `main`). It is `38ddb4f` plus S14 and T2:
 - S14: the admin batch sends and records the executor fee through a shared fee helper, also used by the swaps and the agent batch;
 - S14: the allowances OpenAPI describes the real response, and a comment was corrected;
@@ -314,7 +333,7 @@ three scenarios in parallel for about 75–80 minutes (the contest is held 3600 
   runner keeps waiting (its hold and timing checks still apply). Unblocking the key (a
   same-nonce replacement signed with the evaluator key) is an owner decision (plan C3g, proposal
   A; A1, a manual operator script with dry-run, is the recommendation and does not exist yet).
-  Until it does, stop the run and decide. **Do not replace an evaluator transaction by hand (for example with `cast send --nonce …`) while the worker is running** (plan C3h, D2, found 2026-10-21). The worker's receipt wait follows replacements: it would record the job `REJECTED`, or paid, from another transaction's receipt while the job stays Submitted on-chain. Stop the worker first, then reconcile. Mind the deadline: after a job's `expiresAt`,
+  Until it does, stop the run and decide. **Prefer not to replace an evaluator transaction by hand (for example with `cast send --nonce …`) while the worker is running** (plan C3h, D2). Before the C3h fix the worker recorded the job `REJECTED`, or paid, from another transaction's receipt while it stayed Submitted on-chain. Since C3h it records only its own transaction with the event of that job; after a replacement it raises `evaluator-replaced` and reads the job from the chain. But after a manual 0-value cancel the worker will sign the recorded decision again with the next nonce, and a speed-up mined while the worker is stopped records the status but not the fee or feedback (persisting every candidate is A1). After `evaluator-replaced` the job still points at the replaced hash, so contest and resolve answer "pending" until the worker makes a send of its own (C3h review P3-3, closed by A1). Stop the worker first, then reconcile. Mind the deadline: after a job's `expiresAt`,
   `claimRefund` is permissionless and refunds the requester even for delivered work.
 - **A settlement send whose answer was lost** (C3f item 3): before signing another settlement,
   the worker asks again about the earlier hash and re-adopts it if it mined or a node knows it,

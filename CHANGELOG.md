@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (C3h, 2026-10-21: escrow settlement; no migration, no contract change)
+
+- **The backend no longer refunds a job against a recorded `pay` decision (D1).** After failed settlement attempts or a Q7 deferral, the expiry sweep could make AgentFi's own evaluator sign `claimRefund` (or a cancellation `reject`) on a delivered job the operator had decided to pay. Such a job is now held (`delivery-held` alert) and the decision keeps being retried. **This stops only AgentFi's key: after `expiresAt` the contract lets anyone call `claimRefund`, and the requester can still be refunded for delivered work.**
+- **A settlement is recorded only from its own transaction and this job's event (D2).** viem returns the receipt of a replacing transaction; a same-nonce replacement (a manual cancel or speed-up, another job's settlement) used to finalise the job as `REJECTED` or paid while it stayed Submitted on-chain. The receipt's hash must now be the hash sent and its event must carry the job's id; otherwise `evaluator-replaced` / `settlement-unproven` is raised and the state is read from the chain or left uncertain. `REJECTED` is never inferred from a missing `JobCompleted`.
+- **New alert `provider-unpaid` (D3)**, once per job, when a delivery accepted in time with a decision to pay ends refunded or rejected on-chain without a payment.
+
 ### Fixed (2026-10-21 round: S14, T2; no migration, no contract change)
 
 - **An admin batch with native value works and records the executor fee (S14).** `POST /admin/transactions/batch` sent `value 0`. The executor's on-chain fee always applies, so any admin batch whose actions carried native value reverted with `InsufficientValueForFee`.
