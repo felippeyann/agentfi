@@ -3431,9 +3431,15 @@ async function rebroadcastLostHead(deps: Erc8183Deps, chainId: number, evaluator
 
   let refusal: string | null = null;
   let sent = 0;
-  const signer = deps.evaluatorSigner(chainId) as EvaluatorSigner & Partial<Pick<EvaluatorA1Signer, 'sendRaw'>>;
+  let signer: (EvaluatorSigner & Partial<Pick<EvaluatorA1Signer, 'sendRaw'>>) | null = null;
+  try {
+    signer = deps.evaluatorSigner(chainId) as EvaluatorSigner & Partial<Pick<EvaluatorA1Signer, 'sendRaw'>>;
+  } catch (err) {
+    deps.logger.warn({ chainId, err: errorMessage(err) }, 'ERC-8183 identical rebroadcast impossible — no evaluator signer in this process');
+  }
   const lanes = (deps.evaluatorLanes ?? deps.lanes) as Partial<LeaseLock> | undefined;
-  if (headRows.length > 1) refusal = 'OTHER_LIVE_CANDIDATE: more than one live candidate at the head nonce — no automatic rebroadcast (the recovery script decides)';
+  if (!signer) refusal = 'NO_REBROADCAST: no evaluator signer in this process';
+  else if (headRows.length > 1) refusal = 'OTHER_LIVE_CANDIDATE: more than one live candidate at the head nonce — no automatic rebroadcast (the recovery script decides)';
   else if (typeof signer.sendRaw !== 'function' || !lanes || typeof lanes.acquire !== 'function') refusal = 'NO_REBROADCAST: this process has no A1 signer or no evaluator lane';
   else {
     let lease: LaneLease | null = null;

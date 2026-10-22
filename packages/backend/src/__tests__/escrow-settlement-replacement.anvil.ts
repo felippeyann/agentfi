@@ -119,6 +119,8 @@ async function submittedOnChain(): Promise<{ onChainJobId: bigint; expiredAt: bi
 
 async function wipe(): Promise<void> {
   const agents = { name: { startsWith: NAME_PREFIX } };
+  // A1 (R2-P3-8): candidate rows reference Job with ON DELETE RESTRICT — deleted first.
+  await db.evaluatorTransaction.deleteMany({ where: { job: { OR: [{ requester: agents }, { provider: agents }] } } });
   await db.job.deleteMany({ where: { OR: [{ requester: agents }, { provider: agents }] } });
   await db.agent.deleteMany({ where: agents });
 }
