@@ -535,6 +535,39 @@ describeDb('evaluator ledger on Postgres (migration 0026)', () => {
       await expect(backfillLegacyCandidate(db, { chainId: CHAIN, evaluator: ev, jobId: other, txHash: hash, action: 'COMPLETE', tx: null })).rejects.toMatchObject({ code: 'TX_HASH_REUSED' });
     });
 
+    it('Rechecagem R-P3-a: promoting a LEGACY row (same hash re-signed) passes NONCE_OCCUPIED and R2-P3-3 like a new candidate, excluding itself', async () => {
+      const ev = newEvaluator();
+      // (1) the nonce is occupied by a live candidate of ANOTHER job → refused, the legacy row untouched
+      const job = await newJob();
+      const legacy = newHash();
+      await backfillLegacyCandidate(db, { chainId: CHAIN, evaluator: ev, jobId: job, txHash: legacy, action: 'COMPLETE', decision: 'pay', tx: null });
+      await db.job.update({ where: { id: job }, data: { settleTxHash: legacy } });
+      const other = await newJob();
+      await stampOriginal(ev, other, 30, new Date());
+      const stamp = { id: job, expectedSettleTxHash: legacy, setSettleTxHash: true, stampAttempt: true };
+      await expect(insertCandidateWithJobStamp(db, { candidate: original(ev, job, 30, { txHash: legacy }), job: stamp })).rejects.toMatchObject({ code: 'NONCE_OCCUPIED' });
+      expect(await db.evaluatorTransaction.findFirstOrThrow({ where: { txHash: legacy } })).toMatchObject({ nonce: null, kind: 'LEGACY' });
+      // (2) a live candidate of the same job carrying ANOTHER decision → LIVE_OTHER_DECISION
+      const job2 = await newJob();
+      const legacy2 = newHash();
+      await backfillLegacyCandidate(db, { chainId: CHAIN, evaluator: ev, jobId: job2, txHash: legacy2, action: 'COMPLETE', decision: 'pay', tx: null });
+      await insertCandidateWithJobStamp(db, {
+        candidate: original(ev, job2, 31, { action: 'REJECT', decision: 'refund', calldata: toHex(`reject:${job2}`) }),
+        job: { id: job2, expectedSettleTxHash: null, setSettleTxHash: true, stampAttempt: true },
+      });
+      const settle2 = (await db.job.findUniqueOrThrow({ where: { id: job2 } })).settleTxHash;
+      await expect(insertCandidateWithJobStamp(db, { candidate: original(ev, job2, 32, { txHash: legacy2 }), job: { id: job2, expectedSettleTxHash: settle2, setSettleTxHash: true, stampAttempt: true } }))
+        .rejects.toMatchObject({ code: 'LIVE_OTHER_DECISION' });
+      // (3) nothing in the way → promoted (the row itself is not "another live candidate")
+      const job3 = await newJob();
+      const legacy3 = newHash();
+      await backfillLegacyCandidate(db, { chainId: CHAIN, evaluator: ev, jobId: job3, txHash: legacy3, action: 'COMPLETE', decision: 'pay', tx: null });
+      await db.job.update({ where: { id: job3 }, data: { settleTxHash: legacy3 } });
+      const r = await insertCandidateWithJobStamp(db, { candidate: original(ev, job3, 33, { txHash: legacy3 }), job: { id: job3, expectedSettleTxHash: legacy3, setSettleTxHash: true, stampAttempt: true } });
+      expect(r.inserted).toBe(false);
+      expect(await db.evaluatorTransaction.findUniqueOrThrow({ where: { id: r.id } })).toMatchObject({ nonce: 33, kind: 'LEGACY', calldataHash: keccak256(COMPLETE_DATA(job3)) });
+    });
+
     it('a foreign transaction is recorded once as EXTERNAL / RECONCILE, already mined', async () => {
       const ev = newEvaluator();
       const input = {

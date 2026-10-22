@@ -363,7 +363,11 @@ export interface EscrowAlert {
     /** A1 §4.3: a nonce of the evaluator key was consumed by a transaction no ledger row covers (a manual send, another environment, a compromised key). */
     | 'evaluator-nonce-foreign'
     /** A1 §4.2: the ledger and the chain disagree in a way nothing may be written for (more than one receipt for a nonce). */
-    | 'evaluator-ledger-conflict';
+    | 'evaluator-ledger-conflict'
+    /** Rechecagem R-P3-b: a nonce consumed without a receipt while a node knows our candidate, persisting past the send-lost / stuck threshold. */
+    | 'evaluator-proof-uncertain'
+    /** A1 plan §3: the recovery script refused an execution (a cap, the budget, the reserve, a replacement limit) — escalate to the owner. */
+    | 'evaluator-recovery-refused';
   message: string;
   jobId?: string;
   chainId?: number | null;
@@ -475,6 +479,11 @@ function alertText(value: string | null | undefined, max = ALERT_TEXT_MAX_CHARS)
  * Returns whether the alert was delivered (true without a channel: the log
  * line is the alert).
  */
+/** The sanitized alert channel, for the A1 recovery script (same rules as every orchestrator alert). */
+export function raiseEscrowAlert(deps: Erc8183Deps, alert: EscrowAlert): Promise<boolean> {
+  return raiseAlert(deps, alert);
+}
+
 async function raiseAlert(deps: Erc8183Deps, alert: EscrowAlert): Promise<boolean> {
   const ctx = sanitizeContextFromEnv();
   const clean: EscrowAlert = {
@@ -3337,6 +3346,7 @@ export async function reconcileEvaluatorCandidates(deps: Erc8183Deps, chainId: n
       }
       case 'uncertain': {
         summary.uncertain++;
+        if (res.reason === 'KNOWN_WITHOUT_RECEIPT') await watchKnownWithoutReceipt(deps, chainId, evaluator, nonce, res.detail ?? null, views);
         if (res.reason === 'MULTIPLE_RECEIPTS' || res.reason === 'PROOF_LEVEL_REORG') {
           await raiseEvaluatorKeyAlert(deps, chainId, evaluator, `evaluator-ledger-conflict:${nonce}:${res.reason}`, {
             kind: res.reason === 'PROOF_LEVEL_REORG' ? 'evaluator-reorg' : 'evaluator-ledger-conflict',
@@ -3362,6 +3372,51 @@ export async function reconcileEvaluatorCandidates(deps: Erc8183Deps, chainId: n
   await clearRecordedStamps(deps, chainId);
   for (const jobId of touchedJobs) if (await enqueueCandidateJob(deps, jobId)) summary.enqueued++;
   return summary;
+}
+
+/**
+ * Rechecagem R-P3-b: a nonce consumed with no receipt while a node KNOWS our candidate is "uncertain" (a read
+ * straddling a block). Normally the next pass sees the receipt; when it persists — a node keeps serving a
+ * stale view, or keeps "knowing" a transaction the others do not have — the operator is told
+ * (`evaluator-proof-uncertain`) once past the send-lost / stuck threshold, with the nonce, the hash and the
+ * nodes that disagree. The first sight is persisted in `EvaluatorChainState.lastAlertAt` under an
+ * `observed:` key (written once), so the clock survives restarts; the alert itself is marked delivered only
+ * after `raiseAlert` delivered it.
+ */
+async function watchKnownWithoutReceipt(
+  deps: Erc8183Deps,
+  chainId: number,
+  evaluator: Address,
+  nonce: number,
+  txHash: string | null,
+  views: readonly NodeView[],
+): Promise<void> {
+  try {
+    const ledger = ledgerOf(deps);
+    const now = nowOf(deps);
+    const seenKey = `observed:evaluator-proof-uncertain:${nonce}:${(txHash ?? '').toLowerCase()}`;
+    const state = await ledger.readChainState(chainId, evaluator);
+    let since = state?.lastAlertAt[seenKey];
+    if (!since) {
+      await ledger.recordAlertDelivered(chainId, evaluator, seenKey, now);
+      since = now;
+    }
+    const after = a1Settings(deps).sendLostAlertAfterMs ?? EVALUATOR_STUCK_ALERT_AFTER_MS;
+    if (now.getTime() - since.getTime() < after) return;
+    const h = (txHash ?? '').toLowerCase();
+    const nodes = views.map((v) => `${v.node}: ${!v.ok ? 'error' : `latest ${v.nonceLatest ?? '?'}, ${v.known?.[h] ? 'knows it' : 'does not know it'}, ${v.receipts?.[h] ? 'receipt' : 'no receipt'}`}`);
+    await raiseEvaluatorKeyAlert(deps, chainId, evaluator, `evaluator-proof-uncertain:${nonce}`, {
+      kind: 'evaluator-proof-uncertain',
+      chainId,
+      message:
+        `Evaluator nonce ${nonce} on chain ${chainId}: consumed with no receipt for candidate ${txHash ?? '?'} while a node still KNOWS it, ` +
+        `since ${since.toISOString()} — nothing is concluded (neither mined nor dead); its job's gates stay closed. Nodes: ${nodes.join(' | ')}. ` +
+        'Check the RPC nodes (a lagging or inconsistent one); remove a broken node from the configured candidates.',
+      details: { nonce, txHash, since: since.toISOString(), nodes },
+    }, { intervalMs: SETTLEMENT_FAILURE_ALERT_INTERVAL_MS });
+  } catch (err) {
+    deps.logger.warn({ chainId, nonce, err: errorMessage(err) }, 'ERC-8183 persistent uncertain nonce not tracked this tick');
+  }
 }
 
 /** §5.1: `Job.settleTxHash` points to the candidate that mined (conditional on the value read). */

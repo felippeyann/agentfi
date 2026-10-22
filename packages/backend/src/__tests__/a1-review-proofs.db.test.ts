@@ -81,7 +81,7 @@ function nodeRead(opts: { nonceLatest: number; nonceAtTag: number; receipt: bool
   };
 }
 
-function deps(read: Erc8183Deps['readNodeViews'], alerts: EscrowAlert[]): Erc8183Deps {
+function deps(read: Erc8183Deps['readNodeViews'], alerts: EscrowAlert[], now?: () => Date, failAlert = false): Erc8183Deps {
   const logger = { info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined };
   return {
     db,
@@ -96,8 +96,10 @@ function deps(read: Erc8183Deps['readNodeViews'], alerts: EscrowAlert[]): Erc818
     finalize: async () => undefined,
     logger: logger as never,
     alert: (a: EscrowAlert) => {
+      if (failAlert) throw new Error('channel down');
       alerts.push(a);
     },
+    ...(now ? { now } : {}),
     readNodeViews: read,
     proofTag: 'safe',
     evaluatorA1: { leaseMinRemainingMs: 30_000, criticalSectionMaxMs: 60_000, proofStalledAlertAfterMs: null },
@@ -172,6 +174,43 @@ describe('A1 review R-P2-1 — a straddled per-node read kills our own mined can
     const row = await db.evaluatorTransaction.findUniqueOrThrow({ where: { id } });
     expect(row).toMatchObject({ status: 'MINED_SUCCESS', proofLevel: 'proof', minedBlockHash: BLOCK_HASH.toLowerCase() });
     expect(alerts.map((a) => a.kind)).not.toContain('evaluator-nonce-foreign');
+  });
+
+  it('Rechecagem R-P3-b: a persistent KNOWN_WITHOUT_RECEIPT is alerted past the threshold (persisted first sight), marked delivered only after delivery', async () => {
+    if (!ready) return;
+    const h3 = toHex(randomBytes(32)) as Hex;
+    const { id } = await insertCandidateWithJobStamp(db, {
+      candidate: {
+        chainId: CHAIN, evaluator, nonce: 11, jobId: null, kind: 'ORIGINAL', action: 'COMPLETE',
+        toAddress: getAddress(toHex(randomBytes(20))), calldata: '0x12345678', gasLimit: 500_000n, maxFeePerGas: 10n, maxPriorityFeePerGas: 1n,
+        txHash: h3, origin: 'WORKER',
+      },
+    });
+    await markAnswered(db, id, 'SENT');
+    const read = async (_c: number, _e: Address, hashes: readonly Hex[]): Promise<EvaluatorNodeRead[]> => {
+      const known: Record<Hex, boolean> = {};
+      const receipts: EvaluatorNodeRead['receipts'] = {};
+      for (const h of hashes) {
+        known[h.toLowerCase() as Hex] = h.toLowerCase() === h3.toLowerCase();
+        receipts[h.toLowerCase() as Hex] = null;
+      }
+      return [{ node: '#0 stale', index: 0, ok: true, nonceLatest: 12, noncePending: 12, nonceAtTag: 12, proofBlockNumber: 90n, known, receipts }];
+    };
+    const alerts: EscrowAlert[] = [];
+    let t = Date.now();
+    const kinds = () => alerts.map((a) => a.kind).filter((k) => k === 'evaluator-proof-uncertain');
+    await reconcileEvaluatorCandidates(deps(read, alerts, () => new Date(t)), CHAIN); // first sight: no alert
+    expect(kinds()).toHaveLength(0);
+    t += 11 * 60_000; // past the 10-minute threshold — the channel fails: not marked delivered
+    await reconcileEvaluatorCandidates(deps(read, alerts, () => new Date(t), true), CHAIN);
+    const state = await db.evaluatorChainState.findFirstOrThrow({ where: { chainId: CHAIN, evaluator } });
+    expect(Object.keys(state.lastAlertAt as object).some((k) => k === 'evaluator-proof-uncertain:11')).toBe(false);
+    await reconcileEvaluatorCandidates(deps(read, alerts, () => new Date(t)), CHAIN); // delivered now
+    expect(kinds()).toHaveLength(1);
+    expect(alerts.find((a) => a.kind === 'evaluator-proof-uncertain')!.message).toMatch(/#0 stale: latest 12, knows it, no receipt/);
+    await reconcileEvaluatorCandidates(deps(read, alerts, () => new Date(t + 60_000)), CHAIN); // not again within the hour
+    expect(kinds()).toHaveLength(1);
+    expect(await db.evaluatorTransaction.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'SENT' }); // nothing concluded
   });
 
   it('(a) pure rule: nonce consumed, no receipt, a node KNOWS our live candidate → uncertain (never consumed-foreign)', () => {

@@ -290,6 +290,21 @@ export async function insertCandidateWithJobStamp(
     // job re-signs the SAME decision with the same nonce and fees gets the SAME hash — the same signed bytes
     // (hash = keccak256(raw)). The row becomes a normal one (nonce, tx data, raw), never a conflict.
     if (existing && existing.kind === 'LEGACY' && existing.nonce === null && existing.jobId === c.jobId && existing.evaluator === evaluator) {
+      // Rechecagem R-P3-a: the promotion gives the row a nonce and a decision, so it passes the same checks as a
+      // new candidate — nonce occupancy (R2-P2-3) and R2-P3-3 — excluding the row itself.
+      const self = existing.id;
+      const liveAtNonce = await tx.evaluatorTransaction.findMany({ where: { chainId: c.chainId, evaluator, nonce, status: { in: LIVE }, id: { not: self } } });
+      if (liveAtNonce.length > 0) throw new CandidateConflictError('NONCE_OCCUPIED', `nonce ${nonce} has a live candidate (${liveAtNonce[0]!.txHash})`);
+      if (c.jobId !== null) {
+        const liveOfJob = await tx.evaluatorTransaction.findMany({ where: { jobId: c.jobId, status: { in: LIVE }, id: { not: self } } });
+        for (const l of liveOfJob) {
+          if (l.nonce === null) continue;
+          if (l.kind === 'CANCEL') throw new CandidateConflictError('LIVE_CANCEL', `live cancel ${l.txHash} of job ${c.jobId}`);
+          if (l.calldataHash !== calldataHash || (l.decision ?? null) !== (c.decision ?? null)) {
+            throw new CandidateConflictError('LIVE_OTHER_DECISION', `live candidate ${l.txHash} of job ${c.jobId} carries another decision`);
+          }
+        }
+      }
       existing = await tx.evaluatorTransaction.update({
         where: { id: existing.id },
         data: {
@@ -629,6 +644,29 @@ export async function recordExternalCandidate(db: Db, input: {
   });
   const row = await db.evaluatorTransaction.findUniqueOrThrow({ where: { chainId_txHash: { chainId: input.chainId, txHash } }, select: { id: true } });
   return { id: row.id, inserted: res.count === 1 };
+}
+
+/** Marker written into the note of an EXTERNAL row the operator acknowledged (§4.3, `--acknowledge-foreign`). */
+export const FOREIGN_ACK_MARKER = '[acknowledged-foreign]';
+
+/** EXTERNAL rows of an evaluator key not yet acknowledged by an operator (the recovery script refuses while any exists). */
+export async function unacknowledgedExternal(db: Client, chainId: number, evaluator: string): Promise<LedgerCandidate[]> {
+  const rows = await db.evaluatorTransaction.findMany({
+    where: { chainId, evaluator: normAddress(evaluator), kind: 'EXTERNAL' },
+    orderBy: [{ nonce: 'asc' }, { createdAt: 'asc' }],
+  });
+  return rows.filter((r) => !(r.note ?? '').includes(FOREIGN_ACK_MARKER)).map(toCandidate);
+}
+
+/** §4.3: the operator acknowledges one EXTERNAL row (by hash). Idempotent; true when the row exists. */
+export async function acknowledgeExternal(db: Client, chainId: number, txHash: string, operator: string, at: Date = new Date()): Promise<boolean> {
+  const hash = normHash(txHash, 'txHash');
+  const row = await db.evaluatorTransaction.findUnique({ where: { chainId_txHash: { chainId, txHash: hash } } });
+  if (!row || row.kind !== 'EXTERNAL') return false;
+  if ((row.note ?? '').includes(FOREIGN_ACK_MARKER)) return true;
+  const note = `${row.note ?? ''} ${FOREIGN_ACK_MARKER} by ${operator} at ${at.toISOString()}`.trim().slice(0, 1000);
+  await db.evaluatorTransaction.update({ where: { id: row.id }, data: { note } });
+  return true;
 }
 
 // ── §10-2: backfill of in-flight legacy rows ─────────────────────────────────
