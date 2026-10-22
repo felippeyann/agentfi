@@ -437,6 +437,16 @@ async function preflightChecks(cfg: Config, state: State | null, keys: AgentKeys
     const headAge = BigInt(Math.floor(Date.now() / 1000)) - (await blockTimestamp(cfg));
     checks.push(check('RPC head is current', `≤ ${MAX_HEAD_AGE_SECONDS} s behind the wall clock`, `${headAge} s`, headAge <= BigInt(MAX_HEAD_AGE_SECONDS)));
   }
+  // A1 review P2-2 / owner decision D-g: the proof tag the backend finalizes evaluator settlements at. Read
+  // from THIS shell's environment (run the runner with the backend's .env): it must match the backend's.
+  // Testnet: shown (safe = the DB settles minutes after the receipt, latest = at once). Fork (Anvil): must be
+  // set explicitly to latest — Anvil's safe head does not advance on its own (the backend refuses to boot).
+  const proofTag = (process.env['EVALUATOR_PROOF_TAG'] ?? '').trim();
+  if (cfg.mode === 'fork') {
+    checks.push(check('EVALUATOR_PROOF_TAG on a fork (set explicitly)', 'latest', proofTag || '(unset → safe: never advances on Anvil)', proofTag.toLowerCase() === 'latest'));
+  } else {
+    checks.push(check('EVALUATOR_PROOF_TAG in use (D-g, informational)', 'latest | safe | finalized | latest-K', proofTag || '(unset → backend default safe)', true));
+  }
 
   const [escrowCode, hookCode] = await Promise.all([c.getCode({ address: cfg.escrow }), c.getCode({ address: cfg.hook })]);
   checks.push(check('escrow runtime code = this build', 'match', codeIdentityProblem('AgentJobEscrow', escrowCode) ?? 'match'));

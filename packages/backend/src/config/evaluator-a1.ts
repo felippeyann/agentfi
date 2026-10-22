@@ -132,6 +132,26 @@ export function parseRecoveryCaps(src: Source, chainId: number): RecoveryCapsPar
   return { kind: 'ok', caps };
 }
 
+/**
+ * A1 review P2-2: a `safe` / `finalized` proof tag on an Anvil node (local chain or fork) never advances on
+ * its own — Anvil mines only when a transaction arrives and reports `safe = latest − 32` /
+ * `finalized = latest − 64` — so every A3 finalization and every proof-depth gate would wait forever.
+ * Refused at boot UNLESS `EVALUATOR_PROOF_TAG` was set explicitly (the operator's choice, e.g. `latest`
+ * for a rehearsal). The `safe` default stays for real chains; which tag production uses is the owner's
+ * decision D-g. Returns the refusal text, or null.
+ */
+export function proofTagNodeProblem(input: { chainId: number; proofTag: EvaluatorProofTag; explicit: boolean; clientVersion: string | null }): string | null {
+  if (input.explicit) return null;
+  if (input.proofTag !== 'safe' && input.proofTag !== 'finalized') return null;
+  if (!input.clientVersion || !/anvil/i.test(input.clientVersion)) return null;
+  return (
+    `FATAL: chain ${input.chainId} is served by an Anvil node (${input.clientVersion}) and EVALUATOR_PROOF_TAG is not set: ` +
+    `the default proof tag "${String(input.proofTag)}" never advances on Anvil (it mines only on demand; safe = latest − 32), ` +
+    'so no evaluator settlement would ever be finalized in the DB and every contest / resolve would wait. Set ' +
+    'EVALUATOR_PROOF_TAG explicitly (e.g. EVALUATOR_PROOF_TAG=latest for a local / fork rehearsal), or run Anvil with --block-time.'
+  );
+}
+
 /** `EVALUATOR_PROOF_TAG`: `latest | safe | finalized | latest-K` (K a non-negative integer of blocks). Null when malformed. */
 export function parseProofTag(raw: string): EvaluatorProofTag | null {
   const v = raw.trim().toLowerCase();

@@ -558,6 +558,9 @@ export function backendEnv(ctx: EscrowForkContext, overrides: Record<string, str
     [`REPUTATION_HOOK_ADDRESS_${ctx.chainId}`]: ctx.hook,
     ESCROW_EVALUATOR_PRIVATE_KEY: ctx.evaluatorPrivateKey,
     ESCROW_EVALUATION_DELAY_SECONDS: '0',
+    // A1 review P2-2: Anvil's `safe` head never advances on its own (it mines on demand): the fork stack
+    // proves evaluator outcomes at `latest`, set EXPLICITLY (the backend refuses the implicit `safe` on Anvil).
+    EVALUATOR_PROOF_TAG: 'latest',
     BACKEND_PUBLIC_URL: url,
     // Agents poll their jobs; the FREE default (30/min) is for the public API.
     RATE_LIMIT_FREE: '6000',

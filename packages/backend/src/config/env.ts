@@ -568,6 +568,9 @@ export function evaluatorRecoveryCaps(chainId: number): RecoveryCaps | null {
 /** C3g-A1 D-g: the proof tag (EVALUATOR_PROOF_TAG). */
 export const evaluatorProofTag: EvaluatorProofTag = proofTag!;
 
+/** A1 review P2-2: whether EVALUATOR_PROOF_TAG was set explicitly (the `safe` default is refused on an Anvil node). */
+export const evaluatorProofTagExplicit: boolean = (process.env['EVALUATOR_PROOF_TAG'] ?? '').trim() !== '';
+
 /** Fastify `trustProxy` derived from TRUST_PROXY (validated above). */
 export const trustProxySetting: TrustProxySetting = (() => {
   const result = parseTrustProxy(parsed.data.TRUST_PROXY);
