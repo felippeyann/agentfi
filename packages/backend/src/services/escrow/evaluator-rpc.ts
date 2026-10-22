@@ -140,10 +140,16 @@ async function readOneNode(
       proofBlockNumber = finalized.number;
       nonceAtTagRead = client.getTransactionCount({ address: evaluator, blockNumber: finalized.number });
     }
-    const [nonceLatest, noncePending, nonceAtTag, perHash] = await Promise.all([
+    // A1 review P2-1: the nonces are read BEFORE the receipts / "known" of this node, never in parallel with
+    // them. A transaction that mines between the two reads then shows as "receipt present" (with a nonce
+    // read before it), never as "nonce consumed and no receipt" — which the rules would read as a foreign
+    // transaction consuming the nonce.
+    const [nonceLatest, noncePending, nonceAtTag] = await Promise.all([
       client.getTransactionCount({ address: evaluator, blockTag: 'latest' }),
       client.getTransactionCount({ address: evaluator, blockTag: 'pending' }),
       nonceAtTagRead,
+    ]);
+    const [perHash] = await Promise.all([
       Promise.all(
         hashes.map(async (hash) => {
           const [known, receipt] = await Promise.all([

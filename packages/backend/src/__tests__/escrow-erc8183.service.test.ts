@@ -334,6 +334,8 @@ function makeDeps(
     alert,
     // A1: the candidate ledger (in memory: this suite's Prisma is a mock).
     evaluatorLedger: inMemoryEvaluatorLedger((args) => store.dbMock.job.updateMany(args as never)),
+    // A1 review P3-4: no evaluator send without the evaluator lane (fail closed) — the in-memory lane lock.
+    lanes: new InMemoryLaneLock(),
     // A1: one RPC node. `nodes.mined` = the key's `latest` (= proof) transaction count — by default every
     // nonce this suite signs is consumed; null = the node cannot be read. Receipts come from the read
     // client's `getTransactionReceipt` mock, "known" from `isKnownTransaction` (else: has a receipt).
@@ -2332,5 +2334,47 @@ describe('C3g-A1 (decision A3) — the DB finalizes only at the proof tag', () =
     safeStatus = CHAIN_JOB_STATUS.Completed;
     expect(await processSettlementJob(ctx.deps, settleJob(3))).toMatchObject({ outcome: 'reconciled', onChainStatus: 'COMPLETED' });
     expect(ctx.finalize).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('A1 core review fixes', () => {
+  it('P2-3: a speed-up mined during the receipt wait while the proof tag lags → no-op (no throw, no retry storm), nothing finalized, the job is not handed back', async () => {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    ctx.deps.proofTag = 'safe';
+    let latestStatus: number = CHAIN_JOB_STATUS.Submitted;
+    ctx.readContract.mockImplementation((async (p: { functionName: string; blockTag?: string }) => {
+      if (p.functionName === 'getJob') return { status: p.blockTag === 'safe' ? CHAIN_JOB_STATUS.Submitted : latestStatus, budget: BUDGET };
+      if (p.functionName === 'token') return USDC;
+      throw new Error(`unexpected read ${p.functionName}`);
+    }) as never);
+    const SPEED_UP = ('0x' + '5e'.repeat(32)) as Hex;
+    ctx.signer.waitForTransactionReceipt.mockImplementation((async () => {
+      latestStatus = CHAIN_JOB_STATUS.Completed; // the operator's speed-up of the same decision mined instead
+      return { status: 'success', logs: completeLogs('written'), transactionHash: SPEED_UP, replacedReason: 'repriced' };
+    }) as never);
+    const job = settleJob(3); // the LAST attempt: a throw would hand the job back and alert settlement-failed
+    const result = await processSettlementJob(ctx.deps, job);
+    expect(result).toMatchObject({ outcome: 'noop' });
+    expect(ctx.finalize).not.toHaveBeenCalled();
+    expect(ctx.jobs.get('job-1')).toMatchObject({ onChainStatus: 'SETTLING' });
+    expect(ctx.alert.mock.calls.map(([a]) => (a as EscrowAlert).kind)).not.toContain('settlement-failed');
+  });
+
+  it('P3-4: no evaluator lane wired → nothing is signed or sent (fail closed)', async () => {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    delete (ctx.deps as { lanes?: unknown }).lanes;
+    await expect(processSettlementJob(ctx.deps, settleJob())).rejects.toThrow(/no evaluator lane/);
+    expect(ctx.signer.writeContract).not.toHaveBeenCalled();
+    expect(await ctx.deps.evaluatorLedger!.candidatesForJob('job-1')).toEqual([]);
+  });
+
+  it('P3-2: P17 counts from the moment the lane was OBTAINED — a long wait for a busy lane does not refuse the send', async () => {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    const lanes = new InMemoryLaneLock();
+    ctx.deps.lanes = lanes;
+    ctx.deps.evaluatorA1 = { leaseMinRemainingMs: 1, criticalSectionMaxMs: 40 };
+    const busy = await lanes.acquire(`${CHAIN_ID}:${EVALUATOR.toLowerCase()}`); // the recovery script holds the lane
+    setTimeout(() => void busy.release(), 80); // longer than the critical-section maximum
+    expect(await processSettlementJob(ctx.deps, settleJob())).toMatchObject({ outcome: 'settled' });
   });
 });

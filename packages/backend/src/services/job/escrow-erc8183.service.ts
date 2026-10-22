@@ -2133,8 +2133,15 @@ async function awaitOwnReceipt(
 async function reconcileFromChainOrThrow(deps: Erc8183Deps, job: EscrowJobRow, err: Error, settledBy: Hex | null = null): Promise<SettlementResult> {
   const chain = await tryReadChainJob(deps, job);
   if (chain && chain.status >= CHAIN_JOB_STATUS.Completed) {
-    const onChainStatus = await reconcileTerminal(deps, job, chain.status, { settledBy });
-    return { outcome: 'reconciled', onChainStatus };
+    try {
+      const onChainStatus = await reconcileTerminal(deps, job, chain.status, { settledBy });
+      return { outcome: 'reconciled', onChainStatus };
+    } catch (awaiting) {
+      // A1 review P2-3 (A3): terminal at latest, not yet at the proof tag — a no-op like the other A3 call
+      // sites: no retry storm, no hand-back of a job the chain already settled, no "settlement-failed".
+      if (awaiting instanceof SettlementAwaitingProofError) return { outcome: 'noop', reason: awaiting.message };
+      throw awaiting;
+    }
   }
   throw err;
 }
@@ -2808,12 +2815,20 @@ async function sendEvaluatorTx(
   // Assigned by the broadcast hook (a closure): typed so the checks below are not narrowed away.
   let recorded = null as { id: string; hash: Hex } | null;
   const lanes = (deps.evaluatorLanes ?? deps.lanes) as Partial<LeaseLock> | undefined;
-  const lease: LaneLease | null = lanes && typeof lanes.acquire === 'function' ? await lanes.acquire(evaluatorLaneKey(chainId, signer.address)) : null;
+  // A1 review P3-4: never sign or send an evaluator transaction outside the evaluator lane (fail closed).
+  if (!lanes || typeof lanes.acquire !== 'function') {
+    throw new Error('ERC-8183 evaluator send refused: no evaluator lane lock (LeaseLock) is wired — nothing is signed or sent without the lane');
+  }
+  const lease: LaneLease = await lanes.acquire(evaluatorLaneKey(chainId, signer.address));
+  // A1 review P3-2: the critical section (P17) is measured from the moment the lane was OBTAINED, not from
+  // the start of the wait (the lease's own deadline is still taken before its SET: `assertHeld` stays strict).
+  const leaseObtainedAt = Date.now();
   let sendError: unknown = null;
   let sent = false;
   try {
     await signer.writeContract(params, {
-      ...(lease ? { lease, minLeaseMs: settings.leaseMinRemainingMs } : {}),
+      lease,
+      minLeaseMs: settings.leaseMinRemainingMs,
       // R2-P2-3: never sign on top of a live candidate's nonce (a lagging `pending`).
       chooseNonce: async (pending: number) => chooseNonce(pending, await ledger.liveNonces(chainId, signer.address)),
       onBeforeBroadcast: async (signedTxHash: Hex, tx?: PreparedEvaluatorTx) => {
@@ -2821,10 +2836,8 @@ async function sendEvaluatorTx(
         // signer simulated, estimated and signed: asked again before the
         // record, so a refusal leaves nothing recorded and nothing sent.
         assertEscrowConfigVerified(deps, chainId);
-        if (lease) {
-          const elapsed = Date.now() - lease.acquiredAt;
-          if (elapsed > settings.criticalSectionMaxMs) throw new EvaluatorCriticalSectionError(elapsed, settings.criticalSectionMaxMs);
-        }
+        const elapsed = Date.now() - leaseObtainedAt;
+        if (elapsed > settings.criticalSectionMaxMs) throw new EvaluatorCriticalSectionError(elapsed, settings.criticalSectionMaxMs);
         if (!tx) throw new Error('evaluator signer did not hand over the signed transaction — nothing may be broadcast without its ledger row');
         const { id } = await ledger.insertCandidateWithJobStamp({
           candidate: {
@@ -2863,7 +2876,7 @@ async function sendEvaluatorTx(
     sendError = err;
   } finally {
     // The lane covers the nonce choice up to the send's answer — never the receipt wait.
-    if (lease) await lease.release();
+    await lease.release();
   }
   if (sendError !== null || !sent) {
     if (recorded !== null) await resolveFailedSend(deps, { jobId: job.id, chainId, hash: recorded.hash, candidateId: recorded.id, err: sendError });
@@ -3236,12 +3249,32 @@ export async function reconcileEvaluatorCandidates(deps: Erc8183Deps, chainId: n
     switch (res.kind) {
       case 'winner': {
         const winner = rows.find((c) => c.id === res.winnerId)!;
+        // A1 review P2-1 (b): a row marked DEAD at `latest` whose own receipt is now seen by consensus was
+        // killed by a read that straddled a block (or a lagging node): corrected like a reorg — back to live,
+        // then resolved as mined below. A row DEAD at `proof` stays immutable (alerted, nothing written).
+        let corrected = false;
+        if (winner.status === 'DEAD') {
+          if (winner.proofLevel !== 'latest' || !(await ledger.revertForReorg(winner.id))) {
+            summary.uncertain++;
+            await raiseEvaluatorKeyAlert(deps, chainId, evaluator, `evaluator-ledger-conflict:${nonce}:dead-with-receipt`, {
+              kind: 'evaluator-ledger-conflict',
+              chainId,
+              message:
+                `Evaluator nonce ${nonce} on chain ${chainId}: candidate ${winner.txHash} is recorded DEAD at the proof depth but every node ` +
+                'returns its receipt — nothing is written; operator check required.',
+              details: { nonce, txHash: winner.txHash, jobId: winner.jobId },
+            }, { intervalMs: SETTLEMENT_FAILURE_ALERT_INTERVAL_MS });
+            break;
+          }
+          corrected = true;
+          deps.logger.warn({ chainId, nonce, txHash: winner.txHash, jobId: winner.jobId }, 'ERC-8183 evaluator candidate recorded DEAD at latest has its receipt now — corrected to mined');
+        }
         const moved = await ledger.markResolved(winner.id, res.receipt.status === 'success' ? 'MINED_SUCCESS' : 'MINED_REVERTED', {
           level: res.proofLevel,
           blockNumber: res.receipt.blockNumber,
           blockHash: res.receipt.blockHash,
         });
-        const wasLive = isLiveStatus(winner.status);
+        const wasLive = isLiveStatus(winner.status) || corrected;
         // A3: an outcome reaching the proof depth (from live, or upgraded from `latest`) lets its job be finalized.
         const nowProven = moved && res.proofLevel === 'proof' && winner.proofLevel !== 'proof';
         if (moved && wasLive) summary.resolved++;
@@ -3372,6 +3405,12 @@ async function recordForeignNonce(
 ): Promise<void> {
   const ledger = ledgerOf(deps);
   const found = await locateForeignTransaction(deps, chainId, evaluator, nonce);
+  // A1 review P2-1 (c): the transaction that consumed the nonce is one of OUR ledger rows (its receipt was
+  // not visible to the read yet): no foreign transaction, no incident — the next pass records it as mined.
+  if (found && rows.some((c) => c.txHash.toLowerCase() === found.hash.toLowerCase())) {
+    deps.logger.warn({ chainId, nonce, txHash: found.hash }, 'ERC-8183 evaluator nonce consumed by a recorded candidate whose receipt was not visible yet — no foreign alert');
+    return;
+  }
   if (found && found.to) {
     try {
       await ledger.recordExternalCandidate({

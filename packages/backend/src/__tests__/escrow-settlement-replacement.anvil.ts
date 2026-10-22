@@ -53,6 +53,7 @@ import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 
 import { ANVIL_KEYS, anvilAccount, anvilTestPort, readArtifact, startLocalChain, type LocalChain } from './helpers/anvil-contracts.js';
 import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
 import { createEvaluatorSigner, type EvaluatorSigner } from '../services/escrow/evaluator-signer.js';
+import { InMemoryLaneLock } from '../services/transaction/wallet-lane.js';
 import {
   CHAIN_JOB_STATUS,
   SETTLEMENT_REASONS,
@@ -194,6 +195,8 @@ function harness(): Harness {
     alert: (a) => {
       alerts.push(a);
     },
+    // A1 review P3-4: an evaluator send needs the evaluator lane (fail closed without it).
+    lanes: new InMemoryLaneLock(),
   };
   return { deps, alerts, finalized, released };
 }

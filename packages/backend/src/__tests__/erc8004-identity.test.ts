@@ -53,6 +53,7 @@ import {
 } from '../services/job/escrow-erc8183.service.js';
 import { bindIntentId, registerIntentId, vetBindBeforeBroadcast } from '../services/job/erc8004-identity.service.js';
 import { inMemoryEvaluatorLedger } from './helpers/in-memory-evaluator-ledger.js';
+import { InMemoryLaneLock } from '../services/transaction/wallet-lane.js';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -367,6 +368,8 @@ function makeDeps(seed: { jobs?: Row[]; identities?: Row[]; txs?: Row[] } = {}) 
     now: () => NOW,
     // A1: the candidate ledger (in memory: this suite's Prisma is a mock).
     evaluatorLedger: inMemoryEvaluatorLedger((args) => (store.db as unknown as { job: { updateMany(a: unknown): Promise<{ count: number }> } }).job.updateMany(args)),
+    // A1 review P3-4: the evaluator lane is mandatory for an evaluator send.
+    lanes: new InMemoryLaneLock(),
   };
 
   /** Plays the transaction worker: final status (+hash, +receipt logs) then the outcome hook. */

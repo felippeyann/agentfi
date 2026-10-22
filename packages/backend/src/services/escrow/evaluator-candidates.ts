@@ -235,7 +235,8 @@ export type UncertainReason =
   | 'NO_VIEWS'
   | 'RECEIPT_DISAGREE'    // nodes return different receipts (or one has it, another not) for the same hash
   | 'MULTIPLE_RECEIPTS'   // > 1 candidate of the nonce has a receipt: data / node error — ALERT, write nothing
-  | 'PROOF_LEVEL_REORG';  // a row proven at proof depth lost its block: beyond the assumed depth — ALERT, write nothing
+  | 'PROOF_LEVEL_REORG'   // a row proven at proof depth lost its block: beyond the assumed depth — ALERT, write nothing
+  | 'KNOWN_WITHOUT_RECEIPT'; // A1 review P2-1: nonce consumed, no receipt, but a node KNOWS one of our candidates — a read that straddled a block, not proof of a foreign tx
 
 export type NonceResolution =
   | { kind: 'winner'; winnerId: string; losers: string[]; proofLevel: ProofLevel; receipt: ReceiptView }
@@ -323,6 +324,13 @@ export function resolveNonceDecision(cands: CandidateRow[], views: NodeView[], n
     return { kind: 'winner', winnerId, losers: atNonce.filter((c) => c.id !== winnerId).map((c) => c.id), proofLevel, receipt };
   }
   if (consumedLatest) {
+    // A1 review P2-1: "consumed by a foreign transaction" needs every node to answer "not known" for every
+    // live candidate of the nonce. A node that knows one of ours while the nonce moved most likely served
+    // the receipt from before the block that mined it: uncertain, the next pass sees the receipt.
+    for (const c of atNonce) {
+      if (!isLiveStatus(c.status)) continue;
+      if (views.some((v) => knownOf(v, c.txHash) === true)) return { kind: 'uncertain', reason: 'KNOWN_WITHOUT_RECEIPT', detail: c.txHash };
+    }
     return { kind: 'consumed-foreign', ids: atNonce.filter((c) => isLiveStatus(c.status) || (c.status === 'DEAD' && c.proofLevel === 'latest')).map((c) => c.id), proofLevel };
   }
   return { kind: 'alive' };
