@@ -18,6 +18,9 @@ import {
 // chains.js partially; an unset variable never touches this binding).
 import { TESTNET_CHAIN_IDS } from './chains.js';
 import { parseTrustProxy, type TrustProxySetting } from './trust-proxy.js';
+import { parseProofTag, parseRecoveryCaps } from './evaluator-a1.js';
+import type { RecoveryCaps } from '../services/escrow/evaluator-candidates.js';
+import type { EvaluatorProofTag } from '../services/escrow/evaluator-rpc.js';
 
 /** Chains the ERC-8183 escrow can be configured on (one address pair per chain). */
 export const ESCROW_CHAIN_IDS = [1, 8453, 42161, 137, 84532] as const;
@@ -214,6 +217,32 @@ const envSchema = z.object({
   // permissionless and the job ends as a full refund without feedback.
   // Default 86400 (24 h); 0 disables the reminder (the contest alert stays).
   ESCROW_REVIEW_ALERT_BEFORE_EXPIRY_SECONDS: z.coerce.number().int().min(0).default(86_400),
+  // C3g-A1 (evaluator candidate ledger). Recovery caps EVALUATOR_RECOVERY_*
+  // are parsed separately (config/evaluator-a1.ts): no default, absent ⇒ the
+  // recovery script only dry-runs.
+  // D-g: depth at which an evaluator outcome is PROVEN (contest / resolve /
+  // another decision / DB finalization wait for it): latest | safe | finalized
+  // | latest-K. Owner decision; the spec recommends `safe` on Base.
+  EVALUATOR_PROOF_TAG: z.preprocess(
+    blankToUndefined,
+    z
+      .string()
+      .regex(/^(latest|safe|finalized|latest-\d+)$/i, 'EVALUATOR_PROOF_TAG must be latest | safe | finalized | latest-K')
+      .default('safe'),
+  ),
+  // P17: lane TTL that must remain at the broadcast, and the maximum age of the
+  // critical section (lane requested → candidate recorded). Implementation
+  // parameters (plan §10 step 7); the defaults are the plan's proposal.
+  EVALUATOR_LANE_MIN_REMAINING_MS: z.preprocess(blankToUndefined, z.coerce.number().int().positive().default(30_000)),
+  EVALUATOR_CRITICAL_SECTION_MAX_MS: z.preprocess(blankToUndefined, z.coerce.number().int().positive().default(60_000)),
+  // R2-P1-3: lost head send alert; unset ⇒ EVALUATOR_STUCK_ALERT_AFTER_MS (10 min).
+  EVALUATOR_SEND_LOST_ALERT_AFTER_MS: z.preprocess(blankToUndefined, z.coerce.number().int().positive().optional()),
+  // R2-P2-5 T: unset ⇒ ESCROW_REVIEW_ALERT_BEFORE_EXPIRY_SECONDS.
+  EVALUATOR_EARLY_ALERT_BEFORE_EXPIRY_SECONDS: z.preprocess(blankToUndefined, z.coerce.number().int().min(0).optional()),
+  // R2-P2-2 item 4: proof head (safe / finalized) not advancing; unset ⇒ 10 min.
+  EVALUATOR_PROOF_STALLED_ALERT_AFTER_MS: z.preprocess(blankToUndefined, z.coerce.number().int().positive().optional()),
+  // R2-P3-10: consecutive failed reads of one RPC node before `rpc-node-unhealthy`.
+  EVALUATOR_RPC_UNHEALTHY_AFTER_FAILURES: z.preprocess(blankToUndefined, z.coerce.number().int().positive().default(5)),
   // Public base URL of this API, used to build the ERC-8004 `feedbackURI`
   // (`<BACKEND_PUBLIC_URL>/v1/jobs/<id>/feedback.json`) and the on-chain job description.
   BACKEND_PUBLIC_URL: z.preprocess(
@@ -507,7 +536,37 @@ if (policyOperatorProblem) {
   process.exit(1);
 }
 
+// C3g-A1: recovery caps per escrow chain — no defaults; a malformed value refuses boot.
+const recoveryCapsByChain = new Map<number, RecoveryCaps | null>();
+for (const chainId of ESCROW_CHAIN_IDS) {
+  const caps = parseRecoveryCaps(process.env, chainId);
+  if (caps.kind === 'invalid') {
+    console.error(`FATAL: EVALUATOR_RECOVERY_* for chain ${chainId}: ${caps.problems.join('; ')}`);
+    process.exit(1);
+  }
+  if (caps.kind === 'incomplete') {
+    console.warn(
+      `WARNING: EVALUATOR_RECOVERY_* for chain ${chainId} is incomplete (missing ${caps.missing.join(', ')}): ` +
+        'no recovery caps — the evaluator recovery script only dry-runs on this chain.',
+    );
+  }
+  recoveryCapsByChain.set(chainId, caps.kind === 'ok' ? caps.caps : null);
+}
+const proofTag = parseProofTag(parsed.data.EVALUATOR_PROOF_TAG);
+if (proofTag === null) {
+  console.error(`FATAL: EVALUATOR_PROOF_TAG "${parsed.data.EVALUATOR_PROOF_TAG}" is not latest | safe | finalized | latest-K`);
+  process.exit(1);
+}
+
 export const env = parsed.data;
+
+/** C3g-A1: the configured recovery caps of `chainId` (null: none / incomplete ⇒ every recovery execution refused). */
+export function evaluatorRecoveryCaps(chainId: number): RecoveryCaps | null {
+  return recoveryCapsByChain.get(chainId) ?? null;
+}
+
+/** C3g-A1 D-g: the proof tag (EVALUATOR_PROOF_TAG). */
+export const evaluatorProofTag: EvaluatorProofTag = proofTag!;
 
 /** Fastify `trustProxy` derived from TRUST_PROXY (validated above). */
 export const trustProxySetting: TrustProxySetting = (() => {

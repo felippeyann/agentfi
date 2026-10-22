@@ -28,6 +28,7 @@ import {
   decodeFunctionData,
   encodeAbiParameters,
   encodeEventTopics,
+  encodeFunctionData,
   getAbiItem,
   getAddress,
   parseUnits,
@@ -51,6 +52,7 @@ import {
   type Erc8183Deps,
 } from '../services/job/escrow-erc8183.service.js';
 import { bindIntentId, registerIntentId, vetBindBeforeBroadcast } from '../services/job/erc8004-identity.service.js';
+import { inMemoryEvaluatorLedger } from './helpers/in-memory-evaluator-ledger.js';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -326,6 +328,7 @@ function makeStore(seed: { jobs?: Row[]; identities?: Row[]; txs?: Row[] } = {})
 
 function makeDeps(seed: { jobs?: Row[]; identities?: Row[]; txs?: Row[] } = {}) {
   const store = makeStore(seed);
+  let signed = 0;
   const queue = { add: vi.fn().mockResolvedValue(undefined) };
   const settlement = { add: vi.fn().mockResolvedValue(undefined) };
   const receipts = new Map<string, Log[]>();
@@ -340,7 +343,13 @@ function makeDeps(seed: { jobs?: Row[]; identities?: Row[]; txs?: Row[] } = {}) 
   const signer = {
     address: EVALUATOR,
     chainId: CHAIN_ID,
-    writeContract: vi.fn(async () => nextHash()),
+    // A1: like the real signer, the signed transaction is handed to the broadcast hook (recorded) before it is sent.
+    writeContract: vi.fn(async (params: { address: Address; abi: Abi; functionName: string; args: readonly unknown[] }, opts?: { onBeforeBroadcast?: (h: Hex, tx: unknown) => Promise<void> }) => {
+      const hash = nextHash();
+      const data = encodeFunctionData({ abi: params.abi, functionName: params.functionName, args: params.args as never });
+      await opts?.onBeforeBroadcast?.(hash, { hash, raw: `0xfa${hash.slice(2)}`, nonce: signed++, gas: 500_000n, maxFeePerGas: 2n, maxPriorityFeePerGas: 1n, to: params.address, data, value: 0n, chainId: CHAIN_ID, from: EVALUATOR });
+      return hash;
+    }),
     // C3h D2: the receipt of the transaction the signer sent (its own hash).
     waitForTransactionReceipt: vi.fn(async (hash: Hex) => ({ status: 'success', logs: [] as Log[], transactionHash: hash })),
   };
@@ -356,6 +365,8 @@ function makeDeps(seed: { jobs?: Row[]; identities?: Row[]; txs?: Row[] } = {}) 
     finalize: vi.fn().mockResolvedValue(undefined),
     logger,
     now: () => NOW,
+    // A1: the candidate ledger (in memory: this suite's Prisma is a mock).
+    evaluatorLedger: inMemoryEvaluatorLedger((args) => (store.db as unknown as { job: { updateMany(a: unknown): Promise<{ count: number }> } }).job.updateMany(args)),
   };
 
   /** Plays the transaction worker: final status (+hash, +receipt logs) then the outcome hook. */

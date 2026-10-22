@@ -22,7 +22,7 @@ import { Prisma, type EvaluatorChainState, type EvaluatorTransaction, type Prism
 import { randomUUID } from 'node:crypto';
 import { getAddress, keccak256, type Hex } from 'viem';
 import { sanitizeStoredError } from '../../api/errors/sanitize.js';
-import { SettlementSupersededError } from '../job/escrow-erc8183.service.js';
+import { SettlementSupersededError } from '../job/escrow-errors.js';
 import {
   LIVE_STATUSES,
   budgetCheck,

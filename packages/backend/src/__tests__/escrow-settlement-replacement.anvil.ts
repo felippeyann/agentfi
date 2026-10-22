@@ -56,7 +56,6 @@ import { createEvaluatorSigner, type EvaluatorSigner } from '../services/escrow/
 import {
   CHAIN_JOB_STATUS,
   SETTLEMENT_REASONS,
-  __resetUnconfirmedSendsForTests,
   processSettlementJob,
   type Erc8183Deps,
   type EscrowAlert,
@@ -257,7 +256,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   if (!DB_READY) return;
-  __resetUnconfirmedSendsForTests();
+  // A1: the memory of unconfirmed sends is the candidate ledger now (cleaned with the DB rows).
   await chain.rpc('evm_setAutomine', [true]);
 });
 

@@ -30,6 +30,7 @@ import {
   decodeFunctionData,
   encodeAbiParameters,
   encodeEventTopics,
+  encodeFunctionData,
   getAbiItem,
   getAddress,
   HttpRequestError,
@@ -44,7 +45,8 @@ import {
 } from 'viem';
 import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
 import { InMemoryLaneLock } from '../services/transaction/wallet-lane.js';
-import type { EvaluatorWriteParams } from '../services/escrow/evaluator-signer.js';
+import type { EvaluatorWriteOptions, EvaluatorWriteParams, PreparedEvaluatorTx } from '../services/escrow/evaluator-signer.js';
+import { inMemoryEvaluatorLedger } from './helpers/in-memory-evaluator-ledger.js';
 import { TransactionLookupUnavailableError } from '../services/transaction/tx-known.js';
 import { REPUTATION_HOOK_ABI } from '../abi/ReputationHook.abi.js';
 import {
@@ -54,7 +56,6 @@ import {
   EVALUATOR_STUCK_ALERT_AFTER_MS,
   __resetEscrowTokenCacheForTests,
   __resetEvaluatorBacklogForTests,
-  __resetUnconfirmedSendsForTests,
   alertExpiringReviews,
   checkEvaluatorBacklog,
   contestEscrowJob,
@@ -305,7 +306,11 @@ function makeDeps(
   const signer = {
     address: EVALUATOR,
     chainId: CHAIN_ID,
-    writeContract: vi.fn(async (_params: EvaluatorWriteParams) => SETTLE_HASH),
+    // A1: records through the broadcast hook (hash + signed transaction) before "sending", like the real signer.
+    writeContract: vi.fn(async (params: EvaluatorWriteParams, writeOpts?: EvaluatorWriteOptions) => {
+      await writeOpts?.onBeforeBroadcast?.(SETTLE_HASH, signedTx(SETTLE_HASH, params));
+      return SETTLE_HASH;
+    }),
     // C3h D2: the receipt of the transaction the signer sent (its own hash).
     waitForTransactionReceipt: vi.fn(async (hash: Hex) => ({ status: opts.settleStatus ?? 'success', logs: opts.settleLogs ?? [], transactionHash: hash })),
   };
@@ -314,6 +319,7 @@ function makeDeps(
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const getBalance = vi.fn(async () => 10n ** 18n);
   const alert = vi.fn();
+  const nodes: { mined: number | null } = { mined: 1_000_000 };
   const deps: Erc8183Deps = {
     db: store.db,
     queue: queue as never,
@@ -326,8 +332,48 @@ function makeDeps(
     logger,
     now: () => NOW,
     alert,
+    // A1: the candidate ledger (in memory: this suite's Prisma is a mock).
+    evaluatorLedger: inMemoryEvaluatorLedger((args) => store.dbMock.job.updateMany(args as never)),
+    // A1: one RPC node. `nodes.mined` = the key's `latest` (= proof) transaction count — by default every
+    // nonce this suite signs is consumed; null = the node cannot be read. Receipts come from the read
+    // client's `getTransactionReceipt` mock, "known" from `isKnownTransaction` (else: has a receipt).
+    readNodeViews: async (_chainId, _evaluator, hashes) => {
+      if (nodes.mined === null) return [{ node: '#0 test', index: 0, ok: false, error: 'node down' }];
+      const known: Record<Hex, boolean> = {};
+      const receipts: Record<Hex, { txHash: Hex; status: 'success' | 'reverted'; blockNumber: bigint; blockHash: Hex; logs: Log[] } | null> = {};
+      for (const hash of hashes) {
+        let receipt: (typeof receipts)[Hex] = null;
+        try {
+          const r = (await (getTransactionReceipt as unknown as (a: unknown) => Promise<unknown>)({ hash })) as { status: 'success' | 'reverted'; logs?: Log[] };
+          receipt = { txHash: hash, status: r.status, blockNumber: 1n, blockHash: keccak256(hash), logs: r.logs ?? [] };
+        } catch (err) {
+          if ((err as { name?: string }).name !== 'TransactionReceiptNotFoundError') return [{ node: '#0 test', index: 0, ok: false, error: 'receipt unreadable' }];
+        }
+        receipts[hash] = receipt;
+        known[hash] = receipt !== null || (deps.isKnownTransaction ? await deps.isKnownTransaction(CHAIN_ID, hash).catch(() => false) : false);
+      }
+      return [{ node: '#0 test', index: 0, ok: true, nonceLatest: nodes.mined, noncePending: nodes.mined, nonceAtTag: nodes.mined, known, receipts }];
+    },
   };
-  return { ...store, deps, queue, settlement, readContract, getTransactionReceipt, getBalance, signer, releaseJobEscrow, finalize, logger, alert };
+  return { ...store, deps, nodes, queue, settlement, readContract, getTransactionReceipt, getBalance, signer, releaseJobEscrow, finalize, logger, alert };
+}
+
+let signedNonce = 0;
+/** A1: the signed transaction the evaluator signer hands to `onBeforeBroadcast` (second argument). */
+function signedTx(hash: Hex, params: EvaluatorWriteParams): PreparedEvaluatorTx {
+  return {
+    hash,
+    raw: `0xfa${hash.slice(2)}` as Hex,
+    nonce: signedNonce++,
+    gas: 500_000n,
+    maxFeePerGas: 2_000_000_000n,
+    maxPriorityFeePerGas: 1_000_000_000n,
+    to: params.address,
+    data: encodeFunctionData({ abi: params.abi, functionName: params.functionName, args: params.args as never }),
+    value: 0n,
+    chainId: CHAIN_ID,
+    from: EVALUATOR,
+  };
 }
 
 /** Transaction row for a step, as `enqueueStep` would have created it. */
@@ -350,8 +396,7 @@ function lastQueued(queue: { add: ReturnType<typeof vi.fn> }) {
 
 beforeEach(() => {
   __resetEscrowTokenCacheForTests();
-  // C3f item 3: the worker's memory of sends no node knew (keyed by job id — every test here reuses `job-1`).
-  __resetUnconfirmedSendsForTests();
+  // A1: the C3f item 3 memory is the (per-deps) candidate ledger now — nothing process-wide to reset.
 });
 
 // ── Enablement + token ─────────────────────────────────────────────────────
@@ -833,7 +878,8 @@ describe('processSettlementJob — settle', () => {
     expect((signer.writeContract.mock.calls[0]![0] as { functionName: string }).functionName).toBe('complete');
 
     // The requester contests: the last settlement's receipt is a revert, so nothing can still mine.
-    getTransactionReceipt.mockResolvedValueOnce({ status: 'reverted', logs: [] } as never);
+    // (A1: persistent, not once — the gates read the candidate's receipt on every check, per node.)
+    getTransactionReceipt.mockResolvedValue({ status: 'reverted', logs: [] } as never);
     expect(await contestEscrowJob(deps, { jobId: 'job-1', reason: 'not what I asked' })).toMatchObject({ outcome: 'held' });
     expect(jobs.get('job-1')).toMatchObject({ onChainStatus: 'CONTESTED', contestReason: 'not what I asked' });
 
@@ -1019,32 +1065,78 @@ describe('sendEvaluatorTx — G1 review P3-2: a send that throws after the signe
   /** A signer that records the signed hash through the hook, then fails at send. */
   function failingSend(known: () => Promise<boolean>) {
     const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
-    ctx.signer.writeContract.mockImplementation((async (_params: EvaluatorWriteParams, opts?: { onBeforeBroadcast?: (h: Hex) => Promise<void> }) => {
-      await opts?.onBeforeBroadcast?.(SIGNED);
+    ctx.signer.writeContract.mockImplementation((async (params: EvaluatorWriteParams, opts?: EvaluatorWriteOptions) => {
+      await opts?.onBeforeBroadcast?.(SIGNED, signedTx(SIGNED, params));
       throw new Error('insufficient funds for gas * price + value');
     }) as never);
     ctx.deps.isKnownTransaction = vi.fn(known);
+    // The signed nonce is NOT consumed (the send failed): the key's latest count stays below it.
+    ctx.nodes.mined = 0;
+    ctx.getTransactionReceipt.mockRejectedValue(Object.assign(new Error('no receipt'), { name: 'TransactionReceiptNotFoundError' }));
     return ctx;
   }
 
-  it('no node knows it (every node answered) → never sent: hash slot given back, stamp cleared', async () => {
-    const { deps, jobs } = failingSend(async () => false);
+  // C3g-A1 (§2.4-3, §6.3): changed meaning. P3-2 gave the hash slot back when every node said "not found";
+  // A1 never closes on "not found": the candidate is SEND_UNCONFIRMED and LIVE until its nonce is consumed.
+  it('no node knows it (every node answered) → SEND_UNCONFIRMED, still live: the hash stays, the stamp is cleared (the ledger is the gate); contest refused until the nonce is consumed, accepted after the proof', async () => {
+    const { deps, jobs, nodes } = failingSend(async () => false);
     await expect(processSettlementJob(deps, settleJob())).rejects.toThrow(/insufficient funds/);
-    expect(jobs.get('job-1')).toMatchObject({ settleTxHash: null, settleAttemptAt: null });
+    expect(jobs.get('job-1')).toMatchObject({ settleTxHash: SIGNED, settleAttemptAt: null });
+    const [row] = await deps.evaluatorLedger!.candidatesForJob('job-1');
+    expect(row).toMatchObject({ status: 'SEND_UNCONFIRMED', txHash: SIGNED });
+    jobs.get('job-1')!['onChainStatus'] = 'SUBMITTED'; // the failed handler's hand-back
+    expect(await contestEscrowJob(deps, { jobId: 'job-1', reason: null })).toMatchObject({ outcome: 'refused', reason: expect.stringMatching(/may still mine/) });
+    nodes.mined = row!.nonce! + 1; // another transaction of the key consumed that nonce (no receipt for ours)
+    expect(await contestEscrowJob(deps, { jobId: 'job-1', reason: null })).toMatchObject({ outcome: 'held' });
   });
 
-  it('a node knows it → in flight: hash kept, stamp cleared', async () => {
+  it('a node knows it → SENT: hash kept, stamp cleared', async () => {
     const { deps, jobs } = failingSend(async () => true);
     await expect(processSettlementJob(deps, settleJob())).rejects.toThrow(/insufficient funds/);
     expect(jobs.get('job-1')).toMatchObject({ settleTxHash: SIGNED, settleAttemptAt: null });
+    expect((await deps.evaluatorLedger!.candidatesForJob('job-1'))[0]).toMatchObject({ status: 'SENT' });
   });
 
-  it('strict lookup uncertain (no node knows it, one errored) → hash AND stamp kept (may still mine): contest refused', async () => {
+  // A1: the stamp is cleared here too (it was kept under P3-2) — the live SIGNED candidate is the gate now.
+  it('strict lookup uncertain (no node knows it, one errored) → candidate stays SIGNED with the error (may still mine): contest refused', async () => {
     const { deps, jobs } = failingSend(async () => Promise.reject(new TransactionLookupUnavailableError(SIGNED, 2, 1)));
     await expect(processSettlementJob(deps, settleJob())).rejects.toThrow(/insufficient funds/);
-    expect(jobs.get('job-1')).toMatchObject({ settleTxHash: SIGNED, settleAttemptAt: NOW });
+    expect(jobs.get('job-1')).toMatchObject({ settleTxHash: SIGNED, settleAttemptAt: null });
+    expect((await deps.evaluatorLedger!.candidatesForJob('job-1'))[0]).toMatchObject({ status: 'SIGNED', sendError: expect.stringMatching(/insufficient funds/) });
     jobs.get('job-1')!['onChainStatus'] = 'SUBMITTED'; // the failed handler's hand-back
     expect(await contestEscrowJob(deps, { jobId: 'job-1', reason: null })).toMatchObject({ outcome: 'refused', reason: expect.stringMatching(/may still mine/) });
+  });
+
+  it('A1: a node that cannot be read → contest unverifiable (503 CONTEST_UNVERIFIABLE), resolve unverifiable', async () => {
+    const { deps, jobs, nodes } = failingSend(async () => false);
+    await expect(processSettlementJob(deps, settleJob())).rejects.toThrow(/insufficient funds/);
+    jobs.get('job-1')!['onChainStatus'] = 'SUBMITTED';
+    nodes.mined = null;
+    expect(await contestEscrowJob(deps, { jobId: 'job-1', reason: null })).toMatchObject({ outcome: 'unverifiable' });
+    expect(await resolveEscrowJob(deps, { jobId: 'job-1', decision: 'refund', note: 'n', operator: 'ops' })).toMatchObject({ outcome: 'unverifiable' });
+  });
+
+  it('A1: the retry of the same job signs nothing while its candidate may still mine (no second complete)', async () => {
+    const { deps, signer } = failingSend(async () => false);
+    await expect(processSettlementJob(deps, settleJob())).rejects.toThrow(/insufficient funds/);
+    const err = await processSettlementJob(deps, settleJob(2)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SettlementStillPendingError);
+    expect(signer.writeContract).toHaveBeenCalledTimes(1);
+  });
+
+  it('A1: a candidate is recorded BEFORE the send, atomically with the job stamp; a lost conditional write records nothing and sends nothing', async () => {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    const order: string[] = [];
+    ctx.signer.writeContract.mockImplementation((async (params: EvaluatorWriteParams, opts?: EvaluatorWriteOptions) => {
+      ctx.jobs.get('job-1')!['settleTxHash'] = '0x' + 'cd'.repeat(32); // another attempt recorded its own hash meanwhile
+      await opts?.onBeforeBroadcast?.(SIGNED, signedTx(SIGNED, params));
+      order.push('sent');
+      return SIGNED;
+    }) as never);
+    const err = await processSettlementJob(ctx.deps, settleJob()).catch((e: unknown) => e);
+    expect((err as Error).name).toBe('SettlementSupersededError');
+    expect(order).toEqual([]);
+    expect(await ctx.deps.evaluatorLedger!.candidatesForJob('job-1')).toEqual([]);
   });
 });
 
@@ -1083,9 +1175,9 @@ describe('processSettlementJob — Q7: no evaluator signature on an unverified c
     deps.configGate = (chainId) => (closed ? refuse(chainId) : allow(chainId));
     const sent: Hex[] = [];
     // Like the real signer: simulation, gas estimate and signature, then the hook, then the send.
-    signer.writeContract.mockImplementation((async (_params: EvaluatorWriteParams, opts?: { onBeforeBroadcast?: (h: Hex) => Promise<void> }) => {
+    signer.writeContract.mockImplementation((async (params: EvaluatorWriteParams, opts?: EvaluatorWriteOptions) => {
       closed = true; // a failed re-check revokes the verification in this window (deterministic)
-      await opts?.onBeforeBroadcast?.(SETTLE_HASH);
+      await opts?.onBeforeBroadcast?.(SETTLE_HASH, signedTx(SETTLE_HASH, params));
       sent.push(SETTLE_HASH);
       return SETTLE_HASH;
     }) as never);
@@ -1103,8 +1195,8 @@ describe('processSettlementJob — Q7: no evaluator signature on an unverified c
 
     // Verified again: the same job settles, through the same hook.
     closed = false;
-    signer.writeContract.mockImplementation((async (_params: EvaluatorWriteParams, opts?: { onBeforeBroadcast?: (h: Hex) => Promise<void> }) => {
-      await opts?.onBeforeBroadcast?.(SETTLE_HASH);
+    signer.writeContract.mockImplementation((async (params: EvaluatorWriteParams, opts?: EvaluatorWriteOptions) => {
+      await opts?.onBeforeBroadcast?.(SETTLE_HASH, signedTx(SETTLE_HASH, params));
       sent.push(SETTLE_HASH);
       return SETTLE_HASH;
     }) as never);
@@ -2057,7 +2149,13 @@ describe('C3f review P3-1 — the evaluator-stuck alert states the refund deadli
   async function stuckAlert(ctx: ReturnType<typeof makeDeps>): Promise<EscrowAlert> {
     let now = NOW.getTime();
     const getTransactionCount = vi.fn(async ({ blockTag }: { blockTag: 'latest' | 'pending' }) => (blockTag === 'pending' ? 6 : 5));
-    const deps: Erc8183Deps = { ...ctx.deps, now: () => new Date(now), publicClient: () => ({ getTransactionCount }) as never };
+    // A1 R2-P2-5: the early (first-sight) alert is off here — this block checks the C3f text after the 10-minute rule.
+    const deps: Erc8183Deps = {
+      ...ctx.deps,
+      now: () => new Date(now),
+      publicClient: () => ({ getTransactionCount }) as never,
+      evaluatorA1: { leaseMinRemainingMs: 30_000, criticalSectionMaxMs: 60_000, earlyAlertBeforeExpirySeconds: 0 },
+    };
     expect(await checkEvaluatorBacklog(deps, CHAIN_ID)).toBeNull(); // first sight
     now += EVALUATOR_STUCK_ALERT_AFTER_MS + 1_000;
     expect(await checkEvaluatorBacklog(deps, CHAIN_ID)).toMatchObject({ stuckNonce: 5, queued: 1 });
@@ -2089,5 +2187,150 @@ describe('C3f review P3-1 — the evaluator-stuck alert states the refund deadli
     const alert = await stuckAlert(unreadable);
     expect(alert.message).toContain("(the live jobs' expiresAt could not be read): after it anyone can call claimRefund");
     expect(alert.details).toMatchObject({ earliestExpiresAt: null, earliestExpiringJobId: null });
+  });
+
+  it('A1 R2-P2-5: a delivered job waiting on the key within T of expiresAt → alerted at FIRST sight (no 10 minutes), with the claimRefund sentence', async () => {
+    const soon = new Date(NOW.getTime() + 3_600_000);
+    const ctx = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'SUBMITTED', status: 'PAYMENT_PENDING', expiresAt: soon })]);
+    const getTransactionCount = vi.fn(async ({ blockTag }: { blockTag: 'latest' | 'pending' }) => (blockTag === 'pending' ? 6 : 5));
+    const deps: Erc8183Deps = { ...ctx.deps, publicClient: () => ({ getTransactionCount }) as never, evaluatorA1: { leaseMinRemainingMs: 30_000, criticalSectionMaxMs: 60_000, earlyAlertBeforeExpirySeconds: 86_400 } };
+    expect(await checkEvaluatorBacklog(deps, CHAIN_ID)).toMatchObject({ stuckNonce: 5, early: true, earliestDeliveredExpiry: { jobId: 'job-1', expiresAt: soon } });
+    const alert = ctx.alert.mock.calls[0]![0] as EscrowAlert;
+    expect(alert.kind).toBe('evaluator-stuck');
+    expect(alert.message).toMatch(/Alerted at first sight: delivered job job-1/);
+    expect(alert.message).toMatch(/after it anyone can call claimRefund .*also for work already delivered/);
+    // Not again within the hour (persisted "delivered" mark).
+    expect(await checkEvaluatorBacklog(deps, CHAIN_ID)).toBeNull();
+    expect(ctx.alert).toHaveBeenCalledTimes(1);
+  });
+
+  it('A1 R2-P1-3c: the stuck clock survives a restart (persisted), and the "alerted" mark is written only after the delivery', async () => {
+    let now = NOW.getTime();
+    const ctx = makeDeps([escrowJob({ onChainJobId: '7', onChainStatus: 'SUBMITTED', status: 'PAYMENT_PENDING', expiresAt: null })]);
+    const getTransactionCount = vi.fn(async ({ blockTag }: { blockTag: 'latest' | 'pending' }) => (blockTag === 'pending' ? 6 : 5));
+    const make = (): Erc8183Deps => ({ ...ctx.deps, now: () => new Date(now), publicClient: () => ({ getTransactionCount }) as never });
+    expect(await checkEvaluatorBacklog(make(), CHAIN_ID)).toBeNull(); // first sight, in "process 1"
+    now += EVALUATOR_STUCK_ALERT_AFTER_MS + 1_000;
+    // "Process 2" (new deps, same tables): the channel fails once — nothing recorded as delivered.
+    ctx.alert.mockImplementationOnce(() => {
+      throw new Error('channel down');
+    });
+    expect(await checkEvaluatorBacklog(make(), CHAIN_ID)).toMatchObject({ stuckNonce: 5 });
+    expect((await ctx.deps.evaluatorLedger!.readChainState(CHAIN_ID, EVALUATOR))!.lastAlertAt['evaluator-stuck']).toBeUndefined();
+    // Next tick: alerted again (delivered this time) and recorded.
+    expect(await checkEvaluatorBacklog(make(), CHAIN_ID)).toMatchObject({ stuckNonce: 5 });
+    expect((await ctx.deps.evaluatorLedger!.readChainState(CHAIN_ID, EVALUATOR))!.lastAlertAt['evaluator-stuck']).toEqual(new Date(now));
+    expect(await checkEvaluatorBacklog(make(), CHAIN_ID)).toBeNull();
+  });
+});
+
+// ── C3g-A1: the evaluator lane, nonce choice, critical section, proof-depth finalization ──
+
+describe('C3g-A1 — sendEvaluatorTx in the evaluator lane', () => {
+  it('acquires the evaluator lane before signing, passes lease + margin + nonce choice, and releases it BEFORE the receipt wait', async () => {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    const lanes = new InMemoryLaneLock();
+    const events: string[] = [];
+    const acquire = lanes.acquire.bind(lanes);
+    lanes.acquire = (async (key: string, o?: { waitMs?: number }) => {
+      events.push(`acquire:${key}`);
+      const lease = await acquire(key, o);
+      const release = lease.release.bind(lease);
+      return Object.assign(lease, { release: async () => { events.push('release'); await release(); } });
+    }) as never;
+    ctx.deps.lanes = lanes;
+    let seen: EvaluatorWriteOptions | undefined;
+    ctx.signer.writeContract.mockImplementation((async (params: EvaluatorWriteParams, opts?: EvaluatorWriteOptions) => {
+      seen = opts;
+      events.push(`nonce:${await opts!.chooseNonce!(3)}`);
+      await opts!.lease!.assertHeld(opts!.minLeaseMs!);
+      await opts?.onBeforeBroadcast?.(SETTLE_HASH, signedTx(SETTLE_HASH, params));
+      events.push('sent');
+      return SETTLE_HASH;
+    }) as never);
+    ctx.signer.waitForTransactionReceipt.mockImplementation((async (hash: Hex) => {
+      events.push('wait');
+      return { status: 'success', logs: completeLogs('written'), transactionHash: hash };
+    }) as never);
+    expect(await processSettlementJob(ctx.deps, settleJob())).toMatchObject({ outcome: 'settled' });
+    expect(seen?.minLeaseMs).toBe(30_000);
+    expect(events).toEqual([`acquire:${CHAIN_ID}:${EVALUATOR.toLowerCase()}`, 'nonce:3', 'sent', 'release', 'wait']);
+    expect((await ctx.deps.evaluatorLedger!.candidatesForJob('job-1'))[0]).toMatchObject({ status: 'SENT', origin: 'WORKER', kind: 'ORIGINAL', action: 'COMPLETE', decision: 'pay', rawTx: expect.stringMatching(/^0xfa/) });
+  });
+
+  it('R2-P2-3: the nonce is max(pending, highest live candidate + 1) — never on top of a live candidate of another job', async () => {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    // A live candidate of another job at nonce 7 (a lagging `pending` of 5).
+    await ctx.deps.evaluatorLedger!.insertCandidateWithJobStamp({
+      candidate: { chainId: CHAIN_ID, evaluator: EVALUATOR, nonce: 7, jobId: null, kind: 'ORIGINAL', action: 'COMPLETE', toAddress: ESCROW, calldata: '0x1234', gasLimit: 1n, maxFeePerGas: 2n, maxPriorityFeePerGas: 1n, txHash: '0x' + '77'.repeat(32), origin: 'WORKER' },
+    });
+    let chosen = -1;
+    ctx.signer.writeContract.mockImplementation((async (params: EvaluatorWriteParams, opts?: EvaluatorWriteOptions) => {
+      chosen = await opts!.chooseNonce!(5);
+      await opts?.onBeforeBroadcast?.(SETTLE_HASH, { ...signedTx(SETTLE_HASH, params), nonce: chosen });
+      return SETTLE_HASH;
+    }) as never);
+    await processSettlementJob(ctx.deps, settleJob());
+    expect(chosen).toBe(8);
+  });
+
+  it('P17: a critical section older than the configured maximum records nothing and sends nothing', async () => {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    ctx.deps.lanes = new InMemoryLaneLock();
+    ctx.deps.evaluatorA1 = { leaseMinRemainingMs: 1, criticalSectionMaxMs: 5 };
+    const sent: Hex[] = [];
+    ctx.signer.writeContract.mockImplementation((async (params: EvaluatorWriteParams, opts?: EvaluatorWriteOptions) => {
+      await new Promise((r) => setTimeout(r, 20)); // simulation + signature took too long
+      await opts?.onBeforeBroadcast?.(SETTLE_HASH, signedTx(SETTLE_HASH, params));
+      sent.push(SETTLE_HASH);
+      return SETTLE_HASH;
+    }) as never);
+    const err = await processSettlementJob(ctx.deps, settleJob()).catch((e: unknown) => e);
+    expect((err as Error).name).toBe('EvaluatorCriticalSectionError');
+    expect(sent).toEqual([]);
+    expect(await ctx.deps.evaluatorLedger!.candidatesForJob('job-1')).toEqual([]);
+    expect(ctx.jobs.get('job-1')).toMatchObject({ settleTxHash: null });
+  });
+
+  it('a LeaseLostError after the record = NOT broadcast: the candidate stays SIGNED and live (no "lost answer" verdict, no node asked)', async () => {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    ctx.deps.isKnownTransaction = vi.fn(async () => true);
+    ctx.signer.writeContract.mockImplementation((async (params: EvaluatorWriteParams, opts?: EvaluatorWriteOptions) => {
+      await opts?.onBeforeBroadcast?.(SETTLE_HASH, signedTx(SETTLE_HASH, params));
+      throw Object.assign(new Error('Lane lease is not held'), { name: 'LeaseLostError' });
+    }) as never);
+    await expect(processSettlementJob(ctx.deps, settleJob())).rejects.toThrow(/not held/);
+    expect(ctx.deps.isKnownTransaction).not.toHaveBeenCalled();
+    expect((await ctx.deps.evaluatorLedger!.candidatesForJob('job-1'))[0]).toMatchObject({ status: 'SIGNED', sendError: expect.stringMatching(/not broadcast/) });
+    expect(ctx.jobs.get('job-1')).toMatchObject({ settleTxHash: SETTLE_HASH, settleAttemptAt: null });
+  });
+});
+
+describe('C3g-A1 (decision A3) — the DB finalizes only at the proof tag', () => {
+  it('own complete mined at latest but the job still Submitted at `safe` → nothing finalized, candidate MINED at latest; finalized once proven', async () => {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    ctx.deps.proofTag = 'safe';
+    let safeStatus: number = CHAIN_JOB_STATUS.Submitted;
+    let latestStatus: number = CHAIN_JOB_STATUS.Submitted;
+    ctx.readContract.mockImplementation((async (p: { functionName: string; blockTag?: string }) => {
+      if (p.functionName === 'getJob') return { status: p.blockTag === 'safe' ? safeStatus : latestStatus, budget: BUDGET };
+      if (p.functionName === 'token') return USDC;
+      throw new Error(`unexpected read ${p.functionName}`);
+    }) as never);
+    ctx.signer.waitForTransactionReceipt.mockImplementation((async (hash: Hex) => {
+      latestStatus = CHAIN_JOB_STATUS.Completed; // mined: terminal at latest, not yet at safe
+      return { status: 'success', logs: completeLogs('written'), transactionHash: hash, blockNumber: 9n, blockHash: keccak256(hash) };
+    }) as never);
+    expect(await processSettlementJob(ctx.deps, settleJob())).toMatchObject({ outcome: 'noop' });
+    expect(ctx.finalize).not.toHaveBeenCalled();
+    expect(ctx.jobs.get('job-1')).toMatchObject({ onChainStatus: 'SETTLING' });
+    expect((await ctx.deps.evaluatorLedger!.candidatesForJob('job-1'))[0]).toMatchObject({ status: 'MINED_SUCCESS', proofLevel: 'latest' });
+    // A retry while `safe` lags: still nothing.
+    expect(await processSettlementJob(ctx.deps, settleJob(2))).toMatchObject({ outcome: 'noop' });
+    expect(ctx.finalize).not.toHaveBeenCalled();
+    // `safe` catches up: the existing path reconciles and finalizes once.
+    safeStatus = CHAIN_JOB_STATUS.Completed;
+    expect(await processSettlementJob(ctx.deps, settleJob(3))).toMatchObject({ outcome: 'reconciled', onChainStatus: 'COMPLETED' });
+    expect(ctx.finalize).toHaveBeenCalledTimes(1);
   });
 });
