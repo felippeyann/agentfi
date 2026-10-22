@@ -10,7 +10,16 @@
 
 import { Redis } from 'ioredis';
 import { env } from '../../config/env.js';
-import { RedisLaneLock, RedisNonceStore, type LaneLock, type NonceStore } from './wallet-lane.js';
+import {
+  RedisLaneLock,
+  RedisNonceStore,
+  acquireRecoveryLock,
+  readRecoveryLock,
+  type LeaseLock,
+  type NonceStore,
+  type RecoveryLockHandle,
+  type RecoveryLockHolder,
+} from './wallet-lane.js';
 
 let client: Redis | null = null;
 let lock: RedisLaneLock | null = null;
@@ -23,13 +32,34 @@ function redis(): Redis {
   return client;
 }
 
-/** Cross-process lane lock (broadcast lanes and ERC-8183 funding lanes). */
-export const walletLaneLock: LaneLock = {
+/**
+ * Cross-process lane lock (broadcast lanes and ERC-8183 funding lanes), with
+ * the A1 lease API (`acquire` → token / `assertHeld` / `release`).
+ */
+export const walletLaneLock: LeaseLock = {
   run(key, fn) {
     lock ??= new RedisLaneLock(redis());
     return lock.run(key, fn);
   },
+  acquire(key, opts) {
+    lock ??= new RedisLaneLock(redis());
+    return lock.acquire(key, opts);
+  },
 };
+
+/** A1 §7.1: takes `agentfi:evaluator-recovery:<chainId>` on the shared Redis (throws `RecoveryLockBusyError` when held). */
+export function acquireEvaluatorRecoveryLock(
+  chainId: number,
+  owner: { owner: string; pid?: number; host?: string | null },
+  opts?: { ttlMs?: number },
+): Promise<RecoveryLockHandle> {
+  return acquireRecoveryLock(redis(), chainId, owner, opts);
+}
+
+/** A1 §7.1: who holds the recovery lock of `chainId` (null when free). */
+export function readEvaluatorRecoveryLock(chainId: number): Promise<RecoveryLockHolder | null> {
+  return readRecoveryLock(redis(), chainId);
+}
 
 /** Last nonce broadcast per lane (short-lived, see NONCE_MEMORY_TTL_MS). */
 export const walletNonceStore: NonceStore = {
