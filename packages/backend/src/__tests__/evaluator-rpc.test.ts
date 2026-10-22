@@ -119,10 +119,12 @@ describe('readNodeViewsFrom — per-node report, no conclusion across nodes', ()
   it('readNodeViews builds one node per URL with host-only labels (no key in the label)', async () => {
     const views = await readNodeViews(84532, EVALUATOR, [], {
       proofTag: 'latest',
-      urls: ['http://127.0.0.1:1/', 'https://base-sepolia.g.alchemy.com/v2/sk_live_SECRETKEY987654321'],
+      // Local, unreachable URLs only: no test reaches a public RPC (the key-in-path shape is what matters).
+      urls: ['http://127.0.0.1:1/', 'http://127.0.0.1:2/v2/sk_live_SECRETKEY987654321'],
     });
-    expect(views.map((v) => v.node)).toEqual(['#0 127.0.0.1:1', '#1 base-sepolia.g.alchemy.com']);
+    expect(views.map((v) => v.node)).toEqual(['#0 127.0.0.1:1', '#1 127.0.0.1:2']);
     expect(views[0]!.ok).toBe(false); // nothing listens on port 1
+    expect(views[1]!.ok).toBe(false); // nor on port 2
     expect(JSON.stringify(views)).not.toMatch(/SECRETKEY/);
   }, 30_000);
 

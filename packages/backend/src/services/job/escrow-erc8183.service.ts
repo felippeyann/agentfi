@@ -1573,6 +1573,9 @@ function candidateVerdict(c: CandidateRow, views: readonly NodeView[], depth: 'l
   }
   if (c.nonce === null) {
     if (depth === 'latest') {
+      const mined = receiptsOf(views, tx);
+      // Today's rule: mined (any status) → the caller read the chain first, a new attempt is safe.
+      if (mined.length > 0 && mined.every((r) => r !== undefined && r !== null)) return { state: 'clear' };
       return legacyResignAllowed(c, [...views])
         ? { state: 'clear' }
         : { state: 'blocks', reason: `legacy settlement ${tx} has no receipt and is not proven dropped (a node knows it, or a node could not tell)`, txHash: tx };
@@ -1624,7 +1627,17 @@ async function jobCandidatesVerdict(
   const views = toNodeViews(await readEvaluatorNodes(deps, chainId, evaluator, rows.map((c) => c.txHash)));
   let uncertain: Exclude<Verdict, { state: 'clear' }> | null = null;
   for (const c of rows) {
-    const d: 'latest' | 'proof' = depth === 'proof' && sameCalldataHash !== null && c.calldataHash === sameCalldataHash.toLowerCase() ? 'latest' : depth;
+    // Re-signing the SAME decision (the worker gate passes its calldata hash): `latest` is enough (R2-P2-2) for
+    //  - a candidate carrying exactly that calldata;
+    //  - D-B (row 33): a CANCEL of the job — it never settles anything, its nonce consumed at `latest` is enough
+    //    to re-sign the decision (a reorg costs at worst the gas of a revert);
+    //  - D-A (row 32, R2-P3-1): a LEGACY row without nonce — today's worker rule (`legacyResignAllowed`),
+    //    whatever its (unknown) calldata.
+    // Contest, resolve with another decision and the backend's claimRefund / cancellation reject still call
+    // with `sameCalldataHash = null`: the proof depth.
+    const resign = depth === 'proof' && sameCalldataHash !== null;
+    const d: 'latest' | 'proof' =
+      resign && (c.calldataHash === sameCalldataHash!.toLowerCase() || c.kind === 'CANCEL' || c.nonce === null) ? 'latest' : depth;
     const v = candidateVerdict(c, views, d);
     if (v.state === 'blocks') return v;
     if (v.state === 'uncertain' && !uncertain) uncertain = v;
@@ -3103,7 +3116,11 @@ async function watchNodesAndProofHead(deps: Erc8183Deps, chainId: number, evalua
       deps.logger.warn({ chainId, node: r.node, err: errorMessage(err) }, 'ERC-8183 evaluator node health not recorded');
     }
   }
-  const stalledAfter = settings.proofStalledAlertAfterMs;
+  // Watched whenever the proof tag can stall (safe / finalized): an explicit threshold, else the stuck threshold;
+  // an explicit null turns it off.
+  const stallable = deps.proofTag === 'safe' || deps.proofTag === 'finalized';
+  const stalledAfter =
+    settings.proofStalledAlertAfterMs !== undefined ? settings.proofStalledAlertAfterMs : stallable ? EVALUATOR_STUCK_ALERT_AFTER_MS : null;
   if (!stalledAfter || reads.length === 0 || reads.some((r) => !r.ok || r.proofBlockNumber === undefined)) return;
   const block = reads.reduce((min, r) => (r.proofBlockNumber! < min ? r.proofBlockNumber! : min), reads[0]!.proofBlockNumber!);
   try {

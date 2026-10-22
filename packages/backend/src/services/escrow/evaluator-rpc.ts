@@ -244,6 +244,11 @@ export function readNodeViews(
   hashes: readonly Hex[],
   opts: { proofTag: EvaluatorProofTag; urls?: readonly string[] },
 ): Promise<EvaluatorNodeRead[]> {
+  // Under the test runner the chain's configured RPC candidates include public endpoints: a test must pass
+  // its own (local) `urls` — never let a suite read a public RPC by accident.
+  if (process.env['VITEST'] && !opts.urls) {
+    return Promise.reject(new Error('readNodeViews under the test runner needs explicit (local) urls — the configured RPCs may be public'));
+  }
   return readNodeViewsFrom(evaluatorRpcNodes(chainId, opts.urls), evaluator, hashes, opts);
 }
 

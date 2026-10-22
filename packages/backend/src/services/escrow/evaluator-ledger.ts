@@ -285,8 +285,31 @@ export async function insertCandidateWithJobStamp(
     await lockEvaluator(tx, c.chainId, evaluator);
 
     // 3. replay of an already recorded tx
-    const existing = await tx.evaluatorTransaction.findUnique({ where: { chainId_txHash: { chainId: c.chainId, txHash } } });
-    if (existing) {
+    let existing = await tx.evaluatorTransaction.findUnique({ where: { chainId_txHash: { chainId: c.chainId, txHash } } });
+    // A1 fix round (row 32, R2-P3-1): a LEGACY row without nonce (backfilled from a hash no node returned) whose
+    // job re-signs the SAME decision with the same nonce and fees gets the SAME hash — the same signed bytes
+    // (hash = keccak256(raw)). The row becomes a normal one (nonce, tx data, raw), never a conflict.
+    if (existing && existing.kind === 'LEGACY' && existing.nonce === null && existing.jobId === c.jobId && existing.evaluator === evaluator) {
+      existing = await tx.evaluatorTransaction.update({
+        where: { id: existing.id },
+        data: {
+          nonce,
+          toAddress,
+          valueWei: valueWei.toString(),
+          calldata,
+          calldataHash,
+          gasLimit: gasLimit.toString(),
+          maxFeePerGas: maxFee.toString(),
+          maxPriorityFeePerGas: prio.toString(),
+          rawTx: c.rawTx ?? existing.rawTx,
+          action: existing.action === 'UNKNOWN' ? c.action : existing.action,
+          decision: existing.decision ?? c.decision ?? null,
+        },
+      });
+    }
+    if (existing && existing.kind === 'LEGACY' && existing.nonce === nonce && existing.calldataHash === calldataHash && existing.jobId === c.jobId) {
+      // replay of the upgraded legacy row: the same transaction
+    } else if (existing) {
       if (existing.evaluator !== evaluator || existing.nonce !== nonce || existing.jobId !== c.jobId
           || existing.calldataHash !== calldataHash || existing.kind !== c.kind) {
         throw new CandidateConflictError('TX_HASH_REUSED', `${txHash} already recorded with other fields`);

@@ -1460,12 +1460,12 @@ describeA1('A1 core — candidates, reconciliation, gate, lane (Postgres + fake 
 
   // ── rows 32, 33, 34, 44 ────────────────────────────────────────────────────
 
-  // A1-DEFECT D-A (row 32, R2-P3-1): the worker's gate `assertNoPendingSettlement` runs at depth `proof` and lowers
+  // A1-DEFECT D-A (row 32, R2-P3-1) — FIXED in feat/a1-fix-core (it.fails → it). Was: the worker's gate `assertNoPendingSettlement` runs at depth `proof` and lowers
   // to `latest` only for rows with the SAME calldataHash; a LEGACY row without a nonce has no calldata (''), so it is
   // judged at `proof`, where a nonce-less row clears only with a reverted receipt. An evicted legacy send (every node
   // "not found") therefore blocks the job's settlement forever ("... is pending (no receipt yet) — not signing
   // another one"), instead of today's rule (`legacyResignAllowed`). Remove `.fails` once fixed.
-  it.fails('row 32: a legacy row with nonce NULL follows today\'s rule and leaves through a new worker attempt (every node "not found") — no permanent deadlock', async () => {
+  it('row 32: a legacy row with nonce NULL follows today\'s rule and leaves through a new worker attempt (every node "not found") — no permanent deadlock', async () => {
     const { provider, jobId } = await delivered();
     sim.chain.holdEvaluatorTx = () => true;
     await sim.drive(1);
@@ -1484,12 +1484,12 @@ describeA1('A1 core — candidates, reconciliation, gate, lane (Postgres + fake 
     expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
   });
 
-  // A1-DEFECT D-B (row 33, R2-P2-2 item 1): after a CANCEL mined at `latest` consumed the head, re-signing the SAME
+  // A1-DEFECT D-B (row 33, R2-P2-2 item 1) — FIXED in feat/a1-fix-core (it.fails → it). Was: after a CANCEL mined at `latest` consumed the head, re-signing the SAME
   // decision must only need `latest`. The worker's gate lowers the depth only for rows with the same calldataHash; the
   // job's own MINED_SUCCESS CANCEL row (it never settles anything) is judged at `proof` and blocks ("candidate tx
   // <cancel> at nonce 0 may still mine (its outcome is not yet at the proof depth)") until `safe` passes it — with
   // `safe` stalled, never. Remove `.fails` once fixed.
-  it.fails('row 33: the proof tag lags near expiry — the same decision is re-signed on latest; contest and a decision change wait for the proof; evaluator-proof-stalled when safe stops', async () => {
+  it('row 33: the proof tag lags near expiry — the same decision is re-signed on latest; contest and a decision change wait for the proof; evaluator-proof-stalled when safe stops', async () => {
     const a = await stuckHead();
     sim.chain.safeHead = sim.chain.head; // safe stalls here
     await scriptReplace(a.head, 'cancel', a.jobId);
