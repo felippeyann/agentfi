@@ -719,23 +719,32 @@ export interface PlanFingerprintInput {
   /** getJob(...).status of the affected job (null for a foreign head). */
   jobOnChainStatus: string | null;
   operation: 'speed-up' | 'cancel' | 'rebroadcast';
-  proposedFees: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } | null;
+  /**
+   * Accepted for compatibility and IGNORED (A1 final review F-P2-1): the fees are not part of the
+   * fingerprint. The operator confirms exact fees; the script signs with exactly those and re-checks them
+   * (replacement minimum, base fee, caps, budget) inside the lane — a base fee that moves every block must
+   * not make every confirmed speed-up abort.
+   */
+  proposedFees?: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } | null;
 }
 
-/** keccak256 of a canonical encoding of the plan (spec §8.3); order-independent in the candidates. */
+/**
+ * keccak256 of a canonical encoding of the plan (spec §8.3, refined by F-P2-1): chain, key, nonce, the
+ * candidates of the nonce with their status, the job's on-chain status and the operation — what the
+ * operator decided ABOUT. Order-independent in the candidates; the fees are not included.
+ */
 export function planFingerprint(input: PlanFingerprintInput): string {
   const cands = input.candidates
     .map((c) => `${lower(c.txHash)}:${c.status}`)
     .sort();
   const canonical = JSON.stringify([
-    'a1-plan-v1',
+    'a1-plan-v2',
     input.chainId,
     lower(input.evaluator),
     input.nonce,
     cands,
     input.jobOnChainStatus,
     input.operation,
-    input.proposedFees ? [input.proposedFees.maxFeePerGas.toString(), input.proposedFees.maxPriorityFeePerGas.toString()] : null,
   ]);
   return keccak256(toHex(canonical));
 }

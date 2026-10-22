@@ -413,7 +413,8 @@ describe('planFingerprint (§8.3) and range plan (rows 18, 35)', () => {
     expect(planFingerprint({ ...base, candidates: [...base.candidates, { txHash: H(3), status: 'SIGNED' }] })).not.toBe(f);
     expect(planFingerprint({ ...base, jobOnChainStatus: 'Completed' })).not.toBe(f);
     expect(planFingerprint({ ...base, operation: 'cancel' })).not.toBe(f);
-    expect(planFingerprint({ ...base, proposedFees: { maxFeePerGas: 20_000_001n, maxPriorityFeePerGas: 5_000_000n } })).not.toBe(f);
+    // A1 final review F-P2-1: the fees are not part of the fingerprint (re-checked inside the lane instead).
+    expect(planFingerprint({ ...base, proposedFees: { maxFeePerGas: 20_000_001n, maxPriorityFeePerGas: 5_000_000n } })).toBe(f);
   });
   it('row 18: a nonce that is not the head on every node is refused', () => {
     expect(headCheck(7, [view('a', { nonceLatest: 7 }), view('b', { nonceLatest: 7 })])).toEqual({ ok: true });
