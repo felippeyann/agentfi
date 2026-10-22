@@ -1562,7 +1562,7 @@ function recoveryDeps(o: {
   verify?: { ok: true } | { ok: false; reason: string };
   rpcChainId?: number;
   balance?: bigint;
-  lock?: (chainId: number, owner: string) => Promise<{ release(): Promise<unknown> }>;
+  lock?: (chainId: number, owner: string) => Promise<{ release(): Promise<unknown>; assertHeld?(): Promise<void> }>;
   prompts?: string[];
 } = {}) {
   sim.deps.recoveryCaps = () => (o.caps === undefined ? planCapsFixture() : o.caps);
@@ -1665,7 +1665,8 @@ describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () =
     const speed = rows.find((c) => c.kind === 'SPEED_UP')!;
     expect(speed).toMatchObject({ origin: 'SCRIPT', operator: 'ops@test', note: 'stuck head, C5', action: 'COMPLETE' });
     expect(speed.calldataHash).toBe(byHash(rows, a.head.hash).calldataHash);
-    expect((await job(a.jobId)).escrowError).toMatch(/A1 recovery speed-up at nonce 0 .* by ops@test: stuck head, C5/);
+    // F-P3-3: the API-visible line is neutral; the operator and the note live only in the ledger row (D-i).
+    expect((await job(a.jobId)).escrowError).toBe('evaluator recovery: speed-up sent at nonce 0');
     await reconcile();
     expect(byHash(await atNonce(0), a.head.hash)).toMatchObject({ status: 'DEAD' });
     expect(byHash(await atNonce(0), speed.txHash)).toMatchObject({ status: 'MINED_SUCCESS' });
@@ -1723,10 +1724,10 @@ describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () =
     expect(second.exitCode).toBe(2);
     expect(second.output).toMatch(/another recovery holds the lock/);
     recoveryLocks.clear();
-    // The fee situation moves between the confirmation and the lane: the confirmed plan is no longer the one in force.
+    // The job's on-chain state moves between the confirmation and the lane: the confirmed plan is no longer the one in force.
     const moved = await run(EXEC('speed-up', 0), {
-      answer: (prompt) => {
-        sim.chain.baseFee = sim.chain.baseFee * 2n;
+      answer: async (prompt) => {
+        onChain((await job(a.jobId)).onChainJobId).status = JobStatus.Completed;
         return /Type exactly: (.*)\n/.exec(prompt)![1]!;
       },
     });
@@ -1885,6 +1886,70 @@ describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () =
     expect(r.output).toMatch(/ALREADY PASSED · posture EXPIRED/);
     expect(prompts[0]).toMatch(/SPEED-UP .* AFTER EXPIRY/);
     expect(r.exitCode, r.output).toBe(0);
+  });
+
+  it('F-P2-1: the base fee moves between the confirmation and the lane — the speed-up is still sent, signed with EXACTLY the confirmed fees', async () => {
+    const a = await stuckHead();
+    sim.setNowOffset(61_000);
+    sim.chain.baseFee = 5_000_000n;
+    let confirmedLine = '';
+    const r = await run(EXEC('speed-up', 0), {
+      answer: (prompt) => {
+        sim.chain.baseFee = sim.chain.baseFee + 1n; // the next block
+        return /Type exactly: (.*)\n/.exec(prompt)![1]!;
+      },
+    });
+    expect(r.exitCode, r.output).toBe(0);
+    confirmedLine = r.output.split('\n').find((l) => l.startsWith('Plan: speed-up'))!;
+    const m = /maxFeePerGas (\d+) wei, priority (\d+) wei — signed with exactly these fees/.exec(confirmedLine)!;
+    const speed = (await atNonce(0)).find((c) => c.kind === 'SPEED_UP')!;
+    expect(BigInt((speed as unknown as { maxFeePerGas: string }).maxFeePerGas)).toBe(BigInt(m[1]!));
+    expect(BigInt((speed as unknown as { maxPriorityFeePerGas: string }).maxPriorityFeePerGas)).toBe(BigInt(m[2]!));
+    void a;
+  });
+
+  it('F-P2-1: the base fee rises above the confirmed maxFeePerGas before the lane → aborted (exit 3), nothing signed', async () => {
+    const a = await stuckHead();
+    sim.setNowOffset(61_000);
+    sim.chain.baseFee = 5_000_000n;
+    const r = await run(EXEC('speed-up', 0), {
+      answer: (prompt) => {
+        sim.chain.baseFee = 10n ** 9n; // a spike: the confirmed fees no longer cover the base fee
+        return /Type exactly: (.*)\n/.exec(prompt)![1]!;
+      },
+    });
+    expect(r.exitCode).toBe(3);
+    expect(r.output).toMatch(/below the current base fee .* aborted, nothing sent/);
+    expect((await candidates(a.jobId)).filter((c) => c.origin === 'SCRIPT')).toHaveLength(0);
+  });
+
+  it('F-P3-1: the recovery lock no longer ours before a nonce → stopped, nothing sent', async () => {
+    const a = await stuckHead();
+    sim.setNowOffset(61_000);
+    const r = await run(EXEC('speed-up', 0), {
+      lock: async () => ({
+        release: async () => true,
+        assertHeld: async () => {
+          throw new Error('agentfi:evaluator-recovery:84532 is held by another owner');
+        },
+      }),
+    });
+    expect(r.exitCode).toBe(3);
+    expect(r.output).toMatch(/recovery lock of chain 84532 is no longer ours/);
+    expect((await candidates(a.jobId)).filter((c) => c.origin === 'SCRIPT')).toHaveLength(0);
+  });
+
+  it('F-P3-2: --acknowledge-foreign is written only after the typed phrase (a wrong phrase acknowledges nothing)', async () => {
+    await stuckHead();
+    sim.setNowOffset(61_000);
+    const ext = `0x${'ef'.repeat(32)}`;
+    await ledger.recordExternalCandidate(m.db, {
+      chainId: CHAIN_ID, evaluator: getAddress(SIM_EVALUATOR), nonce: 91, toAddress: getAddress(SIM_EVALUATOR), valueWei: 0n, calldata: '0x',
+      gasLimit: 21_000n, maxFeePerGas: 1n, maxPriorityFeePerGas: 1n, txHash: ext, status: 'MINED_SUCCESS', proofLevel: 'proof', blockNumber: 1n, blockHash: `0x${'cd'.repeat(32)}`,
+    });
+    const r = await run([...EXEC('speed-up', 0), '--acknowledge-foreign', ext], { answer: () => 'no' });
+    expect(r.output).toMatch(/confirmation phrase does not match/);
+    expect(await ledger.unacknowledgedExternal(m.db, CHAIN_ID, SIM_EVALUATOR)).toHaveLength(1);
   });
 
   it.todo('row 9 (script + worker, Redis real): the worker signs Y at pending+1 while the script holds the lane for N; no nonce collision — covered by the shared lane key and chooseNonce (unit + row 30); concurrent run not scripted here');

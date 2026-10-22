@@ -33,6 +33,8 @@ import {
   rangePlanCheck,
   rebroadcastAllowed,
   replacementLimitCheck,
+  bumped,
+  effectiveFeeCap,
   type Allowed,
   type ExpiryPosture,
   type ExpiryThresholds,
@@ -68,6 +70,8 @@ export interface RecoverySigner {
 /** `acquireEvaluatorRecoveryLock` (Redis, SET NX with owner + PID) in production. */
 export interface RecoveryLockLike {
   release(): Promise<unknown>;
+  /** F-P3-1: the lock is still ours (owner token) — checked before each nonce. Throws otherwise. */
+  assertHeld?(minRemainingMs?: number): Promise<void>;
 }
 
 export interface RecoveryDeps {
@@ -245,6 +249,8 @@ interface Situation {
   payDecisionAffected: boolean;
   unackedExternal: LedgerCandidate[];
   caps: RecoveryCaps | null;
+  /** SCRIPT reserved costs per nonce (incident, 24 h, live), for the budget re-check of confirmed fees. */
+  costs: { incident: Map<number, bigint>; day: Map<number, bigint>; live: Map<number, bigint> };
   gateOpen: boolean;
   problems: string[];
 }
@@ -468,7 +474,8 @@ async function readSituation(deps: RecoveryDeps, args: Args): Promise<Situation>
         candidates: rows.map((r) => ({ txHash: r.txHash, status: r.status })),
         jobOnChainStatus: chainStatus === null ? null : (STATUS_NAME[chainStatus] ?? String(chainStatus)),
         operation,
-        proposedFees: p && p.ok ? { maxFeePerGas: p.maxFeePerGas, maxPriorityFeePerGas: p.maxPriorityFeePerGas } : null,
+        // F-P2-1: the fees are confirmed separately (exact values) and re-checked in the lane, not fingerprinted.
+        proposedFees: null,
       });
     plans.set(nonce, {
       nonce,
@@ -499,7 +506,7 @@ async function readSituation(deps: RecoveryDeps, args: Args): Promise<Situation>
   return {
     chainId, evaluator, views, reads, latest, pending, proof, queue, plans, headClass,
     baseFee: fee?.baseFee ?? null, priorityP90: fee?.priorityP90 ?? null, balance, blockTime, blockTimeSource,
-    delivered, otherLive, earliestDelivered, posture, payDecisionAffected, unackedExternal, caps, gateOpen: gateOpen(deps, chainId), problems,
+    delivered, otherLive, earliestDelivered, posture, payDecisionAffected, unackedExternal, caps, costs, gateOpen: gateOpen(deps, chainId), problems,
   };
 }
 
@@ -629,7 +636,13 @@ interface ExecContext {
 }
 
 /** §8.4-3: the critical section for one nonce, inside the evaluator lane. */
-async function executeNonce(ctx: ExecContext, s: Situation, nonce: number, confirmed: string): Promise<void> {
+/** What the operator confirmed for one nonce: the plan fingerprint and, for a speed-up / cancel, the EXACT fees. */
+interface Confirmed {
+  fingerprint: string;
+  fees: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } | null;
+}
+
+async function executeNonce(ctx: ExecContext, s: Situation, nonce: number, confirmed: Confirmed): Promise<void> {
   const { deps, args, op, print } = ctx;
   const lanes = (deps.erc8183.evaluatorLanes ?? deps.erc8183.lanes) as Partial<LeaseLock> | undefined;
   if (!lanes || typeof lanes.acquire !== 'function') throw new Refused('no evaluator lane lock (LeaseLock) in this process — nothing is sent without the lane');
@@ -646,7 +659,7 @@ async function executeNonce(ctx: ExecContext, s: Situation, nonce: number, confi
     const fresh = await readSituation(deps, args);
     const p = fresh.plans.get(nonce);
     if (!p) throw new Refused(`nonce ${nonce} is no longer in the queue — the plan changed; run the dry-run again`, 3);
-    if (p.fingerprint[op] !== confirmed) throw new Refused(`the plan of nonce ${nonce} changed since the confirmation (fingerprint) — aborted, nothing sent; run the dry-run again`, 3);
+    if (p.fingerprint[op] !== confirmed.fingerprint) throw new Refused(`the plan of nonce ${nonce} changed since the confirmation (fingerprint) — aborted, nothing sent; run the dry-run again`, 3);
     // 2. Q7 again, inside the lane
     if (!gateOpen(deps, s.chainId)) throw new Refused(`the on-chain configuration of chain ${s.chainId} is not verified in this process (Q7)`, 3);
     // 3. caps and balance, fresh
@@ -669,12 +682,33 @@ async function executeNonce(ctx: ExecContext, s: Situation, nonce: number, confi
     }
 
     if (!p.limit.ok) await refuseAtLimit(deps, fresh, nonce, `replacement limit: ${p.limit.reason}${'retryAt' in p.limit && p.limit.retryAt ? ` (retry at ${p.limit.retryAt.toISOString()})` : ''}`);
-    const proposal = op === 'speed-up' ? p.fees.speedUp : p.fees.cancel;
-    if (!proposal.ok) {
-      await refuseAtLimit(deps, fresh, nonce, `fees: ${proposal.reason}${'needed' in proposal && proposal.needed !== undefined ? ` — would need ${proposal.needed} wei, cap ${proposal.cap} wei` : ''}`);
-      return;
+    // F-P2-1: sign with EXACTLY the fees the operator confirmed — never a recomputed proposal. Abort if they no
+    // longer replace the most expensive live candidate (bump on both fees) or no longer cover the current base
+    // fee; refuse if they now exceed the fresh caps or budget.
+    const proposal = confirmed.fees;
+    if (!proposal) throw new Refused(`no confirmed fees for nonce ${nonce}`, 3);
+    const gas = op === 'speed-up' ? p.ours!.gasLimit : CANCEL_GAS;
+    const minFee = bumped(maxBig(p.live.map((r) => r.maxFeePerGas)), caps!.bumpBps);
+    const minPrio = bumped(maxBig(p.live.map((r) => r.maxPriorityFeePerGas)), caps!.bumpBps);
+    if (p.live.length > 0 && (proposal.maxFeePerGas < minFee || proposal.maxPriorityFeePerGas < minPrio)) {
+      throw new Refused(
+        `the confirmed fees (${proposal.maxFeePerGas} / ${proposal.maxPriorityFeePerGas} wei) no longer replace the most expensive live candidate of nonce ${nonce} ` +
+          `(minimum ${minFee} / ${minPrio} wei) — aborted, nothing sent; run the dry-run again`,
+        3,
+      );
     }
-    const budget = op === 'speed-up' ? p.budget.speedUp : p.budget.cancel;
+    if (fresh.baseFee === null) throw new Refused('the current base fee cannot be read — aborted, nothing sent', 3);
+    if (proposal.maxFeePerGas < fresh.baseFee) {
+      throw new Refused(`the confirmed maxFeePerGas ${proposal.maxFeePerGas} wei is below the current base fee ${fresh.baseFee} wei — aborted, nothing sent; run the dry-run again`, 3);
+    }
+    const cap = effectiveFeeCap(caps!, fresh.baseFee);
+    if (proposal.maxFeePerGas > cap || proposal.maxPriorityFeePerGas > caps!.maxPriorityFeePerGasWei) {
+      await refuseAtLimit(deps, fresh, nonce, `fees: the confirmed fees exceed the fresh caps — would need ${proposal.maxFeePerGas} wei, cap ${cap} wei (priority cap ${caps!.maxPriorityFeePerGasWei} wei)`);
+    }
+    const budget =
+      fresh.balance === null
+        ? null
+        : budgetCheck({ caps, nonce, gasLimit: gas, maxFeePerGas: proposal.maxFeePerGas, incidentMaxByNonce: fresh.costs.incident, dayMaxByNonce: fresh.costs.day, liveMaxByNonce: fresh.costs.live, balanceWei: fresh.balance });
     if (!budget || !budget.ok) {
       await refuseAtLimit(deps, fresh, nonce, `budget: ${budget ? budget.reason : 'balance unreadable'}${budget && 'needed' in budget && budget.needed !== undefined ? ` — would need ${budget.needed} wei, cap / available ${budget.cap} wei` : ''}`);
       return;
@@ -742,13 +776,11 @@ async function executeNonce(ctx: ExecContext, s: Situation, nonce: number, confi
       }
       throw new Refused(`the ledger refused the candidate: ${(err as Error).message}`, 3);
     }
-    // D-i: one short line in Job.escrowError (the reviewLog is not touched)
+    // D-i + F-P3-3: Job.escrowError is visible to the requester and the provider through the API — one NEUTRAL
+    // line only. The operator and the note stay in the ledger row (SCRIPT, operator, note); reviewLog untouched.
     const affectedJob = stampJobId;
     if (affectedJob) {
-      await db(deps).job.updateMany({
-        where: { id: affectedJob },
-        data: { escrowError: `A1 recovery ${op} at nonce ${nonce} (${signed.hash}) by ${args.operator}: ${args.note}`.slice(0, 500) },
-      });
+      await db(deps).job.updateMany({ where: { id: affectedJob }, data: { escrowError: `evaluator recovery: ${op} sent at nonce ${nonce}` } });
     }
     await ledger.markBroadcast(db(deps), candidateId);
     section();
@@ -808,11 +840,10 @@ export async function runEvaluatorRecovery(argv: readonly string[], deps: Recove
     if (!deps.tty.isTTY) throw new Refused('no TTY (stdin redirected): the typed confirmation is required — refused');
     if (s.problems.length > 0) throw new Refused(`the situation could not be read: ${s.problems.join('; ')}`);
     await assertEnvironment(deps, s);
-    // §4.3: an unacknowledged EXTERNAL blocks every execution on the chain.
-    for (const e of s.unackedExternal) {
-      if (args.acknowledgeForeign.includes(e.txHash.toLowerCase())) await ledger.acknowledgeExternal(db(deps), args.chainId, e.txHash, args.operator!);
-    }
-    const stillForeign = (await ledger.unacknowledgedExternal(db(deps), args.chainId, s.evaluator)).map((e) => e.txHash);
+    // §4.3: an unacknowledged EXTERNAL blocks every execution on the chain. F-P3-2: the acknowledgement is only
+    // CHECKED here; it is written after the typed confirmation.
+    const toAcknowledge = s.unackedExternal.filter((e) => args.acknowledgeForeign.includes(e.txHash.toLowerCase()));
+    const stillForeign = s.unackedExternal.filter((e) => !args.acknowledgeForeign.includes(e.txHash.toLowerCase())).map((e) => e.txHash);
     if (stillForeign.length > 0) throw new Refused(`EXTERNAL transaction(s) of this key not acknowledged: ${stillForeign.join(', ')} — rerun with --acknowledge-foreign <hash> after the incident review`);
     if (s.latest === null) throw new Refused('the head nonce cannot be read on every node');
     if (op === 'speed-up' && nonces.length > 1) {
@@ -843,11 +874,24 @@ export async function runEvaluatorRecovery(argv: readonly string[], deps: Recove
 
     // ── the typed confirmation (never inside the lane)
     const phrase = phraseFor(op, args.chainId, nonces, s.plans, afterExpiry);
-    print(`Plan: ${op} ${nonces.map((n) => `nonce ${n} (job ${s.plans.get(n)?.job?.id ?? '-'}, ${s.plans.get(n)?.ours?.action ?? 'CANCEL_NOOP'})`).join(', ')}`);
+    const confirmedFees = (n: number) => {
+      if (op === 'rebroadcast') return null;
+      const f = op === 'speed-up' ? s.plans.get(n)!.fees.speedUp : s.plans.get(n)!.fees.cancel;
+      return f.ok ? { maxFeePerGas: f.maxFeePerGas, maxPriorityFeePerGas: f.maxPriorityFeePerGas } : null;
+    };
+    print(
+      `Plan: ${op} ${nonces
+        .map((n) => {
+          const f = confirmedFees(n);
+          return `nonce ${n} (job ${s.plans.get(n)?.job?.id ?? '-'}, ${s.plans.get(n)?.ours?.action ?? 'CANCEL_NOOP'}${f ? `, maxFeePerGas ${f.maxFeePerGas} wei, priority ${f.maxPriorityFeePerGas} wei — signed with exactly these fees` : ', the identical recorded bytes'})`;
+        })
+        .join(', ')}`,
+    );
     if (op === 'cancel') print(CANCEL_DOES_NOT_SETTLE);
     const typed = (await deps.tty.ask(`Type exactly: ${phrase}\n> `)).trim();
     if (typed !== phrase) throw new Refused('confirmation phrase does not match — nothing done');
-    const confirmed = new Map(nonces.map((n) => [n, s.plans.get(n)!.fingerprint[op]]));
+    const confirmed = new Map<number, Confirmed>(nonces.map((n) => [n, { fingerprint: s.plans.get(n)!.fingerprint[op], fees: confirmedFees(n) }]));
+    for (const e of toAcknowledge) await ledger.acknowledgeExternal(db(deps), args.chainId, e.txHash, args.operator!);
 
     // ── the recovery lock (one recovery per chain), the full Q7 after the confirmation
     try {
@@ -863,6 +907,14 @@ export async function runEvaluatorRecovery(argv: readonly string[], deps: Recove
     const ctx: ExecContext = { deps, args, op, incidentId: incident.id, print, sent: [] };
     // R2-P2-4: nonce by nonce, from the head backwards; stop at the first deviation.
     for (const n of nonces) {
+      // F-P3-1: the recovery lock is still ours (its owner token) before each nonce.
+      if (lock.assertHeld) {
+        try {
+          await lock.assertHeld();
+        } catch (err) {
+          throw new Refused(`the recovery lock of chain ${args.chainId} is no longer ours (${(err as Error).message}) — stopped before nonce ${n}, nothing sent for it`, 3);
+        }
+      }
       await executeNonce(ctx, s, n, confirmed.get(n)!);
     }
 

@@ -35,7 +35,10 @@ through `POST /admin/jobs/:id/resolve`, once the uncertainty has closed by proof
 npm run evaluator:recover -- --chain 84532
 ```
 
-The dry-run signs nothing. It shows:
+The dry-run signs nothing new. **Every run first runs the reconciliation pass (spec §5.2), the same one the
+worker runs on every tick.** That pass may send the **identical** bytes of a lost head again (R2-P1-3:
+the head, the only live candidate at its nonce, unknown to every node, simulation passing), so even a
+dry-run can rebroadcast an already recorded transaction. It never signs a new one. The dry-run then shows:
 
 - **Key and nonces:** the evaluator address and its balance; the `latest`, `pending` and proof-tag nonces.
 - **The queue `[latest, pending)`**, for each nonce:
@@ -46,7 +49,8 @@ The dry-run signs nothing. It shows:
   - for speed-up, cancel and rebroadcast: admitted or refused (with the reason), the proposed fees or
     the refusal with the value that would be needed, the maximum cost and the reserve left;
   - the replacement count and interval;
-  - the plan fingerprint.
+  - the plan fingerprint. It covers the chain, the key, the nonce, the candidates of the nonce with
+    their status, the job's on-chain status and the operation. It does **not** cover the fees (§3.3).
 - **Head classification:**
 
   | Class | Action |
@@ -109,17 +113,30 @@ After the job's `expiresAt`, the phrase ends with ` AFTER EXPIRY`.
 
 ### 3.3 After the confirmation
 
-1. The script takes the per-chain recovery lock. A second operator stops here.
-2. It verifies the on-chain configuration fully (Q7).
-3. It opens (or reuses) the recovery incident.
+The plan printed before the phrase lists, per nonce, the **exact** `maxFeePerGas` and priority fee. Typing
+the phrase consents to exactly those values. The script signs with them and never with a fee recomputed
+later (final review F-P2-1).
+
+1. It records any `--acknowledge-foreign` only now, after the phrase. A wrong phrase acknowledges
+   nothing.
+2. The script takes the per-chain recovery lock. A second operator stops here. Before each nonce it
+   checks that the lock is still its own (the owner token); if not, it stops.
+3. It verifies the on-chain configuration fully (Q7) and opens (or reuses) the recovery incident.
 4. For each nonce, from the head backwards, **inside the evaluator lane** (the worker shares the same lane):
-   1. It re-reads everything and compares the fingerprint. If the plan changed, it aborts, nothing is
-      sent, and you run the dry-run again.
-   2. It checks Q7, the caps and the balance again, freshly read.
-   3. It signs with an explicit nonce and fees.
-   4. It records the SCRIPT candidate together with the job stamp. The budget is re-checked under the
-      ledger lock.
-   5. It writes your note to `Job.escrowError` (one line).
+   1. It re-reads everything and compares the fingerprint. If the plan changed (a new candidate, a
+      status, the job on-chain), it aborts, nothing is sent, and you run the dry-run again.
+   2. It checks Q7, the caps and the balance again, freshly read. It checks the **confirmed** fees:
+      - it aborts (exit 3, nothing sent) if they no longer beat the most expensive live candidate of the
+        nonce by the replacement bump on both fees, or if `maxFeePerGas` is below the current base fee;
+      - it refuses (`evaluator-recovery-refused`) if they now exceed the fresh caps or the budget.
+
+      A base fee that only moved by a block does not abort a confirmed speed-up.
+   3. It signs with the explicit nonce and **the confirmed fees**.
+   4. It records the SCRIPT candidate together with the job stamp. The operator and the note go only into
+      that ledger row. The budget is re-checked under the ledger lock.
+   5. It writes one **neutral** line into `Job.escrowError`, which the requester and the provider can
+      read through the API: `evaluator recovery: <operation> sent at nonce <N>`. It never carries the
+      operator's name or note (D-i).
    6. It confirms the lease is still held, then sends.
 5. It waits for the receipt **outside** the lane, for at most `EVALUATOR_RECOVERY_RECEIPT_WAIT_SECONDS`
    (90 s).
