@@ -93,8 +93,12 @@ describe('lane keys', () => {
 });
 
 describe('InMemoryLaneLock leases', () => {
-  beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   it('one holder per key; the next acquire waits for release; tokens differ; other keys are free', async () => {
     const lock = new InMemoryLaneLock({ ttlMs: 10_000 });
@@ -163,8 +167,12 @@ describe('InMemoryLaneLock leases', () => {
 });
 
 describe('RedisLaneLock leases — Lua semantics on a fake Redis', () => {
-  beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   it('GET == token AND PTTL >= margin; a foreign token is not-held; the release is compare-and-delete', async () => {
     const redis = new FakeRedis();
@@ -214,8 +222,12 @@ describe('RedisLaneLock leases — Lua semantics on a fake Redis', () => {
 });
 
 describe('recovery lock — owner + PID, compare-and-delete (fake Redis)', () => {
-  beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   it('SET NX with owner and PID; a second acquire names the holder; only the owner releases', async () => {
     const redis = new FakeRedis();
