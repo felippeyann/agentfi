@@ -240,6 +240,27 @@ export async function runEscrowBootCheck(role: ProcessRole): Promise<EscrowBootV
   return verdict;
 }
 
+/**
+ * A1 §8.2 / R2-P3-7 (the recovery script): ONE full verification of the deployed escrow / hook of
+ * `chainId` in this process — `checkEscrowDeployments` + `recordEscrowChecks`, no re-check loop — then
+ * the gate's verdict. Run after the operator's confirmation, before the lane.
+ */
+export async function verifyEscrowConfigOnce(chainId: number): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const chains = escrowExpectations().filter((c) => c.chainId === chainId);
+  if (chains.length === 0) return { ok: false, reason: `no AGENT_JOB_ESCROW_ADDRESS_${chainId} configured in this process` };
+  try {
+    const checks = await checkEscrowDeployments({ chains, reader, chainIdReader, codeReader, attempts: 1 });
+    recordEscrowChecks(checks, chains);
+    const verdict = escrowBootVerdict(env.NODE_ENV, checks);
+    if (verdict.errors.length > 0 || !verdict.verified.includes(chainId)) {
+      return { ok: false, reason: verdict.errors.join('; ') || `chain ${chainId} not verified` };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: `verification crashed: ${(err as Error)?.message ?? String(err)}` };
+  }
+}
+
 /** Testing hook: stops the background re-check. */
 export function __stopEscrowRecheckForTests(): void {
   if (recheckTimer) clearInterval(recheckTimer);

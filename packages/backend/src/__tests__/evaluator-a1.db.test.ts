@@ -1537,25 +1537,355 @@ describeA1('A1 core — candidates, reconciliation, gate, lane (Postgres + fake 
   });
 });
 
-// ══ 3. recovery script (TODO(A1-CLI): enable once src/scripts/evaluator-recovery.ts exists) ═════
+// ══ 3. recovery script (src/scripts/evaluator-recovery.ts — enabled with the CLI) ═════════════════════
 
 /**
- * Assumed entry: `runEvaluatorRecovery(argv: string[], deps: RecoveryDeps): Promise<{ exitCode: number; output: string }>`
- * with `deps` = { db, chain clients (per node), signer (signExplicit/sendRaw), leases + recovery lock,
- * caps (RecoveryCaps | null), configGate, tty: { isTTY: boolean; answer(prompt): Promise<string> }, now }.
+ * Entry: `runEvaluatorRecovery(argv, deps)` → `{ exitCode, output }` (0 done / dry-run, 2 refused, 3 aborted in
+ * the critical section). Deps here: the sim's orchestrator deps (fake multi-node chain, FakeLeaseLock lane),
+ * the fake chain's signer (signExplicit / sendRaw), an in-memory recovery lock, the plan caps FIXTURE (test
+ * values only), a scripted TTY (types the phrase it is asked for, unless told otherwise).
  */
-describe.skip('A1 recovery script — TODO(A1-CLI)', () => {
-  it.todo('row 1 (script): --execute speed-up --nonce N with the typed phrase "SPEED-UP <chainId> NONCE <N> COMPLETE <jobId>" → SPEED_UP row SCRIPT, operator + note, Job.escrowError line; mined → original DEAD');
-  it.todo('row 3 (script): cancel refused while a speed-up is possible (R2-P2-1, no override); admitted when the simulation reverts / job terminal / foreign head with --acknowledge-foreign');
-  it.todo('row 4 (script): refuses every --execute while an unacknowledged EXTERNAL exists; --acknowledge-foreign <hash> unlocks only that one');
-  it.todo('row 8: two operators — the second stops at agentfi:evaluator-recovery:<chainId> (Redis real, 6391/3); with the lock forced away, the fingerprint changes inside the lane → abort, at most one replacement per confirmed plan');
-  it.todo('row 9 (script + worker, Redis real): the worker signs Y at pending+1 while the script holds the lane for N; no nonce collision');
-  it.todo('row 16: wrong chain id / Q7 unverified / key ≠ Job.evaluator → refusal before any signature, reason in the dry-run');
-  it.todo('row 19 (script): calldataHash of the proposed speed-up ≠ the original → refused');
-  it.todo('row 38: 4th replacement and interval < 60 s with a script restart in between → refused; count and broadcastAt read from the table');
-  it.todo('row 39: incident and 24 h budget across two operators in sequence (Redis real) → sum per nonce of the highest reserved; refused at the limit; survives restart');
-  it.todo('row 43 (DB): dry-run head classification price-stuck / lost-send / known-not-mined / foreign → the suggested action');
-  it.todo('row 44 (script, Redis real, injected clock): critical section > 60 s or PTTL < 30 s → abort before send; no SENT candidate');
-  it.todo('no caps configured (P2/P3/P11–P14 absent) → dry-run only, --execute refused (fail closed)');
-  it.todo('no TTY (stdin redirected) → refused');
+const recoveryLocks = new Set<number>();
+function memRecoveryLock(chainId: number) {
+  if (recoveryLocks.has(chainId)) throw new Error(`agentfi:evaluator-recovery:${chainId} is held by another operator`);
+  recoveryLocks.add(chainId);
+  return { release: async () => recoveryLocks.delete(chainId) };
+}
+
+type Cli = typeof import('../scripts/evaluator-recovery.js');
+let cliMod: Cli;
+
+function recoveryDeps(o: {
+  caps?: ReturnType<typeof planCapsFixture> | null;
+  tty?: boolean;
+  answer?: (prompt: string) => string | Promise<string>;
+  verify?: { ok: true } | { ok: false; reason: string };
+  rpcChainId?: number;
+  balance?: bigint;
+  lock?: (chainId: number, owner: string) => Promise<{ release(): Promise<unknown> }>;
+  prompts?: string[];
+} = {}) {
+  sim.deps.recoveryCaps = () => (o.caps === undefined ? planCapsFixture() : o.caps);
+  return {
+    erc8183: sim.deps,
+    signer: sim.chain.signer() as never,
+    acquireRecoveryLock: o.lock ?? (async (chainId: number) => memRecoveryLock(chainId)),
+    verifyConfig: async () => o.verify ?? ({ ok: true } as const),
+    ...(o.rpcChainId !== undefined ? { rpcChainId: async () => o.rpcChainId! } : {}),
+    ...(o.balance !== undefined ? { balance: async () => o.balance! } : {}),
+    thresholds: { actWithinMs: 24 * 3_600_000, urgentWithinMs: 6 * 3_600_000, handToOwnerWithinMs: 3_600_000 },
+    tty: {
+      isTTY: o.tty ?? true,
+      ask: async (prompt: string) => {
+        o.prompts?.push(prompt);
+        if (o.answer) return o.answer(prompt);
+        return /Type exactly: (.*)\n/.exec(prompt)?.[1] ?? '';
+      },
+    },
+    now: () => sim.now(),
+    receiptWaitMs: 20,
+  };
+}
+
+const run = (argv: string[], o: Parameters<typeof recoveryDeps>[0] = {}) => cliMod.runEvaluatorRecovery(['--chain', String(CHAIN_ID), ...argv], recoveryDeps(o));
+const EXEC = (op: string, nonce: number | string) => ['--execute', op, ...(typeof nonce === 'string' ? ['--nonces', nonce] : ['--nonce', String(nonce)]), '--operator', 'ops@test', '--note', 'stuck head, C5'];
+
+describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () => {
+  beforeAll(async () => {
+    await loadModules();
+    cliMod = await import('../scripts/evaluator-recovery.js');
+    await wipe();
+  });
+
+  beforeEach(async () => {
+    await wipe();
+    recoveryLocks.clear();
+    m.svc.__resetEscrowTokenCacheForTests();
+    setSimConfigUnverified(null);
+    sim = makeSim();
+  });
+
+  afterAll(async () => {
+    if (!m) return;
+    await wipe();
+    setSimDeps(null);
+    setSimRepoll(null);
+  });
+
+  it('dry-run (default): nonces latest / pending / proof, the queue with every candidate and "known by" per node, jobs, fees, proposals, cost, balance, head class, the claimRefund sentence, the cancel text, fingerprints — nothing signed', async () => {
+    const a = await stuckHead();
+    const before = (await candidates(a.jobId)).length;
+    const r = await run([]);
+    expect(r.exitCode).toBe(0);
+    expect(r.output).toMatch(/DRY-RUN \(nothing signed\)/);
+    expect(r.output).toMatch(/nonces: latest 0 · pending 1 · proof tag/);
+    expect(r.output).toMatch(/nonce 0 \(HEAD\):/);
+    expect(r.output).toContain(a.head.hash.toLowerCase());
+    expect(r.output).toMatch(/not found|known/);
+    expect(r.output).toMatch(/head classification: price-stuck → speed-up/);
+    expect(r.output).toMatch(/speed-up: allowed · fees maxFeePerGas \d+ wei/);
+    expect(r.output).toMatch(/cancel: +refused: SPEED_UP_POSSIBLE/);
+    expect(r.output).toMatch(/max cost \d+ wei/);
+    expect(r.output).toMatch(/fingerprint speed-up 0x[0-9a-f]{64}/);
+    expect(r.output).toMatch(/Affected jobs \(delivered, waiting on the key\): 1/);
+    expect(r.output).toMatch(/Earliest delivered expiresAt: .* posture/);
+    expect(r.output).toContain('After expiresAt anyone can call claimRefund on a Funded or Submitted job and refund the requester in full');
+    expect(r.output).toContain('CANCEL does not settle the job.');
+    expect((await candidates(a.jobId)).length).toBe(before);
+  });
+
+  it('no caps configured → the dry-run says so; --execute refused (fail closed), nothing signed', async () => {
+    const a = await stuckHead();
+    sim.setNowOffset(61_000);
+    const r = await run(EXEC('speed-up', 0), { caps: null });
+    expect(r.output).toMatch(/caps: NONE CONFIGURED/);
+    expect(r.exitCode).toBe(2);
+    expect(r.output).toMatch(/REFUSED: no recovery caps configured/);
+    expect((await candidates(a.jobId)).filter((c) => c.origin === 'SCRIPT')).toHaveLength(0);
+  });
+
+  it('no TTY (stdin redirected) → refused, nothing signed', async () => {
+    const a = await stuckHead();
+    sim.setNowOffset(61_000);
+    const r = await run(EXEC('speed-up', 0), { tty: false });
+    expect(r.exitCode).toBe(2);
+    expect(r.output).toMatch(/REFUSED: no TTY/);
+    expect((await candidates(a.jobId)).filter((c) => c.origin === 'SCRIPT')).toHaveLength(0);
+  });
+
+  it('row 1 (script): --execute speed-up with the typed phrase "SPEED-UP <chainId> NONCE <N> COMPLETE <jobId>" → SPEED_UP row SCRIPT with operator + note, Job.escrowError line; mined → original DEAD, job paid once', async () => {
+    const a = await stuckHead();
+    sim.setNowOffset(61_000);
+    sim.chain.baseFee = 5_000_000n; // the network calms down: the bumped fees clear the base fee
+    const prompts: string[] = [];
+    const r = await run(EXEC('speed-up', 0), { prompts });
+    expect(r.exitCode, r.output).toBe(0);
+    expect(prompts[0]).toContain(`SPEED-UP ${CHAIN_ID} NONCE 0 COMPLETE ${a.jobId}`);
+    const rows = await atNonce(0);
+    const speed = rows.find((c) => c.kind === 'SPEED_UP')!;
+    expect(speed).toMatchObject({ origin: 'SCRIPT', operator: 'ops@test', note: 'stuck head, C5', action: 'COMPLETE' });
+    expect(speed.calldataHash).toBe(byHash(rows, a.head.hash).calldataHash);
+    expect((await job(a.jobId)).escrowError).toMatch(/A1 recovery speed-up at nonce 0 .* by ops@test: stuck head, C5/);
+    await reconcile();
+    expect(byHash(await atNonce(0), a.head.hash)).toMatchObject({ status: 'DEAD' });
+    expect(byHash(await atNonce(0), speed.txHash)).toMatchObject({ status: 'MINED_SUCCESS' });
+    await sim.drive();
+    expect(await job(a.jobId)).toMatchObject({ onChainStatus: 'COMPLETED' });
+    expect(sim.chain.usdcOf(a.provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+    expect(await table('evaluatorRecoveryIncident').findMany({ where: { evaluator: getAddress(SIM_EVALUATOR) } })).toHaveLength(1);
+  });
+
+  it('row 3 (script): cancel refused while a speed-up is possible (R2-P2-1, no override) — with the cancel text; nothing signed', async () => {
+    const a = await stuckHead();
+    sim.setNowOffset(61_000);
+    const r = await run(EXEC('cancel', 0));
+    expect(r.exitCode).toBe(2);
+    expect(r.output).toMatch(/REFUSED: cancel refused at nonce 0: a speed-up is possible \(R2-P2-1, no override\)\. CANCEL does not settle the job/);
+    expect((await candidates(a.jobId)).filter((c) => c.origin === 'SCRIPT')).toHaveLength(0);
+  });
+
+  it('row 3 (script): cancel admitted once the simulation reverts (blocked payee), with "CANCEL <chainId> NONCE <N> DOES NOT SETTLE" — the job stays Submitted, its decision is kept', async () => {
+    const a = await stuckHead();
+    sim.setNowOffset(61_000);
+    sim.chain.blockedPayees.add(a.provider.safeAddress.toLowerCase()); // complete would revert
+    sim.chain.baseFee = 5_000_000n;
+    const prompts: string[] = [];
+    const r = await run(EXEC('cancel', 0), { prompts });
+    expect(r.exitCode, r.output).toBe(0);
+    expect(prompts[0]).toContain(`CANCEL ${CHAIN_ID} NONCE 0 DOES NOT SETTLE`);
+    expect((await atNonce(0)).find((c) => c.kind === 'CANCEL')).toMatchObject({ origin: 'SCRIPT', action: 'CANCEL_NOOP' });
+    expect(onChain((await job(a.jobId)).onChainJobId).status).toBe(JobStatus.Submitted);
+  });
+
+  it('row 4 (script): an unacknowledged EXTERNAL blocks every --execute; --acknowledge-foreign <hash> unlocks it (and only it)', async () => {
+    const a = await stuckHead();
+    sim.setNowOffset(61_000);
+    const ext = `0x${'ab'.repeat(32)}`;
+    await ledger.recordExternalCandidate(m.db, {
+      chainId: CHAIN_ID, evaluator: getAddress(SIM_EVALUATOR), nonce: 90, toAddress: getAddress(SIM_EVALUATOR), valueWei: 0n, calldata: '0x',
+      gasLimit: 21_000n, maxFeePerGas: 1n, maxPriorityFeePerGas: 1n, txHash: ext, status: 'MINED_SUCCESS', proofLevel: 'proof', blockNumber: 1n, blockHash: `0x${'cd'.repeat(32)}`,
+    });
+    const refused = await run(EXEC('speed-up', 0));
+    expect(refused.exitCode).toBe(2);
+    expect(refused.output).toMatch(/EXTERNAL transaction\(s\) of this key not acknowledged: 0xabab/);
+    sim.chain.baseFee = 5_000_000n;
+    const ok = await run([...EXEC('speed-up', 0), '--acknowledge-foreign', ext]);
+    expect(ok.exitCode, ok.output).toBe(0);
+    expect((await ledger.unacknowledgedExternal(m.db, CHAIN_ID, SIM_EVALUATOR))).toHaveLength(0);
+    expect((await candidates(a.jobId)).filter((c) => c.kind === 'SPEED_UP')).toHaveLength(1);
+  });
+
+  it('row 8: two operators — the second stops at the recovery lock; with the lock out of the way, a plan changed inside the lane (fingerprint) aborts: nothing sent', async () => {
+    const a = await stuckHead();
+    sim.setNowOffset(61_000);
+    recoveryLocks.add(CHAIN_ID); // operator 1 holds agentfi:evaluator-recovery:<chainId>
+    const second = await run(EXEC('speed-up', 0));
+    expect(second.exitCode).toBe(2);
+    expect(second.output).toMatch(/another recovery holds the lock/);
+    recoveryLocks.clear();
+    // The fee situation moves between the confirmation and the lane: the confirmed plan is no longer the one in force.
+    const moved = await run(EXEC('speed-up', 0), {
+      answer: (prompt) => {
+        sim.chain.baseFee = sim.chain.baseFee * 2n;
+        return /Type exactly: (.*)\n/.exec(prompt)![1]!;
+      },
+    });
+    expect(moved.exitCode).toBe(3);
+    expect(moved.output).toMatch(/plan of nonce 0 changed since the confirmation \(fingerprint\)/);
+    expect((await candidates(a.jobId)).filter((c) => c.origin === 'SCRIPT')).toHaveLength(0);
+  });
+
+  it('row 16: wrong chain id, Q7 unverified, key ≠ Job.evaluator → refused before any signature', async () => {
+    const a = await stuckHead();
+    sim.setNowOffset(61_000);
+    expect((await run(EXEC('speed-up', 0), { rpcChainId: 1 })).output).toMatch(/REFUSED: wrong chain: the RPC answers eth_chainId 1/);
+    expect((await run(EXEC('speed-up', 0), { verify: { ok: false, reason: 'hook.trustedEvaluator mismatch' } })).output).toMatch(/REFUSED: the on-chain configuration could not be verified \(Q7\): hook.trustedEvaluator mismatch/);
+    await m.db.job.update({ where: { id: a.jobId }, data: { evaluator: getAddress(`0x${'12'.repeat(20)}`) } });
+    expect((await run(EXEC('speed-up', 0))).output).toMatch(/REFUSED: the signer key is not the Job.evaluator of the live jobs/);
+    expect((await candidates(a.jobId)).filter((c) => c.origin === 'SCRIPT')).toHaveLength(0);
+  });
+
+  it('row 18: a speed-up for a nonce that is not the head → refused (always the head first)', async () => {
+    await stuckHead();
+    const b = await delivered();
+    sim.chain.holdEvaluatorTx = () => true;
+    await sim.drive(1); // B queues at nonce 1 behind the stuck head
+    sim.chain.holdEvaluatorTx = null;
+    sim.setNowOffset(61_000);
+    const r = await run(EXEC('speed-up', 1));
+    expect(r.exitCode).toBe(2);
+    expect(r.output).toMatch(/nonce 1 is not the head \(NOT_HEAD/);
+    expect((await candidates(b.jobId)).filter((c) => c.origin === 'SCRIPT')).toHaveLength(0);
+  });
+
+  it('row 38: a second replacement within 60 s (P9) and a 4th replacement (P8) are refused — read from the table, alerted evaluator-recovery-refused', async () => {
+    const a = await stuckHead();
+    sim.chain.evaluatorAutoMine = false; // the replacements stay pending (still stuck)
+    sim.setNowOffset(61_000);
+    expect((await run(EXEC('speed-up', 0))).exitCode).toBe(0);
+    const tooSoon = await run(EXEC('speed-up', 0));
+    expect(tooSoon.exitCode).toBe(2);
+    expect(tooSoon.output).toMatch(/replacement limit: INTERVAL/);
+    sim.setNowOffset(2 * 61_000);
+    expect((await run(EXEC('speed-up', 0))).exitCode).toBe(0);
+    sim.setNowOffset(3 * 61_000);
+    expect((await run(EXEC('speed-up', 0))).exitCode).toBe(0);
+    sim.setNowOffset(4 * 61_000);
+    const fourth = await run(EXEC('speed-up', 0));
+    expect(fourth.exitCode).toBe(2);
+    expect(fourth.output).toMatch(/MAX_REPLACEMENTS/);
+    expect(alertsOf('evaluator-recovery-refused').length).toBeGreaterThanOrEqual(2);
+    expect((await atNonce(0)).filter((c) => c.kind === 'SPEED_UP')).toHaveLength(3);
+    void a;
+  });
+
+  it('row 39 / 37 / 15-40: incident budget, effective fee cap and the reserve — refused with the value that would be needed, alerted, nothing signed', async () => {
+    const a = await stuckHead();
+    sim.setNowOffset(61_000);
+    const tight = { ...planCapsFixture(), maxCostPerIncidentWei: 1n };
+    const budget = await run(EXEC('speed-up', 0), { caps: tight });
+    expect(budget.exitCode).toBe(2);
+    expect(budget.output).toMatch(/budget: (TX_COST_ABOVE_CAP|INCIDENT_BUDGET_EXCEEDED) — would need \d+ wei/);
+    sim.chain.baseFee = 900_000_000n; // a fee spike: the P7 proposal exceeds min(P2, P5 × base + P3)
+    const fee = await run(EXEC('speed-up', 0));
+    expect(fee.exitCode).toBe(2);
+    expect(fee.output).toMatch(/fees: (FEE_ABOVE_CAP|PRIORITY_ABOVE_CAP) — would need \d+ wei, cap \d+ wei/);
+    sim.chain.baseFee = 5_000_000n;
+    const reserve = await run(EXEC('speed-up', 0), { balance: 10n ** 14n });
+    expect(reserve.exitCode).toBe(2);
+    expect(reserve.output).toMatch(/budget: RESERVE_BREACHED/);
+    expect(alertsOf('evaluator-recovery-refused').length).toBeGreaterThanOrEqual(3);
+    expect((await candidates(a.jobId)).filter((c) => c.origin === 'SCRIPT')).toHaveLength(0);
+  });
+
+  it('row 35 (range): --nonces 0..1 speeds up the head and the next one, head first, one fingerprint each, one confirmation "SPEED-UP <chainId> NONCES 0-1 2 TXS"', async () => {
+    const a = await stuckHead();
+    const b = await delivered();
+    sim.chain.holdEvaluatorTx = () => true;
+    await sim.drive(1);
+    sim.chain.holdEvaluatorTx = null;
+    sim.setNowOffset(61_000);
+    sim.chain.evaluatorAutoMine = false;
+    const prompts: string[] = [];
+    const r = await run(EXEC('speed-up', '0..1'), { prompts });
+    expect(r.exitCode, r.output).toBe(0);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain(`SPEED-UP ${CHAIN_ID} NONCES 0-1 2 TXS`);
+    expect((await candidates(a.jobId)).filter((c) => c.kind === 'SPEED_UP')).toHaveLength(1);
+    expect((await candidates(b.jobId)).filter((c) => c.kind === 'SPEED_UP')).toHaveLength(1);
+    expect(r.output.indexOf('nonce 0: speed-up')).toBeLessThan(r.output.indexOf('nonce 1: speed-up'));
+  });
+
+  it('row 43 (DB): head classification in the dry-run — price-stuck vs lost-send (no node knows the head) → the suggested action; rebroadcast of a lost head through the script', async () => {
+    await stuckHead();
+    expect((await run([])).output).toMatch(/head classification: price-stuck → speed-up/);
+    await wipe();
+    sim = makeSim();
+    const d = await delivered();
+    sim.chain.holdEvaluatorTx = () => true;
+    await sim.drive(1);
+    sim.chain.holdEvaluatorTx = null;
+    sim.settlements.clear();
+    const hash = (await job(d.jobId)).settleTxHash as Hex;
+    sim.chain.dropEvaluatorTx(hash);
+    for (const n of sim.chain.nodes) n.unknown.add(hash);
+    // the reconciliation pass at the start of the run would rebroadcast it (R2-P1-3); a reverting simulation keeps it lost
+    sim.chain.simulationReverts = () => 'payee blocked (test)';
+    const dry = await run([]);
+    expect(dry.output).toMatch(/head classification: lost-send → identical rebroadcast/);
+    expect(dry.output).toMatch(/rebroadcast: refused: SIMULATION_REVERTS/);
+  });
+
+  it('row 28 (script): --execute rebroadcast of a lost head sends the IDENTICAL recorded bytes (no new row, no new nonce), "REBROADCAST <chainId> NONCE <N> COMPLETE <jobId>"; the job settles once', async () => {
+    const d = await delivered();
+    sim.chain.holdEvaluatorTx = () => true;
+    await sim.drive(1);
+    sim.chain.holdEvaluatorTx = null;
+    sim.settlements.clear();
+    const hash = (await job(d.jobId)).settleTxHash as Hex;
+    sim.chain.dropEvaluatorTx(hash);
+    for (const n of sim.chain.nodes) n.unknown.add(hash);
+    // this process's worker signer cannot rebroadcast (the pass refuses): the operator's script does it
+    const workerSigner = sim.chain.signer() as Record<string, unknown>;
+    delete workerSigner['sendRaw'];
+    sim.deps.evaluatorSigner = () => workerSigner as never;
+    const prompts: string[] = [];
+    const r = await run(EXEC('rebroadcast', 0), { prompts });
+    expect(r.exitCode, r.output).toBe(0);
+    expect(prompts[0]).toContain(`REBROADCAST ${CHAIN_ID} NONCE 0 COMPLETE ${d.jobId}`);
+    const rows = await candidates(d.jobId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ txHash: hash.toLowerCase(), status: 'MINED_SUCCESS' });
+    await sim.drive();
+    expect(await job(d.jobId)).toMatchObject({ onChainStatus: 'COMPLETED' });
+    expect(sim.chain.usdcOf(d.provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+  });
+
+  it('row 44 (script): the lane lost / PTTL below the margin right before the send → aborted, nothing SENT (the SCRIPT row stays SIGNED, live)', async () => {
+    const a = await stuckHead();
+    sim.setNowOffset(61_000);
+    sim.chain.baseFee = 5_000_000n;
+    sim.deps.evaluatorLanes = new FakeLeaseLock({ ttlMs: 10_000 }); // a TTL below the 30-s margin (P17)
+    const r = await run(EXEC('speed-up', 0));
+    expect(r.exitCode).toBe(3);
+    expect(r.output).toMatch(/evaluator lane was lost before the send/);
+    const script = (await candidates(a.jobId)).filter((c) => c.origin === 'SCRIPT');
+    expect(script).toHaveLength(1);
+    expect(script[0]).toMatchObject({ status: 'SIGNED' });
+    expect(sim.chain.minedInNonce(0)).toBeNull();
+  });
+
+  it('row 42 (DB): past the earliest delivered expiresAt (block time) the speed-up needs "… AFTER EXPIRY"', async () => {
+    const a = await stuckHead();
+    sim.setNowOffset(61_000);
+    sim.chain.baseFee = 5_000_000n;
+    await m.db.job.update({ where: { id: a.jobId }, data: { expiresAt: new Date(Number(sim.chain.time) * 1000 - 60_000) } });
+    const prompts: string[] = [];
+    const r = await run(EXEC('speed-up', 0), { prompts });
+    expect(r.output).toMatch(/ALREADY PASSED · posture EXPIRED/);
+    expect(prompts[0]).toMatch(/SPEED-UP .* AFTER EXPIRY/);
+    expect(r.exitCode, r.output).toBe(0);
+  });
+
+  it.todo('row 9 (script + worker, Redis real): the worker signs Y at pending+1 while the script holds the lane for N; no nonce collision — covered by the shared lane key and chooseNonce (unit + row 30); concurrent run not scripted here');
 });

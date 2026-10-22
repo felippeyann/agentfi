@@ -18,7 +18,7 @@
  * Blocks:
  *  1. deployment smoke (Postgres up; runs on the pre-A1 code): the real hook rates a worker `complete`.
  *  2. A1 worker / reconciliation rows (gated like the DB suite: EvaluatorTransaction table + `reconcileEvaluatorCandidates`).
- *  3. script rows: describe.skip TODO(A1-CLI).
+ *  3. script rows: the recovery CLI (src/scripts/evaluator-recovery.ts) on the real node.
  *
  * Postgres: DATABASE_URL (migrated; `agentfi_a1_f3_anvil`). Anvil: `anvilTestPort(10)` (default 8755; 8 and 8+97 are F2s), chain id 84532.
  * Keys: Anvil's public test keys only.
@@ -406,6 +406,143 @@ describeDb('A1 Anvil deployment smoke — real AgentJobEscrow + ReputationHook (
   });
 });
 
+// ══ 3. script rows (src/scripts/evaluator-recovery.ts) ════════════════════════
+
+const recoveryHeld = new Set<number>();
+
+/** RecoveryDeps on the real node: F2's A1 signer, the real per-node reads (pinned to this Anvil), Anvil-scaled caps (TEST values). */
+function cliDeps(h: Harness, o: { caps?: ReturnType<typeof anvilCaps> | null; signer?: EvaluatorSigner; prompts?: string[]; nowOffsetMs?: number } = {}) {
+  h.deps.recoveryCaps = () => (o.caps === undefined ? anvilCaps() : o.caps);
+  return {
+    erc8183: h.deps,
+    signer: (o.signer ?? signer) as never,
+    acquireRecoveryLock: async (chainId: number) => {
+      if (recoveryHeld.has(chainId)) throw new Error('busy');
+      recoveryHeld.add(chainId);
+      return { release: async () => recoveryHeld.delete(chainId) };
+    },
+    verifyConfig: async () => ({ ok: true }) as const,
+    thresholds: { actWithinMs: 24 * 3_600_000, urgentWithinMs: 6 * 3_600_000, handToOwnerWithinMs: 3_600_000 },
+    tty: {
+      isTTY: true,
+      ask: async (prompt: string) => {
+        o.prompts?.push(prompt);
+        return /Type exactly: (.*)\n/.exec(prompt)?.[1] ?? '';
+      },
+    },
+    // P9 counts the worker's original too: the operator acts past the 60-s interval.
+    now: () => new Date(Date.now() + (o.nowOffsetMs ?? 61_000)),
+    receiptWaitMs: 50,
+  };
+}
+const cliExec = (op: string, nonce: number) => ['--chain', String(CHAIN_ID), '--execute', op, '--nonce', String(nonce), '--operator', 'ops@anvil', '--note', 'anvil rehearsal'];
+
+describeA1('A1 recovery script on Anvil — real contracts, real signer', () => {
+  let cli: typeof import('../scripts/evaluator-recovery.js');
+  beforeAll(async () => {
+    cli = await import('../scripts/evaluator-recovery.js');
+  });
+  beforeEach(() => recoveryHeld.clear());
+
+  it('row 1 (script, AV): dry-run → --execute speed-up --nonce N with the typed phrase; mined; original DEAD; the job follows the speed-up (fee, feedback, settleTxHash); paid once', async () => {
+    const onChain = await submittedOnChain();
+    const jobId = await deliveredRow(onChain);
+    const h = harness();
+    await wireA1(h.deps, h.lanes);
+    await automine(false);
+    const before = await usdcOf(provider.address);
+    const { tx, outcome } = await settleUntilPending(h, jobId);
+    const dry = await cli.runEvaluatorRecovery(['--chain', String(CHAIN_ID)], cliDeps(h));
+    expect(dry.exitCode, dry.output).toBe(0);
+    expect(dry.output).toMatch(new RegExp(`nonce ${tx.nonce} \\(HEAD\\)`));
+    const prompts: string[] = [];
+    const r = await cli.runEvaluatorRecovery(cliExec('speed-up', tx.nonce), cliDeps(h, { prompts }));
+    expect(r.exitCode, r.output).toBe(0);
+    expect(prompts[0]).toContain(`SPEED-UP ${CHAIN_ID} NONCE ${tx.nonce} COMPLETE ${jobId}`);
+    await mine();
+    await outcome;
+    await automine(true);
+    await reconcile(h);
+    await settle(h, jobId, 1);
+    await reconcile(h);
+    const rows = await rowsOf({ jobId });
+    const speed = rows.find((x) => x.kind === 'SPEED_UP')!;
+    expect(rows.find((x) => same(x.txHash, tx.hash))!.status).toBe('DEAD');
+    expect(speed.status).toBe('MINED_SUCCESS');
+    const done = await db.job.findUniqueOrThrow({ where: { id: jobId } });
+    expect(done).toMatchObject({ onChainStatus: 'COMPLETED', feedbackStatus: 'written', platformFeeAmount: FEE.toString() });
+    expect(same(done.settleTxHash, speed.txHash)).toBe(true);
+    expect((await usdcOf(provider.address)) - before).toBe(BUDGET - FEE);
+  });
+
+  it('row 15 / 40 (AV): anvil_setBalance below cost + reserve (P14) + L1 margin (P15) → the dry-run shows it, --execute refused (evaluator-recovery-refused); nothing signed', async () => {
+    const onChain = await submittedOnChain();
+    const jobId = await deliveredRow(onChain);
+    const h = harness();
+    await wireA1(h.deps, h.lanes);
+    await automine(false);
+    const { tx, outcome } = await settleUntilPending(h, jobId);
+    const original = await chain.publicClient.getBalance({ address: evaluator.address });
+    await chain.rpc('anvil_setBalance', [evaluator.address, '0x38d7ea4c68000']); // 0.001 ETH: below reserve + cost
+    try {
+      const r = await cli.runEvaluatorRecovery(cliExec('speed-up', tx.nonce), cliDeps(h));
+      expect(r.output).toMatch(/budget: RESERVE_BREACHED/);
+      expect(r.exitCode).toBe(2);
+      expect(h.alerts.some((a) => a.kind === ('evaluator-recovery-refused' as EscrowAlert['kind']))).toBe(true);
+      expect((await rowsOf({ jobId })).filter((x) => x.kind === 'SPEED_UP')).toHaveLength(0);
+    } finally {
+      await chain.rpc('anvil_setBalance', [evaluator.address, `0x${original.toString(16)}`]);
+      await mine();
+      await outcome;
+      await automine(true);
+    }
+  });
+
+  it('row 37 (AV): the effective fee cap min(P2, P5 × base + P3) below what the P7 proposal needs → refused with the missing value; nothing signed', async () => {
+    const onChain = await submittedOnChain();
+    const jobId = await deliveredRow(onChain);
+    const h = harness();
+    await wireA1(h.deps, h.lanes);
+    await automine(false);
+    const { tx, outcome } = await settleUntilPending(h, jobId);
+    try {
+      const r = await cli.runEvaluatorRecovery(cliExec('speed-up', tx.nonce), cliDeps(h, { caps: { ...anvilCaps(), maxFeePerGasWei: 1_000n } }));
+      expect(r.exitCode).toBe(2);
+      expect(r.output).toMatch(/fees: FEE_ABOVE_CAP — would need \d+ wei, cap 1000 wei/);
+      expect((await rowsOf({ jobId })).filter((x) => x.kind === 'SPEED_UP')).toHaveLength(0);
+    } finally {
+      await mine();
+      await outcome;
+      await automine(true);
+    }
+  });
+
+  it('row 16 (AV): a key that is not the Job.evaluator / the configured evaluator → refused before any signature', async () => {
+    const onChain = await submittedOnChain();
+    const jobId = await deliveredRow(onChain);
+    const h = harness();
+    await wireA1(h.deps, h.lanes);
+    await automine(false);
+    const { tx, outcome } = await settleUntilPending(h, jobId);
+    try {
+      const other = createEvaluatorSigner(CHAIN_ID, generatePrivateKey());
+      const r = await cli.runEvaluatorRecovery(cliExec('speed-up', tx.nonce), cliDeps(h, { signer: other }));
+      expect(r.exitCode).toBe(2);
+      expect(r.output).toMatch(/REFUSED: (the signer key is not the configured evaluator|nonce \d+ is not the head|.*not in the queue)/);
+      expect((await rowsOf({ jobId })).filter((x) => x.kind === 'SPEED_UP')).toHaveLength(0);
+    } finally {
+      await mine();
+      await outcome;
+      await automine(true);
+    }
+  });
+
+  it.todo('row 2 (script): the original mines between the confirmation and the send → "nonce too low" → DEAD with proof (covered at the ledger / reconciliation layer: row 2 AV)');
+  it.todo('row 3 / 4 / 8 / 18 / 35 (script) on Anvil — covered on Postgres with the fake multi-node chain (evaluator-a1.db.test.ts block 3)');
+  it.todo('row 9 (AV): the worker settles Y at pending while the script holds the lane for N (txpool_content)');
+  it.todo('row 42 (AV): deadline labels by block timestamp (evm_setNextBlockTimestamp) — covered on Postgres (row 42 DB) and by F1 (expiryPosture)');
+});
+
 // ══ 2. A1 rows on the real node ═══════════════════════════════════════════════
 
 describeA1('A1 on Anvil — candidates, reconciliation and the gate against the real contracts', () => {
@@ -752,25 +889,6 @@ describeA1('A1 on Anvil — candidates, reconciliation and the gate against the 
   });
 });
 
-// ══ 3. script rows (TODO(A1-CLI)) ═════════════════════════════════════════════
-
-describe.skip('A1 recovery script on Anvil — TODO(A1-CLI): enable once src/scripts/evaluator-recovery.ts exports runEvaluatorRecovery', () => {
-  // Fixture for every row below: planCapsFixture() as the env caps (test values only).
-  void planCapsFixture;
-  void encodeAbiParameters;
-  it.todo('row 1 (script): dry-run → --execute speed-up --nonce N, typed phrase; mined; original DEAD; row 26 expectations on the job');
-  it.todo('row 2 (script): the original mines between the confirmation and the send → "nonce too low" → DEAD with proof; nothing else signed');
-  it.todo('row 3 (script): cancel refused while a speed-up is possible; admitted after the simulation reverts (blocked payee) with "CANCEL <chainId> NONCE <N> DOES NOT SETTLE"');
-  it.todo('row 4 (script): refuses until --acknowledge-foreign <hash>');
-  it.todo('row 8 (AV + Redis 6391/3): two scripts; the second stops at the recovery lock; forced → fingerprint changes inside the lane → abort');
-  it.todo('row 9 (AV): the worker settles Y at pending while the script holds the lane for N; no collision (txpool_content)');
-  it.todo('row 15 / 40: anvil_setBalance below cost + reserve (P14) + L1 margin (P15) → dry-run shows it, --execute refused; the worker unchanged');
-  it.todo('row 16: Anvil started with another chain id; config gate unverified; key ≠ Job.evaluator → refused before signing');
-  it.todo('row 18: speed-up for a nonce that is not the head → refused');
-  it.todo('row 35 / 45: range N..N+2 with anvil_setNextBlockBaseFeePerGas high: head first; stops at the first cap; evaluator-recovery-refused; one fingerprint per nonce');
-  it.todo('row 37: effective cap min(P2, P5 × base + P3) exceeded (anvil_setNextBlockBaseFeePerGas) → refused with the missing value; nothing signed');
-  it.todo('row 42: deadline labels by block timestamp (evm_setNextBlockTimestamp) > 24 h / ≤ 24 h / ≤ 6 h / ≤ 1 h / ≤ 0; cancel with "pay" refused ≤ 1 h; "AFTER EXPIRY" required after it');
-});
   // LAST on purpose: after `anvil_reorg`, Anvil answers `eth_getTransactionCount(addr, <block number>)` from
   // inconsistent historical state (non-monotone counts), which breaks the §4.3 binary search of any later test.
   it('row 14 (AV): reorg (anvil_reorg depth 1, tx not re-included) of a latest-level MINED_SUCCESS — alive again, evaluator-reorg, the gate refuses', async () => {

@@ -243,6 +243,11 @@ const envSchema = z.object({
   EVALUATOR_PROOF_STALLED_ALERT_AFTER_MS: z.preprocess(blankToUndefined, z.coerce.number().int().positive().optional()),
   // R2-P3-10: consecutive failed reads of one RPC node before `rpc-node-unhealthy`.
   EVALUATOR_RPC_UNHEALTHY_AFTER_FAILURES: z.preprocess(blankToUndefined, z.coerce.number().int().positive().default(5)),
+  // Recovery script (src/scripts/evaluator-recovery.ts) — labels and waits, NOT spending caps (plan §10 step 7):
+  // P19 URGENT and P20 "hand to the owner" thresholds (H = ESCROW_REVIEW_ALERT_BEFORE_EXPIRY_SECONDS), P10 receipt wait.
+  EVALUATOR_RECOVERY_URGENT_WITHIN_SECONDS: z.preprocess(blankToUndefined, z.coerce.number().int().positive().default(21_600)),
+  EVALUATOR_RECOVERY_HAND_TO_OWNER_WITHIN_SECONDS: z.preprocess(blankToUndefined, z.coerce.number().int().positive().default(3_600)),
+  EVALUATOR_RECOVERY_RECEIPT_WAIT_SECONDS: z.preprocess(blankToUndefined, z.coerce.number().int().positive().default(90)),
   // Public base URL of this API, used to build the ERC-8004 `feedbackURI`
   // (`<BACKEND_PUBLIC_URL>/v1/jobs/<id>/feedback.json`) and the on-chain job description.
   BACKEND_PUBLIC_URL: z.preprocess(

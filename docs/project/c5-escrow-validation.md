@@ -330,10 +330,19 @@ three scenarios in parallel for about 75–80 minutes (the contest is held 3600 
   round): every later settlement from that key waits behind it, however well it is priced. The
   worker raises one `ESCROW_ALERT evaluator-stuck` after 10 minutes with the same pending nonce,
   naming the earliest `expiresAt` among the live jobs. Nothing is replaced automatically. The
-  runner keeps waiting (its hold and timing checks still apply). Unblocking the key (a
-  same-nonce replacement signed with the evaluator key) is an owner decision (plan C3g, proposal
-  A; A1, a manual operator script with dry-run, is the recommendation and does not exist yet).
-  Until it does, stop the run and decide. **Prefer not to replace an evaluator transaction by hand (for example with `cast send --nonce …`) while the worker is running** (plan C3h, D2). Before the C3h fix the worker recorded the job `REJECTED`, or paid, from another transaction's receipt while it stayed Submitted on-chain. Since C3h it records only its own transaction with the event of that job; after a replacement it raises `evaluator-replaced` and reads the job from the chain. But after a manual 0-value cancel the worker will sign the recorded decision again with the next nonce, and a speed-up mined while the worker is stopped records the status but not the fee or feedback (persisting every candidate is A1). After `evaluator-replaced` the job still points at the replaced hash, so contest and resolve answer "pending" until the worker makes a send of its own (C3h review P3-3, closed by A1). **Without A1 there is no manual recovery that keeps the database consistent** (decision-package review, 2026-10-21): after a speed-up mined while the worker was stopped, nothing hands the new hash to the reconciliation; the job keeps the replaced `settleTxHash` and no fee or feedback, and the runner stops at that receipt. The executable procedure for C5 is to **stop the run** and record it as an interrupted attempt (no G2 evidence). A speed-up only frees the nonce: stop the worker first, same calldata, nonce and gas limit, both fees +12.5 %, never a cancel, and restart the worker only after the speed-up has mined. Full procedure: the owner note `2026-10-21-pacote-c4c5.md` §5. Mind the deadline: after a job's `expiresAt`,
+  runner keeps waiting (its hold and timing checks still apply). **With A1 (C3g, implemented in the local
+  candidate, final review pending)** every evaluator transaction is recorded before it is sent, and the
+  recovery is the operator script `npm run evaluator:recover` (runbook
+  [`docs/operations/evaluator-recovery.md`](../operations/evaluator-recovery.md)). Run the dry-run first;
+  then `--execute speed-up --nonce <head>` with `--operator` / `--note` and the typed phrase. The worker can
+  stay running: the script and the worker share the evaluator lane, and the reconciliation records the
+  winner (fee and feedback from its receipt). A cancel does **not** settle the job or cancel a "pay": the
+  worker re-signs the decision with a new nonce. Without caps (`EVALUATOR_RECOVERY_*`, owner decision, no
+  defaults) the script only runs the dry-run; then **stop the run** and record it as an interrupted attempt.
+  **Never replace an evaluator transaction by hand** (`cast send --nonce …`): it bypasses the ledger, raises
+  `evaluator-nonce-foreign` and blocks the script until `--acknowledge-foreign`. On the fork rehearsal set
+  `EVALUATOR_PROOF_TAG=latest` for the backend and the runner (Anvil's `safe` head does not advance). Mind
+  the deadline: after a job's `expiresAt`,
   `claimRefund` is permissionless and refunds the requester even for delivered work.
 - **A settlement send whose answer was lost** (C3f item 3): before signing another settlement,
   the worker asks again about the earlier hash and re-adopts it if it mined or a node knows it,
@@ -475,7 +484,7 @@ Still open on 2026-10-17, and two more before C4:
 
 6. **Publishing the round:** the push and PR of `rc/2026-10-17`. Its merge on `main` is the candidate (§2), and that round had no authorisation to push.
 7. **The stuck-evaluator procedure** (plan C3g, proposal A; §6.4):
-   - **A1 (recommended):** a manual operator recovery procedure, implemented and tested on Anvil before C4. This requires persistent tracking and reconciliation of all candidate hashes/nonces, contest/resolve protection while any candidate may mine, a reviewed persistence design (possibly a migration), and a script with dry-run and explicit confirmation. It is not a runbook-only change.
+   - **A1 (recommended):** a manual operator recovery procedure. **Status (2026-10-22): implemented in the local A1 candidate (`feat/2026-10-22-a1`): candidate ledger (migration 0026), reconciliation, gates, evaluator lane and the `evaluator:recover` script with dry-run, typed confirmation and owner-set caps; tested on Postgres and Anvil (real contracts); final review and the C5 fork rehearsal pending.** Owner decisions still open: the caps (D-a, `.env`), the proof tag (D-g), on-call coverage (D-p).
    - **A0:** keep today's alert only. A stuck key then stops the run, and the owner decides without a procedure.
 
    Mind the deadline: after `expiresAt`, anyone can `claimRefund` a job, even when the work was delivered.

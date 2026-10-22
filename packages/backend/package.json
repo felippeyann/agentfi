@@ -28,6 +28,7 @@
     "test:e2e:escrow-fork": "vitest run --config vitest.config.e2e.escrow-fork.ts",
     "e2e:escrow-fork:stack": "tsx src/__tests__/e2e/escrow-fork.stack.ts",
     "c5:escrow": "tsx src/scripts/c5/escrow-validation.ts",
+    "evaluator:recover": "tsx src/scripts/evaluator-recovery.ts",
     "db:generate": "dotenv -e ../../.env prisma generate",
     "db:migrate": "dotenv -e ../../.env prisma migrate dev",
     "db:push": "dotenv -e ../../.env prisma db push"
