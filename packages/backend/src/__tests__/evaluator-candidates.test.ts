@@ -110,7 +110,7 @@ describe('nonce consumed / mayStillMine (§6.1, rows 13 and 33)', () => {
     expect(mayStillMine(c, [view('a', { nonceLatest: 8 }), view('b', { nonceLatest: 7 })], 'latest')).toBe('yes');
     expect(mayStillMine(c, [view('a', { nonceLatest: 8 }), { node: 'b', ok: false }], 'latest')).toBe('uncertain');
     expect(mayStillMine(c, [], 'latest')).toBe('uncertain');
-    expect(mayStillMine(c, [view('a', { nonceLatest: 8, nonceProof: undefined })], 'proof')).toBe('uncertain');
+    expect(mayStillMine(c, [{ node: 'a', ok: true, nonceLatest: 8 }], 'proof')).toBe('uncertain');
   });
 
   it('row 33: consumed at latest but not at proof depth → done for a re-sign, still "may mine" for a decision change', () => {
