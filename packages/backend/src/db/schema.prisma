@@ -180,6 +180,9 @@ model Job {
   providerAgentIdStatus String?   // BINDING | BOUND | FAILED | SKIPPED (NULL: job predates R2 / not escrowed)
   providerAgentIdError  String?   // why the binding FAILED or was SKIPPED
   deferredSubmitAt      DateTime? // provider PATCHed COMPLETED while BINDING: `submit` waits for the binding to end
+  // C3g-A1 (migration 0026): every evaluator transaction signed for this job
+  // (ON DELETE RESTRICT: a row that may have moved money never disappears with the job).
+  evaluatorTransactions EvaluatorTransaction[]
   // ── end ERC-8183 escrow ───────────────────────────────────────────────────
 
   createdAt    DateTime  @default(now())
@@ -192,6 +195,96 @@ model Job {
   @@unique([escrowContract, onChainJobId])
   @@index([onChainStatus])
   @@index([expiresAt])
+}
+
+// ── C3g-A1 (migration 0026): evaluator candidate ledger ─────────────────────
+// Every transaction signed with the evaluator key (worker, recovery script,
+// backfill, reconciliation), recorded as SIGNED before its first byte is sent.
+// Written only through services/escrow/evaluator-ledger.ts. Addresses are
+// checksummed, hashes lowercase 0x-hex, wei / gas / block numbers decimal
+// strings (repo convention). Enumerations and invariants (CANCEL = 0-value
+// self-transfer of 21 000 gas, proof level present exactly on MINED_* / DEAD,
+// SCRIPT rows carry operator + incident) are CHECK constraints in the
+// migration. Nothing here is secret: calldata and rawTx are public once sent.
+model EvaluatorTransaction {
+  id                   String    @id @default(cuid())
+  chainId              Int
+  evaluator            String    // checksummed address of the key that signed
+  nonce                Int?      // NULL only for a LEGACY backfilled row whose tx no node returned
+  jobId                String?   // the job this candidate settles; for a CANCEL, the job of the candidate it replaces; NULL for a foreign head
+  job                  Job?      @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  kind                 String    // ORIGINAL | SPEED_UP | CANCEL | EXTERNAL | LEGACY
+  action               String    // COMPLETE | REJECT | CLAIM_REFUND | CANCEL_NOOP | UNKNOWN
+  decision             String?   // pay | refund | quality-rejected | payout-blocked | cancelled | provider-failed | expiry
+  reasonHex            String?   // bytes32 reason passed to complete / reject
+  replacesId           String?   // the candidate this one replaces (same nonce)
+  toAddress            String?   // NULL only on a LEGACY row with no nonce (tx data unknown)
+  valueWei             String
+  calldata             String?   // full 0x data; NULL only on a LEGACY row with no nonce
+  calldataHash         String?   // keccak256(calldata); NULL only on a LEGACY row with no nonce
+  gasLimit             String?   // NULL only on a LEGACY row with no nonce
+  maxFeePerGas         String?   // NULL only on a LEGACY row with no nonce
+  maxPriorityFeePerGas String?   // NULL only on a LEGACY row with no nonce
+  txHash               String
+  rawTx                String?   // signed serialized tx: identical rebroadcast (D-h / D-o)
+  origin               String    // WORKER | SCRIPT | BACKFILL | RECONCILE
+  operator             String?   // who ran the script
+  note                 String?
+  incidentId           String?   // SCRIPT rows: the recovery incident whose budget they spend
+  incident             EvaluatorRecoveryIncident? @relation(fields: [incidentId], references: [id], onDelete: Restrict)
+  status               String    // SIGNED | SENT | SEND_UNCONFIRMED | MINED_SUCCESS | MINED_REVERTED | DEAD
+  proofLevel           String?   // latest | proof — set exactly when status is MINED_* or DEAD (R2-P2-2)
+  sendError            String?   // sanitized, clipped
+  createdAt            DateTime  @default(now()) // persisted (= signed, before any send)
+  broadcastAt          DateTime? // first send attempted
+  lastBroadcastAt      DateTime? // latest send / identical rebroadcast attempted
+  answeredAt           DateTime? // a node answered the send (accepted or error)
+  resolvedAt           DateTime? // MINED_* or DEAD established
+  minedBlockNumber     String?
+  minedBlockHash       String?   // reorg check
+
+  @@unique([chainId, txHash])
+  @@index([chainId, evaluator, nonce])
+  @@index([jobId, status])
+  @@index([chainId, evaluator, origin, createdAt])
+  @@index([incidentId])
+}
+
+// C3g-A1: a recovery conducted with the script (the durable budget scope).
+// At most one open per (chainId, evaluator): partial unique index
+// "EvaluatorRecoveryIncident_open_key" WHERE "closedAt" IS NULL (migration
+// 0026; Prisma 5 cannot declare it, so it lives in SQL only).
+model EvaluatorRecoveryIncident {
+  id           String    @id @default(cuid())
+  chainId      Int
+  evaluator    String    // checksummed
+  headNonce    Int       // head (latest) nonce when the incident was opened
+  openedAt     DateTime  @default(now())
+  openedBy     String
+  closedAt     DateTime?
+  closeReason  String?
+  transactions EvaluatorTransaction[]
+
+  @@index([chainId, evaluator, openedAt])
+}
+
+// C3g-A1: persisted alert clocks and proof tracking per evaluator key
+// (replaces the in-memory `evaluatorBacklogs` map, R2-P1-3). A "last alert"
+// time is written only after the alert was delivered.
+model EvaluatorChainState {
+  chainId         Int
+  evaluator       String    // checksummed
+  stuckSince      DateTime? // first observation of pending > latest at stuckNonce
+  stuckNonce      Int?
+  sendLostSince   DateTime? // first observation of a live head candidate no node knows
+  sendLostNonce   Int?
+  lastAlertAt     Json      @default("{}") // { "<alert kind>": ISO time of the last DELIVERED alert }
+  safeHeadBlock   String?   // last proof-tag block number seen (decimal)
+  safeHeadSeenAt  DateTime? // when safeHeadBlock last advanced
+  rpcFailures     Json      @default("{}") // { "<node>": consecutive failed reads }
+  updatedAt       DateTime  @default(now()) @updatedAt
+
+  @@id([chainId, evaluator])
 }
 
 enum JobStatus {
