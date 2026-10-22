@@ -187,6 +187,11 @@ const quietLogger = { info: () => undefined, warn: () => undefined, error: () =>
 async function wipe(): Promise<void> {
   const agents = { name: { startsWith: NAME_PREFIX } };
   await m.db.transaction.deleteMany({ where: { agent: agents } });
+  // A1 (P3-8): the candidate ledger references Job with ON DELETE RESTRICT — its rows (and the
+  // evaluator key's incidents / chain state) go first.
+  await m.db.evaluatorTransaction.deleteMany({ where: { OR: [{ job: { OR: [{ requester: agents }, { provider: agents }] } }, { evaluator: SIM_EVALUATOR }] } });
+  await m.db.evaluatorRecoveryIncident.deleteMany({ where: { evaluator: SIM_EVALUATOR } });
+  await m.db.evaluatorChainState.deleteMany({ where: { evaluator: SIM_EVALUATOR } });
   await m.db.job.deleteMany({ where: { OR: [{ requester: agents }, { provider: agents }] } });
   await m.db.agentIdentity.deleteMany({ where: { agent: agents } });
   const ids = (await m.db.agent.findMany({ where: agents, select: { id: true } })).map((a) => a.id);
@@ -2038,8 +2043,14 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
 
       // While the dropped hash is the recorded one, a new decision is refused (it might still be re-broadcast) ...
       expect(await decide(jobId, 'refund')).toMatchObject({ outcome: 'refused', code: 'SETTLEMENT_IN_PROGRESS' });
-      // ... and the recovery tick re-runs the recorded decision, which pays.
+      // ... A1: and a retry signs nothing (dropped is not dead: the candidate stays live until its nonce is
+      // consumed). The candidate pass rebroadcasts the identical signed bytes (R2-P1-3); the next pass proves the
+      // winner and enqueues the job's resolve, which reconciles it from the chain.
       await m.runPaymentRecoveryTick();
+      await sim.drive();
+      expect(sim.chain.evaluatorCalls.filter((c) => c.functionName === 'complete')).toHaveLength(1);
+      expect(await m.svc.reconcileEvaluatorCandidates(sim.deps, CHAIN_ID)).toMatchObject({ rebroadcast: 1 });
+      await m.svc.reconcileEvaluatorCandidates(sim.deps, CHAIN_ID);
       await sim.drive();
       expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', resolution: 'pay' });
       expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
@@ -2335,34 +2346,50 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
 
     // ── P3-2 ────────────────────────────────────────────────────────────────
 
-    it('P3-2: a send refused by the node (out of gas) clears the settle-attempt stamp — the requester can still contest, nothing is paid automatically over it', async () => {
+    // A1 (§2.4-3, §6.3) — changed meaning: P3-2 gave the hash slot back when every node said "not found" and the
+    // contest was accepted. A1 never closes on "not found": the recorded candidate is SEND_UNCONFIRMED and LIVE
+    // until its nonce is consumed, so the contest is refused (409); the identical rebroadcast settles the decision.
+    it('P3-2 → A1: a send refused by the node (out of gas) — the candidate stays live (SEND_UNCONFIRMED), no second complete, contest 409; the identical rebroadcast pays once', async () => {
       const { requester, provider, jobId } = await delivered();
       sim.chain.evaluatorSendFails = ({ functionName }) => functionName === 'complete';
-      await sim.drive(); // 3 attempts, each refused at send; the failed handler hands the job back
+      await sim.drive(); // 3 attempts: the first recorded and refused at send, the next ones refused by the ledger gate
       expect(sim.chain.evaluatorBroadcasts).toHaveLength(0);
-      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', settleAttemptAt: null, settleTxHash: null });
+      expect(sim.chain.evaluatorCalls).toHaveLength(0);
+      const stamped = await job(jobId);
+      expect(stamped).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', settleAttemptAt: null });
+      const [row] = await m.db.evaluatorTransaction.findMany({ where: { jobId } });
+      expect(row).toMatchObject({ status: 'SEND_UNCONFIRMED', nonce: 0, txHash: stamped.settleTxHash, origin: 'WORKER', kind: 'ORIGINAL', action: 'COMPLETE', decision: 'pay' });
 
       const res = await contestAs(requester.id, jobId);
-      expect(res.statusCode, res.body).toBe(200);
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.body).toMatch(/may still mine/);
       sim.chain.evaluatorSendFails = null;
-      await m.runPaymentRecoveryTick();
+      expect(await m.svc.reconcileEvaluatorCandidates(sim.deps, CHAIN_ID)).toMatchObject({ rebroadcast: 1 });
+      await m.svc.reconcileEvaluatorCandidates(sim.deps, CHAIN_ID);
       await sim.drive();
-      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'CONTESTED' });
-      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC);
+      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', settleTxHash: row!.txHash });
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+      expect(sim.chain.evaluatorBroadcasts.filter((b) => b.functionName === 'complete')).toHaveLength(1);
+      expect(await m.db.evaluatorTransaction.findUnique({ where: { id: row!.id } })).toMatchObject({ status: 'MINED_SUCCESS', proofLevel: 'proof' });
     });
 
-    it('P3-2: an operator refund whose send is refused clears the stamp too — the operator can record another decision', async () => {
+    // A1 — changed meaning: the refused refund stays a live candidate; another decision waits for the proof.
+    it('P3-2 → A1: an operator refund whose send is refused stays a live candidate — another decision is refused until its nonce is consumed; the rebroadcast executes the refund', async () => {
       const { requester, jobId } = await delivered();
       expect((await contestAs(requester.id, jobId)).statusCode).toBe(200);
       sim.settlements.clear();
       sim.chain.evaluatorSendFails = ({ functionName }) => functionName === 'reject';
       expect(await decide(jobId, 'refund')).toMatchObject({ outcome: 'scheduled' });
       await sim.drive();
-      expect(await job(jobId)).toMatchObject({ onChainStatus: 'CONTESTED', resolution: 'refund', settleAttemptAt: null, settleTxHash: null });
+      expect(await job(jobId)).toMatchObject({ onChainStatus: 'CONTESTED', resolution: 'refund', settleAttemptAt: null });
       sim.chain.evaluatorSendFails = null;
-      expect(await decide(jobId, 'pay')).toMatchObject({ outcome: 'scheduled' });
+      expect(await decide(jobId, 'pay')).toMatchObject({ outcome: 'refused', code: 'SETTLEMENT_IN_PROGRESS', message: expect.stringMatching(/may still mine/) });
+      expect(await m.svc.reconcileEvaluatorCandidates(sim.deps, CHAIN_ID)).toMatchObject({ rebroadcast: 1 });
+      await m.svc.reconcileEvaluatorCandidates(sim.deps, CHAIN_ID);
       await sim.drive();
-      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', resolution: 'pay' });
+      expect(await job(jobId)).toMatchObject({ onChainStatus: 'REJECTED', resolution: 'refund' });
+      expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC);
+      expect(sim.chain.evaluatorCalls.filter((c) => c.functionName === 'complete')).toHaveLength(0);
     });
 
     it('P3-2: a send whose answer is lost although the node took it — the retry signs nothing new; the job follows that transaction', async () => {
@@ -2391,12 +2418,14 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       const real = m.db;
       let stamped = false;
       let lost = false;
+      // A1: the stamp is written inside the ledger's transaction (with the candidate); the first job write after
+      // the broadcast is the stamp clear — that is the write lost here.
       const failAfterStamp = (write: (args: { data?: Record<string, unknown> }) => Promise<unknown>) => async (args: { data?: Record<string, unknown> }) => {
-        if (stamped && !lost) {
+        if (!lost && args?.data && 'settleAttemptAt' in args.data && args.data['settleAttemptAt'] === null) {
+          stamped = true;
           lost = true;
           throw new Error('Connection terminated unexpectedly (after the broadcast)');
         }
-        if (args?.data?.['settleAttemptAt'] instanceof Date) stamped = true;
         return write(args);
       };
       const jobTable = new Proxy(real.job, {
@@ -2514,6 +2543,8 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
     beforeEach(() => (m.svc as { __resetEvaluatorBacklogForTests?: () => void }).__resetEvaluatorBacklogForTests?.());
 
     it('item 1: one evaluator transaction stuck pending blocks every later one of the key — the operator is told WHICH (nonce, hash, job) once, not only that each job fails', async () => {
+      // A1 R2-P2-5: the early (first-sight) alert is off — this test checks the C3f 10-minute rule and its text.
+      sim.deps.evaluatorA1 = { leaseMinRemainingMs: 30_000, criticalSectionMaxMs: 60_000, earlyAlertBeforeExpirySeconds: 0 };
       const a = await delivered();
       sim.chain.evaluatorHold = () => true; // A's complete never mines (underpriced, stuck in the mempool)
       await sim.drive(); // 3 attempts, no second complete; the failed handler hands A back to SUBMITTED
@@ -2534,6 +2565,7 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
         (x, y) => x.expiresAt!.getTime() - y.expiresAt!.getTime() || (x.id < y.id ? -1 : 1),
       );
       const deadline = earliest!.expiresAt!.toISOString();
+      // A1: the head is read from the ledger (A's complete at nonce 0), not by getTransaction over the live jobs.
       expect(stuckAlerts()).toEqual([
         expect.objectContaining({
           chainId: CHAIN_ID,
@@ -2553,7 +2585,8 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(message).toMatch(/after it anyone can call claimRefund .*also for work already delivered/);
       expect(message).not.toContain('Funds stay in the escrow.');
       await sweepTick();
-      expect(stuckAlerts()).toHaveLength(1); // not repeated every tick
+      expect(stuckAlerts()).toHaveLength(1); // not repeated every tick (A1: the "alerted" mark is persisted)
+      expect((await m.db.evaluatorChainState.findFirst({ where: { chainId: CHAIN_ID } }))?.lastAlertAt).toHaveProperty('evaluator-stuck');
 
       // Nothing is replaced or cancelled by the backend (C3f proposal): once the stuck transaction mines, both settle.
       expect(sim.chain.evaluatorBroadcasts.filter((x) => x.functionName === 'complete')).toHaveLength(2);
@@ -2568,6 +2601,7 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
     });
 
     it('item 1: a key that is only busy (the backlog moves between ticks) is never alerted', async () => {
+      sim.deps.evaluatorA1 = { leaseMinRemainingMs: 30_000, criticalSectionMaxMs: 60_000, earlyAlertBeforeExpirySeconds: 0 };
       const a = await delivered();
       sim.chain.evaluatorHold = () => true;
       await sim.drive(1);
@@ -2582,17 +2616,22 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       expect(await job(a.jobId)).toMatchObject({ status: 'COMPLETED' });
     });
 
-    it('item 2 (not reproduced since G1 review P3-2): a send every node refused leaves no stamp — once the claim is handed back, contest and resolve are accepted', async () => {
+    // A1 — changed meaning (was: the slot is given back, contest and resolve accepted): the refused send's candidate
+    // is SEND_UNCONFIRMED and live; no stamp; contest and resolve are refused until a chain proof (here: a foreign
+    // transaction of the key consumes the nonce — then both are accepted).
+    it('item 2 → A1: a send every node refused leaves no stamp but a LIVE candidate — contest / resolve refused until its nonce is proven consumed, then accepted', async () => {
       const { requester, jobId } = await delivered();
       sim.chain.evaluatorSendFails = ({ functionName }) => functionName === 'complete';
-      await sim.drive(1); // one attempt, refused at send: no stamp, no hash (the job stays claimed while BullMQ retries)
-      expect(await job(jobId)).toMatchObject({ onChainStatus: 'SETTLING', settleAttemptAt: null, settleTxHash: null });
-      await sim.drive(); // the remaining attempts are refused too; the failed handler hands the job back
-      expect(await job(jobId)).toMatchObject({ onChainStatus: 'SUBMITTED', settleAttemptAt: null, settleTxHash: null });
+      await sim.drive(1); // one attempt, refused at send: the candidate is recorded, the stamp cleared
+      const first = await job(jobId);
+      expect(first).toMatchObject({ onChainStatus: 'SETTLING', settleAttemptAt: null });
+      expect(first.settleTxHash).not.toBeNull();
+      await sim.drive(); // the remaining attempts are refused by the ledger gate; the failed handler hands the job back
+      expect(await job(jobId)).toMatchObject({ onChainStatus: 'SUBMITTED', settleAttemptAt: null, settleTxHash: first.settleTxHash });
       sim.chain.evaluatorSendFails = null;
-      expect((await contestAs(requester.id, jobId)).statusCode).toBe(200);
-      sim.settlements.clear();
-      expect(await decide(jobId, 'refund')).toMatchObject({ outcome: 'scheduled' });
+      expect((await contestAs(requester.id, jobId)).statusCode).toBe(409);
+      expect(await decide(jobId, 'refund')).toMatchObject({ outcome: 'refused', code: 'SETTLEMENT_IN_PROGRESS' });
+      expect(sim.chain.evaluatorCalls).toHaveLength(0);
     });
 
     it('item 2 (by design): a refused send no node could be asked about keeps the stamp (it may have left) until the next attempt, which settles it once', async () => {
@@ -2604,13 +2643,20 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       };
       await sim.drive(1);
       const stamped = await job(jobId);
-      expect(stamped.settleAttemptAt).not.toBeNull();
+      // A1: the stamp is cleared (the live SIGNED candidate is the gate now); the candidate keeps the error.
+      expect(stamped.settleAttemptAt).toBeNull();
       expect(stamped.settleTxHash).not.toBeNull();
+      expect(await m.db.evaluatorTransaction.findFirst({ where: { jobId } })).toMatchObject({ status: 'SIGNED', sendError: expect.stringMatching(/insufficient funds/) });
       expect((await contestAs(requester.id, jobId)).statusCode).toBe(409); // the C3e race rule: it may still mine
 
-      // The nodes answer again and the send was in fact refused: the next attempt signs once and settles.
+      // The nodes answer again and the send was in fact refused: no retry signs anew (the candidate may still
+      // mine); the identical rebroadcast of the recorded bytes settles it once.
       sim.deps.isKnownTransaction = realKnown;
       sim.chain.evaluatorSendFails = null;
+      await sim.drive();
+      expect(sim.chain.evaluatorBroadcasts.filter((x) => x.functionName === 'complete')).toHaveLength(0);
+      expect(await m.svc.reconcileEvaluatorCandidates(sim.deps, CHAIN_ID)).toMatchObject({ rebroadcast: 1 });
+      await m.svc.reconcileEvaluatorCandidates(sim.deps, CHAIN_ID);
       await sim.drive();
       expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', settleAttemptAt: null });
       expect(sim.chain.evaluatorBroadcasts.filter((x) => x.functionName === 'complete')).toHaveLength(1);
@@ -2652,30 +2698,96 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       await sim.drive(1);
       const completes = sim.chain.evaluatorBroadcasts.filter((x) => x.functionName === 'complete');
       expect(completes.map((x) => x.outcome)).toEqual(['pending']); // the node took it, the answer was lost
-      // P3-2 gave the hash slot back (every node said "not found" then); the API cannot see the worker's memory.
-      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', settleTxHash: null, settleAttemptAt: null });
+      // A1: no slot is given back any more — the hash stays recorded, its candidate SEND_UNCONFIRMED (still live).
+      expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING', onChainStatus: 'SUBMITTED', settleTxHash: completes[0]!.hash, settleAttemptAt: null });
+      expect(await m.db.evaluatorTransaction.findFirst({ where: { jobId } })).toMatchObject({ status: 'SEND_UNCONFIRMED', txHash: completes[0]!.hash });
 
-      // The contest lands in the interval (pre-existing residual: accepted while that complete may still mine).
-      expect((await contestAs(requester.id, jobId)).statusCode).toBe(200);
-      sim.settlements.clear();
-      expect(await decide(jobId, 'refund')).toMatchObject({ outcome: 'scheduled', previousOnChainStatus: 'CONTESTED' });
-      await sim.drive(); // the resolve is the next attempt: it asks again, a node knows the hash now → re-adopted, nothing signed
-      expect(sim.chain.evaluatorBroadcasts.map((x) => x.functionName)).toEqual(['complete']); // no reject
-      expect(await job(jobId)).toMatchObject({ onChainStatus: 'CONTESTED', resolution: 'refund', settleTxHash: completes[0]!.hash });
-      expect((await job(jobId)).contestedAt).not.toBeNull();
-      // While it may mine, another decision is refused too.
-      expect(await decide(jobId, 'pay')).toMatchObject({ outcome: 'refused', code: 'SETTLEMENT_IN_PROGRESS' });
+      // P3-3 CHANGES MEANING (A1 §6.3, D-k): a contest in the interval is now REFUSED (409) — the candidate may still mine.
+      const res = await contestAs(requester.id, jobId);
+      expect(res.statusCode).toBe(409);
+      expect(res.body).toMatch(new RegExp(`candidate tx ${completes[0]!.hash} at nonce 0 may still mine`));
+      expect(await job(jobId)).toMatchObject({ onChainStatus: 'SUBMITTED', contestedAt: null });
 
-      // The chain decides: the complete mines; the DB follows it and the overridden decision is alerted.
+      // The chain decides: the complete mines; the DB follows it — no contest was accepted, so nothing is overridden.
       sim.chain.evaluatorHold = null;
       sim.chain.releaseEvaluator();
       await m.runPaymentRecoveryTick();
       await sim.drive();
-      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', resolution: 'refund', settleTxHash: completes[0]!.hash, feedbackStatus: 'written', platformFeeAmount: FEE.toString() });
-      expect(sim.alerts.filter((x) => x.kind === 'review-overridden' && x.jobId === jobId)).toHaveLength(1);
+      expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', settleTxHash: completes[0]!.hash, feedbackStatus: 'written', platformFeeAmount: FEE.toString() });
+      expect(sim.alerts.filter((x) => x.kind === 'review-overridden' && x.jobId === jobId)).toHaveLength(0);
       expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
       expect(sim.chain.usdcOf(requester.safeAddress as Hex)).toBe(START_USDC - BUDGET);
       expect(sim.chain.evaluatorBroadcasts.filter((x) => x.outcome === 'reverted')).toHaveLength(0);
+    });
+
+    it('A1 counterpart of P3-3: once the candidate\'s nonce is PROVEN consumed (a foreign transaction of the key took it, nothing settled), the contest is accepted', async () => {
+      const { requester, provider, jobId } = await delivered();
+      sim.chain.evaluatorHold = () => true;
+      sim.chain.evaluatorSendLostAnswer = ({ functionName }) => functionName === 'complete';
+      const realKnown = sim.deps.isKnownTransaction!;
+      let lagging = 1;
+      sim.deps.isKnownTransaction = async (chainId, hash) => (lagging-- > 0 ? false : realKnown(chainId, hash));
+      sim.settlements.get(`settle-${jobId}`)!.attempts = 2;
+      await sim.drive(1);
+      const [pending] = sim.chain.evaluatorBroadcasts.filter((x) => x.functionName === 'complete');
+      expect((await contestAs(requester.id, jobId)).statusCode).toBe(409);
+
+      // A manual send with the evaluator key takes nonce 0 (a 0-value self-transfer): our complete can never mine.
+      sim.chain.replaceEvaluator(pending!.hash, { kind: 'cancel' });
+      sim.chain.evaluatorHold = null;
+      expect(await m.svc.reconcileEvaluatorCandidates(sim.deps, CHAIN_ID)).toMatchObject({ dead: 1, foreign: 1 });
+      expect(await m.db.evaluatorTransaction.findFirst({ where: { jobId } })).toMatchObject({ status: 'DEAD', proofLevel: 'proof' });
+      expect(sim.alerts.filter((x) => x.kind === ('evaluator-nonce-foreign' as EscrowAlert['kind']))).toHaveLength(1);
+      // The pass enqueued the job's own action again; drop it so the contest meets the window as the requester would.
+      sim.settlements.clear();
+      const res = await contestAs(requester.id, jobId);
+      expect(res.statusCode, res.body).toBe(200);
+      expect(await job(jobId)).toMatchObject({ onChainStatus: 'CONTESTED' });
+      expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC);
+      expect(onChain((await job(jobId)).onChainJobId).status).toBe(JobStatus.Submitted);
+    });
+
+    it('A1 R2-P2-3 + R2-P1-3: job A\'s send never left (nonce 0 live, unknown) — job B signs nonce 1, never on top of it; B waits behind the gap; the identical rebroadcast of A unblocks both, each paid once', async () => {
+      const a = await delivered();
+      sim.chain.evaluatorSendFails = ({ functionName }) => functionName === 'complete';
+      await sim.drive(1); // A: recorded at nonce 0, refused at send — SEND_UNCONFIRMED
+      sim.chain.evaluatorSendFails = null;
+      sim.settlements.clear();
+      const b = await delivered();
+      await sim.drive(1); // B: pending is 0 on the node, but nonce 0 is occupied by A's live candidate → nonce 1
+      const rows = await m.db.evaluatorTransaction.findMany({ where: { jobId: { in: [a.jobId, b.jobId] } }, orderBy: { nonce: 'asc' } });
+      expect(rows.map((r) => [r.jobId, r.nonce, r.status])).toEqual([
+        [a.jobId, 0, 'SEND_UNCONFIRMED'],
+        [b.jobId, 1, 'SENT'],
+      ]);
+      expect(onChain((await job(b.jobId)).onChainJobId).status).toBe(JobStatus.Submitted); // queued above the gap
+      expect(await m.svc.reconcileEvaluatorCandidates(sim.deps, CHAIN_ID)).toMatchObject({ rebroadcast: 1 }); // A's identical bytes fill nonce 0; B mines behind it
+      await m.svc.reconcileEvaluatorCandidates(sim.deps, CHAIN_ID);
+      await m.runPaymentRecoveryTick();
+      await sim.drive();
+      for (const x of [a, b]) {
+        expect(await job(x.jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED' });
+        expect(sim.chain.usdcOf(x.provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
+      }
+      expect(sim.chain.evaluatorBroadcasts.filter((x) => x.functionName === 'complete')).toHaveLength(2); // B's, and A's identical bytes once
+      expect(sim.chain.evaluatorBroadcasts.filter((x) => x.outcome === 'reverted')).toHaveLength(0);
+    });
+
+    it('A1 §10-2: an in-flight job from before the ledger (settleTxHash, no candidate) is backfilled once as LEGACY with its nonce; a second pass inserts nothing', async () => {
+      const { jobId } = await delivered();
+      sim.chain.evaluatorHold = () => true;
+      await sim.drive(1); // complete broadcast, pending
+      const hash = (await job(jobId)).settleTxHash!;
+      await m.db.evaluatorTransaction.deleteMany({ where: { jobId } }); // the pre-A1 state: a hash, no ledger row
+      expect(await m.svc.reconcileEvaluatorCandidates(sim.deps, CHAIN_ID)).toMatchObject({ backfilled: 1 });
+      expect(await m.svc.reconcileEvaluatorCandidates(sim.deps, CHAIN_ID)).toMatchObject({ backfilled: 0 });
+      const rows = await m.db.evaluatorTransaction.findMany({ where: { jobId } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ kind: 'LEGACY', origin: 'BACKFILL', txHash: hash, nonce: 0, action: 'COMPLETE', status: 'SENT' });
+      sim.chain.evaluatorHold = null;
+      sim.chain.releaseEvaluator();
+      await m.svc.reconcileEvaluatorCandidates(sim.deps, CHAIN_ID);
+      expect(await m.db.evaluatorTransaction.findFirst({ where: { jobId } })).toMatchObject({ status: 'MINED_SUCCESS', proofLevel: 'proof' });
     });
   });
 
@@ -2717,7 +2829,8 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       await sim.drive(); // every attempt waits behind the pending complete; the decision goes back to its hold
       expect(await job(jobId)).toMatchObject({ onChainStatus: 'CONTESTED', resolution: 'pay' });
       for (const b of sim.chain.evaluatorBroadcasts.filter((x) => x.outcome === 'pending')) sim.chain.dropEvaluator(b.hash);
-      sim.chain.evaluatorHold = null;
+      // A1: the sweep's candidate pass rebroadcasts the dropped complete (identical bytes, R2-P1-3); it stays
+      // pending here (still underpriced), so the expiry checks below meet a job still Submitted on-chain.
 
       await pastExpiry(jobId);
       await sweep();
@@ -2739,10 +2852,15 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       await sweep(); // the next tick, within the hour: not alerted again
       expect(alertsOf('delivery-held', jobId)).toHaveLength(1);
 
-      // The recorded decision is still executed (complete is valid after expiredAt while Submitted).
+      // The recorded decision is still executed (complete is valid after expiredAt while Submitted): A1 — the
+      // rebroadcast candidate mines once the fee allows; the pass proves it and enqueues the job's resolve.
+      sim.chain.evaluatorHold = null;
+      sim.chain.releaseEvaluator();
+      await m.svc.reconcileEvaluatorCandidates(sim.deps, CHAIN_ID);
       await m.runPaymentRecoveryTick();
       await sim.drive();
       expect(await job(jobId)).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', resolution: 'pay' });
+      expect(sim.chain.evaluatorCalls.filter((c) => c.functionName === 'complete')).toHaveLength(1);
       expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
       expect(evaluatorClaims()).toHaveLength(0);
     });
@@ -2901,7 +3019,7 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
       sim.chain.evaluatorHold = () => true;
       await sim.drive(1); // attempt 1: complete pending, the wait times out
       sim.settlements.clear(); // the worker process dies
-      m.svc.__resetUnconfirmedSendsForTests();
+      // A1: no process memory to lose any more — the candidate ledger survives the "restart".
       const [pending] = sim.chain.evaluatorBroadcasts.filter((b) => b.outcome === 'pending');
       sim.chain.replaceEvaluator(pending!.hash, { kind: 'cancel' });
       sim.chain.evaluatorHold = null;
