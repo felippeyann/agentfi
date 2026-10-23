@@ -840,6 +840,42 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     expect((await rowsOf({ id: script[0]!.id }))[0]).toMatchObject({ status: 'DEAD' });
   }, 300_000);
 
+  // A1-DEFECT D-R9-1 (P3, user-visible text): the CLI writes `Job.escrowError = "evaluator recovery: <op> sent at
+  // nonce <N>"` (F-P3-3, visible to requester and provider through the API) BEFORE `sendRaw`'s `assertHeld`
+  // (src/scripts/evaluator-recovery.ts, executeNonce step 5 → step 6). When the lease is lost in between, the
+  // send is refused (exit 3, nothing broadcast) but the line stays: the job claims a recovery send that never
+  // happened, until a later write (settlement / another run) replaces it. Expected: the line is written only
+  // after an accepted send, or corrected when the send is refused. Same steps as scenario 3a.
+  it.fails('scenario 3c — A1-DEFECT D-R9-1: after a lease lost before the broadcast (exit 3, nothing sent), Job.escrowError must not say "sent"', async () => {
+    const x = await delivered();
+    await automine(false);
+    const head = await stuckHead(x);
+    const N = head.nonce;
+    const S = startS(execArgs('speed-up', N));
+    const phrase = await promptOf(S);
+    const sHold = pS.hold('eth_feeHistory');
+    const typedAt = type(S, phrase);
+    try {
+      await withTimeout(sHold.reached, 60_000, 'S reaches its in-lane re-read');
+      expect(await redis.set(LANE_KEY, INTRUDER, 'PX', 120_000, 'XX')).toBe('OK');
+      sHold.release();
+      expect(await withTimeout(S.exited, 120_000, 'S exits')).toBe(3);
+      expect(sendsBy('S', typedAt)).toHaveLength(0);
+      const job = await db.job.findUniqueOrThrow({ where: { id: x.jobId } });
+      timeline.push('test', 'd-r9-1', { escrowError: job.escrowError });
+      expect(job.escrowError ?? '').not.toMatch(/sent at nonce/);
+    } finally {
+      sHold.release();
+      await redis.del(LANE_KEY);
+      await mine();
+      await automine(true);
+      await head.outcome;
+      await reconcile();
+      await p0Settle(x.jobId, 1);
+      await reconcile();
+    }
+  }, 300_000);
+
   it('scenario 3b: W\'s lease runs below the margin (PEXPIRE) while W is held before assertHeld → W records nothing and sends nothing; the BullMQ retry then signs Y at N+1', async () => {
     const x = await delivered();
     const y = await delivered();
@@ -952,9 +988,18 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     expect(rows.find((r) => same(r.txHash, cancel.txHash))!.status).toBe('MINED_SUCCESS');
     expect(rows.find((r) => same(r.txHash, head.hash))!.status).toBe('DEAD');
     expect(await db.job.findUniqueOrThrow({ where: { id: x.jobId } })).toMatchObject({ onChainStatus: 'EXPIRED', resolution: null, platformFeeAmount: null });
-    // The cancel run's reconciliation enqueues the job's own action (addSettlementJob): W mirrors EXPIRED and
-    // raises provider-unpaid — once, across the processes (W's log + P0's alerts).
-    await W!.waitForLine(new RegExp(`^A1C-WORKER-(COMPLETED|FAILED) settle ${x.jobId} `), 60_000);
+    // The cancel run's reconciliation MAY enqueue the job's own action (addSettlementJob) for W while P0 settles
+    // it too: whoever mirrors EXPIRED first raises provider-unpaid — once, across the processes (W's log + P0's
+    // alerts). Wait until W has no settle of X queued or running.
+    await until(
+      'W has no settle of X queued or running',
+      async () => {
+        const j = await settlementQueue.getJob(`settle-${x.jobId}`);
+        return j ? await j.getState() : 'none';
+      },
+      (s) => s === 'none' || s === 'completed' || s === 'failed',
+      60_000,
+    );
     const unpaidInW = W!.lines.filter((l) => /alert.*"provider-unpaid"/.test(l)).length;
     expect(unpaidInW + p0Alerts.filter((a) => a.kind === 'provider-unpaid' && a.jobId === x.jobId).length).toBe(1);
   }, 300_000);
