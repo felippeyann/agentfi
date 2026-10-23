@@ -1956,5 +1956,9 @@ describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () =
     expect(await ledger.unacknowledgedExternal(m.db, CHAIN_ID, SIM_EVALUATOR)).toHaveLength(1);
   });
 
-  it.todo('row 9 (script + worker, Redis real): the worker signs Y at pending+1 while the script holds the lane for N; no nonce collision — covered by the shared lane key and chooseNonce (unit + row 30); concurrent run not scripted here');
+  // Row 9 (script + worker at once, Redis real): the worker signs Y at pending+1 while the script holds the lane
+  // for N, no nonce collision. The worker side alone is the `row 9` test above; the concurrent run is covered by
+  // evaluator-concurrency.anvil.ts (two OS processes, real contracts, Redis lane): scenario 1 (W first),
+  // scenario 2 (S first, lagging pending), scenarios 3a/3b (lease lost before the broadcast), scenarios 4a/4b
+  // (state changes between prompt and execution) and scenario 5 (ledger / chain audit).
 });

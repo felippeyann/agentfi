@@ -6,7 +6,8 @@
  *
  * Rows (matrix: agentfi-notas/2026-10-22-a1-matriz.md): AV side of 1–6, 11, 12a, 12b, 14, 22, 25–28, 34
  * (+ D-C, fixed on 23/10); script rows through the real CLI: 1, 2, 3, 4, 8, 15/40, 16, 18, 35, 37, 42, 45.
- * Row 9 (script + worker at once) is a todo here: a separate multi-process test covers it.
+ * Row 9 (script + worker at once) is not here: evaluator-concurrency.anvil.ts covers it (see the comment where
+ * the row-9 todo used to be).
  *
  * Declared Anvil gaps (R2-§11):
  *  - Anvil DROPS an underpriced transaction when it mines a block; "stuck while blocks are produced"
@@ -911,7 +912,13 @@ describeA1('A1 recovery script on Anvil — real contracts, real signer', () => 
     expect((await usdcOf(provider.address)) - before).toBe(2n * (BUDGET - FEE));
   });
 
-  it.todo('row 9 (AV): the worker settles Y at pending while the script holds the lane for N (txpool_content)');
+  // Row 9 (AV): the worker settles Y while the script holds the lane for N — covered by
+  // evaluator-concurrency.anvil.ts (worker and CLI as two OS processes, real contracts, Redis lane):
+  //   scenario 1      W holds the lane first, S waits, then speeds up N; Y at N+1 (txpool checked);
+  //   scenario 2      S holds the lane first, W (lagging pending) signs Y at N+1, never S's nonce;
+  //   scenarios 3a/3b S / W lose the lease before the broadcast — nothing sent, nothing unauthorised;
+  //   scenarios 4a/4b the head or the job's on-chain status changes between prompt and execution — S aborts;
+  //   scenario 5      audit: one winner per nonce, every broadcast had its ledger row first.
 
   // LAST in this block: it moves the chain clock ~30 h ahead of the wall clock (block timestamps only grow).
   it('row 42 (AV): the deadline labels come from the BLOCK timestamp, never the process clock — NONE / ACT / URGENT / HAND-TO-OWNER / EXPIRED as evm_setNextBlockTimestamp moves the chain; past expiry the speed-up needs "… AFTER EXPIRY" and still settles (complete on Submitted)', async () => {
