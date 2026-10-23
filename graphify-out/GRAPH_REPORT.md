@@ -1,7 +1,7 @@
 # Graph Report - agentfi-a1  (2026-10-23)
 
 ## Corpus Check
-- 498 files · ~756,309 words
+- 498 files · ~757,637 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 26 file(s) not represented in the graph (top: (none) 13, .toml 5, .example 1)
 
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `e9d03cac`
+- Built from commit: `b2301004`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -1187,7 +1187,7 @@ Nodes (6): commonChildEnv(), promptOf(), startS(), Child, childEnv(), startChild
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `viem` connect `viem` to `escrow-validation.ts`, `escrow-erc8183.runtime.ts`, `agents.ts`, `registerErrorHandler`, `transaction.e2e.ts`, `admin.ts`, `backend/package.json`, `transactions.ts`, `transaction.queue.ts`, `executor.service.ts`, `token-registry.ts`, `local.service.ts`, `global-setup.ts`, `policy-sync.service.ts`, `ens.service.ts`, `fastify`, `sanitize.ts`, `evaluator-recovery.ts`, `broadcast-outcome.db.test.ts`, `escrow-verification.ts`, `stranded-queued.bullmq.db.test.ts`, `erc8004-identity.service.ts`, `evaluator-ledger.ts`, `evaluator-concurrency.anvil.ts`, `evaluator-candidates.ts`, `x402-client.service.ts`, `ref_vitest`, `evaluator-signer.ts`, `wallet-lane.test.ts`, `escrow-boot-check.ts`, `evaluator-a1.db.test.ts`, `escrow-boot-check.test.ts`, `contracts.addresses.routes.db.test.ts`, `escrow-erc8183.service.test.ts`, `escrow-boot.runtime.ts`, `escrow-erc8183.service.ts`, `spend-pricing.ts`, `transactions.batch.anvil.ts`, `escrow-chain-truth.db.test.ts`, `escrow-erc8183.fork.e2e.ts`, `FakeEvaluatorChain`, `evaluator-recovery.anvil.ts`, `erc8004-identity.test.ts`, `mcp.ts`, `transaction.processor.ts`, `escrow.service.ts`, `policy-stack-check.test.ts`, `escrow-settlement.queue.ts`, `x402.middleware.ts`, `escrow-fork.harness.ts`, `max-withdrawal-proof.ts`, `resource-payment.service.ts`, `daily-volume.db.test.ts`, `jobs.routes.erc8183.test.ts`, `abi.erc8183.test.ts`, `env.ts`, `spend-pricing.routes.db.test.ts`, `escrow-evaluator-a1.ts`, `policy-stack-verification.runtime.ts`, `evaluator-rpc.ts`, `escrow-settlement-replacement.anvil.ts`, `contracts.ts`, `settle-attempt.migration.db.test.ts`, `ref_node_path`, `policy-units.migration.db.test.ts`, `policy-sync.ts`, `chains.ts`, `fake-evaluator-chain.ts`, `policy-sync.routes.anvil.ts`, `tx-known.ts`, `submitter.service.ts`, `contract-identity.module.anvil.ts`, `escrow-spend-policy.db.test.ts`, `batch-calldata.test.ts`, `handshake.oracle.test.ts`, `a1-review-proofs.db.test.ts`, `.getAddress`, `policy-review-followups.db.test.ts`, `max-withdrawal.routes.db.test.ts`, `outflow-cap.routes.db.test.ts`, `ref_node_crypto`, `transaction.queue.multinode.test.ts`, `pay-agent.mcp.db.test.ts`, `broadcast-tx-hash.migration.db.test.ts`, `contract-identity.executor.anvil.ts`, `transfer-input.routes.db.test.ts`, `bind-skip.db.test.ts`, `in-memory-evaluator-ledger.ts`?**
-  _High betweenness centrality (0.181) - this node is a cross-community bridge._
+  _High betweenness centrality (0.178) - this node is a cross-community bridge._
 - **Are the 16 inferred relationships involving `transactionRoutes()` (e.g. with `.buildAaveSupply()` and `.buildAaveWithdraw()`) actually correct?**
   _`transactionRoutes()` has 16 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `name`, `version`, `private` to the rest of the system?**

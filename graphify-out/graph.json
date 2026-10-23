@@ -1093,7 +1093,7 @@
       "file_type": "code",
       "norm_label": "recoverylockbusyerror",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L427"
+      "source_location": "L440"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_recoverylockhandle",
@@ -1106,7 +1106,7 @@
       "file_type": "code",
       "norm_label": "recoverylockhandle",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L417"
+      "source_location": "L430"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_recoverylockholder",
@@ -1119,7 +1119,7 @@
       "file_type": "code",
       "norm_label": "recoverylockholder",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L409"
+      "source_location": "L422"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_redislanelease",
@@ -1132,7 +1132,7 @@
       "file_type": "code",
       "norm_label": "redislanelease",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L338"
+      "source_location": "L351"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_redislanelock",
@@ -1145,7 +1145,7 @@
       "file_type": "code",
       "norm_label": "redislanelock",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L363"
+      "source_location": "L376"
     },
     {
       "id": "packages_backend_src_tests_wallet_lane_lease_test_fakeredis",
@@ -4577,7 +4577,7 @@
       "file_type": "code",
       "norm_label": "redisnoncestore",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L508"
+      "source_location": "L521"
     },
     {
       "id": "packages_backend_src_services_policy_batch_calldata_batchcalldataclass",
@@ -11351,7 +11351,7 @@
       "file_type": "code",
       "norm_label": "acquirerecoverylock()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L470"
+      "source_location": "L483"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_assertmargin",
@@ -11375,7 +11375,7 @@
       "file_type": "code",
       "norm_label": "assertredisleaseheld()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L313"
+      "source_location": "L321"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_evaluatorlanekey",
@@ -11471,7 +11471,7 @@
       "file_type": "code",
       "norm_label": "parseholder()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L441"
+      "source_location": "L454"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_readrecoverylock",
@@ -11483,7 +11483,7 @@
       "file_type": "code",
       "norm_label": "readrecoverylock()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L461"
+      "source_location": "L474"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_recoverylockbusyerror_constructor",
@@ -11495,7 +11495,7 @@
       "file_type": "code",
       "norm_label": ".constructor()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L428"
+      "source_location": "L441"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_recoverylockhandle_assertheld",
@@ -11507,7 +11507,7 @@
       "file_type": "code",
       "norm_label": ".assertheld()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L421"
+      "source_location": "L434"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_recoverylockhandle_release",
@@ -11519,7 +11519,7 @@
       "file_type": "code",
       "norm_label": ".release()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L423"
+      "source_location": "L436"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_recoverylockkey",
@@ -11543,7 +11543,7 @@
       "file_type": "code",
       "norm_label": ".assertheld()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L350"
+      "source_location": "L363"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_redislanelease_constructor",
@@ -11555,7 +11555,7 @@
       "file_type": "code",
       "norm_label": ".constructor()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L341"
+      "source_location": "L354"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_redislanelease_release",
@@ -11567,7 +11567,7 @@
       "file_type": "code",
       "norm_label": ".release()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L355"
+      "source_location": "L368"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_redislanelock_acquire",
@@ -11579,7 +11579,7 @@
       "file_type": "code",
       "norm_label": ".acquire()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L369"
+      "source_location": "L382"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_redislanelock_constructor",
@@ -11591,7 +11591,7 @@
       "file_type": "code",
       "norm_label": ".constructor()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L364"
+      "source_location": "L377"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_redislanelock_run",
@@ -11603,7 +11603,7 @@
       "file_type": "code",
       "norm_label": ".run()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L388"
+      "source_location": "L401"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_runtime_acquireevaluatorrecoverylock",
@@ -11735,7 +11735,7 @@
       "file_type": "code",
       "norm_label": ".eval()",
       "source_file": "packages/backend/src/__tests__/wallet-lane.lease.test.ts",
-      "source_location": "L59"
+      "source_location": "L64"
     },
     {
       "id": "packages_backend_src_tests_wallet_lane_lease_test_fakeredis_get",
@@ -11747,7 +11747,7 @@
       "file_type": "code",
       "norm_label": ".get()",
       "source_file": "packages/backend/src/__tests__/wallet-lane.lease.test.ts",
-      "source_location": "L55"
+      "source_location": "L60"
     },
     {
       "id": "packages_backend_src_tests_wallet_lane_lease_test_fakeredis_live",
@@ -11759,7 +11759,7 @@
       "file_type": "code",
       "norm_label": ".live()",
       "source_file": "packages/backend/src/__tests__/wallet-lane.lease.test.ts",
-      "source_location": "L38"
+      "source_location": "L43"
     },
     {
       "id": "packages_backend_src_tests_wallet_lane_lease_test_fakeredis_set",
@@ -11771,7 +11771,7 @@
       "file_type": "code",
       "norm_label": ".set()",
       "source_file": "packages/backend/src/__tests__/wallet-lane.lease.test.ts",
-      "source_location": "L48"
+      "source_location": "L53"
     },
     {
       "id": "packages_backend_src_tests_wallet_lane_lease_test_lostreason",
@@ -11783,7 +11783,7 @@
       "file_type": "code",
       "norm_label": "lostreason()",
       "source_file": "packages/backend/src/__tests__/wallet-lane.lease.test.ts",
-      "source_location": "L79"
+      "source_location": "L86"
     },
     {
       "id": "packages_backend_src_services_defi_uniswap_service_uniswapservice_getquote",
@@ -22919,7 +22919,7 @@
       "file_type": "code",
       "norm_label": ".constructor()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L509"
+      "source_location": "L522"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_redisnoncestore_lastused",
@@ -22931,7 +22931,7 @@
       "file_type": "code",
       "norm_label": ".lastused()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L514"
+      "source_location": "L527"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_redisnoncestore_recordused",
@@ -22943,7 +22943,7 @@
       "file_type": "code",
       "norm_label": ".recordused()",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L521"
+      "source_location": "L534"
     },
     {
       "id": "packages_backend_src_config_escrow_boot_check_isdefinitivecontracterror",
@@ -23435,7 +23435,7 @@
       "file_type": "code",
       "norm_label": "assertpoolauthorised()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L508"
+      "source_location": "L509"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_chainstatus",
@@ -23483,7 +23483,7 @@
       "file_type": "code",
       "norm_label": "p0deps()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L371"
+      "source_location": "L372"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_p0settle",
@@ -23495,7 +23495,7 @@
       "file_type": "code",
       "norm_label": "p0settle()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L397"
+      "source_location": "L398"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_reconcile",
@@ -23507,7 +23507,7 @@
       "file_type": "code",
       "norm_label": "reconcile()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L402"
+      "source_location": "L403"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_rowsof",
@@ -23519,7 +23519,7 @@
       "file_type": "code",
       "norm_label": "rowsof()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L359"
+      "source_location": "L360"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_same",
@@ -23555,7 +23555,7 @@
       "file_type": "code",
       "norm_label": "sentrow()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L361"
+      "source_location": "L362"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_settleandcheck",
@@ -23567,7 +23567,7 @@
       "file_type": "code",
       "norm_label": "settleandcheck()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L528"
+      "source_location": "L529"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_stuckhead",
@@ -23579,7 +23579,7 @@
       "file_type": "code",
       "norm_label": "stuckhead()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L409"
+      "source_location": "L410"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_until",
@@ -25919,7 +25919,7 @@
       "file_type": "code",
       "norm_label": "type()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L475"
+      "source_location": "L476"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_write",
@@ -25967,7 +25967,7 @@
       "file_type": "code",
       "norm_label": "commonchildenv()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L428"
+      "source_location": "L429"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_promptof",
@@ -25979,7 +25979,7 @@
       "file_type": "code",
       "norm_label": "promptof()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L471"
+      "source_location": "L472"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_starts",
@@ -25991,7 +25991,7 @@
       "file_type": "code",
       "norm_label": "starts()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L457"
+      "source_location": "L458"
     },
     {
       "id": "packages_backend_src_tests_helpers_a1c_processes_child_exitcode",
@@ -29879,7 +29879,7 @@
       "file_type": "code",
       "norm_label": "main()",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L957"
+      "source_location": "L966"
     },
     {
       "id": "packages_backend_src_scripts_evaluator_recovery_maxbig",
@@ -33167,7 +33167,7 @@
       "file_type": "code",
       "norm_label": "execargs()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L468"
+      "source_location": "L469"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_getjob",
@@ -33203,7 +33203,7 @@
       "file_type": "code",
       "norm_label": "islane()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L484"
+      "source_location": "L485"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_laneholder",
@@ -33215,7 +33215,7 @@
       "file_type": "code",
       "norm_label": "laneholder()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L556"
+      "source_location": "L557"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_mine",
@@ -33263,7 +33263,7 @@
       "file_type": "code",
       "norm_label": "sendrawprobe()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L522"
+      "source_location": "L523"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_sendsby",
@@ -33275,7 +33275,7 @@
       "file_type": "code",
       "norm_label": "sendsby()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L560"
+      "source_location": "L561"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_startmonitor",
@@ -33287,7 +33287,7 @@
       "file_type": "code",
       "norm_label": "startmonitor()",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L487"
+      "source_location": "L488"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_usdcof",
@@ -37937,7 +37937,7 @@
       "file_type": "code",
       "norm_label": "recovery_lock_ttl_ms",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L406"
+      "source_location": "L419"
     },
     {
       "id": "packages_backend_src_services_transaction_wallet_lane_runtime",
@@ -46179,7 +46179,7 @@
       "node_kind": "heading",
       "norm_label": "3.1 refused before anything is signed",
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L87"
+      "source_location": "L90"
     },
     {
       "id": "docs_operations_evaluator_recovery_3_2_the_typed_confirmation",
@@ -46191,7 +46191,7 @@
       "node_kind": "heading",
       "norm_label": "3.2 the typed confirmation",
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L103"
+      "source_location": "L106"
     },
     {
       "id": "docs_operations_evaluator_recovery_3_3_after_the_confirmation",
@@ -46203,7 +46203,7 @@
       "node_kind": "heading",
       "norm_label": "3.3 after the confirmation",
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L116"
+      "source_location": "L119"
     },
     {
       "id": "docs_operations_evaluator_recovery_3_executing",
@@ -46215,7 +46215,7 @@
       "node_kind": "heading",
       "norm_label": "3. executing",
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L78"
+      "source_location": "L81"
     },
     {
       "id": "docs_operations_evaluator_recovery_4_speed_up_cancel",
@@ -46227,7 +46227,7 @@
       "node_kind": "heading",
       "norm_label": "4. speed-up = cancel",
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L160"
+      "source_location": "L164"
     },
     {
       "id": "docs_operations_evaluator_recovery_5_caps_the_owner_sets_them_in_env",
@@ -46239,7 +46239,7 @@
       "node_kind": "heading",
       "norm_label": "5. caps (the owner sets them in `.env`)",
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L178"
+      "source_location": "L182"
     },
     {
       "id": "docs_operations_evaluator_recovery_6_when_a_limit_is_reached",
@@ -46251,7 +46251,7 @@
       "node_kind": "heading",
       "norm_label": "6. when a limit is reached",
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L216"
+      "source_location": "L220"
     },
     {
       "id": "docs_operations_evaluator_recovery_7_deadlines_and_third_parties",
@@ -46263,7 +46263,7 @@
       "node_kind": "heading",
       "norm_label": "7. deadlines and third parties",
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L226"
+      "source_location": "L230"
     },
     {
       "id": "docs_operations_evaluator_recovery_8_proof_tag",
@@ -46275,7 +46275,7 @@
       "node_kind": "heading",
       "norm_label": "8. proof tag",
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L249"
+      "source_location": "L253"
     },
     {
       "id": "docs_operations_evaluator_recovery_9_rpc_nodes",
@@ -46287,7 +46287,7 @@
       "node_kind": "heading",
       "norm_label": "9. rpc nodes",
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L263"
+      "source_location": "L267"
     },
     {
       "id": "docs_operations_evaluator_recovery_evaluator_recovery_runbook_c3g_a1",
@@ -47661,7 +47661,7 @@
       "file_type": "code",
       "norm_label": "no_lane",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L530"
+      "source_location": "L543"
     },
     {
       "id": "packages_backend_src_tests_contract_identity_module_anvil",
@@ -55434,7 +55434,7 @@
       "file_type": "code",
       "norm_label": "invokeddirectly",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L993"
+      "source_location": "L1002"
     },
     {
       "id": "packages_backend_src_scripts_evaluator_recovery_ops",
@@ -56629,7 +56629,7 @@
       "node_kind": "heading",
       "norm_label": "3.1 machine inventory (2026-10-15, without printing any secret)",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L187"
+      "source_location": "L189"
     },
     {
       "id": "docs_project_c5_escrow_validation_3_2_every_address_the_run_uses",
@@ -56641,7 +56641,7 @@
       "node_kind": "heading",
       "norm_label": "3.2 every address the run uses",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L199"
+      "source_location": "L201"
     },
     {
       "id": "docs_project_c5_escrow_validation_3_3_what_only_the_owner_can_enter_in_a_terminal_of_your_own_never_in_a_chat",
@@ -56653,7 +56653,7 @@
       "node_kind": "heading",
       "norm_label": "3.3 what only the owner can enter, in a terminal of your own (never in a chat)",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L219"
+      "source_location": "L221"
     },
     {
       "id": "docs_project_c5_escrow_validation_3_roles_and_addresses",
@@ -56665,7 +56665,7 @@
       "node_kind": "heading",
       "norm_label": "3. roles and addresses",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L185"
+      "source_location": "L187"
     },
     {
       "id": "docs_project_c5_escrow_validation_4_1_usdc_circle_s_testnet_usdc_0x036c_cf7e_6_decimals",
@@ -56677,7 +56677,7 @@
       "node_kind": "heading",
       "norm_label": "4.1 usdc (circle's testnet usdc `0x036c...cf7e`, 6 decimals)",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L237"
+      "source_location": "L239"
     },
     {
       "id": "docs_project_c5_escrow_validation_4_2_agent_policies_registered_by_setup_the_preflight_re_reads_them_before_every_run",
@@ -56689,7 +56689,7 @@
       "node_kind": "heading",
       "norm_label": "4.2 agent policies (registered by `setup`; the preflight re-reads them before every run)",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L250"
+      "source_location": "L252"
     },
     {
       "id": "docs_project_c5_escrow_validation_4_3_eth_base_sepolia_and_gas",
@@ -56701,7 +56701,7 @@
       "node_kind": "heading",
       "norm_label": "4.3 eth (base sepolia) and gas",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L261"
+      "source_location": "L263"
     },
     {
       "id": "docs_project_c5_escrow_validation_4_financial_plan_a_proposal_for_approval_not_an_authorisation_to_spend",
@@ -56713,7 +56713,7 @@
       "node_kind": "heading",
       "norm_label": "4. financial plan (a proposal for approval \u2014 not an authorisation to spend)",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L235"
+      "source_location": "L237"
     },
     {
       "id": "docs_project_c5_escrow_validation_5_stop_criteria",
@@ -56725,7 +56725,7 @@
       "node_kind": "heading",
       "norm_label": "5. stop criteria",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L281"
+      "source_location": "L283"
     },
     {
       "id": "docs_project_c5_escrow_validation_6_1_c4_deploy_owner_about_20_minutes",
@@ -56737,7 +56737,7 @@
       "node_kind": "heading",
       "norm_label": "6.1 c4 \u2014 deploy (owner, about 20 minutes)",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L298"
+      "source_location": "L300"
     },
     {
       "id": "docs_project_c5_escrow_validation_6_2_c5_environment_owner_about_15_minutes",
@@ -56749,7 +56749,7 @@
       "node_kind": "heading",
       "norm_label": "6.2 c5 environment (owner, about 15 minutes)",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L306"
+      "source_location": "L308"
     },
     {
       "id": "docs_project_c5_escrow_validation_6_3_the_runner_third_terminal_packages_backend",
@@ -56761,7 +56761,7 @@
       "node_kind": "heading",
       "norm_label": "6.3 the runner (third terminal, `packages/backend`)",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L314"
+      "source_location": "L316"
     },
     {
       "id": "docs_project_c5_escrow_validation_6_4_following_the_run_and_recovering_from_an_interruption",
@@ -56773,7 +56773,7 @@
       "node_kind": "heading",
       "norm_label": "6.4 following the run and recovering from an interruption",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L342"
+      "source_location": "L344"
     },
     {
       "id": "docs_project_c5_escrow_validation_6_execution",
@@ -56785,7 +56785,7 @@
       "node_kind": "heading",
       "norm_label": "6. execution",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L296"
+      "source_location": "L298"
     },
     {
       "id": "docs_project_c5_escrow_validation_7_1_completed_work_budget_2_0_usdc",
@@ -56797,7 +56797,7 @@
       "node_kind": "heading",
       "norm_label": "7.1 completed work (budget 2.0 usdc)",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L390"
+      "source_location": "L392"
     },
     {
       "id": "docs_project_c5_escrow_validation_7_2_cancellation_budget_1_0_usdc",
@@ -56809,7 +56809,7 @@
       "node_kind": "heading",
       "norm_label": "7.2 cancellation (budget 1.0 usdc)",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L402"
+      "source_location": "L404"
     },
     {
       "id": "docs_project_c5_escrow_validation_7_3_contest_operator_resolution_budget_1_5_usdc",
@@ -56821,7 +56821,7 @@
       "node_kind": "heading",
       "norm_label": "7.3 contest \u2192 operator resolution (budget 1.5 usdc)",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L412"
+      "source_location": "L414"
     },
     {
       "id": "docs_project_c5_escrow_validation_7_4_no_agent_can_resolve_the_dispute",
@@ -56833,7 +56833,7 @@
       "node_kind": "heading",
       "norm_label": "7.4 no agent can resolve the dispute",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L423"
+      "source_location": "L425"
     },
     {
       "id": "docs_project_c5_escrow_validation_7_5_whole_run_reconcile_against_the_snapshot",
@@ -56845,7 +56845,7 @@
       "node_kind": "heading",
       "norm_label": "7.5 whole run (`reconcile`, against the snapshot)",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L436"
+      "source_location": "L438"
     },
     {
       "id": "docs_project_c5_escrow_validation_7_6_after_a_restart_or_a_repeated_query",
@@ -56857,7 +56857,7 @@
       "node_kind": "heading",
       "norm_label": "7.6 after a restart or a repeated query",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L449"
+      "source_location": "L451"
     },
     {
       "id": "docs_project_c5_escrow_validation_7_acceptance_matrix",
@@ -56869,7 +56869,7 @@
       "node_kind": "heading",
       "norm_label": "7. acceptance matrix",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L385"
+      "source_location": "L387"
     },
     {
       "id": "docs_project_c5_escrow_validation_8_fork_rehearsal_of_the_runner",
@@ -56881,7 +56881,7 @@
       "node_kind": "heading",
       "norm_label": "8. fork rehearsal of the runner",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L456"
+      "source_location": "L458"
     },
     {
       "id": "docs_project_c5_escrow_validation_9_decisions_for_the_owner_asked_once_with_a_recommendation",
@@ -56893,7 +56893,7 @@
       "node_kind": "heading",
       "norm_label": "9. decisions for the owner (asked once, with a recommendation)",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L496"
+      "source_location": "L498"
     },
     {
       "id": "docs_project_c5_escrow_validation_c5_escrow_validation_on_base_sepolia_plan_runner_and_acceptance",
@@ -56917,7 +56917,7 @@
       "node_kind": "heading",
       "norm_label": "historical evidence by class (2026-10-15)",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L156"
+      "source_location": "L158"
     },
     {
       "id": "packages_backend_src_services_transaction_pre_submit_guard",
@@ -60391,7 +60391,7 @@
       "file_type": "code",
       "norm_label": "caps_per_tx",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L653"
+      "source_location": "L654"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_children",
@@ -60446,7 +60446,7 @@
       "file_type": "code",
       "norm_label": "p0alerts",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L369"
+      "source_location": "L370"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_provider",
@@ -60479,7 +60479,7 @@
       "file_type": "code",
       "norm_label": "redisdb",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L483"
+      "source_location": "L484"
     },
     {
       "id": "packages_backend_src_tests_evaluator_concurrency_anvil_requester",
@@ -72917,7 +72917,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L975",
+      "source_location": "L984",
       "weight": 1.0
     },
     {
@@ -73282,6 +73282,18 @@
     },
     {
       "source": "packages_backend_src_scripts_evaluator_recovery_runevaluatorrecovery",
+      "target": "packages_backend_src_scripts_evaluator_recovery_recoverydeps_verifyconfig",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
+      "source_location": "L843",
+      "weight": 1.0
+    },
+    {
+      "source": "packages_backend_src_scripts_evaluator_recovery_runevaluatorrecovery",
       "target": "packages_backend_src_scripts_evaluator_recovery_readsituation",
       "relation": "calls",
       "_origin": "ast",
@@ -73289,7 +73301,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L837",
+      "source_location": "L846",
       "weight": 1.0
     },
     {
@@ -73301,7 +73313,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L838",
+      "source_location": "L847",
       "weight": 1.0
     },
     {
@@ -73313,7 +73325,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L844",
+      "source_location": "L853",
       "weight": 1.0
     },
     {
@@ -73325,7 +73337,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L847",
+      "source_location": "L856",
       "weight": 1.0
     },
     {
@@ -73337,7 +73349,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L855",
+      "source_location": "L864",
       "weight": 1.0
     },
     {
@@ -73349,7 +73361,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L858",
+      "source_location": "L867",
       "weight": 1.0
     },
     {
@@ -73361,7 +73373,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L872",
+      "source_location": "L881",
       "weight": 1.0
     },
     {
@@ -73373,7 +73385,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L881",
+      "source_location": "L890",
       "weight": 1.0
     },
     {
@@ -73385,7 +73397,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L896",
+      "source_location": "L905",
       "weight": 1.0
     },
     {
@@ -73397,7 +73409,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L899",
+      "source_location": "L908",
       "weight": 1.0
     },
     {
@@ -73409,7 +73421,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L903",
+      "source_location": "L912",
       "weight": 1.0
     },
     {
@@ -73421,19 +73433,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L907",
-      "weight": 1.0
-    },
-    {
-      "source": "packages_backend_src_scripts_evaluator_recovery_runevaluatorrecovery",
-      "target": "packages_backend_src_scripts_evaluator_recovery_recoverydeps_verifyconfig",
-      "relation": "calls",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "context": "call",
-      "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L907",
+      "source_location": "L916",
       "weight": 1.0
     },
     {
@@ -73445,7 +73445,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L918",
+      "source_location": "L927",
       "weight": 1.0
     },
     {
@@ -73457,7 +73457,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L923",
+      "source_location": "L932",
       "weight": 1.0
     },
     {
@@ -73469,7 +73469,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L930",
+      "source_location": "L939",
       "weight": 1.0
     },
     {
@@ -73481,7 +73481,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L952",
+      "source_location": "L961",
       "weight": 1.0
     },
     {
@@ -86333,7 +86333,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L477",
+      "source_location": "L490",
       "weight": 1.0
     },
     {
@@ -86345,7 +86345,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L489",
+      "source_location": "L502",
       "weight": 1.0
     },
     {
@@ -86357,7 +86357,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L489",
+      "source_location": "L502",
       "weight": 1.0
     },
     {
@@ -86381,7 +86381,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L321",
+      "source_location": "L329",
       "weight": 1.0
     },
     {
@@ -86393,7 +86393,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L323",
+      "source_location": "L332",
       "weight": 1.0
     },
     {
@@ -86453,7 +86453,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L462",
+      "source_location": "L475",
       "weight": 1.0
     },
     {
@@ -86465,7 +86465,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L462",
+      "source_location": "L475",
       "weight": 1.0
     },
     {
@@ -86477,7 +86477,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L351",
+      "source_location": "L364",
       "weight": 1.0
     },
     {
@@ -86489,7 +86489,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L352",
+      "source_location": "L365",
       "weight": 1.0
     },
     {
@@ -86501,7 +86501,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L381",
+      "source_location": "L394",
       "weight": 1.0
     },
     {
@@ -86513,7 +86513,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L382",
+      "source_location": "L395",
       "weight": 1.0
     },
     {
@@ -86525,7 +86525,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L383",
+      "source_location": "L396",
       "weight": 1.0
     },
     {
@@ -86537,7 +86537,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L389",
+      "source_location": "L402",
       "weight": 1.0
     },
     {
@@ -86549,7 +86549,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L393",
+      "source_location": "L406",
       "weight": 1.0
     },
     {
@@ -86561,7 +86561,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L523",
+      "source_location": "L536",
       "weight": 1.0
     },
     {
@@ -89621,7 +89621,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L673",
+      "source_location": "L674",
       "weight": 1.0
     },
     {
@@ -89633,7 +89633,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L509",
+      "source_location": "L510",
       "weight": 1.0
     },
     {
@@ -89645,7 +89645,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L511",
+      "source_location": "L512",
       "weight": 1.0
     },
     {
@@ -89657,7 +89657,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L515",
+      "source_location": "L516",
       "weight": 1.0
     },
     {
@@ -89705,7 +89705,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L391",
+      "source_location": "L392",
       "weight": 1.0
     },
     {
@@ -89717,7 +89717,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L398",
+      "source_location": "L399",
       "weight": 1.0
     },
     {
@@ -89729,7 +89729,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L398",
+      "source_location": "L399",
       "weight": 1.0
     },
     {
@@ -89741,7 +89741,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L402",
+      "source_location": "L403",
       "weight": 1.0
     },
     {
@@ -89789,7 +89789,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L362",
+      "source_location": "L363",
       "weight": 1.0
     },
     {
@@ -89801,7 +89801,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L362",
+      "source_location": "L363",
       "weight": 1.0
     },
     {
@@ -89813,7 +89813,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L529",
+      "source_location": "L530",
       "weight": 1.0
     },
     {
@@ -89825,7 +89825,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L531",
+      "source_location": "L532",
       "weight": 1.0
     },
     {
@@ -89837,7 +89837,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L536",
+      "source_location": "L537",
       "weight": 1.0
     },
     {
@@ -89849,7 +89849,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L538",
+      "source_location": "L539",
       "weight": 1.0
     },
     {
@@ -89861,7 +89861,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L539",
+      "source_location": "L540",
       "weight": 1.0
     },
     {
@@ -89873,7 +89873,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L541",
+      "source_location": "L542",
       "weight": 1.0
     },
     {
@@ -89885,7 +89885,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L542",
+      "source_location": "L543",
       "weight": 1.0
     },
     {
@@ -89897,7 +89897,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L458",
+      "source_location": "L459",
       "weight": 1.0
     },
     {
@@ -89909,7 +89909,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L462",
+      "source_location": "L463",
       "weight": 1.0
     },
     {
@@ -89921,7 +89921,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L462",
+      "source_location": "L463",
       "weight": 1.0
     },
     {
@@ -89945,7 +89945,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L411",
+      "source_location": "L412",
       "weight": 1.0
     },
     {
@@ -89957,7 +89957,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L412",
+      "source_location": "L413",
       "weight": 1.0
     },
     {
@@ -89969,7 +89969,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L416",
+      "source_location": "L417",
       "weight": 1.0
     },
     {
@@ -89981,7 +89981,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L420",
+      "source_location": "L421",
       "weight": 1.0
     },
     {
@@ -89993,7 +89993,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L423",
+      "source_location": "L424",
       "weight": 1.0
     },
     {
@@ -90017,7 +90017,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L477",
+      "source_location": "L478",
       "weight": 1.0
     },
     {
@@ -92969,7 +92969,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/wallet-lane.lease.test.ts",
-      "source_location": "L181",
+      "source_location": "L188",
       "weight": 1.0
     },
     {
@@ -92981,7 +92981,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/wallet-lane.lease.test.ts",
-      "source_location": "L61",
+      "source_location": "L66",
       "weight": 1.0
     },
     {
@@ -92993,7 +92993,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/wallet-lane.lease.test.ts",
-      "source_location": "L56",
+      "source_location": "L61",
       "weight": 1.0
     },
     {
@@ -93005,7 +93005,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/wallet-lane.lease.test.ts",
-      "source_location": "L50",
+      "source_location": "L55",
       "weight": 1.0
     },
     {
@@ -97625,7 +97625,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L359",
+      "source_location": "L360",
       "weight": 1.0
     },
     {
@@ -97637,7 +97637,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L361",
+      "source_location": "L362",
       "weight": 1.0
     },
     {
@@ -97649,7 +97649,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L397",
+      "source_location": "L398",
       "weight": 1.0
     },
     {
@@ -97661,7 +97661,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L402",
+      "source_location": "L403",
       "weight": 1.0
     },
     {
@@ -97673,7 +97673,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L409",
+      "source_location": "L410",
       "weight": 1.0
     },
     {
@@ -97685,7 +97685,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L428",
+      "source_location": "L429",
       "weight": 1.0
     },
     {
@@ -97697,7 +97697,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L457",
+      "source_location": "L458",
       "weight": 1.0
     },
     {
@@ -97709,7 +97709,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L468",
+      "source_location": "L469",
       "weight": 1.0
     },
     {
@@ -97721,7 +97721,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L471",
+      "source_location": "L472",
       "weight": 1.0
     },
     {
@@ -97733,7 +97733,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L484",
+      "source_location": "L485",
       "weight": 1.0
     },
     {
@@ -97745,7 +97745,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L487",
+      "source_location": "L488",
       "weight": 1.0
     },
     {
@@ -97757,7 +97757,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L508",
+      "source_location": "L509",
       "weight": 1.0
     },
     {
@@ -97769,7 +97769,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L528",
+      "source_location": "L529",
       "weight": 1.0
     },
     {
@@ -97781,7 +97781,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L556",
+      "source_location": "L557",
       "weight": 1.0
     },
     {
@@ -97793,7 +97793,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L560",
+      "source_location": "L561",
       "weight": 1.0
     },
     {
@@ -100673,7 +100673,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/wallet-lane.lease.test.ts",
-      "source_location": "L79",
+      "source_location": "L86",
       "weight": 1.0
     },
     {
@@ -102542,7 +102542,7 @@
       "context": "import",
       "deferred": true,
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L959",
+      "source_location": "L968",
       "weight": 1.0
     },
     {
@@ -102555,7 +102555,7 @@
       "context": "import",
       "deferred": true,
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L960",
+      "source_location": "L969",
       "weight": 1.0
     },
     {
@@ -102568,7 +102568,7 @@
       "context": "import",
       "deferred": true,
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L961",
+      "source_location": "L970",
       "weight": 1.0
     },
     {
@@ -102581,7 +102581,7 @@
       "context": "import",
       "deferred": true,
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L962",
+      "source_location": "L971",
       "weight": 1.0
     },
     {
@@ -102594,7 +102594,7 @@
       "context": "import",
       "deferred": true,
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L963",
+      "source_location": "L972",
       "weight": 1.0
     },
     {
@@ -102607,7 +102607,7 @@
       "context": "import",
       "deferred": true,
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L964",
+      "source_location": "L973",
       "weight": 1.0
     },
     {
@@ -103912,7 +103912,7 @@
       "context": "import",
       "deferred": true,
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L604",
+      "source_location": "L605",
       "weight": 1.0
     },
     {
@@ -145898,7 +145898,7 @@
       "confidence_score": 1.0,
       "context": "type",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L338",
+      "source_location": "L351",
       "weight": 1.0
     },
     {
@@ -145910,7 +145910,7 @@
       "confidence_score": 1.0,
       "context": "type",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L363",
+      "source_location": "L376",
       "weight": 1.0
     },
     {
@@ -145922,7 +145922,7 @@
       "confidence_score": 1.0,
       "context": "type",
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L508",
+      "source_location": "L521",
       "weight": 1.0
     },
     {
@@ -149457,7 +149457,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L103",
+      "source_location": "L106",
       "weight": 1.0
     },
     {
@@ -149468,7 +149468,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L116",
+      "source_location": "L119",
       "weight": 1.0
     },
     {
@@ -149479,7 +149479,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L87",
+      "source_location": "L90",
       "weight": 1.0
     },
     {
@@ -149501,7 +149501,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L160",
+      "source_location": "L164",
       "weight": 1.0
     },
     {
@@ -149512,7 +149512,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L178",
+      "source_location": "L182",
       "weight": 1.0
     },
     {
@@ -149523,7 +149523,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L216",
+      "source_location": "L220",
       "weight": 1.0
     },
     {
@@ -149534,7 +149534,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L226",
+      "source_location": "L230",
       "weight": 1.0
     },
     {
@@ -149545,7 +149545,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L249",
+      "source_location": "L253",
       "weight": 1.0
     },
     {
@@ -149567,7 +149567,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L263",
+      "source_location": "L267",
       "weight": 1.0
     },
     {
@@ -149578,7 +149578,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L78",
+      "source_location": "L81",
       "weight": 1.0
     },
     {
@@ -150447,7 +150447,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L156",
+      "source_location": "L158",
       "weight": 1.0
     },
     {
@@ -150469,7 +150469,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L187",
+      "source_location": "L189",
       "weight": 1.0
     },
     {
@@ -150480,7 +150480,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L199",
+      "source_location": "L201",
       "weight": 1.0
     },
     {
@@ -150491,7 +150491,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L219",
+      "source_location": "L221",
       "weight": 1.0
     },
     {
@@ -150502,7 +150502,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L237",
+      "source_location": "L239",
       "weight": 1.0
     },
     {
@@ -150513,7 +150513,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L250",
+      "source_location": "L252",
       "weight": 1.0
     },
     {
@@ -150524,7 +150524,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L261",
+      "source_location": "L263",
       "weight": 1.0
     },
     {
@@ -150535,7 +150535,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L298",
+      "source_location": "L300",
       "weight": 1.0
     },
     {
@@ -150546,7 +150546,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L306",
+      "source_location": "L308",
       "weight": 1.0
     },
     {
@@ -150557,7 +150557,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L314",
+      "source_location": "L316",
       "weight": 1.0
     },
     {
@@ -150568,7 +150568,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L342",
+      "source_location": "L344",
       "weight": 1.0
     },
     {
@@ -150579,7 +150579,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L390",
+      "source_location": "L392",
       "weight": 1.0
     },
     {
@@ -150590,7 +150590,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L402",
+      "source_location": "L404",
       "weight": 1.0
     },
     {
@@ -150601,7 +150601,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L412",
+      "source_location": "L414",
       "weight": 1.0
     },
     {
@@ -150612,7 +150612,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L423",
+      "source_location": "L425",
       "weight": 1.0
     },
     {
@@ -150623,7 +150623,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L436",
+      "source_location": "L438",
       "weight": 1.0
     },
     {
@@ -150634,7 +150634,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L449",
+      "source_location": "L451",
       "weight": 1.0
     },
     {
@@ -150656,7 +150656,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L185",
+      "source_location": "L187",
       "weight": 1.0
     },
     {
@@ -150667,7 +150667,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L235",
+      "source_location": "L237",
       "weight": 1.0
     },
     {
@@ -150689,7 +150689,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L281",
+      "source_location": "L283",
       "weight": 1.0
     },
     {
@@ -150700,7 +150700,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L296",
+      "source_location": "L298",
       "weight": 1.0
     },
     {
@@ -150711,7 +150711,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L385",
+      "source_location": "L387",
       "weight": 1.0
     },
     {
@@ -150722,7 +150722,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L456",
+      "source_location": "L458",
       "weight": 1.0
     },
     {
@@ -150733,7 +150733,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L496",
+      "source_location": "L498",
       "weight": 1.0
     },
     {
@@ -164576,6 +164576,17 @@
     },
     {
       "source": "packages_backend_src_scripts_evaluator_recovery",
+      "target": "packages_backend_src_scripts_evaluator_recovery_invokeddirectly",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
+      "source_location": "L1002",
+      "weight": 1.0
+    },
+    {
+      "source": "packages_backend_src_scripts_evaluator_recovery",
       "target": "packages_backend_src_scripts_evaluator_recovery_recoveryresult",
       "relation": "contains",
       "_origin": "ast",
@@ -165055,18 +165066,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L957",
-      "weight": 1.0
-    },
-    {
-      "source": "packages_backend_src_scripts_evaluator_recovery",
-      "target": "packages_backend_src_scripts_evaluator_recovery_invokeddirectly",
-      "relation": "contains",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "packages/backend/src/scripts/evaluator-recovery.ts",
-      "source_location": "L993",
+      "source_location": "L966",
       "weight": 1.0
     },
     {
@@ -175043,7 +175043,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L313",
+      "source_location": "L321",
       "weight": 1.0
     },
     {
@@ -175054,7 +175054,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L338",
+      "source_location": "L351",
       "weight": 1.0
     },
     {
@@ -175065,7 +175065,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L363",
+      "source_location": "L376",
       "weight": 1.0
     },
     {
@@ -175076,7 +175076,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L406",
+      "source_location": "L419",
       "weight": 1.0
     },
     {
@@ -175087,7 +175087,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L409",
+      "source_location": "L422",
       "weight": 1.0
     },
     {
@@ -175098,7 +175098,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L417",
+      "source_location": "L430",
       "weight": 1.0
     },
     {
@@ -175109,7 +175109,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L427",
+      "source_location": "L440",
       "weight": 1.0
     },
     {
@@ -175120,7 +175120,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L441",
+      "source_location": "L454",
       "weight": 1.0
     },
     {
@@ -175131,18 +175131,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L461",
-      "weight": 1.0
-    },
-    {
-      "source": "packages_backend_src_services_transaction_wallet_lane",
-      "target": "packages_backend_src_services_transaction_wallet_lane_acquirerecoverylock",
-      "relation": "contains",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L470",
+      "source_location": "L474",
       "weight": 1.0
     },
     {
@@ -175158,13 +175147,24 @@
     },
     {
       "source": "packages_backend_src_services_transaction_wallet_lane",
+      "target": "packages_backend_src_services_transaction_wallet_lane_acquirerecoverylock",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
+      "source_location": "L483",
+      "weight": 1.0
+    },
+    {
+      "source": "packages_backend_src_services_transaction_wallet_lane",
       "target": "packages_backend_src_services_transaction_wallet_lane_redisnoncestore",
       "relation": "contains",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L508",
+      "source_location": "L521",
       "weight": 1.0
     },
     {
@@ -175175,7 +175175,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L530",
+      "source_location": "L543",
       "weight": 1.0
     },
     {
@@ -179641,7 +179641,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L369",
+      "source_location": "L370",
       "weight": 1.0
     },
     {
@@ -179652,7 +179652,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L371",
+      "source_location": "L372",
       "weight": 1.0
     },
     {
@@ -179663,7 +179663,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L475",
+      "source_location": "L476",
       "weight": 1.0
     },
     {
@@ -179674,7 +179674,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L483",
+      "source_location": "L484",
       "weight": 1.0
     },
     {
@@ -179685,7 +179685,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L522",
+      "source_location": "L523",
       "weight": 1.0
     },
     {
@@ -179696,7 +179696,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L653",
+      "source_location": "L654",
       "weight": 1.0
     },
     {
@@ -192225,7 +192225,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L428",
+      "source_location": "L441",
       "weight": 1.0
     },
     {
@@ -192236,7 +192236,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L421",
+      "source_location": "L434",
       "weight": 1.0
     },
     {
@@ -192247,7 +192247,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L423",
+      "source_location": "L436",
       "weight": 1.0
     },
     {
@@ -192258,7 +192258,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L341",
+      "source_location": "L354",
       "weight": 1.0
     },
     {
@@ -192269,7 +192269,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L350",
+      "source_location": "L363",
       "weight": 1.0
     },
     {
@@ -192280,7 +192280,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L355",
+      "source_location": "L368",
       "weight": 1.0
     },
     {
@@ -192291,7 +192291,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L364",
+      "source_location": "L377",
       "weight": 1.0
     },
     {
@@ -192302,7 +192302,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L369",
+      "source_location": "L382",
       "weight": 1.0
     },
     {
@@ -192313,7 +192313,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L388",
+      "source_location": "L401",
       "weight": 1.0
     },
     {
@@ -192324,7 +192324,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L509",
+      "source_location": "L522",
       "weight": 1.0
     },
     {
@@ -192335,7 +192335,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L514",
+      "source_location": "L527",
       "weight": 1.0
     },
     {
@@ -192346,7 +192346,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/services/transaction/wallet-lane.ts",
-      "source_location": "L521",
+      "source_location": "L534",
       "weight": 1.0
     },
     {
@@ -194106,7 +194106,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/__tests__/wallet-lane.lease.test.ts",
-      "source_location": "L38",
+      "source_location": "L43",
       "weight": 1.0
     },
     {
@@ -194117,7 +194117,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/__tests__/wallet-lane.lease.test.ts",
-      "source_location": "L48",
+      "source_location": "L53",
       "weight": 1.0
     },
     {
@@ -194128,7 +194128,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/__tests__/wallet-lane.lease.test.ts",
-      "source_location": "L55",
+      "source_location": "L60",
       "weight": 1.0
     },
     {
@@ -194139,7 +194139,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "packages/backend/src/__tests__/wallet-lane.lease.test.ts",
-      "source_location": "L59",
+      "source_location": "L64",
       "weight": 1.0
     },
     {
@@ -194711,7 +194711,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L308",
+      "source_location": "L310",
       "weight": 1.0
     },
     {
@@ -194722,7 +194722,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L367",
+      "source_location": "L369",
       "weight": 1.0
     },
     {
@@ -197349,7 +197349,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L472",
+      "source_location": "L473",
       "weight": 1.0
     },
     {
@@ -197985,7 +197985,7 @@
       "confidence_score": 0.85,
       "context": "collection",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L444",
+      "source_location": "L445",
       "weight": 1.0
     },
     {
@@ -197997,7 +197997,7 @@
       "confidence_score": 0.85,
       "context": "collection",
       "source_file": "packages/backend/src/__tests__/evaluator-concurrency.anvil.ts",
-      "source_location": "L383",
+      "source_location": "L384",
       "weight": 1.0
     },
     {
@@ -199557,7 +199557,7 @@
       "confidence_score": 0.95,
       "context": "claimRefund",
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L76",
+      "source_location": "L79",
       "weight": 1.0
     },
     {
@@ -199569,7 +199569,7 @@
       "confidence_score": 0.95,
       "context": "claimRefund",
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L245",
+      "source_location": "L249",
       "weight": 1.0
     },
     {
@@ -199581,7 +199581,7 @@
       "confidence_score": 0.95,
       "context": "claimRefund",
       "source_file": "docs/operations/evaluator-recovery.md",
-      "source_location": "L256",
+      "source_location": "L260",
       "weight": 1.0
     },
     {
@@ -199617,7 +199617,7 @@
       "confidence_score": 0.95,
       "context": "claimRefund",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L377",
+      "source_location": "L379",
       "weight": 1.0
     },
     {
@@ -199629,7 +199629,7 @@
       "confidence_score": 0.95,
       "context": "claimRefund",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L432",
+      "source_location": "L434",
       "weight": 1.0
     },
     {
@@ -199641,7 +199641,7 @@
       "confidence_score": 0.95,
       "context": "claimRefund",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L521",
+      "source_location": "L523",
       "weight": 1.0
     },
     {
@@ -200613,7 +200613,7 @@
       "confidence_score": 0.95,
       "context": "pendingPlatformFees",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L241",
+      "source_location": "L243",
       "weight": 1.0
     },
     {
@@ -200625,7 +200625,7 @@
       "confidence_score": 0.95,
       "context": "pendingPlatformFees",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L442",
+      "source_location": "L444",
       "weight": 1.0
     },
     {
@@ -200721,7 +200721,7 @@
       "confidence_score": 0.95,
       "context": "preflight",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L464",
+      "source_location": "L466",
       "weight": 1.0
     },
     {
@@ -201189,7 +201189,7 @@
       "confidence_score": 0.95,
       "context": "reject",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L209",
+      "source_location": "L211",
       "weight": 1.0
     },
     {
@@ -201201,7 +201201,7 @@
       "confidence_score": 0.95,
       "context": "reject",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L432",
+      "source_location": "L434",
       "weight": 1.0
     },
     {
@@ -201921,7 +201921,7 @@
       "confidence_score": 0.95,
       "context": "verify",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L293",
+      "source_location": "L295",
       "weight": 1.0
     },
     {
@@ -201933,7 +201933,7 @@
       "confidence_score": 0.95,
       "context": "verify",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L451",
+      "source_location": "L453",
       "weight": 1.0
     },
     {
@@ -201945,7 +201945,7 @@
       "confidence_score": 0.95,
       "context": "verify",
       "source_file": "docs/project/c5-escrow-validation.md",
-      "source_location": "L470",
+      "source_location": "L472",
       "weight": 1.0
     },
     {
@@ -202046,5 +202046,5 @@
     }
   ],
   "hyperedges": [],
-  "built_at_commit": "e9d03cacdbdbc66aa4274adb29327c6f05782b9e"
+  "built_at_commit": "b230100448e9623f566b4d02ddf2204861e2f19d"
 }
