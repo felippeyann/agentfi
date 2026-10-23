@@ -1007,8 +1007,13 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
       (s) => s === 'none' || s === 'completed' || s === 'failed',
       60_000,
     );
-    const unpaidInW = W!.lines.filter((l) => /alert.*"provider-unpaid"/.test(l)).length;
-    expect(unpaidInW + p0Alerts.filter((a) => a.kind === 'provider-unpaid' && a.jobId === x.jobId).length).toBe(1);
+    // W's alert reaches this process through its stdout pipe, which can lag the BullMQ state read above (one run
+    // saw 0 with the line in W's log file): wait for the alert, then require exactly one.
+    const unpaid = () =>
+      W!.lines.filter((l) => /alert.*"provider-unpaid"/.test(l)).length +
+      p0Alerts.filter((a) => a.kind === 'provider-unpaid' && a.jobId === x.jobId).length;
+    await until('provider-unpaid seen (W stdout or P0)', async () => unpaid(), (n) => n >= 1, 15_000);
+    expect(unpaid()).toBe(1);
   }, 300_000);
 
   it('scenario 5: after all the races — every evaluator tx on chain had its ledger row before the broadcast; one winner per nonce, the rest DEAD; nothing live; no decision changed; no proxy request abandoned', async () => {
