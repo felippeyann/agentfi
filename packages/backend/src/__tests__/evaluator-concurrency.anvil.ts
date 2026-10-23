@@ -187,7 +187,11 @@ let p0: RpcBarrierProxy;
 let W: Child | null = null;
 const children: Child[] = [];
 let addSettlementJob: (data: { jobId: string; action: 'settle' }) => Promise<void>;
-let settlementQueue: { getJob(id: string): Promise<{ promote(): Promise<void>; getState(): Promise<string> } | undefined>; close(): Promise<void> };
+let settlementQueue: {
+  getJob(id: string): Promise<{ promote(): Promise<void>; getState(): Promise<string> } | undefined>;
+  getJobCounts(...types: string[]): Promise<Record<string, number>>;
+  close(): Promise<void>;
+};
 
 const lower = (s: string | null | undefined) => (s ?? '').toLowerCase();
 const same = (a: string | null | undefined, b: string | null | undefined) => lower(a) === lower(b);
@@ -878,7 +882,7 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
   // `sendRaw`'s `assertHeld`. When the lease was lost in between, the send was refused (exit 3, nothing broadcast)
   // but the line stayed. Now the line is written only after `sendRaw` returned ("sent" for an accepted / already
   // known answer, "attempted" otherwise); a LeaseLostError writes nothing. Same steps as scenario 3a.
-  it('scenario 3c — D-R9-1: after a lease lost before the broadcast (exit 3, nothing sent), Job.escrowError must not say "sent"', async () => {
+  it('scenario 3c — D-R9-1: after a lease lost before the broadcast (exit 3, nothing sent), Job.escrowError carries no "evaluator recovery:" line', async () => {
     const x = await delivered();
     await automine(false);
     const head = await stuckHead(x);
@@ -895,7 +899,8 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
       expect(sendsBy('S', typedAt)).toHaveLength(0);
       const job = await db.job.findUniqueOrThrow({ where: { id: x.jobId } });
       timeline.push('test', 'd-r9-1', { escrowError: job.escrowError });
-      expect(job.escrowError ?? '').not.toMatch(/sent at nonce/);
+      // Review P3-1: no "evaluator recovery:" line at all — neither "sent" nor "attempted" — after a lost lease.
+      expect(job.escrowError ?? '').not.toMatch(/evaluator recovery:/);
     } finally {
       sHold.release();
       await redis.del(LANE_KEY);
@@ -1032,13 +1037,26 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
       (s) => s === 'none' || s === 'completed' || s === 'failed',
       60_000,
     );
-    // W's alert reaches this process through its stdout pipe, which can lag the BullMQ state read above (one run
-    // saw 0 with the line in W's log file): wait for the alert, then require exactly one.
-    const unpaid = () =>
-      W!.lines.filter((l) => /alert.*"provider-unpaid"/.test(l)).length +
-      p0Alerts.filter((a) => a.kind === 'provider-unpaid' && a.jobId === x.jobId).length;
-    await until('provider-unpaid seen (W stdout or P0)', async () => unpaid(), (n) => n >= 1, 15_000);
-    expect(unpaid()).toBe(1);
+    // Count only once W is idle AND its stdout is drained (review P3-2): a duplicate alert from W arriving after a
+    // first sighting must still fail the test. W prints every alert as `A1C-ALERT <kind> <jobId>` on the same
+    // stream as its answer to `flush`; stdout keeps the write order, so after `A1C-FLUSH <n>` nothing W raised
+    // before is still in flight.
+    await until(
+      'W idle (no settlement waiting, active or delayed)',
+      async () => {
+        const c = await settlementQueue.getJobCounts('waiting', 'active', 'delayed', 'prioritized');
+        return Object.values(c).reduce((s, n) => s + n, 0);
+      },
+      (n) => n === 0,
+      60_000,
+    );
+    const flushFrom = W!.lines.length;
+    W!.write('flush\n');
+    await W!.waitForLine(/^A1C-FLUSH \d+$/, 15_000, flushFrom);
+    const unpaidInW = W!.lines.filter((l) => l.trim() === `A1C-ALERT provider-unpaid ${x.jobId}`).length;
+    const unpaidInP0 = p0Alerts.filter((a) => a.kind === 'provider-unpaid' && a.jobId === x.jobId).length;
+    timeline.push('test', '4b-provider-unpaid', { unpaidInW, unpaidInP0 });
+    expect(unpaidInW + unpaidInP0).toBe(1);
   }, 300_000);
 
   it('scenario 5: after all the races — every evaluator tx on chain had its ledger row before the broadcast; one winner per nonce, the rest DEAD; nothing live; no decision changed; no proxy request abandoned', async () => {

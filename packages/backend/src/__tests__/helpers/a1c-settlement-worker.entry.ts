@@ -11,6 +11,13 @@
  * (`addSettlementJob`, the API's own path).
  *
  * Prints `A1C-WORKER-READY` once the worker is connected; exits on SIGTERM / stdin close.
+ *
+ * Test-only instrumentation (the production deps are otherwise untouched):
+ *  - every operator alert the worker raises is also printed as `A1C-ALERT <kind> <jobId>` with console.log,
+ *    on the same stdout stream as the `A1C-WORKER-*` lines (the production logger is pino-pretty in a worker
+ *    thread, whose lines can arrive late and out of order with these);
+ *  - a `flush` line on stdin answers `A1C-FLUSH <n>`. Stdout keeps the write order, so once the test sees
+ *    `A1C-FLUSH <n>`, every `A1C-ALERT` written before it has arrived.
  */
 import { runEscrowBootCheck } from '../../config/escrow-boot.runtime.js';
 import { startEscrowSettlementWorker } from '../../queues/escrow-settlement.queue.js';
@@ -22,7 +29,16 @@ const chainId = Number(process.env['A1C_CHAIN_ID'] ?? '84532');
 await runEscrowBootCheck('worker');
 const gate = escrowConfigGate(chainId);
 console.log(`A1C-WORKER-GATE ${JSON.stringify(gate)}`);
-const worker = startEscrowSettlementWorker(erc8183Deps);
+const worker = startEscrowSettlementWorker(() => {
+  const deps = erc8183Deps();
+  return {
+    ...deps,
+    alert: async (alert) => {
+      console.log(`A1C-ALERT ${alert.kind} ${alert.jobId ?? '-'}`);
+      await deps.alert?.(alert);
+    },
+  };
+});
 worker.on('completed', (job, result) => console.log(`A1C-WORKER-COMPLETED ${job.data.action} ${job.data.jobId} ${JSON.stringify(result)}`));
 worker.on('failed', (job, err) => console.log(`A1C-WORKER-FAILED ${job?.data.action} ${job?.data.jobId} attempt ${job?.attemptsMade} ${err?.name}: ${err?.message}`));
 await worker.waitUntilReady();
@@ -39,4 +55,13 @@ async function stop(): Promise<void> {
 process.on('SIGTERM', () => void stop());
 process.on('SIGINT', () => void stop());
 process.stdin.on('end', () => void stop());
+let flushes = 0;
+let pendingInput = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk: string) => {
+  pendingInput += chunk;
+  const lines = pendingInput.split(/\r?\n/);
+  pendingInput = lines.pop() ?? '';
+  for (const line of lines) if (line.trim() === 'flush') console.log(`A1C-FLUSH ${++flushes}`);
+});
 process.stdin.resume();
