@@ -594,6 +594,9 @@ afterAll(async () => {
   await settlementQueue?.close().catch(() => undefined);
   for (const p of [pW, pS, p0]) await p?.stop().catch(() => undefined);
   if (db) {
+    // Leave the shared database clean: other Anvil suites deploy the escrow at the SAME address (same deployer
+    // nonce), and a leftover Job (escrowContract, onChainJobId) collides with theirs.
+    await wipe().catch(() => undefined);
     await db.$disconnect();
   }
   redis?.disconnect();
