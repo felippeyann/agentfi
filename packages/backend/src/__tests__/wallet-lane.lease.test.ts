@@ -246,6 +246,27 @@ describe('RedisLaneLock leases — Lua semantics on a fake Redis', () => {
     redis.assertHeldReplyDelayMs = 600; // evaluated with 1 000 ms left (≥ 500), answered with ~400 ms left
     expect(await lostReason(lease.assertHeld(500))).toBe('margin');
   });
+
+  // Review P3-8: the round trip must also come off the PTTL, not only off the local deadline. Here the key's TTL
+  // was shortened (as by a PEXPIRE) far below the holder's own deadline, so only the PTTL can refuse: recomputing
+  // the local remaining time alone (9 400 / 8 800 ms left) would accept both answers.
+  it('#194-4363039159 / P3-8: PTTL shortened below the local deadline + a late answer → margin (the round trip comes off the PTTL)', async () => {
+    const redis = new FakeRedis();
+    const lock = new RedisLaneLock(redis as never, { ttlMs: 10_000 });
+    const lease = await lock.acquire('k');
+    redis.store.get('agentfi:lane:k')!.expiresAt = Date.now() + 1_000; // PEXPIRE 1000
+    redis.assertHeldReplyDelayMs = 600; // PTTL 1 000 at evaluation (≥ 500), ~400 ms left at the answer
+    expect(await lostReason(lease.assertHeld(500))).toBe('margin');
+  });
+
+  it('#194-4363039159 / P3-8: PTTL shortened below the local deadline + an answer later than the PTTL → expired', async () => {
+    const redis = new FakeRedis();
+    const lock = new RedisLaneLock(redis as never, { ttlMs: 10_000 });
+    const lease = await lock.acquire('k');
+    redis.store.get('agentfi:lane:k')!.expiresAt = Date.now() + 1_000; // PEXPIRE 1000
+    redis.assertHeldReplyDelayMs = 1_200; // held with PTTL 1 000 at evaluation; gone 200 ms before the answer
+    expect(await lostReason(lease.assertHeld(0))).toBe('expired');
+  });
 });
 
 describe('recovery lock — owner + PID, compare-and-delete (fake Redis)', () => {
