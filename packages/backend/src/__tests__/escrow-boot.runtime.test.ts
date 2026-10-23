@@ -300,6 +300,27 @@ describe('C3f item 4 — every check publishes this process\'s verification stat
     expect(Date.parse(report.publishedAt)).not.toBeNaN();
   });
 
+  // #193 finding 2 (reproduction): with TRANSACTION_WORKER_ENABLED=true, index.ts runs the
+  // boot check as 'api' and hosts the escrow settlement worker in the same process, yet only
+  // `agentfi:escrow-verification:api` is published, so GET /admin/escrow/verification
+  // (which reads `:worker`) reports `worker.state = "missing"` forever.
+  it.fails('#193 finding 2: the single process (index.ts, TRANSACTION_WORKER_ENABLED=true) hosts the settlement worker, so its state must also be published as `worker`', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../index.ts', import.meta.url), 'utf8');
+    // index.ts: the boot check is always run as 'api' …
+    expect(src).toMatch(/await runEscrowBootCheck\('api'\);/);
+    // … and the same process starts the escrow settlement worker when TRANSACTION_WORKER_ENABLED=true.
+    expect(src).toMatch(/if \(env\.TRANSACTION_WORKER_ENABLED === 'true'\) \{[\s\S]{0,80}escrowSettlementWorker = startEscrowSettlementWorker/);
+    // What index.ts does at boot, then after starting the settlement worker:
+    await runEscrowBootCheck('api');
+    await flush();
+    const { peerVerificationView } = await import('../config/escrow-verification-report.js');
+    const api = peerVerificationView(redisStore.get('agentfi:escrow-verification:api') ?? null, new Date());
+    const worker = peerVerificationView(redisStore.get('agentfi:escrow-verification:worker') ?? null, new Date());
+    expect(api.state).toBe('reported');
+    expect(worker.state).toBe('reported'); // fails: the endpoint's `worker` field reads only this key
+  });
+
   it('an unreadable chain is published as unverified, with its reason', async () => {
     state.readFails = true;
     await runEscrowBootCheck('worker');
