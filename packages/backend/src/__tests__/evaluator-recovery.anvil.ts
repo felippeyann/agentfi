@@ -588,9 +588,10 @@ describeA1('A1 recovery script on Anvil — real contracts, real signer', () => 
   // ── front B (A1 closing round): the remaining script rows on the real node ──────────────────────
   // Each starts from an empty ledger / job table (`wipe`): the CLI's posture, delivered-job list and Job.evaluator
   // check read EVERY live job of the chain, and earlier tests leave delivered rows behind.
-  // The operator's CLI runs with its OWN signer instance (its own process in production): its bounded receipt wait
-  // leaves a viem watcher behind until the hash mines (or 180 s), and a watcher left on the worker's client would
-  // make the worker's next wait the second listener of that client — finding F-B1 (see `twoQueued`).
+  // The operator's CLI runs with its OWN signer instance, as in production (its own process). Historical reason
+  // (finding F-B1, FIXED in 8ce8f31): a wait left behind on the worker's viem client made the worker's next wait
+  // that client's second listener, which could not detect a replacement. Since 8ce8f31 every receipt wait has its
+  // own client, so a shared signer would also work; the separate instance stays because it mirrors production.
   const operatorSigner = () => createEvaluatorSigner(CHAIN_ID, ANVIL_KEYS[4]);
   const opDeps = (h: Harness, o: Parameters<typeof cliDeps>[1] = {}) => cliDeps(h, { signer: operatorSigner(), ...o });
 
@@ -785,12 +786,13 @@ describeA1('A1 recovery script on Anvil — real contracts, real signer', () => 
   /**
    * Two delivered jobs, A's complete at N (the stuck head) and B's queued behind it at N+1 (automine off).
    *
-   * B is settled through a SECOND signer instance (its own viem client), i.e. a second worker process. Finding
-   * F-B1 (2026-10-23, reproduced on this file): viem 2.57.3 shares one block-number observer per client, and a
-   * second `waitForTransactionReceipt` on the same client misses `emitOnBegin`, so it never fetched its pending
-   * transaction; when that transaction is then REPLACED, viem cannot detect the replacement and the worker's
-   * wait hangs until EVALUATOR_RECEIPT_TIMEOUT_MS (180 s) — liveness only (the job stays SETTLING for the retry;
-   * no `evaluator-replaced` alert). With one signer, row 35's B wait never resolved within the test.
+   * B is settled through a SECOND signer instance, i.e. a second worker process. This was the workaround for
+   * finding F-B1 (2026-10-23, reproduced on this file): viem 2.57.3 shares one block-number observer per client,
+   * so a second concurrent `waitForTransactionReceipt` on the same client could not detect its replacement and
+   * hung until EVALUATOR_RECEIPT_TIMEOUT_MS (180 s). F-B1 is FIXED in 8ce8f31 (one viem client per receipt wait);
+   * the realistic path — one worker, one signer, two jobs, the second replaced — is covered by the F-B1 test in
+   * escrow-settlement-replacement.anvil.ts. Rows 18, 35 and 45 keep the second signer here (not re-scoped in
+   * this round).
    */
   async function twoQueued(h: Harness) {
     const a = await submittedOnChain(48n * 3600n);
