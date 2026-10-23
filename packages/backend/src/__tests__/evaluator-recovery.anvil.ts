@@ -1,10 +1,12 @@
 /**
  * A1 (C3g) on a REAL node with the REAL contracts (`npm run test:anvil`): `AgentJobEscrow` +
- * `ReputationHook` (+ MockERC20, MockIdentityRegistry, MockReputationRegistry from the Foundry
- * artifacts), automine OFF while a scenario needs an evaluator transaction to stay pending.
+ * `ReputationHook` (+ BlacklistERC20 — MockERC20 with an empty blacklist —, MockIdentityRegistry,
+ * MockReputationRegistry from the Foundry artifacts), automine OFF while a scenario needs an evaluator
+ * transaction to stay pending.
  *
- * Rows (matrix: agentfi-notas/2026-10-22-a1-matriz.md): AV side of 1–6, 11, 12a, 12b, 14, 22, 25–28, 34;
- * the script rows (8, 9, 15/40, 16, 18, 35, 37, 42, 45) are `describe.skip` TODO(A1-CLI).
+ * Rows (matrix: agentfi-notas/2026-10-22-a1-matriz.md): AV side of 1–6, 11, 12a, 12b, 14, 22, 25–28, 34
+ * (+ D-C, `it.fails`); script rows through the real CLI: 1, 2, 3, 4, 8, 15/40, 16, 18, 35, 37, 42, 45.
+ * Row 9 (script + worker at once) is a todo here: a separate multi-process test covers it.
  *
  * Declared Anvil gaps (R2-§11):
  *  - Anvil DROPS an underpriced transaction when it mines a block; "stuck while blocks are produced"
@@ -17,10 +19,12 @@
  *
  * Blocks:
  *  1. deployment smoke (Postgres up; runs on the pre-A1 code): the real hook rates a worker `complete`.
+ *  3. script rows: the recovery CLI (src/scripts/evaluator-recovery.ts) on the real node (runs second).
  *  2. A1 worker / reconciliation rows (gated like the DB suite: EvaluatorTransaction table + `reconcileEvaluatorCandidates`).
- *  3. script rows: the recovery CLI (src/scripts/evaluator-recovery.ts) on the real node.
+ *  last: row 14 (reorg), alone in its describe.
+ * Outside CI, blocks 2/3 skip with a warning when the A1 table is missing; on CI that throws.
  *
- * Postgres: DATABASE_URL (migrated; `agentfi_a1_f3_anvil`). Anvil: `anvilTestPort(10)` (default 8755; 8 and 8+97 are F2s), chain id 84532.
+ * Postgres: DATABASE_URL (migrated). Anvil: `anvilTestPort(10)` (ANVIL_TEST_PORT_BASE + 10), chain id 84532.
  * Keys: Anvil's public test keys only.
  */
 import { vi } from 'vitest';
@@ -52,13 +56,14 @@ vi.mock('../api/middleware/logger.js', () => {
 
 import { PrismaClient } from '@prisma/client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { encodeAbiParameters, encodeFunctionData, getAddress, keccak256, parseEventLogs, toBytes, type Abi, type Address, type Hex } from 'viem';
+import { createPublicClient, encodeAbiParameters, encodeFunctionData, getAddress, http, keccak256, parseEventLogs, toBytes, type Abi, type Address, type Hex } from 'viem';
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
 import { ANVIL_KEYS, anvilAccount, anvilTestPort, readArtifact, startLocalChain, type LocalChain } from './helpers/anvil-contracts.js';
 import { candidateInput, FakeLeaseLock, planCapsFixture } from './helpers/fake-evaluator-chain.js';
 import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
 import { createEvaluatorSigner, describeSignedEvaluatorTx, type EvaluatorSigner } from '../services/escrow/evaluator-signer.js';
 import * as ledger from '../services/escrow/evaluator-ledger.js';
+import type { RecoverySigner } from '../scripts/evaluator-recovery.js';
 import { readNodeViews } from '../services/escrow/evaluator-rpc.js';
 import * as svcModule from '../services/job/escrow-erc8183.service.js';
 import { CHAIN_JOB_STATUS, SETTLEMENT_REASONS, processSettlementJob, type Erc8183Deps, type EscrowAlert } from '../services/job/escrow-erc8183.service.js';
@@ -86,6 +91,8 @@ const AVAIL = await probe();
 if (!AVAIL.db && process.env['CI']) throw new Error('evaluator-recovery.anvil.ts needs a migrated Postgres at DATABASE_URL on CI');
 const A1_READY = AVAIL.db && AVAIL.table && typeof (svcModule as Record<string, unknown>)['reconcileEvaluatorCandidates'] === 'function';
 if (!A1_READY) console.warn(`[evaluator-recovery.anvil] A1 rows skipped — db=${AVAIL.db} table=${AVAIL.table}`);
+// CI migrates the database and runs this file (`npm run test:anvil`): a missing A1 table there must fail, not skip.
+if (!A1_READY && process.env['CI']) throw new Error('evaluator-recovery.anvil.ts: the A1 rows cannot run on CI (EvaluatorTransaction table or reconcileEvaluatorCandidates missing)');
 const describeDb = AVAIL.db ? describe : describe.skip;
 const describeA1 = A1_READY ? describe : describe.skip;
 
@@ -263,6 +270,11 @@ function harness(): Harness {
   return { deps, alerts, finalized, released, lanes };
 }
 
+/** A read client of this Anvil WITHOUT viem's per-client cache (`cacheTime: 0`): every `getBlockNumber` asks the node (see D-C). */
+function freshHeadClient() {
+  return createPublicClient({ chain: chain.publicClient.chain, transport: http(chain.rpcUrl), cacheTime: 0 });
+}
+
 async function chainStatus(onChainJobId: bigint): Promise<number> {
   const job = (await chain.publicClient.readContract({ address: escrow, abi: AGENT_JOB_ESCROW_ABI, functionName: 'getJob', args: [onChainJobId] })) as { status: number };
   return Number(job.status);
@@ -285,6 +297,10 @@ interface Row {
   txHash: string;
   proofLevel: string | null;
   calldataHash: string;
+  origin?: string;
+  action?: string;
+  operator?: string | null;
+  note?: string | null;
 }
 async function rowsOf(where: Record<string, unknown>): Promise<Row[]> {
   return (db as unknown as Record<string, { findMany(a: unknown): Promise<Row[]> }>)['evaluatorTransaction']!.findMany({ where, orderBy: { createdAt: 'asc' } });
@@ -303,6 +319,35 @@ async function settleUntilPending(h: Harness, jobId: string) {
   const tx = await chain.publicClient.getTransaction({ hash: row.settleTxHash as Hex });
   await sleep(1_500);
   return { tx, outcome };
+}
+
+/**
+ * Like `settleUntilPending`, for a job queued BEHIND other pending evaluator transactions (automine off): returns once
+ * the key's `pending` nonce has grown past its value before the call, i.e. this job's `complete` is in the pool.
+ */
+async function settleUntilQueued(h: Harness, jobId: string, attemptsMade = 0) {
+  const pendingBefore = await evaluatorNonce('pending');
+  const outcome = settle(h, jobId, attemptsMade);
+  for (let i = 0; i < 200; i++) {
+    if ((await evaluatorNonce('pending')) > pendingBefore) break;
+    await sleep(50);
+  }
+  const row = await db.job.findUniqueOrThrow({ where: { id: jobId } });
+  const tx = await chain.publicClient.getTransaction({ hash: row.settleTxHash as Hex });
+  await sleep(1_500);
+  return { tx, outcome };
+}
+
+/**
+ * BlacklistERC20 storage: name(0) symbol(1) decimals(2) totalSupply(3) balanceOf(4) allowance(5) blacklisted(6).
+ * Written with `anvil_setStorageAt`, so no block is mined (the evaluator's pending transaction stays pending);
+ * read back through the contract's getter so a wrong slot fails loudly.
+ */
+async function setBlacklisted(account: Address, value: boolean): Promise<void> {
+  const slot = keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], [account, 6n]));
+  await chain.rpc('anvil_setStorageAt', [usdc, slot, `0x${(value ? 1n : 0n).toString(16).padStart(64, '0')}`]);
+  const now = (await chain.publicClient.readContract({ address: usdc, abi: erc20Abi, functionName: 'blacklisted', args: [account] })) as boolean;
+  if (now !== value) throw new Error(`setBlacklisted: storage slot mismatch (blacklisted(${account}) = ${now})`);
 }
 
 const bump = (tx: { maxFeePerGas?: bigint | null | undefined; maxPriorityFeePerGas?: bigint | null | undefined }) => ({
@@ -354,7 +399,9 @@ beforeAll(async () => {
   chain = await startLocalChain({ port: anvilTestPort(10), chainId: CHAIN_ID });
   process.env[`RPC_URL_${CHAIN_ID}`] = chain.rpcUrl;
   db = new PrismaClient();
-  const erc20 = readArtifact('MockERC20', 'MockERC20.sol');
+  // BlacklistERC20 = MockERC20 + an (initially empty) blacklist: identical behaviour for every row; row 3 (script)
+  // blacklists the provider in storage (no block) so the pending `complete` stops simulating while the job stays Submitted.
+  const erc20 = readArtifact('BlacklistERC20', 'MockERC20.sol');
   erc20Abi = erc20.abi;
   usdc = await chain.deploy(deployer, erc20);
   escrow = await chain.deploy(deployer, readArtifact('AgentJobEscrow'), [usdc, deployer.address, deployer.address, 0n, 30n]);
@@ -537,10 +584,387 @@ describeA1('A1 recovery script on Anvil — real contracts, real signer', () => 
     }
   });
 
-  it.todo('row 2 (script): the original mines between the confirmation and the send → "nonce too low" → DEAD with proof (covered at the ledger / reconciliation layer: row 2 AV)');
-  it.todo('row 3 / 4 / 8 / 18 / 35 (script) on Anvil — covered on Postgres with the fake multi-node chain (evaluator-a1.db.test.ts block 3)');
+  // ── front B (A1 closing round): the remaining script rows on the real node ──────────────────────
+  // Each starts from an empty ledger / job table (`wipe`): the CLI's posture, delivered-job list and Job.evaluator
+  // check read EVERY live job of the chain, and earlier tests leave delivered rows behind.
+  // The operator's CLI runs with its OWN signer instance (its own process in production): its bounded receipt wait
+  // leaves a viem watcher behind until the hash mines (or 180 s), and a watcher left on the worker's client would
+  // make the worker's next wait the second listener of that client — finding F-B1 (see `twoQueued`).
+  const operatorSigner = () => createEvaluatorSigner(CHAIN_ID, ANVIL_KEYS[4]);
+  const opDeps = (h: Harness, o: Parameters<typeof cliDeps>[1] = {}) => cliDeps(h, { signer: operatorSigner(), ...o });
+
+  it('row 2 (script, AV): the original mines between the confirmation and the send — the confirmed speed-up gets "nonce too low"; DEAD with the original\'s receipt as proof; the DB follows the original; paid once', async () => {
+    await wipe();
+    const onChain = await submittedOnChain(48n * 3600n);
+    const jobId = await deliveredRow(onChain);
+    const h = harness();
+    await wireA1(h.deps, h.lanes);
+    await automine(false);
+    const before = await usdcOf(provider.address);
+    const { tx, outcome } = await settleUntilPending(h, jobId);
+    // The race: the SCRIPT row is recorded (inside the lane), then — right before its bytes reach the node — a block
+    // mines the worker's original. The send answers "nonce too low".
+    let raced = false;
+    const operator = operatorSigner();
+    const real = operator as unknown as RecoverySigner;
+    const racing = {
+      ...operator,
+      sendRaw: async (raw: Hex, o: Parameters<RecoverySigner['sendRaw']>[1]) => {
+        raced = true;
+        await mine();
+        return real.sendRaw(raw, o);
+      },
+    } as unknown as EvaluatorSigner;
+    const r = await cli.runEvaluatorRecovery(cliExec('speed-up', tx.nonce), opDeps(h, { signer: racing }));
+    expect(r.exitCode, r.output).toBe(0);
+    expect(raced).toBe(true);
+    expect(r.output).toMatch(new RegExp(`nonce ${tx.nonce}: speed-up 0x[0-9a-f]{64} sent → nonce-too-low`));
+    await outcome;
+    await automine(true);
+    await reconcile(h);
+    await settle(h, jobId, 1);
+    await reconcile(h);
+    const rows = await rowsOf({ jobId });
+    const speed = rows.filter((x) => x.kind === 'SPEED_UP');
+    expect(speed).toHaveLength(1);
+    expect(speed[0]).toMatchObject({ origin: 'SCRIPT', status: 'DEAD', proofLevel: 'proof' });
+    expect(rows.find((x) => same(x.txHash, tx.hash))).toMatchObject({ status: 'MINED_SUCCESS', proofLevel: 'proof' });
+    expect((await chain.publicClient.getTransactionReceipt({ hash: tx.hash })).status).toBe('success');
+    await expect(chain.publicClient.getTransactionReceipt({ hash: speed[0]!.txHash as Hex })).rejects.toThrow();
+    const done = await db.job.findUniqueOrThrow({ where: { id: jobId } });
+    expect(same(done.settleTxHash, tx.hash)).toBe(true);
+    expect(done).toMatchObject({ onChainStatus: 'COMPLETED', platformFeeAmount: FEE.toString() });
+    expect((await usdcOf(provider.address)) - before).toBe(BUDGET - FEE);
+  });
+
+  it('row 3 (script, AV): cancel refused while a speed-up is possible; once the complete reverts (payee blacklisted by the token, job still Submitted) the cancel is admitted with "CANCEL … DOES NOT SETTLE"; it mines; the job stays Submitted; the worker re-signs the SAME decision at a new nonce; one payment', async () => {
+    await wipe();
+    const onChain = await submittedOnChain(48n * 3600n);
+    const jobId = await deliveredRow(onChain);
+    const h = harness();
+    await wireA1(h.deps, h.lanes);
+    await automine(false);
+    const before = await usdcOf(provider.address);
+    const { tx, outcome } = await settleUntilPending(h, jobId);
+    const refused = await cli.runEvaluatorRecovery(cliExec('cancel', tx.nonce), opDeps(h));
+    expect(refused.exitCode).toBe(2);
+    expect(refused.output).toMatch(new RegExp(`REFUSED: cancel refused at nonce ${tx.nonce}: a speed-up is possible \\(R2-P2-1, no override\\)\\. CANCEL does not settle the job`));
+    expect((await rowsOf({ jobId })).filter((x) => x.origin === 'SCRIPT')).toHaveLength(0);
+    await setBlacklisted(provider.address, true);
+    let cancelHash: string;
+    try {
+      const prompts: string[] = [];
+      const r = await cli.runEvaluatorRecovery(cliExec('cancel', tx.nonce), opDeps(h, { prompts }));
+      expect(r.exitCode, r.output).toBe(0);
+      expect(r.output).toMatch(/simulation of our calldata: REVERTS/);
+      expect(prompts[0]).toContain(`CANCEL ${CHAIN_ID} NONCE ${tx.nonce} DOES NOT SETTLE`);
+      const cancel = (await rowsOf({ jobId })).find((x) => x.kind === 'CANCEL')!;
+      expect(cancel).toMatchObject({ origin: 'SCRIPT', action: 'CANCEL_NOOP', operator: 'ops@anvil' });
+      cancelHash = cancel.txHash;
+      await mine();
+      const { error } = await outcome; // the replacement's receipt is never the job's outcome (C3h D2)
+      expect(error?.name).toBe('SettlementReplacedError');
+      expect(await chainStatus(onChain.onChainJobId)).toBe(CHAIN_JOB_STATUS.Submitted);
+      await reconcile(h);
+      const rows = await rowsOf({ jobId });
+      expect(rows.find((x) => same(x.txHash, tx.hash))).toMatchObject({ status: 'DEAD' });
+      expect(rows.find((x) => same(x.txHash, cancelHash))).toMatchObject({ status: 'MINED_SUCCESS', kind: 'CANCEL' });
+      // the decision is kept: nothing finalized, nothing paid, the job still waits for its settlement
+      // (the DB mirror may still say SETTLING — the worker's in-flight marker — but never a terminal status)
+      const waiting = await db.job.findUniqueOrThrow({ where: { id: jobId } });
+      expect(waiting).toMatchObject({ status: 'PAYMENT_PENDING', resolution: null, platformFeeAmount: null });
+      expect(['SUBMITTED', 'SETTLING']).toContain(waiting.onChainStatus);
+      expect(h.finalized).toEqual([]);
+      expect(await usdcOf(provider.address)).toBe(before);
+    } finally {
+      await setBlacklisted(provider.address, false);
+      await automine(true);
+    }
+    await settle(h, jobId, 1);
+    await reconcile(h);
+    const rows = await rowsOf({ jobId });
+    const resigned = rows.filter((x) => x.nonce === tx.nonce + 1);
+    expect(resigned).toHaveLength(1);
+    expect(resigned[0]).toMatchObject({ kind: 'ORIGINAL', action: 'COMPLETE', status: 'MINED_SUCCESS' });
+    expect(resigned[0]!.calldataHash).toBe(rows.find((x) => same(x.txHash, tx.hash))!.calldataHash);
+    expect(await db.job.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ onChainStatus: 'COMPLETED', platformFeeAmount: FEE.toString() });
+    expect(await chainStatus(onChain.onChainJobId)).toBe(CHAIN_JOB_STATUS.Completed);
+    expect((await usdcOf(provider.address)) - before).toBe(BUDGET - FEE);
+    expect(h.finalized).toEqual([{ jobId, outcome: 'CONFIRMED' }]);
+  });
+
+  it('row 4 (script, AV): a transaction of the same key outside the backend consumes N (EXTERNAL recorded) — every --execute is refused until --acknowledge-foreign <hash>; acknowledged, the speed-up of the re-signed head mines; paid once', async () => {
+    await wipe();
+    const onChain = await submittedOnChain(48n * 3600n);
+    const jobId = await deliveredRow(onChain);
+    const h = harness();
+    await wireA1(h.deps, h.lanes);
+    await automine(false);
+    const before = await usdcOf(provider.address);
+    const first = await settleUntilPending(h, jobId);
+    const foreign = await chain.wallet(evaluator).sendTransaction({ account: evaluator, chain: null, to: evaluator.address, value: 0n, gas: 21_000n, nonce: first.tx.nonce, ...bump(first.tx) });
+    await mine();
+    await first.outcome;
+    await automine(true);
+    for (let i = 0; i < 3; i++) await mine();
+    // This row NEEDS the EXTERNAL row: the pass reads a fresh head (D-C, the cached head, is pinned in block 2).
+    h.deps.publicClient = () => freshHeadClient() as never;
+    await reconcile(h);
+    expect((await rowsOf({ chainId: CHAIN_ID, nonce: first.tx.nonce })).find((x) => same(x.txHash, foreign))).toMatchObject({ kind: 'EXTERNAL', status: 'MINED_SUCCESS' });
+    // The worker re-signs the job behind the foreign transaction; that complete is now the stuck head.
+    await automine(false);
+    const again = await settleUntilQueued(h, jobId, 1);
+    expect(again.tx.nonce).toBe(first.tx.nonce + 1);
+    const refused = await cli.runEvaluatorRecovery(cliExec('speed-up', again.tx.nonce), opDeps(h));
+    expect(refused.exitCode).toBe(2);
+    expect(refused.output).toContain(`REFUSED: EXTERNAL transaction(s) of this key not acknowledged: ${foreign.toLowerCase()}`);
+    expect((await rowsOf({ jobId })).filter((x) => x.kind === 'SPEED_UP')).toHaveLength(0);
+    const ok = await cli.runEvaluatorRecovery([...cliExec('speed-up', again.tx.nonce), '--acknowledge-foreign', foreign], opDeps(h));
+    expect(ok.exitCode, ok.output).toBe(0);
+    expect(await ledger.unacknowledgedExternal(db, CHAIN_ID, evaluator.address)).toHaveLength(0);
+    const speed = (await rowsOf({ jobId })).filter((x) => x.kind === 'SPEED_UP');
+    expect(speed).toHaveLength(1);
+    await mine();
+    await again.outcome;
+    await automine(true);
+    await reconcile(h);
+    await settle(h, jobId, 2);
+    await reconcile(h);
+    expect((await rowsOf({ jobId })).find((x) => same(x.txHash, speed[0]!.txHash))).toMatchObject({ status: 'MINED_SUCCESS' });
+    expect((await rowsOf({ jobId })).find((x) => same(x.txHash, again.tx.hash))).toMatchObject({ status: 'DEAD' });
+    const done = await db.job.findUniqueOrThrow({ where: { id: jobId } });
+    expect(done).toMatchObject({ onChainStatus: 'COMPLETED', platformFeeAmount: FEE.toString() });
+    expect(same(done.settleTxHash, speed[0]!.txHash)).toBe(true);
+    expect((await usdcOf(provider.address)) - before).toBe(BUDGET - FEE);
+  });
+
+  it('row 8 (script, AV): two operators — the second stops at the recovery lock; with the lock out of the way, operator 1\'s speed-up lands while operator 2 sits at the prompt → operator 2 aborts inside the lane (fingerprint): one replacement per confirmed plan; paid once', async () => {
+    await wipe();
+    const onChain = await submittedOnChain(48n * 3600n);
+    const jobId = await deliveredRow(onChain);
+    const h = harness();
+    await wireA1(h.deps, h.lanes);
+    await automine(false);
+    const before = await usdcOf(provider.address);
+    const { tx, outcome } = await settleUntilPending(h, jobId);
+    recoveryHeld.add(CHAIN_ID); // operator 1 holds agentfi:evaluator-recovery:<chainId>
+    const blocked = await cli.runEvaluatorRecovery(cliExec('speed-up', tx.nonce), opDeps(h));
+    expect(blocked.exitCode).toBe(2);
+    expect(blocked.output).toMatch(new RegExp(`another recovery holds the lock of chain ${CHAIN_ID}`));
+    expect((await rowsOf({ jobId })).filter((x) => x.origin === 'SCRIPT')).toHaveLength(0);
+    recoveryHeld.clear();
+    // The lock out of the way: operator 2 confirms a plan; before it reaches the lane, operator 1 executes its own.
+    const op1: { result?: Awaited<ReturnType<typeof cli.runEvaluatorRecovery>> } = {};
+    const op2 = opDeps(h);
+    op2.tty = {
+      isTTY: true,
+      ask: async (prompt: string) => {
+        op1.result = await cli.runEvaluatorRecovery(cliExec('speed-up', tx.nonce), opDeps(h));
+        return /Type exactly: (.*)\n/.exec(prompt)?.[1] ?? '';
+      },
+    };
+    const second = await cli.runEvaluatorRecovery(cliExec('speed-up', tx.nonce), op2);
+    expect(op1.result?.exitCode, op1.result?.output).toBe(0);
+    expect(second.exitCode, second.output).toBe(3);
+    expect(second.output).toMatch(new RegExp(`the plan of nonce ${tx.nonce} changed since the confirmation \\(fingerprint\\) — aborted, nothing sent`));
+    const speed = (await rowsOf({ jobId })).filter((x) => x.kind === 'SPEED_UP');
+    expect(speed).toHaveLength(1);
+    await mine();
+    await outcome;
+    await automine(true);
+    await reconcile(h);
+    await settle(h, jobId, 1);
+    await reconcile(h);
+    const done = await db.job.findUniqueOrThrow({ where: { id: jobId } });
+    expect(done).toMatchObject({ onChainStatus: 'COMPLETED', platformFeeAmount: FEE.toString() });
+    expect(same(done.settleTxHash, speed[0]!.txHash)).toBe(true);
+    expect((await usdcOf(provider.address)) - before).toBe(BUDGET - FEE);
+  });
+
+  /**
+   * Two delivered jobs, A's complete at N (the stuck head) and B's queued behind it at N+1 (automine off).
+   *
+   * B is settled through a SECOND signer instance (its own viem client), i.e. a second worker process. Finding
+   * F-B1 (2026-10-23, reproduced on this file): viem 2.57.3 shares one block-number observer per client, and a
+   * second `waitForTransactionReceipt` on the same client misses `emitOnBegin`, so it never fetched its pending
+   * transaction; when that transaction is then REPLACED, viem cannot detect the replacement and the worker's
+   * wait hangs until EVALUATOR_RECEIPT_TIMEOUT_MS (180 s) — liveness only (the job stays SETTLING for the retry;
+   * no `evaluator-replaced` alert). With one signer, row 35's B wait never resolved within the test.
+   */
+  async function twoQueued(h: Harness) {
+    const a = await submittedOnChain(48n * 3600n);
+    const b = await submittedOnChain(48n * 3600n);
+    const jobA = await deliveredRow(a);
+    const jobB = await deliveredRow(b);
+    await automine(false);
+    const A = await settleUntilQueued(h, jobA);
+    const secondWorker = createEvaluatorSigner(CHAIN_ID, ANVIL_KEYS[4]);
+    h.deps.evaluatorSigner = () => secondWorker;
+    const B = await settleUntilQueued(h, jobB);
+    h.deps.evaluatorSigner = () => signer;
+    expect(B.tx.nonce).toBe(A.tx.nonce + 1);
+    return { a, b, jobA, jobB, A, B };
+  }
+
+  it('row 18 (script, AV): a speed-up for N+1 while N is the stuck head → refused (always the head first); nothing signed', async () => {
+    await wipe();
+    const h = harness();
+    await wireA1(h.deps, h.lanes);
+    const { a, b, jobA, jobB, A, B } = await twoQueued(h);
+    try {
+      const r = await cli.runEvaluatorRecovery(cliExec('speed-up', B.tx.nonce), opDeps(h));
+      expect(r.exitCode).toBe(2);
+      expect(r.output).toMatch(new RegExp(`REFUSED: nonce ${B.tx.nonce} is not the head \\(NOT_HEAD`));
+      expect((await rowsOf({ chainId: CHAIN_ID, origin: 'SCRIPT' }))).toHaveLength(0);
+      expect(await db.evaluatorRecoveryIncident.count({ where: { chainId: CHAIN_ID } })).toBe(0);
+    } finally {
+      await mine();
+      await A.outcome;
+      await B.outcome;
+      await automine(true);
+    }
+    expect(await chainStatus(a.onChainJobId)).toBe(CHAIN_JOB_STATUS.Completed);
+    expect(await chainStatus(b.onChainJobId)).toBe(CHAIN_JOB_STATUS.Completed);
+    void jobA;
+    void jobB;
+  });
+
+  it('row 35 (script, AV): --nonces N..N+1 speeds up the head, then the next one — one confirmation "SPEED-UP <chainId> NONCES N-N+1 2 TXS", one fingerprint per nonce; both mine; each job paid once', async () => {
+    await wipe();
+    const h = harness();
+    await wireA1(h.deps, h.lanes);
+    const before = await usdcOf(provider.address);
+    const { a, b, jobA, jobB, A, B } = await twoQueued(h);
+    const n = A.tx.nonce;
+    const prompts: string[] = [];
+    const argv = ['--chain', String(CHAIN_ID), '--execute', 'speed-up', '--nonces', `${n}..${n + 1}`, '--operator', 'ops@anvil', '--note', 'anvil range'];
+    const r = await cli.runEvaluatorRecovery(argv, opDeps(h, { prompts }));
+    expect(r.exitCode, r.output).toBe(0);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain(`SPEED-UP ${CHAIN_ID} NONCES ${n}-${n + 1} 2 TXS`);
+    expect(r.output.match(/fingerprint speed-up 0x[0-9a-f]{64}/g)).toHaveLength(2);
+    const sentA = r.output.indexOf(`nonce ${n}: speed-up`);
+    const sentB = r.output.indexOf(`nonce ${n + 1}: speed-up`);
+    expect(sentA).toBeGreaterThan(-1);
+    expect(sentA).toBeLessThan(sentB);
+    const speedA = (await rowsOf({ jobId: jobA })).filter((x) => x.kind === 'SPEED_UP');
+    const speedB = (await rowsOf({ jobId: jobB })).filter((x) => x.kind === 'SPEED_UP');
+    expect(speedA).toHaveLength(1);
+    expect(speedB).toHaveLength(1);
+    expect(speedA[0]!.nonce).toBe(n);
+    expect(speedB[0]!.nonce).toBe(n + 1);
+    await mine();
+    await A.outcome;
+    await B.outcome;
+    await automine(true);
+    await reconcile(h);
+    await settle(h, jobA, 1);
+    await settle(h, jobB, 1);
+    await reconcile(h);
+    for (const [jobId, speed, original, on] of [[jobA, speedA[0]!, A.tx.hash, a], [jobB, speedB[0]!, B.tx.hash, b]] as const) {
+      const rows = await rowsOf({ jobId });
+      expect(rows.find((x) => same(x.txHash, speed.txHash))).toMatchObject({ status: 'MINED_SUCCESS' });
+      expect(rows.find((x) => same(x.txHash, original))).toMatchObject({ status: 'DEAD' });
+      const done = await db.job.findUniqueOrThrow({ where: { id: jobId } });
+      expect(done).toMatchObject({ onChainStatus: 'COMPLETED', platformFeeAmount: FEE.toString() });
+      expect(same(done.settleTxHash, speed.txHash)).toBe(true);
+      expect(await chainStatus(on.onChainJobId)).toBe(CHAIN_JOB_STATUS.Completed);
+    }
+    expect((await usdcOf(provider.address)) - before).toBe(2n * (BUDGET - FEE));
+  });
+
+  it('row 45 (script, AV): a range N..N+1 whose incident budget covers only one replacement — the head is sped up, then the next nonce is refused under the ledger budget (evaluator-recovery-refused), nothing signed for it; both jobs still settle once', async () => {
+    await wipe();
+    const h = harness();
+    await wireA1(h.deps, h.lanes);
+    const before = await usdcOf(provider.address);
+    const { jobA, jobB, A, B } = await twoQueued(h);
+    const n = A.tx.nonce;
+    const dry = await cli.runEvaluatorRecovery(['--chain', String(CHAIN_ID)], opDeps(h));
+    const costs = [...dry.output.matchAll(/speed-up: allowed · fees .*? · max cost (\d+) wei/g)].map((m) => BigInt(m[1]!));
+    expect(costs).toHaveLength(2);
+    const one = costs.reduce((x, y) => (y > x ? y : x), 0n);
+    // TEST cap: room for one replacement of this size, not two (the plan's P12 value is not used on Anvil).
+    const caps = { ...anvilCaps(), maxCostPerIncidentWei: (one * 3n) / 2n };
+    const argv = ['--chain', String(CHAIN_ID), '--execute', 'speed-up', '--nonces', `${n}..${n + 1}`, '--operator', 'ops@anvil', '--note', 'anvil range, budget'];
+    try {
+      const r = await cli.runEvaluatorRecovery(argv, opDeps(h, { caps }));
+      expect(r.exitCode, r.output).toBe(2);
+      expect(r.output).toMatch(new RegExp(`nonce ${n}: speed-up 0x[0-9a-f]{64} sent → accepted`));
+      expect(r.output).toMatch(/REFUSED: budget: INCIDENT_BUDGET_EXCEEDED|REFUSED: INCIDENT_BUDGET_EXCEEDED/);
+      expect(h.alerts.filter((x) => x.kind === ('evaluator-recovery-refused' as EscrowAlert['kind']) && x.jobId === jobB)).toHaveLength(1);
+      expect((await rowsOf({ jobId: jobA })).filter((x) => x.kind === 'SPEED_UP')).toHaveLength(1);
+      expect((await rowsOf({ jobId: jobB })).filter((x) => x.origin === 'SCRIPT')).toHaveLength(0);
+    } finally {
+      await mine();
+      await A.outcome;
+      await B.outcome;
+      await automine(true);
+    }
+    await reconcile(h);
+    await settle(h, jobA, 1);
+    await settle(h, jobB, 1);
+    await reconcile(h);
+    for (const jobId of [jobA, jobB]) {
+      expect(await db.job.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ onChainStatus: 'COMPLETED', platformFeeAmount: FEE.toString() });
+    }
+    expect((await usdcOf(provider.address)) - before).toBe(2n * (BUDGET - FEE));
+  });
+
   it.todo('row 9 (AV): the worker settles Y at pending while the script holds the lane for N (txpool_content)');
-  it.todo('row 42 (AV): deadline labels by block timestamp (evm_setNextBlockTimestamp) — covered on Postgres (row 42 DB) and by F1 (expiryPosture)');
+
+  // LAST in this block: it moves the chain clock ~30 h ahead of the wall clock (block timestamps only grow).
+  it('row 42 (AV): the deadline labels come from the BLOCK timestamp, never the process clock — NONE / ACT / URGENT / HAND-TO-OWNER / EXPIRED as evm_setNextBlockTimestamp moves the chain; past expiry the speed-up needs "… AFTER EXPIRY" and still settles (complete on Submitted)', async () => {
+    await wipe();
+    const onChain = await submittedOnChain(30n * 3600n);
+    const jobId = await deliveredRow(onChain);
+    const h = harness();
+    await wireA1(h.deps, h.lanes);
+    const expiredAt = Number(onChain.expiredAt);
+    const posture = async (o: Parameters<typeof cliDeps>[1] = {}) => {
+      const r = await cli.runEvaluatorRecovery(['--chain', String(CHAIN_ID)], opDeps(h, o));
+      expect(r.exitCode, r.output).toBe(0);
+      const line = r.output.split('\n').find((l) => l.startsWith('Earliest delivered expiresAt:'))!;
+      expect(line).toContain(`(job ${jobId}) vs block time`);
+      return line;
+    };
+    /** Mines an EMPTY block (no evaluator transaction is pending yet) whose timestamp is `secondsBefore` before expiredAt. */
+    const blockAt = async (secondsBefore: number) => {
+      await chain.rpc('evm_setNextBlockTimestamp', [expiredAt - secondsBefore]);
+      await mine();
+    };
+    // the process clock already 31 h ahead (past expiresAt), the chain 30 h before it: the chain wins
+    expect(await posture({ nowOffsetMs: 31 * 3_600_000 })).toMatch(/· posture NONE$/);
+    await blockAt(23 * 3600);
+    expect(await posture()).toMatch(/· posture ACT$/);
+    await blockAt(5 * 3600);
+    expect(await posture()).toMatch(/· posture URGENT$/);
+    await blockAt(30 * 60);
+    expect(await posture()).toMatch(/· posture HAND-TO-OWNER$/);
+    // the process clock is still ~30 h BEFORE expiresAt here; the chain is at expiredAt (claimRefund now valid)
+    await blockAt(0);
+    expect(Date.now()).toBeLessThan(expiredAt * 1000);
+    const expired = await posture();
+    expect(expired).toMatch(/ — ALREADY PASSED · posture EXPIRED$/);
+    // Past expiry by block time, with the head stuck: only the speed-up, with the AFTER EXPIRY phrase.
+    await automine(false);
+    const before = await usdcOf(provider.address);
+    const { tx, outcome } = await settleUntilPending(h, jobId);
+    const prompts: string[] = [];
+    const r = await cli.runEvaluatorRecovery(cliExec('speed-up', tx.nonce), opDeps(h, { prompts }));
+    expect(r.exitCode, r.output).toBe(0);
+    expect(r.output).toMatch(/speed-up: allowed \(AFTER EXPIRY phrase\)/);
+    expect(prompts[0]).toBe(`Type exactly: SPEED-UP ${CHAIN_ID} NONCE ${tx.nonce} COMPLETE ${jobId} AFTER EXPIRY\n> `);
+    await mine();
+    await outcome;
+    await automine(true);
+    await reconcile(h);
+    await settle(h, jobId, 1);
+    await reconcile(h);
+    expect(await chainStatus(onChain.onChainJobId)).toBe(CHAIN_JOB_STATUS.Completed);
+    expect(await db.job.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ onChainStatus: 'COMPLETED', platformFeeAmount: FEE.toString() });
+    expect((await usdcOf(provider.address)) - before).toBe(BUDGET - FEE);
+  });
 });
 
 // ══ 2. A1 rows on the real node ═══════════════════════════════════════════════
@@ -622,11 +1046,49 @@ describeA1('A1 on Anvil — candidates, reconciliation and the gate against the 
     await outcome;
     await automine(true);
     for (let i = 0; i < 3; i++) await mine();
+    // The pass reads the head through a client without viem's block-number cache: with the shared client this row
+    // flaked (1 in 4 local runs) — the §4.3 search took a head cached before the foreign block. That is D-C, pinned
+    // by its own `it.fails` below; this row checks the search itself on the real node.
+    h.deps.publicClient = () => freshHeadClient() as never;
     await reconcile(h);
     const rows = await rowsOf({ chainId: CHAIN_ID, nonce: tx.nonce });
     expect(rows.find((r) => same(r.txHash, tx.hash))!.status).toBe('DEAD');
     expect(rows.find((r) => same(r.txHash, foreign))).toMatchObject({ kind: 'EXTERNAL' });
     expect(h.alerts.filter((a) => a.kind === ('evaluator-nonce-foreign' as EscrowAlert['kind']))).toHaveLength(1);
+  });
+
+  // A1-DEFECT D-C (row 4, spec §4.3; P3, liveness / observability — nothing financial):
+  //  `locateForeignTransaction` (escrow-erc8183.service.ts) starts the binary search at `client.getBlockNumber()`.
+  //  viem caches that answer per client for `cacheTime` (= pollingInterval: 4 s on this Anvil client, 1 s on a
+  //  2-s-block chain). On the pass right after the foreign transaction mined, the cached head predates its block:
+  //  `countAt(head) <= nonce` → null → no EXTERNAL row on that pass (the alert still leaves, without the hash; the
+  //  next pass usually records it). Reproduced deterministically below by reading the head once (cache primed)
+  //  just before the foreign block; it was also the real cause of the row 4 / row 25-27 flakes (attributed before
+  //  to lagging historical reads: the historical counts were monotone in every failing run here).
+  //  Probable fix: `getBlockNumber({ cacheTime: 0 })` in the search. Expected after the fix: it.fails → it.
+  it.fails('row 4 (AV, D-C): the foreign transaction is recorded EXTERNAL on the first pass even when the client\'s cached block number predates its block', async () => {
+    const onChain = await submittedOnChain();
+    const jobId = await deliveredRow(onChain);
+    const h = harness();
+    await wireA1(h.deps, h.lanes);
+    await automine(false);
+    const { tx, outcome } = await settleUntilPending(h, jobId);
+    const foreign = await chain.wallet(evaluator).sendTransaction({ account: evaluator, chain: null, to: evaluator.address, value: 0n, gas: 21_000n, nonce: tx.nonce, ...bump(tx) });
+    await chain.publicClient.getBlockNumber(); // the shared client's head, cached (as any earlier read in the process would)
+    await mine();
+    await automine(true);
+    for (let i = 0; i < 3; i++) await mine();
+    try {
+      await reconcile(h); // within the cache window (the four blocks above take milliseconds)
+      const rows = await rowsOf({ chainId: CHAIN_ID, nonce: tx.nonce });
+      // guaranteed today (and asserted first, so the expected failure is the last line only)
+      expect(rows.find((r) => same(r.txHash, tx.hash))!.status).toBe('DEAD');
+      expect(h.alerts.filter((a) => a.kind === ('evaluator-nonce-foreign' as EscrowAlert['kind']))).toHaveLength(1);
+      // the defect: no EXTERNAL row on this pass
+      expect(rows.find((r) => same(r.txHash, foreign))).toMatchObject({ kind: 'EXTERNAL' });
+    } finally {
+      await outcome;
+    }
   });
 
   it('row 5 (AV): crash after the SIGNED insert, before the send — the reconciliation rebroadcasts the identical raw bytes; it mines; paid once', async () => {
@@ -896,8 +1358,10 @@ describeA1('A1 on Anvil — candidates, reconciliation and the gate against the 
   });
 });
 
-  // LAST on purpose: after `anvil_reorg`, Anvil answers `eth_getTransactionCount(addr, <block number>)` from
-  // inconsistent historical state (non-monotone counts), which breaks the §4.3 binary search of any later test.
+// LAST on purpose: after `anvil_reorg`, Anvil answers `eth_getTransactionCount(addr, <block number>)` from
+// inconsistent historical state (non-monotone counts), which breaks the §4.3 binary search of any later test.
+// Gated like the other A1 rows (it used to sit outside any describe, so it ran even when the A1 rows were skipped).
+describeA1('A1 on Anvil — reorg (runs last)', () => {
   it('row 14 (AV): reorg (anvil_reorg depth 1, tx not re-included) of a latest-level MINED_SUCCESS — alive again, evaluator-reorg, the gate refuses', async () => {
     const onChain = await submittedOnChain();
     const jobId = await deliveredRow(onChain);
@@ -924,5 +1388,5 @@ describeA1('A1 on Anvil — candidates, reconciliation and the gate against the 
     await settle(h, jobId, 1);
     expect(await chainStatus(onChain.onChainJobId)).toBe(CHAIN_JOB_STATUS.Completed);
   });
-
+});
 
