@@ -10,11 +10,11 @@
  *
  * Three blocks:
  *  1. `fake-evaluator-chain self-check` — always runs (no DB): the fake obeys the node rules the rows rely on.
- *  2. `A1 core` — runs once A1 is integrated: the table exists AND the service exports
- *     `reconcileEvaluatorCandidates`. Until then it is skipped with a warning (CI does not fail on it:
- *     the A1 branch is the only place it can run).
- *  3. `A1 recovery script` — `describe.skip` with `TODO(A1-CLI)`: enable once `src/scripts/evaluator-recovery.ts`
- *     exports `runEvaluatorRecovery(argv, deps)`.
+ *  1b. `harness smoke` — runs whenever Postgres answers (`describe.runIf`).
+ *  2. `A1 core` — runs when the table exists AND the service exports `reconcileEvaluatorCandidates`
+ *     (A1 is integrated). Outside CI it is skipped with a warning when they are missing; on CI that throws.
+ *  3. `A1 recovery script` — the recovery CLI (`runEvaluatorRecovery(argv, deps)`), same gate as block 2.
+ *     Row 9 (script + worker at once, Redis real) stays a todo here: a separate multi-process test covers it.
  *
  * Integration points (assumed names, ONE place to fix): the section "A1 integration points" below.
  * Cleanup order: EvaluatorTransaction → incidents/state → Job (ON DELETE RESTRICT, R2-P3-8).
@@ -150,6 +150,8 @@ if (!A1_READY) {
     `[evaluator-a1.db.test] A1 core suite skipped — db=${AVAIL.db} table=${AVAIL.table} reconcileEvaluatorCandidates=${typeof SVC_PROBE['reconcileEvaluatorCandidates']}`,
   );
 }
+// CI migrates the database: a missing A1 table / export there must fail, not skip the A1 rows silently.
+if (!A1_READY && process.env['CI']) throw new Error('evaluator-a1.db.test.ts: the A1 rows cannot run on CI (EvaluatorTransaction table or reconcileEvaluatorCandidates missing)');
 const describeA1 = A1_READY ? describe : describe.skip;
 
 // ── A1 integration points (ASSUMED names; the orchestrator fixes them HERE) ─────────────────────
