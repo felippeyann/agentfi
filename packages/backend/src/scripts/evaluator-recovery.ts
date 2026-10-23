@@ -776,17 +776,22 @@ async function executeNonce(ctx: ExecContext, s: Situation, nonce: number, confi
       }
       throw new Refused(`the ledger refused the candidate: ${(err as Error).message}`, 3);
     }
-    // D-i + F-P3-3: Job.escrowError is visible to the requester and the provider through the API — one NEUTRAL
-    // line only. The operator and the note stay in the ledger row (SCRIPT, operator, note); reviewLog untouched.
     const affectedJob = stampJobId;
-    if (affectedJob) {
-      await db(deps).job.updateMany({ where: { id: affectedJob }, data: { escrowError: `evaluator recovery: ${op} sent at nonce ${nonce}` } });
-    }
     await ledger.markBroadcast(db(deps), candidateId);
     section();
     // 6. assertHeld (inside sendRaw) + send
     const out = await deps.signer.sendRaw(signed.raw, { lease, minLeaseMs: settings.leaseMinRemainingMs });
     await answer(deps, candidateId, out);
+    // 7. D-i + F-P3-3: Job.escrowError is visible to the requester and the provider through the API — one NEUTRAL
+    // line only. The operator and the note stay in the ledger row (SCRIPT, operator, note); reviewLog untouched.
+    // D-R9-1: written only AFTER sendRaw returned, so a lease lost before the broadcast (LeaseLostError, nothing
+    // sent) never leaves a line claiming a send. "sent" only when the node accepted (or already knew) the
+    // transaction; any other answer is an attempt whose outcome the reconciliation proves. A crash between the
+    // send and this write leaves no line — the ledger row stays the source of truth.
+    if (affectedJob) {
+      const verb = out.kind === 'accepted' || out.kind === 'already-known' ? 'sent' : 'attempted';
+      await db(deps).job.updateMany({ where: { id: affectedJob }, data: { escrowError: `evaluator recovery: ${op} ${verb} at nonce ${nonce}` } });
+    }
     if (affectedJob) await db(deps).job.updateMany({ where: { id: affectedJob, settleAttemptAt: { not: null } }, data: { settleAttemptAt: null } });
     print(`  nonce ${nonce}: ${op} ${signed.hash} sent → ${out.kind}${'message' in out ? ` (${out.message})` : ''} · note: ${note}`);
     ctx.sent.push({ nonce, hash: signed.hash });

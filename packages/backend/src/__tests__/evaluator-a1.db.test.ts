@@ -1876,6 +1876,8 @@ describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () =
     expect(script).toHaveLength(1);
     expect(script[0]).toMatchObject({ status: 'SIGNED' });
     expect(sim.chain.minedInNonce(0)).toBeNull();
+    // D-R9-1: nothing was broadcast, so the API-visible line never claims a recovery send.
+    expect((await job(a.jobId)).escrowError ?? '').not.toMatch(/evaluator recovery: .* (sent|attempted) at nonce/);
   });
 
   it('row 42 (DB): past the earliest delivered expiresAt (block time) the speed-up needs "… AFTER EXPIRY"', async () => {

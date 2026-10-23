@@ -848,13 +848,12 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     expect((await rowsOf({ id: script[0]!.id }))[0]).toMatchObject({ status: 'DEAD' });
   }, 300_000);
 
-  // A1-DEFECT D-R9-1 (P3, user-visible text): the CLI writes `Job.escrowError = "evaluator recovery: <op> sent at
-  // nonce <N>"` (F-P3-3, visible to requester and provider through the API) BEFORE `sendRaw`'s `assertHeld`
-  // (src/scripts/evaluator-recovery.ts, executeNonce step 5 → step 6). When the lease is lost in between, the
-  // send is refused (exit 3, nothing broadcast) but the line stays: the job claims a recovery send that never
-  // happened, until a later write (settlement / another run) replaces it. Expected: the line is written only
-  // after an accepted send, or corrected when the send is refused. Same steps as scenario 3a.
-  it.fails('scenario 3c — A1-DEFECT D-R9-1: after a lease lost before the broadcast (exit 3, nothing sent), Job.escrowError must not say "sent"', async () => {
+  // A1-DEFECT D-R9-1 — FIXED (23/10) (P3, user-visible text): the CLI wrote `Job.escrowError = "evaluator
+  // recovery: <op> sent at nonce <N>"` (F-P3-3, visible to requester and provider through the API) BEFORE
+  // `sendRaw`'s `assertHeld`. When the lease was lost in between, the send was refused (exit 3, nothing broadcast)
+  // but the line stayed. Now the line is written only after `sendRaw` returned ("sent" for an accepted / already
+  // known answer, "attempted" otherwise); a LeaseLostError writes nothing. Same steps as scenario 3a.
+  it('scenario 3c — D-R9-1: after a lease lost before the broadcast (exit 3, nothing sent), Job.escrowError must not say "sent"', async () => {
     const x = await delivered();
     await automine(false);
     const head = await stuckHead(x);
