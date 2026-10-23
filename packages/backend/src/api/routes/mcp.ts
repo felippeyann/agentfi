@@ -80,6 +80,27 @@ const MOVES_FUNDS = {
  */
 export const PATH_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
+/**
+ * X7: an idempotency key a money-moving tool forwards as the route's
+ * `idempotencyKey` — the stdio MCP server's rule for `pay_agent` /
+ * `transfer_token` (packages/mcp-server/src/tools/agent.ts, defi.ts).
+ */
+export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+
+/**
+ * A new transaction is answered 202 `{ transactionId, … }`; a known
+ * idempotencyKey is answered 200 with the stored Transaction (`id`, no
+ * `transactionId`). The tool reports `transactionId` either way, so the retry
+ * the key exists for still names the first transaction. Anything else (a
+ * refusal body) is relayed unchanged.
+ */
+function withTransactionId(result: unknown): unknown {
+  if (result === null || typeof result !== 'object' || Array.isArray(result)) return result;
+  const record = result as Record<string, unknown>;
+  if (record['transactionId'] !== undefined || typeof record['id'] !== 'string') return result;
+  return { ...record, transactionId: record['id'] };
+}
+
 export interface ToolDef {
   name: string;
   description: string;
@@ -196,15 +217,30 @@ export function buildProxyTools(apiBaseUrl: string, apiKey: string): ToolDef[] {
     {
       name: 'execute_transfer',
       annotations: { title: 'Transfer tokens', ...MOVES_FUNDS },
-      description: 'Transfer tokens or native ETH to another address',
+      description:
+        'Transfer tokens or native ETH to another address. Pass an idempotencyKey and reuse the same key when you ' +
+        'retry this same transfer (e.g. after a timeout), or a retry transfers twice: a known key returns the ' +
+        'transfer already created instead of sending again. Reuse a key only to repeat the same request — the ' +
+        'backend answers a known key with its first transfer even when the new request differs — and once that ' +
+        'transfer has failed (FAILED or REVERTED) a new attempt needs a new key.',
       inputSchema: z.object({
         to: z.string().describe('Recipient address (0x...)'),
         token: z.string().describe('Token contract address or "ETH" for native'),
         amount: z.string().describe('Amount in human-readable decimals (e.g. "0.1")'),
         chainId: z.number().optional().describe('Chain ID (default: 1)'),
+        // X7: before, zod stripped an idempotencyKey the client sent.
+        idempotencyKey: z
+          .string()
+          .regex(IDEMPOTENCY_KEY_PATTERN, 'must be 16-128 chars of [A-Za-z0-9_-]')
+          .optional()
+          .describe(
+            'Idempotency key (16-128 chars of [A-Za-z0-9_-]). A retry with the same key returns the first transfer ' +
+              'instead of transferring again. One key per transfer request: the same key with different fields ' +
+              'still returns the first transfer.',
+          ),
       }),
       handler: async (args: Record<string, unknown>) =>
-        call('POST', '/v1/transactions/transfer', args),
+        withTransactionId(await call('POST', '/v1/transactions/transfer', args)),
     },
     {
       name: 'supply_aave',

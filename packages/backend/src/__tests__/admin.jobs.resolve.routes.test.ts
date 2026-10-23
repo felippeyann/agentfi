@@ -49,6 +49,10 @@ vi.mock('../config/escrow-verification.runtime.js', () => ({
     { chainId: 84532, state: 'unverified', allowed: false, verifiedAt: null, validUntil: null, since: '2026-10-14T10:00:00.000Z', ...(opts.withReason ? { reason: 'the chain could not be read: timed out' } : {}) },
   ],
 }));
+// C3f item 4: the worker's report, as read from Redis (real Redis: escrow-verification-report.redis.db.test.ts).
+vi.mock('../config/escrow-verification-report.runtime.js', () => ({
+  readEscrowVerificationReport: async () => ({ state: 'missing', reason: 'no verification report (test)' }),
+}));
 
 import Fastify, { type FastifyInstance } from 'fastify';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -214,6 +218,7 @@ describe('GET /admin/escrow/verification (Q7)', () => {
       // C5: the run's preflight compares this with the approved 3600 s (env default 0 here).
       escrowWindow: { evaluationDelaySeconds: env.ESCROW_EVALUATION_DELAY_SECONDS, jobTtlSeconds: env.ESCROW_JOB_TTL_SECONDS },
       chains: [expect.objectContaining({ chainId: 84532, state: 'unverified', allowed: false, reason: expect.stringContaining('could not be read') })],
+      worker: { state: 'missing', reason: 'no verification report (test)' },
     });
     expect(typeof res.json().escrowWindow.evaluationDelaySeconds).toBe('number');
   });

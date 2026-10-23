@@ -25,18 +25,79 @@ Three scenarios:
 
 ## 2. Baseline
 
-**Candidate commit:** `e6e93bd73020537e9cb4a56a148ac0f3de8ec814`, the merge of #189 that adds this
-file. The contracts are unchanged since `162cb06` (#182); the deploy, the backend and the runner all
-run from that one commit, because S9 accepts only contracts whose runtime code is this build's (D16).
+**Candidate commit (updated 2026-10-17):** the merge on `main` of the 2026-10-17 round. Its code
+is the local integration branch `rc/2026-10-17` at **`38ddb4f`**; no PR was opened in that round
+(no push). Every later commit of the round changes no file under `packages/`. **Gate before C4:**
+`git diff 38ddb4f <merged main commit> -- packages` prints nothing; otherwise the rehearsal below
+is repeated on the merged commit. The contracts are unchanged since `162cb06` (#182). The deploy,
+the backend and the runner all run from that one commit, because S9 accepts only contracts whose
+runtime code is this build's (D16).
+
+The previous candidate `e6e93bd` is **superseded**. The round changed the evaluator's settlement
+path (C3f items 1, 3, 4 and the review's P3-1 / P3-3), the runner's preflight (the worker's own Q7
+report) and, outside the C5 path, the batch, transfer, allowances and `/mcp/sse` routes (A6d, X7,
+S12). `git diff --stat e6e93bd 38ddb4f -- packages/contracts` is empty, and so is the migrations
+directory: no contract, no migration, no dependency changed.
 
 ### 2.1 Rehearsed, candidate and re-checked commits
 
-Three different things, not one SHA:
+**Newest candidate: C3h round, code `67ba588`** (local branch `rc/2026-10-21b`, not on `main`). It is `51f00a6` plus the C3h settlement fixes (plan row C3h):
+- D1: no backend refund against a recorded `pay`;
+- D2: a result is recorded only from its own receipt and this job's event;
+- D3: the `provider-unpaid` alert.
+
+Contracts are unchanged (`ddc6936bc680`). Independent review: P3 only (owner note `2026-10-21-revisao-c3h.md`). **No evidence of `51f00a6` or `38ddb4f` is carried over**: everything below ran on `67ba588`, on 2026-10-21, locally.
+
+| Evidence on `67ba588` | Result |
+|---|---|
+| backend unit | 1641 passed / 13 skipped. The first run had 4 `agent.search` failures, because the suite ran before its database was migrated (a script-order issue, not the code); rerun on the migrated database: green |
+| real Postgres | 398 / 398 |
+| Anvil with real contracts | 65 passed / 3 skipped, incl. the D2 replacement tests |
+| E2E | 3 passed / 4 skipped (by design) |
+| ERC-8183 fork suite | 7 / 7 |
+| **C5 runner end to end** (fork, window 60 s, isolated Redis container and database, ports 8561 / 3171) | preflight all PASS. Completed 37 / 37, contest 39 / 39, cancel 22 / 22, reconcile 16 / 16. **0 wei unexplained**. Alerts: only the expected `contested` one; no `provider-unpaid`, `evaluator-replaced`, `settlement-unproven` or `delivery-held` on the happy, refund or cancel paths |
+| Foundry; `contracts:code:check`; typecheck; `spec:lint` / `spec:check`; mcp | 356 / 0 / 2; `ddc6936bc680`; clean; OK (`spec:check` drift = line endings only); 163 |
+
+The runner covers the paths that must stay unchanged. The defects themselves are proven by their own tests: real Postgres for D1 and D3, Anvil with the real escrow for D2. Evidence files are in the owner's notes, `c5-rehearsal-2026-10-21/67ba588-runner/`, with SHA-256 sums and no secret.
+
+**Newer candidate, 2026-10-21 round: code `51f00a6`** (local branch `rc/2026-10-21`, not on `main`). It is `38ddb4f` plus S14 and T2:
+- S14: the admin batch sends and records the executor fee through a shared fee helper, also used by the swaps and the agent batch;
+- S14: the allowances OpenAPI describes the real response, and a comment was corrected;
+- T2: the unit test pass runs on `pool: 'forks'`.
+
+`git diff --name-only 38ddb4f 51f00a6 -- packages` touches no escrow service, C5 runner, contract or migration. Independent review: approved with P3 caveats only (owner note `2026-10-21-revisao-codigo.md`).
+
+| Evidence on `51f00a6` (2026-10-21, local) | Result |
+|---|---|
+| backend unit (now `forks`) | 1638 passed / 13 skipped (81 files) |
+| real Postgres | 388 / 388 |
+| Anvil with real contracts | 63 passed / 3 skipped (the admin batch with native value mines; the fee wallet receives F) |
+| Foundry; `contracts:code:check`; typecheck; `spec:lint` / `spec:check` | 356 / 0 / 2; `ddc6936bc680`; clean; OK (the `spec:check` drift was line endings only, and the regenerated file is identical) |
+| mcp-server | 163 / 163 |
+| ERC-8183 fork suite (Base Sepolia fork) | 7 / 7 |
+| **C5 runner end to end** (window 60 s, fork mode only, `WALLET_PROVIDER=local`; run of its own, not carried over from `38ddb4f`) | **2026-10-21, on `51f00a6`.** It ran from worktree `rc-1021` at HEAD `8d08150`, whose `packages` tree equals `51f00a6`'s: tree `8e9baab8…` in both, and `git diff 51f00a6 8d08150 -- packages package-lock.json` is empty. Isolated resources: a dedicated Redis container (removed afterwards), a new database, and ports 8560 / 3170. Preflight: all PASS. Completed 37 / 37, contest 39 / 39, cancel 22 / 22, reconcile 16 / 16. USDC moved −2.0 / +1.994 / +0.006 with exactly 6 transfers. Fee wallet: 0. Gas: **0 wei unexplained** per wallet. `getSummary` (1, 100) `completed` and (1, 0) `rejected` |
+
+On a local fork, both candidates now have the full evidence: `38ddb4f` (runner on 2026-10-18) and `51f00a6` (runner on 2026-10-21). The owner chooses which one C4 deploys from. Evidence files live in the owner's notes, in `c5-rehearsal-2026-10-21/51f00a6-runner/`: logs, evidence JSON, the harness used and SHA-256 sums; no secret is kept.
+
+**Current candidate, code `38ddb4f`** (local branch `rc/2026-10-17`; later commits touch no file under `packages/` — `git diff 38ddb4f HEAD -- packages package-lock.json` is empty, re-checked 2026-10-21). Every row below ran on a **local** machine or a **local Anvil fork**: none is a Base Sepolia transaction, none uses Turnkey, none counts for G2.
+
+| Evidence | Code it ran | Date | Result | Kept at (owner notes, not the repository) |
+|---|---|---|---|---|
+| backend unit, real Postgres, Anvil with real contracts, mcp-server, typecheck | `38ddb4f` | 2026-10-17 (orchestrator, and again by the independent reviewer in a separate worktree) | unit 1624 passed / 13 skipped; Postgres 388 / 388; Anvil 55 passed / 3 skipped; mcp 163 / 163; clean | round note `2026-10-17-retomada-validacao.md`, review `2026-10-17-revisao-independente.md` |
+| Foundry, `contracts:code:check`, `spec:check` / `spec:lint` | `38ddb4f` | 2026-10-17; `contracts:code:check` again on 2026-10-18 | 356 passed / 0 failed / 2 skipped; `ddc6936bc680`; OK | same |
+| ERC-8183 fork suite (`npm run test:e2e:escrow-fork`, block 47 822 000) | `6e03bf2`, then **`38ddb4f`** | 2026-10-17; **2026-10-21** | 7 / 7 both times (the escrow service changed between the two: the C3f review P3s) | `c5-rehearsal-2026-10-17/`, `c5-rehearsal-2026-10-21/38ddb4f-fork-suite.log` |
+| C5 runner end to end, window 60 s (fork mode only), `WALLET_PROVIDER=local` | `38ddb4f` (worktree at `a18f620` + an untracked harness, archived) | 2026-10-18 (checked 2026-10-19 and 2026-10-21) | preflight all PASS; completed 37 / 37, contest 39 / 39, cancel 22 / 22, reconcile 16 / 16; USDC −2.0 / +1.994 / +0.006, 6 transfers, nonces 12 / 6 / 3, **0 wei unexplained** per wallet — identical to the `75796fb` / `cc0bb90` references | `c5-rehearsal-2026-10-18/` (logs, evidence JSON, `harness/` with instructions and SHA-256 sums) |
+| Runner refusals: second `setup`, `fund` after the snapshot; the `worker` field on a fork | `38ddb4f` | 2026-10-17 (rehearsal kit; it then stopped on a bug in the kit itself, not in the code) | both refused with `STOP` as designed; `worker` = `missing` (API and worker in one process on a fork — why the preflight check applies to the real run only) | `C:\Users\AAWZ 360\agentfi-c5-rehearsal\runs\38ddb4f-20261017-111752\` |
+| Runner lock (a second runner on a scenario), interruption and adoption by the outbox tag | `75796fb` / `e5ae120` (historical, §8) | 2026-10-15 | as in §8 | runner code unchanged in those paths since: `git diff e6e93bd 38ddb4f -- packages/backend/src/scripts/c5` is only the additive worker check `2a3e9c2` |
+
+The evidence JSON files do not record the code SHA: the link to `38ddb4f` comes from where the run happened and the Git state checked afterwards. Not covered by any row: Turnkey, the real 3600 s window, a worker restart during the contest hold, a real network.
+
+Historical 2026-10-15 evidence (the candidate in this table is superseded by §2):
 
 | Role | Commit | What it means |
 |---|---|---|
 | fork rehearsal of the runner (§8) | `75796fb` (final run recorded in §8), repeated on `cc0bb90` | the end-to-end run on the Anvil fork; the repeat on `cc0bb90` after the two #189 review fixes gave the same results (round handoff of 2026-10-15; its run files were not kept in the repository) |
-| candidate for the real run | `e6e93bd` | merge of #189; **same tree as `cc0bb90`** (`git rev-parse cc0bb90^{tree} e6e93bd^{tree}` → both `ce5d0b7d…`), so the second rehearsal ran exactly this code |
+| previous candidate for the real run | `e6e93bd` | merge of #189; **same tree as `cc0bb90`** (`git rev-parse cc0bb90^{tree} e6e93bd^{tree}` → both `ce5d0b7d…`), so the second rehearsal ran exactly this code |
 | re-checked afterwards | `e6e93bd` | `contracts:code:check` at merge time and again on 2026-10-15 (orchestrated round): `forge build` + `npm run contracts:code:check` → `matches the artifacts (version ddc6936bc680)`; the runtime keccak of all four artifacts equals the table below |
 
 What changed between the rehearsals and the candidate (`git diff --stat 75796fb..e6e93bd -- packages`):
@@ -61,7 +122,7 @@ version `ddc6936bc680adbddc474d63216850b5d936ec0d6ef68896e18aed6220dfbe1d`
 Check on the candidate: `cd packages/contracts && forge build && cd ../.. && npm run contracts:code:check`
 → `matches the artifacts (version ddc6936bc680)`.
 
-### Evidence by class
+### Historical evidence by class (2026-10-15)
 
 | Class | What | Commit / layer | Result |
 |---|---|---|---|
@@ -195,7 +256,7 @@ existing job.
 | Condition | Where it is checked |
 |---|---|
 | **Wrong network**: RPC chain id ≠ 84532; an Anvil fork in `testnet` mode; an RPC head more than 2 minutes behind the wall clock | preflight; contest hold |
-| **Configuration not verified**: escrow / hook runtime code ≠ this build; escrow `token`, `platformFeeBP` (30), `evaluatorFeeBP` (0), `operator`, `feeWallet`, `paused`; hook `acp`, `trustedEvaluator`, registries, `minFeedbackBudget`; backend Q7 state not `verified / allowed`; backend window ≠ 3600 s; job TTL clamping the window; Turnkey not ready; no admin secret | preflight (before `setup`, `run`, `resolve`) |
+| **Configuration not verified**: escrow / hook runtime code ≠ this build; escrow `token`, `platformFeeBP` (30), `evaluatorFeeBP` (0), `operator`, `feeWallet`, `paused`; hook `acp`, `trustedEvaluator`, registries, `minFeedbackBudget`; backend Q7 state not `verified / allowed`; the worker's own Q7 report (`worker` in `GET /admin/escrow/verification`, C3f) not `reported`, `stale`, or without 84532 `verified / allowed` (real run only: the fork rehearsal runs API and worker in one process); backend window ≠ 3600 s; job TTL clamping the window; Turnkey not ready; no admin secret | preflight (before `setup`, `run`, `resolve`) |
 | **Unexpected recipient or party**: the job's escrow, evaluator, budget, token or provider ≠ the approved ones; the on-chain job's client / provider / evaluator / hook / budget ≠ the approved; USDC from the escrow to any address other than the two agents; any USDC transfer touching the agents outside the six expected; a transaction from another sender | per job (once funded); settlement checks; reconcile |
 | **Insufficient balance**: requester USDC < the scenario budget; any wallet's ETH < max(floor, planned gas × current price × 3) | snapshot; before creating each job; preflight |
 | **Event divergence**: missing / extra / wrong settlement events (decision event and reason, payout, fee, refund, `FeedbackWritten` / `FeedbackSkipped` / `NewFeedback`, `FeedbackFailed`); a settlement sooner than 3600 s after `submit`; the contested job settling without the operator; an authority check failing; nonce counts outside the plan; ETH not explained by gas | per scenario (`verify`), contest hold, reconcile |
@@ -265,6 +326,19 @@ three scenarios in parallel for about 75–80 minutes (the contest is held 3600 
   (Q7); the runner's preflight stops.
 - **A failed identity binding**: the runner stops before `submit` (the feedback would be
   skipped). The job stays funded; deciding it (cancel → refund) is an owner decision.
+- **The evaluator key stuck behind an unmined transaction** (C3f item 1, since the 2026-10-17
+  round): every later settlement from that key waits behind it, however well it is priced. The
+  worker raises one `ESCROW_ALERT evaluator-stuck` after 10 minutes with the same pending nonce,
+  naming the earliest `expiresAt` among the live jobs. Nothing is replaced automatically. The
+  runner keeps waiting (its hold and timing checks still apply). Unblocking the key (a
+  same-nonce replacement signed with the evaluator key) is an owner decision (plan C3g, proposal
+  A; A1, a manual operator script with dry-run, is the recommendation and does not exist yet).
+  Until it does, stop the run and decide. **Prefer not to replace an evaluator transaction by hand (for example with `cast send --nonce …`) while the worker is running** (plan C3h, D2). Before the C3h fix the worker recorded the job `REJECTED`, or paid, from another transaction's receipt while it stayed Submitted on-chain. Since C3h it records only its own transaction with the event of that job; after a replacement it raises `evaluator-replaced` and reads the job from the chain. But after a manual 0-value cancel the worker will sign the recorded decision again with the next nonce, and a speed-up mined while the worker is stopped records the status but not the fee or feedback (persisting every candidate is A1). After `evaluator-replaced` the job still points at the replaced hash, so contest and resolve answer "pending" until the worker makes a send of its own (C3h review P3-3, closed by A1). **Without A1 there is no manual recovery that keeps the database consistent** (decision-package review, 2026-10-21): after a speed-up mined while the worker was stopped, nothing hands the new hash to the reconciliation; the job keeps the replaced `settleTxHash` and no fee or feedback, and the runner stops at that receipt. The executable procedure for C5 is to **stop the run** and record it as an interrupted attempt (no G2 evidence). A speed-up only frees the nonce: stop the worker first, same calldata, nonce and gas limit, both fees +12.5 %, never a cancel, and restart the worker only after the speed-up has mined. Full procedure: the owner note `2026-10-21-pacote-c4c5.md` §5. Mind the deadline: after a job's `expiresAt`,
+  `claimRefund` is permissionless and refunds the requester even for delivered work.
+- **A settlement send whose answer was lost** (C3f item 3): before signing another settlement,
+  the worker asks again about the earlier hash and re-adopts it if it mined or a node knows it,
+  so a second `complete` is not sent in the same process (after a worker restart the residual
+  remains: plan C3g, proposal C). Only one settlement can ever succeed on-chain.
 - **Worst case**: an escrow that nobody settles is refunded to the requester after its 7-day TTL
   by the evaluator's expiry sweep (`claimRefund`).
 
@@ -315,7 +389,7 @@ Checked by the runner right after the contest, and by the fork suite (`escrow-er
 | provider / requester API key on `POST /admin/jobs/:id/resolve` | 401 |
 | requester `PATCH status CANCELLED` | 400 (no transition from `PAYMENT_PENDING`) |
 | provider `PATCH status COMPLETED` again | 400 |
-| provider `POST /v1/transactions/batch` calling `escrow.complete` | refused (400) |
+| provider `POST /v1/transactions/batch` calling `escrow.complete` | refused (400). In C5 the refusal is "AgentExecutor not deployed" (`EXECUTOR_ADDRESS_84532` unset), not a guard on the escrow target; with an executor, `complete` / `reject` revert `Unauthorized` at simulation, but `claimRefund` after `expiresAt` would be reachable — plan S15 |
 | `complete` / `reject` from the provider or the requester wallet | revert `Unauthorized` (only the evaluator may decide a Submitted job) |
 | afterwards | still `CONTESTED`, no resolution, no settle tx; chain status Submitted |
 
@@ -357,7 +431,7 @@ hook deployed with `DeployEscrow.s.sol`, the real backend with `WALLET_PROVIDER=
 
 The whole rehearsal was repeated on `cc0bb90` after the two #189 review fixes (stale RPC head in the
 preflight, a recorded authority failure stops the run), with the same results; that commit's tree is
-the candidate's (§2.1). With a copy of the state holding a simulated authority failure, `resolve`
+the previous candidate `e6e93bd`'s (§2.1). With a copy of the state holding a simulated authority failure, `resolve`
 answered STOP.
 
 An earlier run on the same fork (`e5ae120` + working tree) exercised the recovery paths: a runner
@@ -393,6 +467,15 @@ Found and fixed while rehearsing:
    Base Sepolia enabled (both required, §3.3). Entered by the owner in a local terminal / `.env`, never
    in a chat, a note or an issue.
 5. **The package itself** — chain 84532, the six roles, 4.5 USDC and 0.012 ETH from faucets, the
-   policies, the 3600 s window, the 22–23 transactions and the stop / success criteria above.
+   policies, the 3600 s window, the 22–23 transactions (C4 2 + C5 20–21) and the stop / success criteria above.
 
 Open as of 2026-10-15 (orchestrated round): all five. None is answered by this document.
+
+Still open on 2026-10-17, and two more before C4:
+
+6. **Publishing the round:** the push and PR of `rc/2026-10-17`. Its merge on `main` is the candidate (§2), and that round had no authorisation to push.
+7. **The stuck-evaluator procedure** (plan C3g, proposal A; §6.4):
+   - **A1 (recommended):** a manual operator recovery procedure, implemented and tested on Anvil before C4. This requires persistent tracking and reconciliation of all candidate hashes/nonces, contest/resolve protection while any candidate may mine, a reviewed persistence design (possibly a migration), and a script with dry-run and explicit confirmation. It is not a runbook-only change.
+   - **A0:** keep today's alert only. A stuck key then stops the run, and the owner decides without a procedure.
+
+   Mind the deadline: after `expiresAt`, anyone can `claimRefund` a job, even when the work was delivered.

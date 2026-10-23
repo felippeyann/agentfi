@@ -3,7 +3,7 @@
 > **Read together with [VISION.md](VISION.md) (the _why_) and [HANDOFF.md](HANDOFF.md) (live pending tasks).**
 > This file is the **comprehensive, point-in-time snapshot** of what the project _is_ today — purpose, stack, capabilities, progress. Update it whenever the scope or architecture shifts.
 
-**Last updated**: 2026-10-14 · **main baseline verified** `162cb06` · **npm** `@agent_fi/mcp-server@0.5.0` published 2026-05-15 (31 tools; 35 in source until 0.6.0, plan X3) · **Status**: reactivated in exploratory mode on 2026-10-06 (archived 2026-05-17 → 2026-10-06); live plan in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md)
+**Last updated**: 2026-10-17 · **main** `1b4d1c5` (code unchanged since `e6e93bd`; last full local verification of `main` on `162cb06`) · **2026-10-17 round verified on the local branch `rc/2026-10-17`** (§9) · **npm** `@agent_fi/mcp-server@0.5.0` published 2026-05-15 (31 tools; 35 in source until 0.6.0, plan X3) · **Status**: reactivated in exploratory mode on 2026-10-06 (archived 2026-05-17 → 2026-10-06); live plan in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md)
 
 ---
 
@@ -260,7 +260,7 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 
 ## 9. Current pending work
 
-All pending work is tracked task by task in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md). Where the reactivation (Q4 2026) stands on 2026-10-14:
+All pending work is tracked task by task in [docs/project/execution-plan-2026-10.md](docs/project/execution-plan-2026-10.md). Where the reactivation (Q4 2026) stands on 2026-10-17:
 
 - **Done:** the Week-0 fixes (A1 ABI, A2 no mock simulation in production, A3 re-validation before signing, S1 agents can only tighten their policy) and their hardening; `AgentJobEscrow` + `ReputationHook` (C2, R3, R3c gas guard, C2b fixes after the second adversarial review); the backend escrow driver with the chain as the source of truth (C3, C3c); ERC-8004 identities minted on the first funded job (R2); the x402 client and `pay_for_resource` with its money fixes (P1, P2, P6); MCP annotations, error sanitising and the escrow job tools (S2, X3a); security fixes S4, S5, S6; the fork rehearsal of C5 (C5a).
 - **Done on 2026-10-11:** C3d (#162: contest → operator review per D9, escrow spending policy, hook boot check) and A6 (#163: an ordinary transaction counted once in the daily volume and settled exactly once); H14 (#161) runbooks. Both were reviewed again independently: no P1.
@@ -268,6 +268,16 @@ All pending work is tracked task by task in [docs/project/execution-plan-2026-10
 - **Done on 2026-10-14 (C4/C5 preparation round, #178–#187):** contract identity before authority or value (S9, D16: the runtime bytecode of this repository's build plus the configured bindings, checked before Safe module enablement, executor-routed transactions, the policy sync and escrow); `AgentPolicyModule` accepts only its bound executor and checks the cooldown once per execution (D18); Safe mode refused in production / staging (D19); the on-chain policy sync signed by the agent wallet and sent straight to the module (S8); the four wrong third-party addresses replaced by official deployments (S7) and MCP `pay_agent` fixed (X5); `maxOutflowPerTxUsd`, a USD cap on ordinary outflows that blocks them until the operator sets it (D17, migration 0025); "max" withdrawals uncounted only on calldata proof, approvals revalidated on the approval day (D20); the Windows DB-suite crash (Prisma N-API engine in worker threads; `pool: 'forks'`). G1 stays met on `03a429d` within its threshold; it is not a general security claim.
 - **Open, owner decisions:** plan §5 questions 9–13 (mainnet contest window, `"ETH"` on Polygon at the API, GMX, the Uniswap routers on Ethereum / Arbitrum / Polygon, ERC-4626 max withdrawals); questions 6–8 were answered on 2026-10-14 (D17, D20). The per-agent `maxOutflowPerTxUsd` values are an operator choice.
 - **Prepared on 2026-10-15, waiting for the owner's approval:** the C4 / C5 authorisation package for the escrow validation (completed, cancel, contest → operator resolution) — [c4-c5-checklist.md](docs/project/c4-c5-checklist.md) and [c5-escrow-validation.md](docs/project/c5-escrow-validation.md), with the resumable runner `npm run c5:escrow` rehearsed end to end on a fork (`75796fb`, repeated on `cc0bb90` = the candidate `e6e93bd`'s tree). No deploy, funding or transaction on the real network (read-only RPC reads only); five owner decisions open; G2 pending.
+- **2026-10-17 round (local branch `rc/2026-10-17`, not on `main` yet):**
+  - **Fixed, each reproduced first:**
+    - X7: MCP transfers take an idempotency key, on stdio and SSE;
+    - A6d: an agent batch sends and counts the executor fee;
+    - S12: the Aave allowance reads the Pool;
+    - C3f: stuck-evaluator alert; no second settlement signed over a send the nodes did not know yet; the worker's Q7 state visible to the admin and required by the C5 preflight.
+  - **Review:** independent, covering the financial consequences: no P1 or P2.
+  - **Added:** the pilot operational checklist.
+  - **C4 / C5 package:** moved to the merge of this round as its candidate. Contracts are unchanged (`ddc6936bc680`).
+  - **Not done:** no deploy, funding or transaction on a real network.
 - **Next, owner-run:** C4 deploys the contracts on Base Sepolia ([runbook](docs/project/testnet-log.md), §2), C5 runs the two-agent E2E there with Turnkey wallets (D11, §5.4), demand interviews V1–V3. Then X1–X3 (example on testnet, screencast, mcp-server 0.6.0) and the C6 mainnet decision.
 - **Go/no-go:** 2027-01-05.
 

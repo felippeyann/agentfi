@@ -36,6 +36,39 @@ import type { TransactionData } from './builder.service.js';
  */
 export const FEE_BPS = 30n;
 
+/**
+ * F = floor(value × FEE_BPS / 10 000): the fee `AgentExecutor.calculateFee`
+ * charges on the native value an executor call deploys. The one copy of the
+ * formula (`estimateFee`, `wrapSingle`, `executorBatchValue`).
+ */
+export function executorFeeWei(valueWei: bigint): bigint {
+  return (valueWei * FEE_BPS) / 10_000n;
+}
+
+/** What an `executeBatch` call must carry (A6d, S14). */
+export interface ExecutorBatchValue {
+  /** ΣV: the sum of the actions' native values. */
+  actionsValueWei: bigint;
+  /** F on ΣV — on the sum, never per action (200 + 200 wei: 1, not 0 + 0). What the fee wallet receives. */
+  feeWei: bigint;
+  /** msg.value = ΣV + F. Below it `executeBatch` reverts `InsufficientValueForFee(sent, required)`. */
+  msgValueWei: bigint;
+}
+
+/**
+ * The value of an `executeBatch` call: ΣV + F, the fee on the SUM of the
+ * action values (the contract's own computation). Shared by every batch the
+ * backend routes through the executor — `POST /v1/transactions/batch` (A6d),
+ * `POST /admin/transactions/batch` (S14) and `wrapBatch` — and never the tier
+ * schedule (`FeeService.calculateFee`: PRO 15 / ENTERPRISE 5 bps would
+ * underpay and revert).
+ */
+export function executorBatchValue(actionValuesWei: readonly bigint[]): ExecutorBatchValue {
+  const actionsValueWei = actionValuesWei.reduce((sum, v) => sum + v, 0n);
+  const feeWei = executorFeeWei(actionsValueWei);
+  return { actionsValueWei, feeWei, msgValueWei: actionsValueWei + feeWei };
+}
+
 /** Minimal logger surface (pino-compatible) so this module stays free of env.ts. */
 export interface ExecutorLogger {
   warn(obj: Record<string, unknown>, msg: string): void;
@@ -129,7 +162,7 @@ export class ExecutorService {
     }
 
     // ETH-value tx: wrap in executeSingle, add fee to msg.value
-    const feeWei = (tx.value * FEE_BPS) / 10_000n;
+    const feeWei = executorFeeWei(tx.value);
     const totalValue = tx.value + feeWei;
 
     const wrappedData = encodeFunctionData({
@@ -160,8 +193,7 @@ export class ExecutorService {
       throw new Error(`No AgentExecutor deployed for chain ${chainId}`);
     }
 
-    const totalValue = txs.reduce((sum, tx) => sum + tx.value, 0n);
-    const feeWei     = (totalValue * FEE_BPS) / 10_000n;
+    const { feeWei, msgValueWei } = executorBatchValue(txs.map((tx) => tx.value));
 
     const wrappedData = encodeFunctionData({
       abi: AGENT_EXECUTOR_ABI,
@@ -172,7 +204,7 @@ export class ExecutorService {
     return {
       to:    executorAddress,
       data:  wrappedData,
-      value: totalValue + feeWei,
+      value: msgValueWei,
       feeWei,
       routedViaExecutor: true,
     };
@@ -183,6 +215,6 @@ export class ExecutorService {
    * Use for display / estimation before wrapping.
    */
   estimateFee(valueWei: bigint): bigint {
-    return (valueWei * FEE_BPS) / 10_000n;
+    return executorFeeWei(valueWei);
   }
 }

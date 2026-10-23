@@ -1,4 +1,4 @@
-# Session Notes — 2026-10-15
+# Session Notes — 2026-10-21
 
 > Single-point handoff doc. Update on every substantive session, prune stale
 > sections aggressively. If this file is older than a few days when you read
@@ -13,65 +13,71 @@
 The project was **archived 2026-05-17** and **reactivated 2026-10-06** in
 exploratory mode (90-day validation, go/no-go 2027-01-05). Everything that
 matters is tracked in the execution plan; this file only records what the last
-sessions did and what the next one should pick up. The latest handoff is the
-owner's note `agentfi-notas/2026-10-15-orquestracao-paralela.md`, the
-orchestrated round of 2026-10-15. Each front of that round has its own note:
+sessions did and what the next one should pick up.
 
-- C4/C5 package facts: `2026-10-15-c4c5-atualizacao.md`;
-- interview kit: `2026-10-15-kit-entrevistas.md`;
-- public-site redesign: `2026-10-15-identidade-visual.md` and
-  `2026-10-15-revisao-landing.md`.
+The latest handoff is the owner's note
+`agentfi-notas/2026-10-21-fechamento-avanco.md`.
+- **2026-10-21:** it closed the evidence of the 2026-10-17 candidate (`38ddb4f`).
+- **18/10 harness:** archived in `c5-rehearsal-2026-10-18/harness/`.
+- **New candidate in progress:** S14 and T2, on separate branches.
 
-Before it: `2026-10-15-autorizacao-c4-c5.md` (the C4/C5 authorisation
-package), `2026-10-14-preparacao-c4-c5.md` and `2026-10-14-fechamento-g1.md`.
+The 2026-10-17 round is described in `2026-10-17-retomada-validacao.md`. Each
+of its fronts has its own note:
+- front B (C3f): `2026-10-17-frente-b-c3f.md`;
+- the independent review: `2026-10-17-revisao-independente.md`;
+- the pilot checklist: `2026-10-17-checklist-piloto.md`;
+- the C5 fork rehearsal: `c5-rehearsal-2026-10-17/`.
+
+A parallel commercial front (pricing, fund flow, treasury, company and
+regulation) is consolidated in the private note
+`2026-10-17-politica-comercial-tesouraria.md`. It changed no code and no C4 / C5
+parameter.
 
 | Surface | Status |
 |---|---|
-| `main` | `e6e93bd` (#189, 2026-10-15: the C5 runner and the authorisation package; contracts unchanged). Before it, code `162cb06`. 2026-10-14 (evening), the C4/C5 preparation round: #178 approval day, #179 S8, #180 max withdrawals, #181 X5, #182 S9, #183 S7, #184 DB-suite crash, #185 USD cap on ordinary outflows, #186 / #187 review follow-ups, and this docs PR |
-| Gates | **G1 met on `03a429d`**, within its threshold only (not a general security claim). **G2 not met:** needs C4 + C5 on the real network (owner). G3–G5 not started |
-| Tests on `162cb06` | GitHub CI 8/8. Local: backend unit 1576 (13 skipped: opt-in fork suites), **real Postgres 365 / 365 in one run** (20 files; `pool: 'forks'` fixed the Windows crash), Anvil with real contracts 39 (3 skipped: Safe-mode fork file), Foundry 356 (2 skipped: Base Sepolia fork suites; CI's nightly forge counts 355), mcp-server 152, admin 14, E2E 3 / 4 skipped by design |
-| Forks (read-only) | escrow rehearsal 7/7 and Safe mode 3/3 (Base Sepolia), Foundry fork suites 14/14, S7 addresses 10/10 + routes 6/6 (Base, Arbitrum One), max withdrawal 3/3 (Ethereum mainnet). Commands: [local-validation.md](docs/operations/local-validation.md) |
-| Dev stack | validated on `162cb06`: rebuilt with its volumes kept, migration 0025 applied to the dev database at boot, `smoke:dev` and the three examples green (`swap-planner` registers `maxOutflowPerTxUsd: '250'`), no ERROR lines |
-| Migrations | latest `0025_q6_outflow_usd_cap`: `AgentPolicy.maxOutflowPerTxUsd`, NULL on every row = ordinary outflows blocked until the operator sets it (escrow, x402 and withdrawals unaffected). Deploy the API and every worker from the same release, after stopping the old processes |
-| In flight | nothing of ours; Dependabot PRs only |
-| C4 / C5 package (2026-10-15) | prepared, **waiting for the owner's approval**: [c4-c5-checklist.md](docs/project/c4-c5-checklist.md) (package) and [c5-escrow-validation.md](docs/project/c5-escrow-validation.md) (baseline, inventory, amounts, stop criteria, acceptance matrix). Runner `npm run c5:escrow` for the three escrow scenarios, rehearsed end to end on a fork (all PASS): on `75796fb`, then again on `cc0bb90`, whose tree is the candidate `e6e93bd`'s (doc §2.1). `GET /admin/escrow/verification` reports the effective window. No deploy, funding or transaction on Base Sepolia; read-only RPC reads only. Five owner decisions are open (doc §9) |
-| Orchestrated round (2026-10-15) | documentation and materials only; no code, contract or network change. Interview script: G4 needs an executed run, not intent; the Day 30 checkpoint is only an on-track signal (plan V3–V5). Docs now say Turnkey keeps keys in secure enclaves (it is not MPC shards) and drop Safe as the working mode (D19). `SECURITY.md` points to GitHub private vulnerability reporting. HANDOFF §7: the landing repository exists and is private. Public site: redesign on an unpushed branch of `felippeyann/agentfi-landing`, plan X8, publish only on the owner's approval. Owner decisions the same day: **D21** (checkpoint on 2026-11-05; assisted pilot on Base Sepolia after C4 / C5; aggregated interview results public, identifiable records private) and **D22** (site identity B, published after these docs are on `main`). Conduct contact (H15): the unmonitored `conduct@agentfi.io` was removed and a monitored channel is still pending. Handoff of the publication round: owner note `2026-10-15-publicacao-b.md` |
-| Contracts | legacy deployments fail the S9 identity check by construction; C4 redeploys every contract from the merged commit (`npm run contracts:code:check` must match). Checklist: [docs/project/c4-c5-checklist.md](docs/project/c4-c5-checklist.md) — authorisation section first |
-| npm `@agent_fi/mcp-server` | 0.5.0 published (31 tools); 0.6.0 is task X3 (source now has `update_policy.max_outflow_per_tx_usd` and the fixed `pay_agent`) |
+| `main` | `1b4d1c5` (#190, 2026-10-15 docs). Code unchanged since `e6e93bd` (#189: the C5 runner and the authorisation package) |
+| **`rc/2026-10-17`** (local, **not pushed**) | The 2026-10-17 round. Code `38ddb4f`; docs and graph commits after it touch no file under `packages/`. Merged in: the pilot checklist, front B (C3f + review P3s) and front A (X7, A6d, S12). Its PR waits for the owner's authorisation, and its merge on `main` is the new C4 / C5 candidate |
+| Tests on `38ddb4f` (local, Windows 11, Node 24) | `contracts:code:check` OK (`ddc6936bc680`); `spec:check` and `spec:lint` OK; typecheck clean; backend unit 1624 (13 skipped); **real Postgres 388 / 388** (21 files); Anvil with real contracts 55 (3 skipped: the Safe-mode fork file); Foundry 356 (2 skipped); mcp-server 163. ERC-8183 fork suite 7 / 7 on `6e03bf2` and on `38ddb4f` (2026-10-21). C5 runner end to end on `38ddb4f`, local fork (2026-10-18): 37 / 39 / 22 / 16, 0 wei unexplained. Matrix by SHA: C5 doc §2.1 |
+| Gates | **G1 met on `03a429d`**, within its threshold only. **G2 not met:** needs C4 + C5 on the real network (owner); fork evidence never counts. G3–G5 not started |
+| Migrations | unchanged, latest `0025_q6_outflow_usd_cap` |
+| C4 / C5 package | candidate moved to the 2026-10-17 round ([c5-escrow-validation.md](docs/project/c5-escrow-validation.md) §2). Open before C4: the five §9 decisions, publishing the round and the stuck-evaluator procedure (plan C3g, proposal A). No deploy, funding or transaction on any real network |
+| Pilot | [pilot-checklist.md](docs/project/pilot-checklist.md) (new): the assisted G4 pilot on Base Sepolia after C4 / C5 (D21). Its §8 decisions are open |
+| Interviews | checkpoint on 2026-11-05 (D21); kit in the owner's notes; public material in [docs/project/interviews/](docs/project/interviews/) |
+| npm `@agent_fi/mcp-server` | 0.5.0 published (31 tools). 0.6.0 is task X3; the source now has `transfer_token.idempotency_key` |
 
 ## What this round did
 
-Every item was reproduced first (a failing test committed before the fix), on
-the layer that proves it: real Postgres for atomicity, real local contracts on
-Anvil for authority.
+Every fix was reproduced first, with a failing test committed before it, on the
+layer that proves it. One independent review covered the financial
+consequences: no P1, no P2.
 
-1. **S9, contract identity before authority or value (D16).** The backend compares the runtime bytecode of this repository's build with `eth_getCode` (immutables masked), then the configured bindings and the chain id. Unverified → no Safe module enablement, no executor-routed transaction (`503 CONTRACTS_UNVERIFIED`, re-checked just before the broadcast), no policy sync, no escrow. Reproduced first: a wrong executor kept the funds; a wrong module drained a Safe on a fork; a lookalike escrow took the approved USDC.
-2. **AgentPolicyModule (D18):** only the bound executor may validate; the cooldown is checked once per execution. **Safe mode (D19):** FATAL in production / staging.
-3. **S8:** the policy sync is signed by the agent's own wallet and sent straight to the module (it always reverted through the executor). `POST /admin/agents/:id/policy/sync`, `GET …/policy/onchain`; the batch routes refuse the module as a target.
-4. **S7 / X5:** the four "bad checksum" addresses had no code at all; official deployments now, verified on-chain. The same scan found a second wrong Base QuoterV2 (no slippage floor on Base swaps). `pay_agent` sends the transfer route's real contract.
-5. **USD cap on ordinary outflows (D17, migration 0025):** `maxOutflowPerTxUsd`, NULL = blocked, compared in micro-USD; USD limits take at most 6 decimals.
-6. **Max withdrawals (D20):** uncounted only when the exact calldata proves the funds return to the signing wallet (Aave pool, Compound comet); ERC-4626 refused.
-7. **Approval day (D20):** the approval revalidates the daily budget atomically on the approval day; no override.
-8. **Windows DB-suite crash:** Prisma's N-API engine in ended worker threads; the DB config runs with `pool: 'forks'`.
-9. **Automated reviews:** every P1 / P2 was reproduced and fixed in the round (Polygon `"ETH"` in the MCP, strict EIP-55 on the transfer route, the max-withdrawal signer, classifier float bypasses, exact approval-day arithmetic); all threads resolved.
+1. **X7.** MCP transfers take an idempotency key: stdio `transfer_token` (`idempotency_key`) and `/mcp/sse` `execute_transfer` (`idempotencyKey`). On real Postgres, the same key twice gives one row, one reservation and one job.
+2. **A6d.** An agent batch sends `msg.value` = value + the executor fee, and counts the fee against the USD limits. A batch whose value alone equals a limit is now refused. The `FeeEvent` records the fee charged on-chain. Anvil proves it with the real contracts.
+3. **S12.** The Aave allowance reads the Pool. An unreadable provider gives `502 AAVE_POOL_UNAVAILABLE`.
+4. **C3f.**
+   - A stuck evaluator key raises one `evaluator-stuck` alert, with the refund deadline.
+   - A send whose answer was lost is asked about again before another settlement is signed.
+   - The worker's own Q7 state shows in `GET /admin/escrow/verification`, and the C5 preflight requires it on the real run.
+   - Item 2 was not reproduced (fixed since #176).
+   - Proposals A, B and C for the owner (plan C3g).
+5. **Plan.**
+   - New rows: A6e, A7, S14, X7b, C3g.
+   - C3b corrected: the fee sweep is the operator's or the fee wallet's, never the evaluator's.
 
 ## Next session (do this first)
 
-1. **Owner: approve the C4 / C5 package, then run it** (checklist: package first, then §0–§2 with the runner). Open choices in the package: C4 scope (escrow + hook recommended), the operator / fee-wallet addresses, the contest decision. This is the only path to G2.
-2. **Owner: plan §5 questions 9–13.**
-   - 9: mainnet contest window.
-   - 10: `"ETH"` on Polygon at the API.
-   - 11: GMX.
-   - 12: the Uniswap routers.
-   - 13: ERC-4626 max withdrawals.
-   - Also: the per-agent `maxOutflowPerTxUsd` values.
-3. **Owner: the interviews** (the day-30 checkpoint is on 2026-11-05).
-4. **Code without owner input:**
-   - S12 (Aave allowance spender);
-   - A6d (batch fee);
-   - X7 (`transfer_token` idempotency key);
-   - T2 (unit suite on Windows);
-   - A6c / C3f residuals;
+1. **Owner: authorise publishing the round.** Push `rc/2026-10-17`, open its PR and merge after CI. Then check `git diff 38ddb4f <merge> -- packages` is empty (C5 doc §2).
+2. **Owner: the decision card** in the round note:
+   - the C5 §9 decisions plus C3g-A (A1 recommended, to be built before C4);
+   - the pilot §8;
+   - the commercial decisions.
+3. **Owner: approve and run C4 / C5.** This is the only path to G2.
+4. **Owner: the interviews** (checkpoint on 2026-11-05).
+5. **Code with separate owner decision:** C3g-A1 requires approval and a reviewed candidate-hash persistence/reconciliation design, not just a script.
+6. **Code without owner input:**
+   - S14;
+   - R5, the read-only identity command for the pilot;
+   - T2;
    - then X3 / X1 / X2.
 
-_Last touch: 2026-10-15._
+_Last touch: 2026-10-18._

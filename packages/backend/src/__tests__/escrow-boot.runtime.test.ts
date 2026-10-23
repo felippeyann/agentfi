@@ -107,6 +107,7 @@ vi.mock('ioredis', () => ({
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   __stopEscrowRecheckForTests,
+  alsoPublishAs,
   announceProcessCapabilities,
   processCapabilities,
   runEscrowBootCheck,
@@ -286,6 +287,86 @@ describe('Q7 — per-process verification state, forever re-check, gate', () => 
     await tick();
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(escrowConfigGate(84532)).toMatchObject({ allowed: false, block: 'mismatch' });
+  });
+});
+
+describe('C3f item 4 — every check publishes this process\'s verification state (read by GET /admin/escrow/verification)', () => {
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+  it('a matching boot of the worker publishes its chains as verified', async () => {
+    await runEscrowBootCheck('worker');
+    await flush();
+    const report = JSON.parse(redisStore.get('agentfi:escrow-verification:worker') ?? 'null');
+    expect(report).toMatchObject({ role: 'worker', recheckSeconds: expect.any(Number), chains: [expect.objectContaining({ chainId: 84532, state: 'verified', allowed: true })] });
+    expect(Date.parse(report.publishedAt)).not.toBeNaN();
+  });
+
+  // #193 finding 2: with TRANSACTION_WORKER_ENABLED=true, index.ts runs the boot check as 'api'
+  // and hosts the escrow settlement worker in the same process; GET /admin/escrow/verification
+  // reads `:worker`, so that process must publish its state under `worker` too.
+  it('#193 finding 2: the single process (index.ts, TRANSACTION_WORKER_ENABLED=true) hosts the settlement worker, so its state must also be published as `worker`', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../index.ts', import.meta.url), 'utf8');
+    // index.ts: the boot check is always run as 'api' …
+    expect(src).toMatch(/await runEscrowBootCheck\('api'\);/);
+    // … and the same process starts the escrow settlement worker when TRANSACTION_WORKER_ENABLED=true,
+    // then publishes as `worker` right after it started (never when it did not).
+    expect(src).toMatch(/if \(env\.TRANSACTION_WORKER_ENABLED === 'true'\) \{[\s\S]{0,80}escrowSettlementWorker = startEscrowSettlementWorker/);
+    expect(src).toMatch(/escrowSettlementWorker = startEscrowSettlementWorker\(erc8183Deps\);\s*(\/\/[^\n]*\n\s*)*alsoPublishAs\('worker'\);/);
+    expect(src.match(/alsoPublishAs\('worker'\)/g)).toHaveLength(1);
+    // What index.ts does at boot, then after starting the settlement worker:
+    await runEscrowBootCheck('api');
+    alsoPublishAs('worker');
+    await flush();
+    const { peerVerificationView } = await import('../config/escrow-verification-report.js');
+    const api = peerVerificationView(redisStore.get('agentfi:escrow-verification:api') ?? null, new Date());
+    const worker = peerVerificationView(redisStore.get('agentfi:escrow-verification:worker') ?? null, new Date());
+    expect(api.state).toBe('reported');
+    expect(worker.state).toBe('reported');
+    expect(worker).toMatchObject({ chains: [expect.objectContaining({ chainId: 84532, state: 'verified', allowed: true })] });
+  });
+
+  it('#193 finding 2: in the single process every re-check renews both keys (api and worker) with the same state', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    await runEscrowBootCheck('api');
+    alsoPublishAs('worker');
+    await flush();
+    redisStore.clear();
+    state.readFails = true;
+    await vi.advanceTimersByTimeAsync(120_000);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    await flush();
+    for (const key of ['agentfi:escrow-verification:api', 'agentfi:escrow-verification:worker']) {
+      const report = JSON.parse(redisStore.get(key) ?? 'null');
+      expect(report?.chains).toEqual([expect.objectContaining({ chainId: 84532, state: 'unverified', allowed: false })]);
+    }
+  });
+
+  it('#193 finding 2: an API process that did not start the settlement worker never publishes `worker` (two-process topology unchanged)', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    await runEscrowBootCheck('api');
+    await vi.advanceTimersByTimeAsync(120_000);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    await flush();
+    expect([...redisStore.keys()]).toEqual(['agentfi:escrow-verification:api']);
+  });
+
+  it('#193 finding 2: the separate worker process publishes only `worker`, as before (worker-process.ts does not call alsoPublishAs)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../worker-process.ts', import.meta.url), 'utf8');
+    expect(src).toMatch(/await runEscrowBootCheck\('worker'\);/);
+    expect(src).not.toMatch(/alsoPublishAs/);
+    await runEscrowBootCheck('worker');
+    await flush();
+    expect([...redisStore.keys()]).toEqual(['agentfi:escrow-verification:worker']);
+  });
+
+  it('an unreadable chain is published as unverified, with its reason', async () => {
+    state.readFails = true;
+    await runEscrowBootCheck('worker');
+    await flush();
+    const report = JSON.parse(redisStore.get('agentfi:escrow-verification:worker') ?? 'null');
+    expect(report.chains).toEqual([expect.objectContaining({ chainId: 84532, state: 'unverified', allowed: false, reason: expect.any(String) })]);
   });
 });
 

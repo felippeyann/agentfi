@@ -283,7 +283,8 @@ const OUTFLOWS: Op[] = [
     body: { market: 'ETH/USD', collateralToken: USDC, collateralAmount: '25', sizeDeltaUsd: '1', acceptablePrice: '1', isLong: true },
     usd: 25,
   },
-  { name: 'batch native value', url: '/v1/transactions/batch', body: { actions: [{ to: RECIPIENT, value: '10000000000000000' }] }, usd: 20 },
+  // A6d: msg.value = 0.01 ETH + the executor's 30 bps (0.00003 ETH) = 20.06 USD.
+  { name: 'batch native value', url: '/v1/transactions/batch', body: { actions: [{ to: RECIPIENT, value: '10000000000000000' }] }, usd: 20.06 },
   {
     name: 'batch ERC-20 transfer calldata',
     url: '/v1/transactions/batch',
@@ -466,18 +467,40 @@ describeDb('§5-6 — USD cap on ordinary outflows (maxOutflowPerTxUsd), on Post
       expect(res.statusCode, res.body).toBe(202);
     });
 
-    it('batch: native value and ERC-20 transfers are ONE outflow — 15 + 10 = 25 USD passes a 25 cap, the same with 10.01 is refused', async () => {
-      const ok = await mkAgent({ maxOutflowPerTxUsd: '25' });
+    it('batch: native value (with the executor fee, A6d) and ERC-20 transfers are ONE outflow — 15 + 0.045 + 10 = 25.045 USD passes a 25.045 cap, the same with 10.01 is refused', async () => {
+      const ok = await mkAgent({ maxOutflowPerTxUsd: '25.045' });
       const fits = await post(await app(ok.id), '/v1/transactions/batch', {
         actions: [{ to: RECIPIENT, value: '7500000000000000' }, { to: USDC, data: usdcTransferData(10_000_000n) }],
       });
       expect(fits.statusCode, fits.body).toBe(202);
-      const over = await mkAgent({ maxOutflowPerTxUsd: '25' });
+      expect(await volume(ok.id)).toBeCloseTo(25.045, 6);
+      const over = await mkAgent({ maxOutflowPerTxUsd: '25.045' });
       const refused = await post(await app(over.id), '/v1/transactions/batch', {
         actions: [{ to: RECIPIENT, value: '7500000000000000' }, { to: USDC, data: usdcTransferData(10_010_000n) }],
       });
       expect(refused.statusCode, refused.body).toBe(403);
       expect(refused.json()).toMatchObject({ code: 'POLICY_VIOLATION', rule: 'maxOutflowPerTxUsd' });
+    });
+
+    it('A6d behaviour change: a batch whose native value is exactly at the cap is refused (the executor fee is counted); value + fee at the cap passes', async () => {
+      // 0.0125 ETH = 25 USD; the executor adds 30 bps = 0.0000375 ETH = 0.075 USD.
+      const atCap = await mkAgent({ maxOutflowPerTxUsd: '25' });
+      const refused = await post(await app(atCap.id), '/v1/transactions/batch', { actions: [{ to: RECIPIENT, value: '12500000000000000' }] });
+      expect(refused.statusCode, refused.body).toBe(403);
+      expect(refused.json()).toMatchObject({ code: 'POLICY_VIOLATION', rule: 'maxOutflowPerTxUsd', limit: '25' });
+      expect(await rows(atCap.id)).toHaveLength(0);
+      expect(h.simulations).toBe(0);
+
+      const withFee = await mkAgent({ maxOutflowPerTxUsd: '25.075' });
+      const fits = await post(await app(withFee.id), '/v1/transactions/batch', { actions: [{ to: RECIPIENT, value: '12500000000000000' }] });
+      expect(fits.statusCode, fits.body).toBe(202);
+      const row = await m.db.transaction.findFirst({ where: { agentId: withFee.id } });
+      expect(row).toMatchObject({ volumeState: 'RESERVED', volumeReservedUsd: '25.075000', volumePriceSource: 'synthetic' });
+      // The amount sent is value + fee (what the outflow cap and the reservation priced).
+      expect((row!.metadata as { queuePayload: { value: string; feeAmountWei: string } }).queuePayload).toMatchObject({
+        value: '12537500000000000',
+        feeAmountWei: '37500000000000',
+      });
     });
 
     it('batch without a daily limit: a non-canonical ERC-20 transfer (the cap cannot see its amount) is refused; other calldata to an unlisted contract is not (that rule is daily-limit-only)', async () => {

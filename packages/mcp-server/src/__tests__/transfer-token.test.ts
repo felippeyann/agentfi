@@ -7,9 +7,16 @@
  * as `pay_agent` does (`pay-agent.test.ts`).
  * P2: `to` is checked with the backend's address rule (viem strict
  * `isAddress`): a mixed-case address with a bad EIP-55 checksum is refused.
+ *
+ * X7: `transfer_token` takes an optional `idempotency_key` (same format and
+ * validation as `pay_agent`) and sends it as the route's `idempotencyKey`;
+ * every body is checked against the route contract read from
+ * `docs/api/openapi.yaml` (`TransferRequest`). The retry against the real
+ * route and real Postgres: packages/backend/src/__tests__/pay-agent.mcp.db.test.ts.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { contractViolations, readComponentSchema } from './openapi-contract.js';
 
 const apiMock = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn() }));
 
@@ -18,10 +25,11 @@ vi.mock('../api-client.js', async () => {
   return { api: apiMock, ApiError };
 });
 
-import { callTool } from '../server.js';
+import { callTool, listTools } from '../server.js';
 
 const TO = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
 const USDC_POLYGON = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+const TRANSFER_REQUEST = readComponentSchema('TransferRequest');
 
 const log = vi.fn();
 
@@ -114,5 +122,101 @@ describe('transfer_token: `to` is checked with the backend\'s address rule (revi
       amount: '1',
       chainId: 8453,
     });
+  });
+});
+
+/** The one call the tool made: [path, body]. */
+function sent(): [string, Record<string, unknown>] {
+  expect(apiMock.post).toHaveBeenCalledTimes(1);
+  const [path, body] = apiMock.post.mock.calls[0] as [string, Record<string, unknown>];
+  return [path, body];
+}
+
+describe('transfer_token: idempotency_key (X7)', () => {
+  // The route accepts `idempotencyKey` (TransferRequest); before X7 the tool
+  // had no way to send one, so a client retry after a timeout transferred twice.
+  const KEY = 'transfer-report-2026-10-17-0001';
+
+  it('the route contract the test reads: TransferRequest defines idempotencyKey (string, optional)', () => {
+    expect(TRANSFER_REQUEST.properties['idempotencyKey']).toEqual({ type: 'string' });
+    expect(TRANSFER_REQUEST.required).not.toContain('idempotencyKey');
+  });
+
+  it('idempotency_key is sent as idempotencyKey, the body conforming to TransferRequest', async () => {
+    const result = await transfer({ token: 'ETH', chain_id: 8453, idempotency_key: KEY });
+
+    expect(result.isError, JSON.stringify(payloadOf(result))).toBeFalsy();
+    const [path, body] = sent();
+    expect(path).toBe('/v1/transactions/transfer');
+    expect(contractViolations(body, TRANSFER_REQUEST)).toEqual([]);
+    expect(body).toEqual({ token: 'ETH', to: TO, amount: '1', chainId: 8453, idempotencyKey: KEY });
+  });
+
+  it('an ERC-20 transfer carries the key too', async () => {
+    await transfer({ token: 'USDC', chain_id: 137, idempotency_key: KEY });
+    const [, body] = sent();
+    expect(contractViolations(body, TRANSFER_REQUEST)).toEqual([]);
+    expect(body).toEqual({ token: USDC_POLYGON, to: TO, amount: '1', chainId: 137, idempotencyKey: KEY });
+  });
+
+  it('without idempotency_key no idempotencyKey is sent (the body still conforms)', async () => {
+    await transfer({ token: 'ETH', chain_id: 8453 });
+    const [, body] = sent();
+    expect(contractViolations(body, TRANSFER_REQUEST)).toEqual([]);
+    expect(body).not.toHaveProperty('idempotencyKey');
+  });
+
+  it.each([
+    ['too short (15 chars)', 'abcdefghijklmno'],
+    ['too long (129 chars)', 'a'.repeat(129)],
+    ['a character outside [A-Za-z0-9_-]', 'transfer-2026-10-17/0001'],
+    ['whitespace', 'transfer 2026 10 17 0001'],
+  ])('a malformed key (%s) is INVALID_INPUT, nothing sent — same rule as pay_agent', async (_label, key) => {
+    const result = await transfer({ token: 'ETH', chain_id: 8453, idempotency_key: key });
+
+    expect(result.isError).toBe(true);
+    const payload = payloadOf(result);
+    expect(payload).toMatchObject({ code: 'INVALID_INPUT', tool: 'transfer_token' });
+    expect(String(payload['error'])).toMatch(/idempotency_key/);
+    expect(apiMock.post).not.toHaveBeenCalled();
+
+    // pay_agent applies the same rule to the same value.
+    const viaPayAgent = await callTool(
+      'pay_agent',
+      { recipient_address: TO, amount: '1', token_symbol: 'ETH', chain_id: 8453, reason: 'same rule', idempotency_key: key },
+      { log },
+    );
+    expect(payloadOf(viaPayAgent)).toMatchObject({ code: 'INVALID_INPUT' });
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
+  it('the boundary lengths (16 and 128 chars) are accepted', async () => {
+    for (const key of ['a'.repeat(16), 'A_-9'.repeat(32)]) {
+      apiMock.post.mockClear();
+      const result = await transfer({ token: 'ETH', chain_id: 8453, idempotency_key: key });
+      expect(result.isError, JSON.stringify(payloadOf(result))).toBeFalsy();
+      expect(sent()[1]['idempotencyKey']).toBe(key);
+    }
+  });
+
+  it('a replay answered with the stored transaction (200, `id` instead of `transactionId`) still reports its transactionId', async () => {
+    // The route answers a known key with the stored row — the GET /v1/transactions/:id view.
+    apiMock.post.mockResolvedValueOnce({ id: 'tx_first', status: 'CONFIRMED', type: 'TRANSFER', chainId: 8453 });
+
+    const result = await transfer({ token: 'ETH', chain_id: 8453, idempotency_key: KEY });
+
+    expect(result.isError, JSON.stringify(payloadOf(result))).toBeFalsy();
+    expect(payloadOf(result)).toMatchObject({ transactionId: 'tx_first', status: 'CONFIRMED' });
+  });
+
+  it('tools/list: idempotency_key is an optional string whose description says to reuse it on a retry', () => {
+    const tool = listTools().find((t) => t.name === 'transfer_token');
+    expect(tool?.inputSchema.required ?? []).not.toContain('idempotency_key');
+    const property = (tool?.inputSchema.properties ?? {})['idempotency_key'] as { type?: string; description?: string } | undefined;
+    expect(property).toMatchObject({ type: 'string' });
+    expect(property?.description).toMatch(/16-128/);
+    expect(property?.description).toMatch(/same key/i);
+    expect(tool?.description).toMatch(/idempotency_key/);
+    expect(tool?.description).toMatch(/reuse/i);
   });
 });

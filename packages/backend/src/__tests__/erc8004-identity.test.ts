@@ -341,7 +341,8 @@ function makeDeps(seed: { jobs?: Row[]; identities?: Row[]; txs?: Row[] } = {}) 
     address: EVALUATOR,
     chainId: CHAIN_ID,
     writeContract: vi.fn(async () => nextHash()),
-    waitForTransactionReceipt: vi.fn(async () => ({ status: 'success', logs: [] as Log[] })),
+    // C3h D2: the receipt of the transaction the signer sent (its own hash).
+    waitForTransactionReceipt: vi.fn(async (hash: Hex) => ({ status: 'success', logs: [] as Log[], transactionHash: hash })),
   };
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const deps: Erc8183Deps = {
@@ -818,7 +819,7 @@ describe('settlement of jobs already submitted', () => {
       nextHash(),
     );
     const completed = makeLog(AGENT_JOB_ESCROW_ABI, 'JobCompleted', { jobId: 7n, evaluator: EVALUATOR, reason: `0x${'00'.repeat(32)}` }, ESCROW, nextHash());
-    h.signer.waitForTransactionReceipt.mockResolvedValueOnce({ status: 'success', logs: [completed, skipped] });
+    h.signer.waitForTransactionReceipt.mockImplementationOnce(async (hash: Hex) => ({ status: 'success', logs: [completed, skipped], transactionHash: hash }));
 
     const result = await processSettlementJob(h.deps, { data: { jobId: 'job-1', action: 'settle' } });
 
@@ -835,7 +836,7 @@ describe('settlement of jobs already submitted', () => {
     });
     const log = makeLog(REPUTATION_HOOK_ABI, 'FeedbackWritten', { jobId: 7n, agentId: 9598n, value: 100n }, HOOK, nextHash());
     const completed = makeLog(AGENT_JOB_ESCROW_ABI, 'JobCompleted', { jobId: 7n, evaluator: EVALUATOR, reason: `0x${'00'.repeat(32)}` }, ESCROW, nextHash());
-    h.signer.waitForTransactionReceipt.mockResolvedValueOnce({ status: 'success', logs: [completed, log] });
+    h.signer.waitForTransactionReceipt.mockImplementationOnce(async (hash: Hex) => ({ status: 'success', logs: [completed, log], transactionHash: hash }));
 
     const result = await processSettlementJob(h.deps, { data: { jobId: 'job-1', action: 'settle' } });
     expect(result).toMatchObject({ outcome: 'settled', feedbackStatus: 'written' });

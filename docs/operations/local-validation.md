@@ -108,8 +108,26 @@ Exit 0 with "all workers completed" means every lifecycle ended as its mode expe
 - **Runner (trigger):** vitest 1.x runs each file in a worker thread and ends it afterwards; with one process per file (`forks`) or one long-lived thread there is no crash.
 - **Test isolation (ruled out as the cause):** the suites already `$disconnect()` their clients in `afterAll`, and disconnecting does not prevent the crash (the reproduction crashes with and without it). Closing clients is still good hygiene; it is not a fix.
 
-**Fix:** `packages/backend/vitest.config.db.ts` sets `pool: 'forks'` (each DB file in its own process, still one at a time). Measured with the committed config: 9 whole-suite runs, 0 crashes — 4 before the clock fix below (one with that flake), then **5 of 5 at 231 / 231** with both fixes. Duration is unchanged (≈ 1.5–3 min). `npm test` / `npm run test:db` use it on every platform, CI included. The unit suite keeps `threads`: only `agent.search.test.ts` touches the real engine there and none of the 6 full unit runs of this round crashed.
+**Fix:** `packages/backend/vitest.config.db.ts` sets `pool: 'forks'` (each DB file in its own process, still one at a time). Measured with the committed config: 9 whole-suite runs, 0 crashes — 4 before the clock fix below (one with that flake), then **5 of 5 at 231 / 231** with both fixes. Duration is unchanged (≈ 1.5–3 min). `npm test` / `npm run test:db` use it on every platform, CI included. The unit suite kept `threads` then (none of its 6 runs in that round crashed); it crashed later and moved to `forks` too (T2, below).
 
 **A second, unrelated flake found on the way (test timing, fixed):** `escrow-chain-truth.db.test.ts` made the recovery tick and the re-poll treat every row as due with **0-ms cut-offs**. The Docker database's clock ran 1–20 ms ahead of Node, so rows stamped with Postgres `NOW()` looked "in the future" and were skipped: 1–7 re-poll / recovery tests failed in 5 of 29 valid whole-suite runs (threads and forks alike, `main` included), never in a single-file run. Lagging Node's `Date` by 500 ms reproduced it deterministically (25 of 81 failed); the suite now uses a 60-s allowance (as the A6b tests do) and passes under that lag. Measure the skew with `SELECT clock_timestamp()` against `Date.now()` if a time-based DB test flakes.
 
 If a joint run ever crashes again: rerun the file list one file per process to see whether anything fails (`for f in src/__tests__/*.db.test.ts; do npx vitest run --config vitest.config.db.ts "$f" || echo "FAILED $f"; done`), then run the reproduction script to tell an environment crash from a test failure.
+
+### T2 (2026-10-21) — the unit suite crashed too (resolved: `pool: 'forks'`)
+
+**Symptom:** `npx vitest run` (unit config, `threads`; 81 files, 1637 tests) died with `Segmentation fault` / exit 139 in Git Bash, once mid-run and once *after* the summary and the JSON report were written — so `npm test` fails and its DB half never starts even when every test passed.
+
+**Which files load the engine:** a temporary `process.dlopen` probe (not committed) showed exactly two unit files loading `query_engine-windows.dll.node`: `agent.search.test.ts` (real queries) and `pnl.service.test.ts`, which injects a mock client but imports `services/billing/pnl.service.ts` → `db/client.ts` unmocked; Prisma 5's `LibraryEngine` constructor loads the engine at `new PrismaClient()`, with no connect. The reproduction's new mode shows that alone is enough: `node scripts/repro-prisma-worker-thread-crash.mjs 40 instantiate-terminate` died with exit 139 in **6 of 6** runs on the author's machine under load, the `noprisma-terminate` control in 0 of 6. The independent reviewer, on a quieter machine, saw 0 crashes in 7 runs (and none in 3 unit passes on `threads`): the crash is load- and timing-dependent, so a clean run does not disprove it.
+
+**Measurements** (Windows 11, Node 24.14.1, vitest 1.6.1, Prisma 5.22.0; whole unit suite; DB `agentfi_c21_t2` migrated, Redis DB 2; machine shared with other agents' suites, so times are noisy; variants interleaved round by round):
+
+| Configuration | Runs | Crashed | Median wall time |
+|---|---|---|---|
+| `threads` (the old config) | 21 | **3** | 71.9 s in the first session; 38.8 s in the second |
+| `forks`, whole suite (now the config) | 20 | 0 | 83.2 s in the first session; 41.9 s in the second |
+| `threads` + `poolMatchGlobs` → `forks` for the two files | 10 | 0 | 82.4 s (first session) |
+
+Every run that reached the summary listed the same 81 files and 1637 test names (identical sorted lists); the only failures, in both pools, were the load-sensitive 5-s budgets of `env.example.test.ts` / `env.guards.test.ts` (and once `x402-client.body-limit.test.ts`, `admin.pause.routes.test.ts`'s 30-s hook) of §3. A Linux container (local backend image: Alpine, Node 20, 4 CPUs, same tool versions) ran 5 + 5 runs, no crash, 1624 passed / 13 skipped every time, median 157.8 s `threads` vs 132.8 s `forks` — no measurable cost, though that machine was much slower than CI (≈ 32 s for this pass on `ubuntu-latest`). CI time with `forks` is an estimate until the next CI run.
+
+**Why the whole suite and not `poolMatchGlobs`:** a new unit file reaching `db/client.ts` unmocked would load the engine in a thread again; and vitest 1.6.1 matches those globs against absolute paths without `dot`, so a `**/…` glob silently matches nothing in a checkout under a dot directory (`.claude/worktrees/…`): the probe showed all 81 files still in threads.
