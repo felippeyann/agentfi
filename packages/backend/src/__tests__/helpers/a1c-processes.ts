@@ -49,6 +49,7 @@ export function startChild(opts: { name: string; entry: string; args?: string[];
   mkdirSync(logDir, { recursive: true });
   const logFile = join(logDir, `${opts.name}-${Date.now()}.log`);
   const log: WriteStream = createWriteStream(logFile);
+  log.write(`# ${process.execPath} cwd=${BACKEND_DIR} env keys: ${Object.keys(opts.env).sort().join(',')}\n`);
   const proc = spawn(process.execPath, ['--import', 'tsx', '--import', PRELOAD, opts.entry, ...(opts.args ?? [])], {
     cwd: BACKEND_DIR,
     env: opts.env,

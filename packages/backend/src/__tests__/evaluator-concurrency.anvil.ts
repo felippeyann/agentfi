@@ -14,7 +14,7 @@
  * Each process talks to Anvil through its own JSON-RPC proxy (`helpers/rpc-barrier-proxy.ts`).
  *
  * Synchronisation is deterministic — barriers the test controls, no sleep as proof:
- *  - a proxy HOLDS one request: W's `eth_estimateGas` (W inside the lane, nothing signed yet); S's
+ *  - a proxy HOLDS one request: W's first `eth_fillTransaction` (viem's gas / nonce fill on Anvil: W inside the lane, nothing signed yet); S's
  *    `eth_feeHistory` after the typed phrase (S inside its critical section: the re-read);
  *  - the lane owner is read from Redis (`agentfi:lane:<chainId>:<evaluator>` = the lease token); every
  *    SET / release / assertHeld on the lane key is seen through Redis MONITOR, in one ordered timeline
@@ -57,9 +57,12 @@ vi.mock('../api/middleware/logger.js', () => {
   return { logger };
 });
 
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import { Redis } from 'ioredis';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { getAddress, keccak256, parseEventLogs, toBytes, type Abi, type Address, type Hex } from 'viem';
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
 import { ANVIL_KEYS, anvilAccount, anvilTestPort, readArtifact, startLocalChain, type LocalChain } from './helpers/anvil-contracts.js';
@@ -164,6 +167,12 @@ let settlementQueue: { getJob(id: string): Promise<{ promote(): Promise<void>; g
 
 const lower = (s: string | null | undefined) => (s ?? '').toLowerCase();
 const same = (a: string | null | undefined, b: string | null | undefined) => lower(a) === lower(b);
+
+/** Setup progress on stderr (a hang in the shared fixtures is then located at a glance). */
+function step(label: string): void {
+  timeline.push('test', 'step', { label });
+  process.stderr.write(`[a1c-row9 ${new Date().toISOString()}] ${label}\n`);
+}
 
 async function until<T>(what: string, read: () => Promise<T> | T, ok: (v: T) => boolean, timeoutMs = 30_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
@@ -280,7 +289,8 @@ async function wipe(): Promise<void> {
   await db.evaluatorTransaction.deleteMany({});
   await db.evaluatorRecoveryIncident.deleteMany({});
   await db.evaluatorChainState.deleteMany({});
-  await db.$executeRawUnsafe('TRUNCATE TABLE "Job", "Agent" CASCADE');
+  // Fail fast (with a message) instead of waiting forever on a lock a stray process of an earlier run might hold.
+  await db.$transaction([db.$executeRawUnsafe("SET LOCAL lock_timeout = '20s'"), db.$executeRawUnsafe('TRUNCATE TABLE "Job", "Agent" CASCADE')]);
 }
 
 async function cleanRedis(): Promise<void> {
@@ -449,7 +459,9 @@ async function startMonitor(): Promise<void> {
     const cmd = String(args[0]).toLowerCase();
     if (cmd === 'set' && args[1] === LANE_KEY) timeline.push('redis', 'set', { token: args[2], args: args.slice(3), client: source });
     else if (cmd === 'eval' && args[3] === LANE_KEY) {
-      const kind = args[1] === ASSERT_HELD_SCRIPT ? 'assert' : String(args[1]).includes("'del'") ? 'release' : 'eval';
+      // MONITOR escapes the script text: matched by content (assertHeld asks `pttl`; the release `del`s).
+      const script = String(args[1]);
+      const kind = script === ASSERT_HELD_SCRIPT || script.includes("'pttl'") ? 'assert' : script.includes("'del'") ? 'release' : 'eval';
       timeline.push('redis', kind, { token: args[4], client: source });
     } else if (cmd === 'pexpire' && args[1] === LANE_KEY) timeline.push('redis', 'pexpire', { client: source });
     else if ((cmd === 'set' || cmd === 'eval') && (args[1] === RECOVERY_KEY || args[3] === RECOVERY_KEY)) timeline.push('redis', `recovery-${cmd}`, { client: source });
@@ -510,16 +522,22 @@ async function settleAndCheck(jobs: Array<{ job: TestJob; winner: string; settle
 async function laneHolder(): Promise<string | null> {
   return redis.get(LANE_KEY);
 }
+/** Broadcasts a process made (seen by its proxy) after timeline position `from`. */
+const sendsBy = (source: 'W' | 'S' | 'P0', from: number) => timeline.filter((e) => e.source === source && e.kind === 'send-raw', from);
+const INTRUDER = 'a1c-row9-intruder';
 
 // ── lifecycle ─────────────────────────────────────────────────────────────────
 
 beforeAll(async () => {
   if (!AVAIL) return;
+  step('start anvil');
   chain = await startLocalChain({ port: anvilTestPort(40), chainId: CHAIN_ID });
   db = new PrismaClient();
   redis = new Redis(process.env['A1C_REDIS_URL']!);
   p0Lanes = new RedisLaneLock(redis);
+  step('wipe db');
   await wipe();
+  step('clean redis');
   await cleanRedis();
 
   // USDC: the escrow must hold the chain's registered USDC (the boot check compares token()), so the
@@ -536,6 +554,7 @@ beforeAll(async () => {
   await write(deployer, USDC, erc20Abi, 'mint', [requester.address, 1_000n * BUDGET]);
   await write(requester, USDC, erc20Abi, 'approve', [escrow, 1_000n * BUDGET]);
   startBlock = await chain.publicClient.getBlockNumber();
+  step('contracts deployed');
 
   pW = new RpcBarrierProxy('W', chain.rpcUrl, timeline);
   pS = new RpcBarrierProxy('S', chain.rpcUrl, timeline);
@@ -552,6 +571,7 @@ beforeAll(async () => {
   addSettlementJob = (data) => queueMod.addSettlementJob(data);
   settlementQueue = queueMod.escrowSettlementQueue as never;
 
+  step('start W');
   W = startChild({ name: 'W', entry: 'src/__tests__/helpers/a1c-settlement-worker.entry.ts', env: childEnv(commonChildEnv(pW.url)), timeline });
   children.push(W);
   const gate = await W.waitForLine(/^A1C-WORKER-GATE /, 120_000);
@@ -560,6 +580,14 @@ beforeAll(async () => {
 }, 240_000);
 
 afterAll(async () => {
+  // The ordered evidence of the run (proxies, Redis MONITOR, child lines) next to the child logs.
+  try {
+    const dir = join(tmpdir(), 'agentfi-a1c-row9');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `timeline-${Date.now()}.json`), JSON.stringify(timeline.events, (_k, v) => (typeof v === 'bigint' ? v.toString() : v), 1));
+  } catch {
+    // evidence only
+  }
   for (const c of children) await c.stop().catch(() => undefined);
   monitor?.disconnect();
   monitorConn?.disconnect();
@@ -571,6 +599,12 @@ afterAll(async () => {
   redis?.disconnect();
   chain?.stop();
 }, 60_000);
+
+afterEach(async () => {
+  if (!AVAIL) return;
+  // Only the test's own intruder token is ever removed here (a failed 3a must not cascade).
+  if ((await laneHolder()) === INTRUDER) await redis.del(LANE_KEY);
+});
 
 beforeEach(async () => {
   if (!AVAIL) return;
@@ -596,11 +630,11 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     const phrase = await promptOf(S);
     expect(phrase).toBe(`SPEED-UP ${CHAIN_ID} NONCE ${N} COMPLETE ${x.jobId}`);
 
-    // W enters the lane for Y and is parked inside it (eth_estimateGas: lane held, nothing signed yet).
+    // W enters the lane for Y and is parked inside it (its first eth_fillTransaction: lane held, nothing signed yet).
     const m0 = timeline.last;
-    const wHold = pW.hold('eth_estimateGas');
+    const wHold = pW.hold('eth_fillTransaction');
     await addSettlementJob({ jobId: y.jobId, action: 'settle' });
-    await withTimeout(wHold.reached, 60_000, 'W reaches eth_estimateGas');
+    await withTimeout(wHold.reached, 60_000, 'W reaches its first eth_fillTransaction (inside the lane)');
     const wToken = await laneHolder();
     expect(wToken, 'W holds the lane').toBeTruthy();
     expect(timeline.find(isLane('set', wToken!), m0), 'the lane token was written by a SET while W is held').toBeTruthy();
@@ -611,7 +645,7 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     const sToken = sTry!.detail['token'] as string;
     expect(await laneHolder()).toBe(wToken);
     expect(S.exitCode(), 'S is waiting, not finished').toBeUndefined();
-    expect(pS.sendRaws, 'S sent nothing while W holds the lane').toHaveLength(0);
+    expect(sendsBy('S', typedAt), 'S sent nothing while W holds the lane').toHaveLength(0);
     expect(await rowsOf({ origin: 'SCRIPT' })).toHaveLength(0);
     expect(await rowsOf({ jobId: y.jobId }), 'W signed nothing yet').toHaveLength(0);
     expect(pW.aborted).toHaveLength(0);
@@ -684,13 +718,23 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     // A lagging node for W: its `pending` nonce answers N (the head), as if S's replacement were not seen.
     const lagHex = `0x${N.toString(16)}`;
     const m1 = timeline.last;
-    const unlag = pW.rewrite((method, params) => (method === 'eth_getTransactionCount' && params[1] === 'pending' ? lagHex : undefined));
+    // viem fills the nonce with `eth_fillTransaction` on Anvil (or `eth_getTransactionCount(pending)` where
+    // the node lacks it): both answers lag; a fill that already carries an explicit nonce is left alone.
+    const unlag = pW.rewrite((method, params, result) => {
+      if (method === 'eth_getTransactionCount' && params[1] === 'pending') return lagHex;
+      const req = params[0] as { nonce?: string } | undefined;
+      const filled = result as { tx?: { nonce?: string } } | null;
+      if (method === 'eth_fillTransaction' && req && req.nonce === undefined && filled?.tx?.nonce !== undefined) {
+        return { ...filled, tx: { ...filled.tx, nonce: lagHex } };
+      }
+      return undefined;
+    });
     await addSettlementJob({ jobId: y.jobId, action: 'settle' });
     const wTry = await until('W contends for the lane', () => timeline.find((e) => isLane('set')(e) && e.detail['token'] !== sToken, m1), Boolean, 60_000);
     const wToken = wTry!.detail['token'] as string;
     expect(await laneHolder()).toBe(sToken);
     expect(await rowsOf({ jobId: y.jobId }), 'W signed nothing while S holds the lane').toHaveLength(0);
-    expect(pW.count('eth_estimateGas', m1), 'W did not get past the lane').toBe(0);
+    expect(pW.count('eth_fillTransaction', m1), 'W did not get past the lane').toBe(0);
 
     sHold.release();
     const code = await withTimeout(S.exited, 120_000, 'S exits');
@@ -707,7 +751,10 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     const wSets = timeline.filter(isLane('set', wToken), m1);
     expect(wSets[0]!.seq).toBeLessThan(sRelease.seq);
     expect(wSets[wSets.length - 1]!.seq).toBeGreaterThan(sRelease.seq);
-    const lagged = timeline.filter((e) => e.source === 'W' && e.kind === 'rewritten' && e.detail['to'] === lagHex, sRelease.seq);
+    const lagged = timeline.filter(
+      (e) => e.source === 'W' && e.kind === 'rewritten' && JSON.stringify(e.detail['to']).includes(`"${lagHex}"`) && e.detail['method'] === 'eth_fillTransaction',
+      sRelease.seq,
+    );
     expect(lagged.length, 'W read a lagging pending nonce inside the lane').toBeGreaterThan(0);
     const sSend = timeline.find((e) => e.source === 'S' && e.kind === 'send-raw', typedAt)!;
     const wSend = timeline.find((e) => e.source === 'W' && e.kind === 'send-raw', m1)!;
@@ -746,24 +793,27 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     const sToken = await laneHolder();
     expect(sToken).toBeTruthy();
     // The lease is lost: another holder's token is in the key (what an expiry + a new SET leaves).
-    expect(await redis.set(LANE_KEY, 'a1c-row9-intruder', 'PX', 120_000, 'XX')).toBe('OK');
+    expect(await redis.set(LANE_KEY, INTRUDER, 'PX', 120_000, 'XX')).toBe('OK');
     sHold.release();
     const code = await withTimeout(S.exited, 120_000, 'S exits');
     expect(code, S.output()).toBe(3);
     expect(S.output()).toMatch(/the evaluator lane was lost before the send .*nothing sent; the recorded candidate stays SIGNED/);
 
     // Nothing left S: no eth_sendRawTransaction at its proxy; the assertHeld that refused it is in the MONITOR log.
-    expect(pS.sendRaws).toHaveLength(0);
+    expect(sendsBy('S', typedAt), 'S broadcast nothing').toHaveLength(0);
     expect(timeline.find(isLane('assert', sToken!), typedAt), 'S asked assertHeld with its token').toBeTruthy();
     const script = await rowsOf({ origin: 'SCRIPT', nonce: N });
     expect(script).toHaveLength(1);
     expect(script[0]).toMatchObject({ kind: 'SPEED_UP', status: 'SIGNED', jobId: x.jobId });
     expect(script[0]!.sendError).toMatch(/not broadcast/);
     expect((await evaluatorPool()).get(N), 'the pool still has the ORIGINAL at N').toBe(head.hash);
-    expect(await laneHolder(), 'S\'s compare-and-delete did not free a lane that is not its own').toBe('a1c-row9-intruder');
+    expect(await laneHolder(), 'S\'s compare-and-delete did not free a lane that is not its own').toBe(INTRUDER);
     expect(await redis.get(RECOVERY_KEY)).toBeNull();
     const incident = await db.evaluatorRecoveryIncident.findUniqueOrThrow({ where: { id: script[0]!.incidentId! } });
-    expect(incident).toMatchObject({ headNonce: N, openedBy: OPERATOR, closedAt: null });
+    // The open incident is REUSED (openIncident): the one of an earlier run whose queue was still pending at its end
+    // stays open until a script run sees the queue unblocked — its budget (P12) keeps counting, fail-closed.
+    expect(incident).toMatchObject({ openedBy: OPERATOR, closedAt: null });
+    expect(incident.headNonce).toBeLessThanOrEqual(N);
     await redis.del(LANE_KEY);
 
     // W afterwards: two live candidates at N in the ledger (the original + S's unsent speed-up) → Y at N+1.
@@ -798,9 +848,9 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     const N = head.nonce;
 
     const m0 = timeline.last;
-    const wHold = pW.hold('eth_estimateGas');
+    const wHold = pW.hold('eth_fillTransaction');
     await addSettlementJob({ jobId: y.jobId, action: 'settle' });
-    await withTimeout(wHold.reached, 60_000, 'W reaches eth_estimateGas');
+    await withTimeout(wHold.reached, 60_000, 'W reaches its first eth_fillTransaction (inside the lane)');
     const wToken = await laneHolder();
     expect(wToken).toBeTruthy();
     expect(await redis.pexpire(LANE_KEY, 3_000)).toBe(1); // remaining TTL below EVALUATOR_LANE_MIN_REMAINING_MS (30 s)
@@ -852,7 +902,7 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     expect(code, S.output()).toBe(3);
     expect(S.output()).toMatch(new RegExp(`REFUSED: nonce ${N} is no longer in the queue`));
     expect(timeline.find((e) => isLane('set')(e) && e.detail['token'] !== undefined, typedAt), 'S did enter the lane to re-read').toBeTruthy();
-    expect(pS.sendRaws).toHaveLength(0);
+    expect(sendsBy('S', typedAt), 'S broadcast nothing').toHaveLength(0);
     expect(await rowsOf({ origin: 'SCRIPT' }), 'no SCRIPT row written by this run').toHaveLength(scriptRowsAtStart);
     expect((await evaluatorPool()).size).toBe(0);
     await settleAndCheck([
@@ -878,11 +928,11 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     expect(await chainStatus(x.onChainJobId)).toBe(CHAIN_JOB_STATUS.Expired);
     expect(await evaluatorNonce('latest')).toBe(N); // N not consumed
 
-    type(S, phrase);
+    const typedAt = type(S, phrase);
     const code = await withTimeout(S.exited, 120_000, 'S exits');
     expect(code, S.output()).toBe(3);
     expect(S.output()).toMatch(new RegExp(`REFUSED: the plan of nonce ${N} changed since the confirmation \\(fingerprint\\)`));
-    expect(pS.sendRaws).toHaveLength(0);
+    expect(sendsBy('S', typedAt), 'S broadcast nothing').toHaveLength(0);
     expect(await rowsOf({ origin: 'SCRIPT', jobId: x.jobId })).toHaveLength(0);
     expect((await evaluatorPool()).size).toBe(0);
 
@@ -902,7 +952,11 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     expect(rows.find((r) => same(r.txHash, cancel.txHash))!.status).toBe('MINED_SUCCESS');
     expect(rows.find((r) => same(r.txHash, head.hash))!.status).toBe('DEAD');
     expect(await db.job.findUniqueOrThrow({ where: { id: x.jobId } })).toMatchObject({ onChainStatus: 'EXPIRED', resolution: null, platformFeeAmount: null });
-    expect(p0Alerts.filter((a) => a.kind === 'provider-unpaid' && a.jobId === x.jobId)).toHaveLength(1);
+    // The cancel run's reconciliation enqueues the job's own action (addSettlementJob): W mirrors EXPIRED and
+    // raises provider-unpaid — once, across the processes (W's log + P0's alerts).
+    await W!.waitForLine(new RegExp(`^A1C-WORKER-(COMPLETED|FAILED) settle ${x.jobId} `), 60_000);
+    const unpaidInW = W!.lines.filter((l) => /alert.*"provider-unpaid"/.test(l)).length;
+    expect(unpaidInW + p0Alerts.filter((a) => a.kind === 'provider-unpaid' && a.jobId === x.jobId).length).toBe(1);
   }, 300_000);
 
   it('scenario 5: after all the races — every evaluator tx on chain had its ledger row before the broadcast; one winner per nonce, the rest DEAD; nothing live; no decision changed; no proxy request abandoned', async () => {
@@ -931,10 +985,15 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     expect(await rowsOf({ status: { in: ['SIGNED', 'SENT', 'SEND_UNCONFIRMED'] } }), 'nothing left live').toHaveLength(0);
     expect(await db.job.count({ where: { resolution: { not: null } } }), 'no decision changed').toBe(0);
     // every SCRIPT row spent an incident's budget within the per-tx cap
+    const perIncident = new Map<string, bigint>();
     for (const r of await rowsOf({ origin: 'SCRIPT' })) {
       expect(r.incidentId).toBeTruthy();
-      expect(BigInt(r.gasLimit!) * BigInt(r.maxFeePerGas!)).toBeLessThanOrEqual(CAPS_PER_TX);
+      const cost = BigInt(r.gasLimit!) * BigInt(r.maxFeePerGas!);
+      expect(cost).toBeLessThanOrEqual(CAPS_PER_TX);
+      perIncident.set(r.incidentId!, (perIncident.get(r.incidentId!) ?? 0n) + cost);
     }
+    expect(perIncident.size).toBeGreaterThan(0);
+    for (const [, total] of perIncident) expect(total).toBeLessThanOrEqual(BigInt(TEST_CAPS[`EVALUATOR_RECOVERY_MAX_INCIDENT_COST_WEI_${CHAIN_ID}`]!));
     expect([...pW.aborted, ...pS.aborted, ...p0.aborted]).toHaveLength(0);
     expect(timeline.filter((e) => e.kind === 'proxy-error')).toHaveLength(0);
   }, 120_000);

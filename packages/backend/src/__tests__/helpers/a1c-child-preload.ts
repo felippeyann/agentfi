@@ -16,7 +16,10 @@
  *     (`readline.question` on that pipe). See the report: what is NOT proven is the terminal itself.
  */
 import https from 'node:https';
-import { PUBLIC_RPC_URLS, RPC_URLS } from '../../config/chains.js';
+
+// Imported by URL with the .ts extension: the module the backend reaches as `../config/chains.js`
+// (tsx maps it to this same file URL, so this is the same module instance).
+const { PUBLIC_RPC_URLS, RPC_URLS } = (await import(new URL('../../config/chains.ts', import.meta.url).href)) as typeof import('../../config/chains.js');
 
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
