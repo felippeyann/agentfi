@@ -377,7 +377,12 @@ export function createEvaluatorSigner(chainId: number, privateKey: Hex): Evaluat
     },
     async waitForTransactionReceipt(hash) {
       let replacedReason: EvaluatorReceipt['replacedReason'];
-      const receipt = await publicClient.waitForTransactionReceipt({
+      // F-B1: viem 2.57.3 shares ONE block watcher per client. A second concurrent wait on the same client
+      // never gets the `emitOnBegin` tick, so it never reads its transaction while pending and cannot
+      // recognise a replacement once the transaction is gone (it ends at the timeout, unalerted). Each wait
+      // gets its own client (same transport): its own watcher, its own first read; no cached block number.
+      const waiter = createPublicClient({ chain, transport, cacheTime: 0 });
+      const receipt = await waiter.waitForTransactionReceipt({
         hash,
         timeout: EVALUATOR_RECEIPT_TIMEOUT_MS,
         // C3h D2: recorded, never trusted — the caller compares the receipt's hash with `hash`.

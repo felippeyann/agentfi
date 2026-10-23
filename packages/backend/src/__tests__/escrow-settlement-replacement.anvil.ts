@@ -311,8 +311,8 @@ describeDb('C3h D2 — a same-nonce replacement of the evaluator settlement whil
     expect(h.finalized).toEqual([{ jobId, outcome: 'CONFIRMED' }]);
   });
 
-  // A1-DEFECT F-B1 (reproduced; fixed in the next commit — it.fails → it).
-  it.fails('F-B1: two settlements waiting on the SAME signer — the second one\'s transaction is replaced (cancel): detected promptly (evaluator-replaced), nothing finalized from the replacement\'s receipt', async () => {
+  // A1-DEFECT F-B1 — FIXED (23/10): one viem client per receipt wait in the evaluator signer (it.fails → it).
+  it('F-B1: two settlements waiting on the SAME signer — the second one\'s transaction is replaced (cancel): detected promptly (evaluator-replaced), nothing finalized from the replacement\'s receipt', async () => {
     const x = await submittedOnChain();
     const y = await submittedOnChain();
     const xJob = await deliveredRow(x);
