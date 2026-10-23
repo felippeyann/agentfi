@@ -309,6 +309,14 @@ export const ASSERT_HELD_SCRIPT = [
  * Checks a Redis-held lease: the Lua answer first, then the holder's own
  * clock (`localDeadline`, computed from a time taken BEFORE the SET, so it is
  * never later than the key's real expiry). Any doubt throws.
+ *
+ * #194 review (4363039159): the time left is judged AFTER the awaited answer.
+ * Both the local deadline and the PTTL are re-based on the clock at the
+ * answer: the local remaining time is recomputed, and the PTTL loses the whole
+ * round trip (the script ran at some point between the call and the answer,
+ * so `pttl - roundTrip` never over-states what is left). A slow reply can only
+ * make the check refuse, never accept a lease that expired or fell below the
+ * margin while the answer was in flight.
  */
 async function assertRedisLeaseHeld(
   redis: LaneRedis,
@@ -319,18 +327,23 @@ async function assertRedisLeaseHeld(
   minRemainingMs: number,
 ): Promise<void> {
   assertMargin(lane, minRemainingMs);
-  const localRemaining = localDeadline - Date.now();
-  if (localRemaining <= 0) throw new LeaseLostError(lane, 'expired', localRemaining, minRemainingMs);
+  const calledAt = Date.now();
+  const localRemainingBefore = localDeadline - calledAt;
+  if (localRemainingBefore <= 0) throw new LeaseLostError(lane, 'expired', localRemainingBefore, minRemainingMs);
   let answer: unknown;
   try {
     answer = await redis.eval(ASSERT_HELD_SCRIPT, 1, redisKey, token, String(Math.ceil(minRemainingMs)));
   } catch (err) {
     throw new LeaseLostError(lane, 'unverifiable', null, minRemainingMs, { cause: err });
   }
+  const answeredAt = Date.now();
   const [status, pttl] = Array.isArray(answer) ? answer.map(Number) : [Number.NaN, Number.NaN];
   if (status === -1) throw new LeaseLostError(lane, 'not-held', null, minRemainingMs);
   if (status !== 0 && status !== 1) throw new LeaseLostError(lane, 'unverifiable', null, minRemainingMs);
-  const remaining = Math.min(pttl!, localRemaining);
+  if (!Number.isFinite(pttl)) throw new LeaseLostError(lane, 'unverifiable', null, minRemainingMs);
+  const localRemaining = localDeadline - answeredAt;
+  const pttlNow = pttl! - Math.max(0, answeredAt - calledAt);
+  const remaining = Math.min(pttlNow, localRemaining);
   if (remaining <= 0) throw new LeaseLostError(lane, 'expired', remaining, minRemainingMs);
   if (status === 0 || remaining < minRemainingMs) throw new LeaseLostError(lane, 'margin', remaining, minRemainingMs);
 }

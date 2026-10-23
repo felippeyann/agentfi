@@ -227,10 +227,10 @@ describe('RedisLaneLock leases — Lua semantics on a fake Redis', () => {
     expect(redis.store.has('agentfi:lane:k')).toBe(false);
   });
 
-  // #194 review id 4363039159 (P2, exclusion safety): the local remaining time and the PTTL were taken BEFORE the
-  // awaited Redis answer. A reply delayed past the deadline (or below the margin) must not be accepted: both
+  // #194 review id 4363039159 (P2, exclusion safety) — FIXED: the local remaining time and the PTTL were taken
+  // BEFORE the awaited Redis answer; both are now re-based on the clock at the answer. A reply delayed past the deadline (or below the margin) must not be accepted: both
   // evaluator send paths broadcast right after assertHeld.
-  it.fails('#194-4363039159: a Redis answer delayed PAST the lease deadline → expired (not accepted)', async () => {
+  it('#194-4363039159: a Redis answer delayed PAST the lease deadline → expired (not accepted)', async () => {
     const redis = new FakeRedis();
     redis.frozen = true; // the store still shows the token: only the holder's clock can refuse
     const lock = new RedisLaneLock(redis as never, { ttlMs: 1_000 });
@@ -239,7 +239,7 @@ describe('RedisLaneLock leases — Lua semantics on a fake Redis', () => {
     expect(await lostReason(lease.assertHeld(0))).toBe('expired');
   });
 
-  it.fails('#194-4363039159: a Redis answer delayed BELOW the margin → margin (not accepted)', async () => {
+  it('#194-4363039159: a Redis answer delayed BELOW the margin → margin (not accepted)', async () => {
     const redis = new FakeRedis();
     const lock = new RedisLaneLock(redis as never, { ttlMs: 1_000 });
     const lease = await lock.acquire('k');
@@ -278,7 +278,7 @@ describe('recovery lock — owner + PID, compare-and-delete (fake Redis)', () =>
     expect(await bobs.release()).toBe(false);
   });
 
-  it.fails('#194-4363039159: the recovery lock — a Redis answer delayed past its deadline → expired (not accepted)', async () => {
+  it('#194-4363039159: the recovery lock — a Redis answer delayed past its deadline → expired (not accepted)', async () => {
     const redis = new FakeRedis();
     redis.frozen = true;
     const mine = await acquireRecoveryLock(redis as never, 84532, { owner: 'alice', pid: 4242 }, { ttlMs: 10_000 });
