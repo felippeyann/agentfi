@@ -381,6 +381,10 @@ export function createEvaluatorSigner(chainId: number, privateKey: Hex): Evaluat
       // never gets the `emitOnBegin` tick, so it never reads its transaction while pending and cannot
       // recognise a replacement once the transaction is gone (it ends at the timeout, unalerted). Each wait
       // gets its own client (same transport): its own watcher, its own first read; no cached block number.
+      // Accepted cost (review P3-3): viem's module-level responseCache keeps one small entry per client
+      // (`blockNumber.<client.uid>`, ~100 B) that is never evicted, so a long-lived worker grows by one entry
+      // per wait; each concurrent wait also polls eth_blockNumber on its own. Watchers/observers are removed
+      // when the wait ends (receipt, error, timeout). Do not reach into viem internals to clear the cache.
       const waiter = createPublicClient({ chain, transport, cacheTime: 0 });
       const receipt = await waiter.waitForTransactionReceipt({
         hash,
