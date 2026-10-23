@@ -41,7 +41,8 @@ vi.hoisted(() => {
     throw new Error('evaluator-concurrency.anvil.ts needs A1C_REDIS_URL on CI (a dedicated Redis, e.g. redis://localhost:6391/1)');
   }
   const redisUrl = process.env['A1C_REDIS_URL'] ?? 'redis://127.0.0.1:6391/1';
-  if (/:6379(\/|$)/.test(redisUrl)) throw new Error('evaluator-concurrency.anvil.ts must not use Redis 6379 (the dev stack)');
+  // Review P3-7: an implicit port is 6379 too (redis://localhost/1), so read the parsed port, not the text.
+  if ((new URL(redisUrl).port || '6379') === '6379') throw new Error('evaluator-concurrency.anvil.ts must not use Redis 6379 (the dev stack)');
   // P2-2: the suite deletes `agentfi:*` and the settlement queue in this Redis db — never db 0 / an implicit db.
   const redisDb = /^\/(\d+)$/.exec(new URL(redisUrl).pathname)?.[1];
   if (redisDb === undefined || Number(redisDb) < 1) {
