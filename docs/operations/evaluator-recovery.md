@@ -36,9 +36,12 @@ npm run evaluator:recover -- --chain 84532
 ```
 
 The dry-run signs nothing new. **Every run first runs the reconciliation pass (spec §5.2), the same one the
-worker runs on every tick.** That pass may send the **identical** bytes of a lost head again (R2-P1-3:
-the head, the only live candidate at its nonce, unknown to every node, simulation passing), so even a
-dry-run can rebroadcast an already recorded transaction. It never signs a new one. The dry-run then shows:
+worker runs on every tick.** In the worker that pass may send the **identical** bytes of a lost head again
+(R2-P1-3: the head, the only live candidate at its nonce, unknown to every node, simulation passing). In the
+script it runs before this process has verified the on-chain configuration (Q7), so its own rebroadcast is
+refused there and a dry-run transmits nothing; use `--execute rebroadcast` for a lost head. The script then
+verifies the configuration once (read-only) so the plan sees the real gate, and verifies it again after the
+typed confirmation. It never signs a new transaction on a dry-run. The dry-run then shows:
 
 - **Key and nonces:** the evaluator address and its balance; the `latest`, `pending` and proof-tag nonces.
 - **The queue `[latest, pending)`**, for each nonce:
@@ -123,7 +126,8 @@ later (final review F-P2-1).
    nothing.
 2. The script takes the per-chain recovery lock. A second operator stops here. Before each nonce it
    checks that the lock is still its own (the owner token); if not, it stops.
-3. It verifies the on-chain configuration fully (Q7) and opens (or reuses) the recovery incident.
+3. It verifies the on-chain configuration fully (Q7) again — the first verification ran before the plan —
+   and opens (or reuses) the recovery incident.
 4. For each nonce, from the head backwards, **inside the evaluator lane** (the worker shares the same lane):
    1. It re-reads everything and compares the fingerprint of that nonce. It aborts (exit 3, nothing
       sent; run the dry-run again) if the nonce left the queue, or if something **of that nonce**

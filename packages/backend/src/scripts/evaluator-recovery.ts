@@ -834,6 +834,15 @@ export async function runEvaluatorRecovery(argv: readonly string[], deps: Recove
     } catch (err) {
       print(`  ! reconciliation pass failed: ${(err as Error).message}`);
     }
+    // #194 review (4363039154): this process's Q7 gate starts empty, so the plan (the rebroadcast check, the
+    // dry-run's gate line) would always see it closed. Run the full verification once now — read-only, AFTER the
+    // reconciliation pass so that pass never rebroadcasts on a dry-run — and keep both later checks: the full
+    // verification again after the typed confirmation, and the gate inside the lane. A failure here only leaves the
+    // gate closed (fail closed): the plan shows NOT VERIFIED and refuses.
+    if (deps.verifyConfig) {
+      const pre = await deps.verifyConfig(args.chainId);
+      if (!pre.ok) print(`  ! on-chain configuration not verified (Q7): ${pre.reason}`);
+    }
     let s = await readSituation(deps, args);
     describe(s, print);
     if (!args.execute) return { exitCode: 0, output: lines.join('\n') };

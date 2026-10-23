@@ -1061,11 +1061,12 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     expect(unpaidInW + unpaidInP0).toBe(1);
   }, 300_000);
 
-  // #194 review id 4363039154 (P2, functional): through the PRODUCTION CLI (`main()`: the process's own
-  // escrowConfigGate + verifyEscrowConfigOnce), `--execute rebroadcast` is refused GATE_CLOSED before the
+  // #194 review id 4363039154 (P2, functional) — FIXED: through the PRODUCTION CLI (`main()`: the process's own
+  // escrowConfigGate + verifyEscrowConfigOnce), `--execute rebroadcast` was refused GATE_CLOSED before the
   // confirmation — the gate starts empty in the script's process and the first verification ran only after the
-  // phrase. S here is that exact path (the real script as its own process, production deps).
-  it.fails('scenario 6 — #194-4363039154: a lost head (dropped from every node) → the production CLI rebroadcasts it (prompt, identical bytes, same hash); the job settles once on that hash', async () => {
+  // phrase. The script now verifies once before it reads the plan. S here is that exact path (the real script
+  // as its own process, production deps).
+  it('scenario 6 — #194-4363039154: a lost head (dropped from every node) → the production CLI rebroadcasts it (prompt, identical bytes, same hash); the job settles once on that hash', async () => {
     const x = await delivered();
     await automine(false);
     const head = await stuckHead(x);
