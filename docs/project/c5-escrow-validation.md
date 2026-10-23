@@ -41,7 +41,9 @@ directory: no contract, no migration, no dependency changed.
 
 ### 2.1 Rehearsed, candidate and re-checked commits
 
-**A1 candidate (C3g-A1), code `199e674`** (local branch `feat/2026-10-22-a1`, not on `main`). It is `67ba588` (C3h) plus:
+**A1 candidate after the closing round (2026-10-23), code `fafe375`** (same local branch, not on `main`). `199e674` plus three backend fixes (D-C: foreign-transaction search reads an uncached head; F-B1: one viem client per evaluator receipt wait; D-R9-1: the recovery line in `escrowError` is written only after the send) and the row-9 multi-process test. Contracts unchanged (`ddc6936bc680`). **No evidence of `199e674` is carried over.** On `e77733f`, 2026-10-23, locally: unit 1740 / 13 skipped; real Postgres 499 / 0 todo; Anvil with real contracts 108 / 3 skipped / 0 todo (file by file); E2E 3 / 4 skipped; ERC-8183 fork suite 7 / 7; **C5 runner end to end on a fork 37 / 39 / 22 / 16, 0 wei unexplained** (isolated Redis, `EVALUATOR_PROOF_TAG=latest`); Foundry 356 / 0 / 2; `spec:check`, `spec:lint`, `contracts:code:check` OK. `e77733f..fafe375` changes only tests, CI and four comment lines (runtime equivalent); the changed suites were rerun on `20ed9dd` and the row-9 suite on `fafe375`. Evidence files in the owner's notes, `c5-rehearsal-2026-10-23/`.
+
+**Previous A1 candidate (C3g-A1), code `199e674`** (local branch `feat/2026-10-22-a1`, not on `main`). It is `67ba588` (C3h) plus:
 - the evaluator candidate ledger (migration 0026);
 - the lane;
 - the gates;
