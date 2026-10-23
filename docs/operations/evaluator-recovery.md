@@ -51,6 +51,8 @@ dry-run can rebroadcast an already recorded transaction. It never signs a new on
   - the replacement count and interval;
   - the plan fingerprint. It covers the chain, the key, the nonce, the candidates of the nonce with
     their status, the job's on-chain status and the operation. It does **not** cover the fees (§3.3).
+    It is **per nonce**: a candidate at another nonce (for example the worker's new transaction at N+1)
+    does not change the fingerprint of N.
 - **Head classification:**
 
   | Class | Action |
@@ -123,8 +125,15 @@ later (final review F-P2-1).
    checks that the lock is still its own (the owner token); if not, it stops.
 3. It verifies the on-chain configuration fully (Q7) and opens (or reuses) the recovery incident.
 4. For each nonce, from the head backwards, **inside the evaluator lane** (the worker shares the same lane):
-   1. It re-reads everything and compares the fingerprint. If the plan changed (a new candidate, a
-      status, the job on-chain), it aborts, nothing is sent, and you run the dry-run again.
+   1. It re-reads everything and compares the fingerprint of that nonce. It aborts (exit 3, nothing
+      sent; run the dry-run again) if the nonce left the queue, or if something **of that nonce**
+      changed: a new or replaced candidate at N, a candidate's status at N, or the affected job's
+      on-chain status.
+
+      A candidate the worker signed meanwhile at **another** nonce (N+1, chosen from the ledger inside
+      the same lane) does not change the fingerprint of N. The script goes on with N; this is safe,
+      because the replacement only ever targets N. If those nonces are still pending at the end of the
+      run, the incident stays open and the last line lists them (`stays open (queue: N, N+1)`).
    2. It checks Q7, the caps and the balance again, freshly read. It checks the **confirmed** fees:
       - it aborts (exit 3, nothing sent) if they no longer beat the most expensive live candidate of the
         nonce by the replacement bump on both fees, or if `maxFeePerGas` is below the current base fee;
@@ -134,10 +143,13 @@ later (final review F-P2-1).
    3. It signs with the explicit nonce and **the confirmed fees**.
    4. It records the SCRIPT candidate together with the job stamp. The operator and the note go only into
       that ledger row. The budget is re-checked under the ledger lock.
-   5. It writes one **neutral** line into `Job.escrowError`, which the requester and the provider can
-      read through the API: `evaluator recovery: <operation> sent at nonce <N>`. It never carries the
-      operator's name or note (D-i).
-   6. It confirms the lease is still held, then sends.
+   5. It confirms the lease is still held, then sends. If the lease was lost, it sends nothing and
+      exits with 3; the SCRIPT row stays SIGNED until the reconciliation proves it dead.
+   6. Only after the send returned, it writes one **neutral** line into `Job.escrowError`, which the
+      requester and the provider can read through the API: `evaluator recovery: <operation> sent at
+      nonce <N>` when the node accepted the transaction (or already knew it), `… attempted at nonce <N>`
+      for any other answer. It never carries the operator's name or note (D-i). A lost lease writes no
+      line.
 5. It waits for the receipt **outside** the lane, for at most `EVALUATOR_RECOVERY_RECEIPT_WAIT_SECONDS`
    (90 s).
 6. It runs the reconciliation. The existing path settles the job from the chain.
