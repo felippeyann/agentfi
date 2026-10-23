@@ -25,13 +25,37 @@
  * ledger row of that hash must already exist ("no unauthorised send").
  *
  * Resources: Postgres DATABASE_URL (migrated; `agentfi_a1c_row9_anvil`), Redis A1C_REDIS_URL (default
- * redis://127.0.0.1:6391/1 — never 6379), Anvil `anvilTestPort(40)`, chain id 84532, Anvil keys only.
+ * redis://127.0.0.1:6391/1 — never 6379; required explicitly on CI), Anvil `anvilTestPort(40)`, chain id 84532,
+ * Anvil keys only.
+ *
+ * The suite WIPES its database (the A1 ledger of every chain, TRUNCATE "Job", "Agent" CASCADE) and its Redis db
+ * (`agentfi:*`, `bull:escrow-settlement:*`). Before anything connects, it refuses (file error, nothing touched):
+ *  - a database whose name is not dedicated — only `test` or a name ending in `_anvil` / `_test` (so never
+ *    `agentfi`, the docker-compose dev database);
+ *  - a Redis URL on port 6379 (the dev stack) or without an explicit db index ≥ 1.
  */
 import { vi } from 'vitest';
 
 vi.hoisted(() => {
+  if (process.env['CI'] && !process.env['A1C_REDIS_URL']) {
+    throw new Error('evaluator-concurrency.anvil.ts needs A1C_REDIS_URL on CI (a dedicated Redis, e.g. redis://localhost:6391/1)');
+  }
   const redisUrl = process.env['A1C_REDIS_URL'] ?? 'redis://127.0.0.1:6391/1';
   if (/:6379(\/|$)/.test(redisUrl)) throw new Error('evaluator-concurrency.anvil.ts must not use Redis 6379 (the dev stack)');
+  // P2-2: the suite deletes `agentfi:*` and the settlement queue in this Redis db — never db 0 / an implicit db.
+  const redisDb = /^\/(\d+)$/.exec(new URL(redisUrl).pathname)?.[1];
+  if (redisDb === undefined || Number(redisDb) < 1) {
+    throw new Error(`evaluator-concurrency.anvil.ts refuses Redis ${redisUrl}: name an explicit, dedicated db index ≥ 1 (e.g. redis://127.0.0.1:6391/1)`);
+  }
+  // P2-2: the suite truncates Job / Agent and the A1 ledger — only in a dedicated database.
+  if (process.env['DATABASE_URL']) {
+    const dbName = new URL(process.env['DATABASE_URL']).pathname.replace(/^\//, '');
+    if (!(dbName === 'test' || /_(anvil|test)$/.test(dbName))) {
+      throw new Error(
+        `evaluator-concurrency.anvil.ts refuses to wipe database "${dbName || '(none)'}": point DATABASE_URL at a dedicated database whose name ends in _anvil or _test (e.g. agentfi_a1c_row9_anvil)`,
+      );
+    }
+  }
   process.env['A1C_REDIS_URL'] = redisUrl;
   process.env['REDIS_URL'] = redisUrl;
   const required: Array<[string, string]> = [
@@ -289,7 +313,8 @@ async function delivered(ttlSeconds = 3600n): Promise<TestJob> {
 }
 
 async function wipe(): Promise<void> {
-  // This database is row 9's own (agentfi_a1c_row9_anvil): the ledger first (ON DELETE RESTRICT), then jobs and agents.
+  // A dedicated database only (name `test` / `*_anvil` / `*_test`, enforced in vi.hoisted at the top of the file,
+  // before anything connects): the ledger first (ON DELETE RESTRICT), then jobs and agents.
   await db.evaluatorTransaction.deleteMany({});
   await db.evaluatorRecoveryIncident.deleteMany({});
   await db.evaluatorChainState.deleteMany({});
