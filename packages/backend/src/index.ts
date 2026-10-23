@@ -31,7 +31,7 @@ import {
 } from './queues/escrow-settlement.queue.js';
 import { erc8183Deps } from './services/job/escrow-erc8183.runtime.js';
 import { configuredEscrowChainIds, escrowEvaluatorAddress } from './config/env.js';
-import { announceProcessCapabilities, processCapabilities, runEscrowBootCheck } from './config/escrow-boot.runtime.js';
+import { alsoPublishAs, announceProcessCapabilities, processCapabilities, runEscrowBootCheck } from './config/escrow-boot.runtime.js';
 import { runPolicyStackBootCheck } from './config/policy-stack-boot.runtime.js';
 
 // Fastify v5 expects a logger CONFIG object (not a pino instance). We pass
@@ -190,6 +190,9 @@ async function start() {
       if (env.TRANSACTION_WORKER_ENABLED === 'true') {
         try {
           escrowSettlementWorker = startEscrowSettlementWorker(erc8183Deps);
+          // #193 finding 2: this process is also the worker — publish its
+          // verification state as `worker` too (GET /admin/escrow/verification).
+          alsoPublishAs('worker');
           await scheduleEscrowExpirySweep();
         } catch (err) {
           logger.error({ err }, 'Escrow settlement worker failed to start');

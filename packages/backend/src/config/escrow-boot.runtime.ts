@@ -116,10 +116,37 @@ async function reportTransitions(role: ProcessRole, transitions: readonly Verifi
  * C3f item 4: after every check, this process's verification state goes to
  * Redis, so `GET /admin/escrow/verification` on the API can show the
  * worker's (the process that signs settlements and sends escrow steps).
+ * Published under every role this process plays: its boot role and, in the
+ * single-process topology (`index.ts` with TRANSACTION_WORKER_ENABLED=true),
+ * `worker` once the settlement worker is started (`alsoPublishAs`).
  * Best effort, never awaited by the gate.
  */
-function publishState(role: ProcessRole): void {
-  void publishEscrowVerificationReport(role, escrowVerificationSnapshot({ withReason: true }), escrowVerificationSettings()).catch(() => undefined);
+const publishRoles = new Set<ProcessRole>();
+let checkedOnce = false;
+
+function publishState(): void {
+  checkedOnce = true;
+  const chains = escrowVerificationSnapshot({ withReason: true });
+  const settings = escrowVerificationSettings();
+  for (const role of publishRoles) {
+    void publishEscrowVerificationReport(role, chains, settings).catch(() => undefined);
+  }
+}
+
+/**
+ * #193 finding 2: the API process that also hosts the escrow settlement
+ * worker (TRANSACTION_WORKER_ENABLED=true) publishes the same verification
+ * state as `worker` too — at once, and at every later re-check — so
+ * `GET /admin/escrow/verification` does not report the worker `missing`.
+ * Call it only once the settlement worker has actually started. The gate and
+ * the separate worker process are unchanged.
+ */
+export function alsoPublishAs(role: ProcessRole): void {
+  if (publishRoles.has(role)) return;
+  publishRoles.add(role);
+  if (checkedOnce) {
+    void publishEscrowVerificationReport(role, escrowVerificationSnapshot({ withReason: true }), escrowVerificationSettings()).catch(() => undefined);
+  }
 }
 
 let recheckTimer: ReturnType<typeof setInterval> | null = null;
@@ -149,7 +176,7 @@ function startRecheckLoop(role: ProcessRole): void {
         timeoutMs: Math.min(10_000, intervalMs),
       });
       const transitions = recordEscrowChecks(checks, chains);
-      publishState(role);
+      publishState();
       applyVerdict(role, escrowBootVerdict(env.NODE_ENV, checks), { quietUnreadable: true });
       for (const check of checks) {
         if (check.unreadable) logger.warn({ role, chainId: check.chainId, err: check.unreadable }, 'ERC-8183 configuration re-check failed — chain unverified');
@@ -177,12 +204,13 @@ function startRecheckLoop(role: ProcessRole): void {
 export async function runEscrowBootCheck(role: ProcessRole): Promise<EscrowBootVerdict | null> {
   const chains = escrowExpectations();
   if (chains.length === 0) return null;
+  publishRoles.add(role);
   let verdict: EscrowBootVerdict;
   try {
     const checks = await checkEscrowDeployments({ chains, reader, chainIdReader, codeReader });
     verdict = escrowBootVerdict(env.NODE_ENV, checks);
     const transitions = recordEscrowChecks(checks, chains);
-    publishState(role);
+    publishState();
     applyVerdict(role, verdict);
     await reportTransitions(role, transitions);
   } catch (err) {
@@ -194,10 +222,12 @@ export async function runEscrowBootCheck(role: ProcessRole): Promise<EscrowBootV
   return verdict;
 }
 
-/** Testing hook: stops the background re-check. */
+/** Testing hook: stops the background re-check and forgets the published roles. */
 export function __stopEscrowRecheckForTests(): void {
   if (recheckTimer) clearInterval(recheckTimer);
   recheckTimer = null;
+  publishRoles.clear();
+  checkedOnce = false;
 }
 
 /** This process's capabilities from its environment and what it started. */
