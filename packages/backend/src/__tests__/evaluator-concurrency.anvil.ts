@@ -355,6 +355,7 @@ interface Row {
   createdAt: Date;
   gasLimit: string | null;
   maxFeePerGas: string | null;
+  rawTx: string | null;
 }
 const rowsOf = (where: Record<string, unknown>) => db.evaluatorTransaction.findMany({ where, orderBy: { createdAt: 'asc' } }) as unknown as Promise<Row[]>;
 /** Polls (with a timeout) until the job's first candidate is recorded AND answered SENT. */
@@ -1058,6 +1059,49 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     const unpaidInP0 = p0Alerts.filter((a) => a.kind === 'provider-unpaid' && a.jobId === x.jobId).length;
     timeline.push('test', '4b-provider-unpaid', { unpaidInW, unpaidInP0 });
     expect(unpaidInW + unpaidInP0).toBe(1);
+  }, 300_000);
+
+  // #194 review id 4363039154 (P2, functional): through the PRODUCTION CLI (`main()`: the process's own
+  // escrowConfigGate + verifyEscrowConfigOnce), `--execute rebroadcast` is refused GATE_CLOSED before the
+  // confirmation — the gate starts empty in the script's process and the first verification ran only after the
+  // phrase. S here is that exact path (the real script as its own process, production deps).
+  it.fails('scenario 6 — #194-4363039154: a lost head (dropped from every node) → the production CLI rebroadcasts it (prompt, identical bytes, same hash); the job settles once on that hash', async () => {
+    const x = await delivered();
+    await automine(false);
+    const head = await stuckHead(x);
+    const N = head.nonce;
+    const [row] = await rowsOf({ jobId: x.jobId });
+    // lost-send: no node knows the head any more
+    await chain.rpc('anvil_dropTransaction', [head.hash]);
+    let sent = false;
+    try {
+      const S = startS(execArgs('rebroadcast', N));
+      const first = await Promise.race([
+        S.waitForLine(/^Type exactly: /, 120_000).then(() => 'prompt' as const),
+        S.exited.then(() => 'exited' as const),
+      ]);
+      expect(first, S.output()).toBe('prompt');
+      expect(S.output()).toMatch(/config gate \(Q7, this process\): verified/);
+      const phrase = await promptOf(S);
+      expect(phrase.startsWith(`REBROADCAST ${CHAIN_ID} NONCE ${N} `)).toBe(true);
+      const typedAt = type(S, phrase);
+      expect(await withTimeout(S.exited, 120_000, 'S exits'), S.output()).toBe(0);
+      const sends = sendsBy('S', typedAt);
+      expect(sends).toHaveLength(1);
+      expect(same(sends[0]!.detail['hash'] as string, head.hash)).toBe(true);
+      sent = true;
+    } finally {
+      if (!sent) {
+        // The fix is absent (or S failed): put the identical bytes back so the head can mine and later scenarios run.
+        await chain.rpc('eth_sendRawTransaction', [row!.rawTx]).catch(() => undefined);
+      }
+      await mine();
+      await automine(true);
+      await head.outcome;
+    }
+    // the same row, the same hash: no SCRIPT candidate for an identical rebroadcast
+    expect((await rowsOf({ jobId: x.jobId })).map((r) => lower(r.txHash))).toEqual([head.hash]);
+    await settleAndCheck([{ job: x, winner: head.hash, settledBy: 'P0' }]);
   }, 300_000);
 
   it('scenario 5: after all the races — every evaluator tx on chain had its ledger row before the broadcast; one winner per nonce, the rest DEAD; nothing live; no decision changed; no proxy request abandoned', async () => {
