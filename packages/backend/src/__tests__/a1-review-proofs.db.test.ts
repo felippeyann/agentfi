@@ -35,7 +35,7 @@ vi.hoisted(() => {
 
 import { randomBytes } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { getAddress, toHex, type Address, type Hex } from 'viem';
 import { insertCandidateWithJobStamp, markAnswered, markResolved } from '../services/escrow/evaluator-ledger.js';
 import { resolveNonceDecision, type CandidateRow, type NodeView } from '../services/escrow/evaluator-candidates.js';
@@ -47,16 +47,15 @@ const CHAIN = 999_001;
 const evaluator = getAddress(toHex(randomBytes(20))) as Address;
 const hash = toHex(randomBytes(32)) as Hex;
 const BLOCK_HASH = toHex(randomBytes(32)) as Hex;
-let ready = false;
-
-beforeAll(async () => {
-  try {
-    await db.$queryRaw`SELECT "proofLevel" FROM "EvaluatorTransaction" LIMIT 1`;
-    ready = true;
-  } catch {
-    ready = false;
-  }
-});
+// The A1 table must exist: an explicit skip outside CI (with a warning), a failure on CI (the same guard as
+// the other A1 suites) — never a test that passes empty.
+const ready = await db.$queryRaw`SELECT "proofLevel" FROM "EvaluatorTransaction" LIMIT 1`.then(
+  () => true,
+  () => false,
+);
+if (!ready && process.env['CI']) throw new Error('a1-review-proofs.db.test.ts: the A1 table (EvaluatorTransaction) is missing on CI');
+if (!ready) console.warn('[a1-review-proofs.db.test] EvaluatorTransaction table missing — suite skipped');
+const describeA1 = ready ? describe : describe.skip;
 
 afterAll(async () => {
   if (ready) {
@@ -106,9 +105,8 @@ function deps(read: Erc8183Deps['readNodeViews'], alerts: EscrowAlert[], now?: (
   } as unknown as Erc8183Deps;
 }
 
-describe('A1 review R-P2-1 — a straddled per-node read kills our own mined candidate', () => {
+describeA1('A1 review R-P2-1 — a straddled per-node read kills our own mined candidate', () => {
   it('our candidate that mined is recorded MINED_SUCCESS once its receipt is visible (not left DEAD, no foreign-key alert)', async () => {
-    if (!ready) return;
     const { id } = await insertCandidateWithJobStamp(db, {
       candidate: {
         chainId: CHAIN,
@@ -148,7 +146,6 @@ describe('A1 review R-P2-1 — a straddled per-node read kills our own mined can
   });
 
   it('(b) a row already DEAD at `latest` whose own receipt is now seen by consensus is corrected to MINED_SUCCESS (and proven); DEAD at `proof` stays immutable', async () => {
-    if (!ready) return;
     const h2 = toHex(randomBytes(32)) as Hex;
     const { id } = await insertCandidateWithJobStamp(db, {
       candidate: {
@@ -177,7 +174,6 @@ describe('A1 review R-P2-1 — a straddled per-node read kills our own mined can
   });
 
   it('Rechecagem R-P3-b: a persistent KNOWN_WITHOUT_RECEIPT is alerted past the threshold (persisted first sight), marked delivered only after delivery', async () => {
-    if (!ready) return;
     const h3 = toHex(randomBytes(32)) as Hex;
     const { id } = await insertCandidateWithJobStamp(db, {
       candidate: {
