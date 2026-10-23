@@ -41,7 +41,34 @@ directory: no contract, no migration, no dependency changed.
 
 ### 2.1 Rehearsed, candidate and re-checked commits
 
-**Newest candidate: C3h round, code `67ba588`** (local branch `rc/2026-10-21b`, not on `main`). It is `51f00a6` plus the C3h settlement fixes (plan row C3h):
+**A1 candidate (C3g-A1), code `199e674`** (local branch `feat/2026-10-22-a1`, not on `main`). It is `67ba588` (C3h) plus:
+- the evaluator candidate ledger (migration 0026);
+- the lane;
+- the gates;
+- the reconciliation pass;
+- the recovery script.
+
+The contracts are unchanged (`ddc6936bc680`). **No evidence of `67ba588` is carried over.** On `199e674`, on 2026-10-22, locally:
+
+| Check | Result |
+|---|---|
+| unit | 1740 / 13 skipped |
+| real Postgres | 499 / 1 todo |
+| Anvil with real contracts | 90 / 3 skipped / 4 todo |
+| E2E | 3 / 4 skipped |
+| ERC-8183 fork suite | 7 / 7 |
+| **C5 runner end to end on a fork** | **37 / 39 / 22 / 16, 0 wei unexplained** |
+| Foundry | 356 / 0 / 2 |
+
+The runner used an isolated Redis and set `EVALUATOR_PROOF_TAG=latest` explicitly, which a fork requires (P2-2).
+
+A real Base Sepolia run must set:
+- the proof tag the owner decides (D-g). On real chains the default is `safe`, so DB finalization then waits for the safe head;
+- the recovery caps (D-a). Without them the script only diagnoses.
+
+Evidence files are in the owner's notes, `c5-rehearsal-2026-10-22/199e674/`.
+
+**Previous candidate: C3h round, code `67ba588`** (local branch `rc/2026-10-21b`, not on `main`). It is `51f00a6` plus the C3h settlement fixes (plan row C3h):
 - D1: no backend refund against a recorded `pay`;
 - D2: a result is recorded only from its own receipt and this job's event;
 - D3: the `provider-unpaid` alert.
