@@ -3068,7 +3068,9 @@ async function locateForeignTransaction(
   };
   if (!client.getBlockNumber || !client.getTransactionCount || !client.getBlock) return null;
   try {
-    const head = await client.getBlockNumber();
+    // D-C: never viem's per-client cached block number (cacheTime ≈ pollingInterval): a head read before the
+    // foreign transaction's block would make the search give up on the pass right after it.
+    const head = await client.getBlockNumber({ cacheTime: 0 });
     let lo = head > REFUND_LOOKUP_BLOCKS ? head - REFUND_LOOKUP_BLOCKS : 0n;
     let hi = head;
     const countAt = (b: bigint) => client.getTransactionCount!({ address: evaluator, blockNumber: b } as never);

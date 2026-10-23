@@ -5,7 +5,7 @@
  * transaction to stay pending.
  *
  * Rows (matrix: agentfi-notas/2026-10-22-a1-matriz.md): AV side of 1–6, 11, 12a, 12b, 14, 22, 25–28, 34
- * (+ D-C, `it.fails`); script rows through the real CLI: 1, 2, 3, 4, 8, 15/40, 16, 18, 35, 37, 42, 45.
+ * (+ D-C, fixed on 23/10); script rows through the real CLI: 1, 2, 3, 4, 8, 15/40, 16, 18, 35, 37, 42, 45.
  * Row 9 (script + worker at once) is a todo here: a separate multi-process test covers it.
  *
  * Declared Anvil gaps (R2-§11):
@@ -1048,7 +1048,7 @@ describeA1('A1 on Anvil — candidates, reconciliation and the gate against the 
     for (let i = 0; i < 3; i++) await mine();
     // The pass reads the head through a client without viem's block-number cache: with the shared client this row
     // flaked (1 in 4 local runs) — the §4.3 search took a head cached before the foreign block. That is D-C, pinned
-    // by its own `it.fails` below; this row checks the search itself on the real node.
+    // by its own row below (fixed: the search reads the head with cacheTime 0); this row checks the search itself on the real node.
     h.deps.publicClient = () => freshHeadClient() as never;
     await reconcile(h);
     const rows = await rowsOf({ chainId: CHAIN_ID, nonce: tx.nonce });
@@ -1065,8 +1065,8 @@ describeA1('A1 on Anvil — candidates, reconciliation and the gate against the 
   //  next pass usually records it). Reproduced deterministically below by reading the head once (cache primed)
   //  just before the foreign block; it was also the real cause of the row 4 / row 25-27 flakes (attributed before
   //  to lagging historical reads: the historical counts were monotone in every failing run here).
-  //  Probable fix: `getBlockNumber({ cacheTime: 0 })` in the search. Expected after the fix: it.fails → it.
-  it.fails('row 4 (AV, D-C): the foreign transaction is recorded EXTERNAL on the first pass even when the client\'s cached block number predates its block', async () => {
+  //  FIXED (23/10): `getBlockNumber({ cacheTime: 0 })` in the search — it.fails → it.
+  it('row 4 (AV, D-C): the foreign transaction is recorded EXTERNAL on the first pass even when the client\'s cached block number predates its block', async () => {
     const onChain = await submittedOnChain();
     const jobId = await deliveredRow(onChain);
     const h = harness();
