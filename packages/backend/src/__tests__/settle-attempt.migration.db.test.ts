@@ -50,6 +50,7 @@ import { PrismaClient } from '@prisma/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { keccak256, toHex } from 'viem';
 import { resolveEscrowJob, type Erc8183Deps } from '../services/job/escrow-erc8183.service.js';
+import { inMemoryEvaluatorLedger } from './helpers/in-memory-evaluator-ledger.js';
 
 async function databaseReady(): Promise<boolean> {
   const probe = new PrismaClient();
@@ -133,6 +134,9 @@ describeDb('migration 0023 (C3e) on Postgres, against rows that existed before i
       releaseJobEscrow: async () => undefined,
       finalize: async () => undefined,
       logger: quiet,
+      // A1: this scratch schema stops at 0023 (no candidate ledger): rows from before A1 have no candidate, and
+      // the gate keeps today's rule for them (R2-P3-1) — an empty ledger models exactly that.
+      evaluatorLedger: inMemoryEvaluatorLedger(async () => ({ count: 0 })),
     };
   }
 

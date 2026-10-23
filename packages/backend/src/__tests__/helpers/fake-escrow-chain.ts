@@ -226,7 +226,8 @@ export class FakeEscrowChain {
   getTransactionCount(address: string, blockTag: 'latest' | 'pending' = 'latest'): number {
     // C3f: the evaluator key's own nonce sequence (mined evaluator transactions; pending ones queue behind).
     if (this.evaluatorAddress && lower(address) === lower(this.evaluatorAddress)) {
-      return blockTag === 'pending' ? this.evaluatorMined + this.evaluatorPending.length : this.evaluatorMined;
+      // A1: `pending` is the next CONTIGUOUS nonce (a transaction signed above a gap waits in the queued pool).
+      return blockTag === 'pending' ? this.evaluatorNextNonce() : this.evaluatorMined;
     }
     const latest = this.latestNonce.get(lower(address)) ?? 0;
     return blockTag === 'pending' ? latest + this.pendingCount(address) : latest;
@@ -321,12 +322,17 @@ export class FakeEscrowChain {
   getTransaction(hash: Hex): { hash: Hex; nonce: number; from?: Address } {
     // C3e: evaluator transactions — known while pending (no blockNumber) or once mined. C3f: with their nonce.
     const evaluatorNonce = this.evaluatorNonceOf.get(hash) ?? 0;
-    if (this.evaluatorTxPending(hash)) return { hash, nonce: evaluatorNonce, blockNumber: null } as { hash: Hex; nonce: number };
+    // A1: an evaluator transaction signed through the fake signer carries its fields (the legacy backfill reads them).
+    const signed = [...this.evaluatorRaw.values()].find((t) => t.hash === hash);
+    const fields = signed
+      ? { from: signed.from, to: signed.to, input: signed.data, gas: FakeEscrowChain.EVALUATOR_GAS, maxFeePerGas: FakeEscrowChain.EVALUATOR_MAX_FEE, maxPriorityFeePerGas: FakeEscrowChain.EVALUATOR_PRIORITY_FEE, value: 0n }
+      : {};
+    if (this.evaluatorTxPending(hash)) return { hash, nonce: evaluatorNonce, blockNumber: null, ...fields } as unknown as { hash: Hex; nonce: number };
     if (
       this.evaluatorBroadcasts.some((b) => b.hash === hash && b.outcome !== 'dropped' && b.outcome !== 'pending' && b.outcome !== 'replaced') &&
       this.receipts.has(hash)
     ) {
-      return { hash, nonce: evaluatorNonce, blockNumber: 1n } as { hash: Hex; nonce: number };
+      return { hash, nonce: evaluatorNonce, blockNumber: 1n, ...fields } as unknown as { hash: Hex; nonce: number };
     }
     const tx = this.known.get(hash);
     const pending = this.mempool.some((p) => p.hash === hash);
@@ -344,6 +350,8 @@ export class FakeEscrowChain {
       effectiveGasPrice: 1n,
       transactionHash: hash,
       blockNumber: 1n,
+      // A1: a 32-byte block hash per receipt (the ledger records it; reorg checks compare it).
+      blockHash: keccak256(hash),
       ...(from ? { from } : {}),
     } as unknown as TransactionReceipt;
   }
@@ -399,6 +407,15 @@ export class FakeEscrowChain {
         this.getTransactionCount(address, blockTag === 'pending' ? 'pending' : 'latest'),
       getLogs: async (params: { address: Address; event: { name: string }; args?: Record<string, unknown> }) => this.getLogs(params),
       getBlockNumber: async () => 1n,
+      // A1: `eth_call` (the reconciliation pass simulates a lost head before its identical rebroadcast).
+      call: async (params: { account: Address | { address: Address }; to: Address; data: Hex }) => {
+        const from = typeof params.account === 'string' ? params.account : params.account.address;
+        const snapshot = this.snapshot();
+        const simulated = this.execute(getAddress(from), params.to, params.data, '0x' as Hex);
+        this.restore(snapshot);
+        if (simulated.status !== 'success') throw new Error('execution reverted');
+        return { data: '0x' as Hex };
+      },
     };
   }
 
@@ -425,7 +442,33 @@ export class FakeEscrowChain {
    * job then reverts on-chain with InvalidStatus — gas spent, nothing changed).
    */
   evaluatorHold: ((call: { functionName: string }) => boolean) | null = null;
-  private readonly evaluatorPending: Array<{ hash: Hex; from: Address; to: Address; data: Hex }> = [];
+  private readonly evaluatorPending: Array<{ hash: Hex; from: Address; to: Address; data: Hex; nonce?: number }> = [];
+  /** A1: signed evaluator transactions by raw bytes (the fake's "serialization"), for an identical rebroadcast. */
+  private readonly evaluatorRaw = new Map<string, { hash: Hex; from: Address; to: Address; data: Hex; nonce: number; functionName: string }>();
+
+  /** A1: the next contiguous nonce of the key (mined + the pending run without a gap). */
+  private evaluatorNextNonce(): number {
+    let next = this.evaluatorMined;
+    while (this.evaluatorPending.some((tx) => (tx.nonce ?? -1) === next)) next++;
+    return next;
+  }
+
+  /** A1: mines, in nonce order, every pending evaluator transaction that is not held and has no gap before it. */
+  private mineEvaluatorContiguous(): void {
+    for (;;) {
+      const index = this.evaluatorPending.findIndex((tx) => tx.nonce === this.evaluatorMined);
+      if (index < 0) return;
+      const tx = this.evaluatorPending[index]!;
+      if (this.evaluatorHeldHashes.has(tx.hash)) return;
+      this.evaluatorPending.splice(index, 1);
+      const { status, logs } = this.execute(tx.from, tx.to, tx.data, tx.hash);
+      this.evaluatorMined++;
+      this.receipts.set(tx.hash, this.receipt(tx.hash, status, logs));
+      const entry = this.evaluatorBroadcasts.find((b) => b.hash === tx.hash);
+      if (entry) entry.outcome = status;
+    }
+  }
+  private readonly evaluatorHeldHashes = new Set<Hex>();
   /** Every evaluator broadcast, in order, with what became of it. */
   readonly evaluatorBroadcasts: Array<{ hash: Hex; functionName: string; outcome: 'pending' | 'success' | 'reverted' | 'dropped' | 'replaced' }> = [];
   /** C3f: the evaluator key (set by `evaluatorSigner`), its mined transaction count and each broadcast's nonce. */
@@ -435,19 +478,16 @@ export class FakeEscrowChain {
 
   /** Mines every pending evaluator transaction, in nonce order. */
   releaseEvaluator(): void {
-    for (const tx of this.evaluatorPending.splice(0)) {
-      const { status, logs } = this.execute(tx.from, tx.to, tx.data, tx.hash);
-      this.evaluatorMined++;
-      this.receipts.set(tx.hash, this.receipt(tx.hash, status, logs));
-      const entry = this.evaluatorBroadcasts.find((b) => b.hash === tx.hash);
-      if (entry) entry.outcome = status;
-    }
+    // A1: in nonce order, up to the first gap (a nonce nobody broadcast stops the key, as on a node).
+    this.evaluatorHeldHashes.clear();
+    this.mineEvaluatorContiguous();
   }
 
   /** A pending evaluator transaction is evicted from every mempool: no receipt, unknown to the node. */
   dropEvaluator(hash: Hex): void {
     const index = this.evaluatorPending.findIndex((tx) => tx.hash === hash);
     if (index >= 0) this.evaluatorPending.splice(index, 1);
+    this.evaluatorHeldHashes.delete(hash);
     const entry = this.evaluatorBroadcasts.find((b) => b.hash === hash);
     if (entry) entry.outcome = 'dropped';
   }
@@ -510,14 +550,59 @@ export class FakeEscrowChain {
   evaluatorSendLostAnswer: ((call: { functionName: string }) => boolean) | null = null;
 
   /** The evaluator signer (operator key): simulates, signs, then broadcasts; mined at once unless held (C3e). */
+  /** A1: the gas / fees every fake evaluator transaction is "signed" with. */
+  static readonly EVALUATOR_GAS = 500_000n;
+  static readonly EVALUATOR_MAX_FEE = 2_000_000_000n;
+  static readonly EVALUATOR_PRIORITY_FEE = 1_000_000_000n;
+
+  /**
+   * A1: broadcasts a known signed evaluator transaction at its own nonce:
+   * mined at once when it is the next nonce and nothing holds the key, queued
+   * otherwise (behind a pending one, or above a gap). Throws like a node.
+   */
+  private broadcastEvaluator(tx: { hash: Hex; from: Address; to: Address; data: Hex; nonce: number; functionName: string }): void {
+    if (this.evaluatorPending.some((p) => p.hash === tx.hash)) throw new Error('already known');
+    if (tx.nonce < this.evaluatorMined || this.receipts.has(tx.hash)) throw new Error(`nonce too low: next nonce ${this.evaluatorMined}, tx nonce ${tx.nonce}`);
+    if (this.evaluatorPending.some((p) => p.nonce === tx.nonce)) throw new Error('replacement transaction underpriced');
+    this.evaluatorNonceOf.set(tx.hash, tx.nonce);
+    const held = this.evaluatorHold?.({ functionName: tx.functionName }) ?? false;
+    if (held) this.evaluatorHeldHashes.add(tx.hash);
+    else this.evaluatorHeldHashes.delete(tx.hash);
+    this.evaluatorPending.push({ hash: tx.hash, from: tx.from, to: tx.to, data: tx.data, nonce: tx.nonce });
+    const entry = this.evaluatorBroadcasts.find((b) => b.hash === tx.hash);
+    if (entry) entry.outcome = 'pending';
+    else this.evaluatorBroadcasts.push({ hash: tx.hash, functionName: tx.functionName, outcome: 'pending' });
+    // Held, or behind a held one: stays pending (C3e). Otherwise mined in nonce order.
+    if (!this.evaluatorPending.some((p) => this.evaluatorHeldHashes.has(p.hash) && (p.nonce ?? 0) <= tx.nonce)) this.mineEvaluatorContiguous();
+  }
+
   evaluatorSigner(evaluator: Address) {
     this.evaluatorAddress = evaluator;
     return {
       address: evaluator,
       chainId: SIM_CHAIN_ID,
+      /** A1 `sendRaw`: rebroadcasts the identical signed transaction (by its raw bytes), under the lease. */
+      sendRaw: async (raw: Hex, opts: { lease: { assertHeld(min: number): Promise<void> }; minLeaseMs: number }) => {
+        await opts.lease.assertHeld(opts.minLeaseMs);
+        const tx = this.evaluatorRaw.get(raw.toLowerCase());
+        if (!tx) return { kind: 'rejected' as const, hash: keccak256(raw), message: 'unknown raw transaction' };
+        try {
+          this.broadcastEvaluator(tx);
+          return { kind: 'accepted' as const, hash: tx.hash };
+        } catch (err) {
+          const message = (err as Error).message;
+          const kind = /already known/.test(message) ? ('already-known' as const) : /nonce too low/.test(message) ? ('nonce-too-low' as const) : /underpriced/.test(message) ? ('underpriced' as const) : ('rejected' as const);
+          return { kind, hash: tx.hash, message };
+        }
+      },
       writeContract: async (
         params: { address: Address; abi: Abi; functionName: string; args: readonly unknown[] },
-        opts?: { onBeforeBroadcast?: (signedTxHash: Hex) => Promise<void> },
+        opts?: {
+          onBeforeBroadcast?: (signedTxHash: Hex, tx: { hash: Hex; raw: Hex; nonce: number; gas: bigint; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint; to: Address; data: Hex; value: bigint; chainId: number; from: Address }) => Promise<void>;
+          chooseNonce?: (pending: number) => Promise<number>;
+          lease?: { assertHeld(min: number): Promise<void> };
+          minLeaseMs?: number;
+        },
       ) => {
         const data = encodeFunctionData({ abi: params.abi, functionName: params.functionName, args: params.args } as never);
         // A real evaluator simulates first (against the latest state — a
@@ -527,9 +612,20 @@ export class FakeEscrowChain {
         const simulated = this.execute(evaluator, params.address, data, '0x' as Hex);
         this.restore(snapshot);
         if (simulated.status !== 'success') throw new Error(`simulation reverted: ${params.functionName}`);
-        // Signed locally: the hash is known before the send (the hook receives it).
+        // Signed locally: the hash is known before the send (the hook receives it, A1: with the signed transaction).
         const hash = `0x${(++this.evaluatorTxSeq).toString(16).padStart(64, 'e')}` as Hex;
-        await opts?.onBeforeBroadcast?.(hash);
+        const pending = this.evaluatorNextNonce();
+        const nonce = opts?.chooseNonce ? await opts.chooseNonce(pending) : pending;
+        if (!Number.isSafeInteger(nonce) || nonce < pending) throw new Error(`fake evaluator: nonce ${nonce} below pending ${pending}`);
+        const raw = `0xfa${hash.slice(2)}` as Hex;
+        const signed = { hash, from: evaluator, to: params.address, data, nonce, functionName: params.functionName };
+        this.evaluatorRaw.set(raw.toLowerCase(), signed);
+        if (opts?.lease) await opts.lease.assertHeld(opts.minLeaseMs ?? 0);
+        await opts?.onBeforeBroadcast?.(hash, {
+          hash, raw, nonce, gas: FakeEscrowChain.EVALUATOR_GAS, maxFeePerGas: FakeEscrowChain.EVALUATOR_MAX_FEE,
+          maxPriorityFeePerGas: FakeEscrowChain.EVALUATOR_PRIORITY_FEE, to: params.address, data, value: 0n, chainId: SIM_CHAIN_ID, from: evaluator,
+        });
+        if (opts?.lease) await opts.lease.assertHeld(opts.minLeaseMs ?? 0);
         if (this.evaluatorSendFails?.({ functionName: params.functionName })) {
           throw new Error('insufficient funds for gas * price + value (the node refused the transaction; nothing was broadcast)');
         }
@@ -542,17 +638,8 @@ export class FakeEscrowChain {
             ? { reason: params.args[1] as Hex, optParams: params.args[2] as Hex }
             : {}),
         });
-        // C3f: the next nonce of the key — behind every pending evaluator transaction.
-        this.evaluatorNonceOf.set(hash, this.evaluatorMined + this.evaluatorPending.length);
-        if (this.evaluatorHold?.({ functionName: params.functionName }) || this.evaluatorPending.length > 0) {
-          this.evaluatorPending.push({ hash, from: evaluator, to: params.address, data });
-          this.evaluatorBroadcasts.push({ hash, functionName: params.functionName, outcome: 'pending' });
-        } else {
-          const { status, logs } = this.execute(evaluator, params.address, data, hash);
-          this.evaluatorMined++;
-          this.receipts.set(hash, this.receipt(hash, status, logs));
-          this.evaluatorBroadcasts.push({ hash, functionName: params.functionName, outcome: status });
-        }
+        // C3f / A1: at the chosen nonce — mined in nonce order, behind every pending evaluator transaction.
+        this.broadcastEvaluator(signed);
         if (loseAnswer) throw new Error('socket hang up (the node took the evaluator transaction, the answer was lost)');
         return hash;
       },

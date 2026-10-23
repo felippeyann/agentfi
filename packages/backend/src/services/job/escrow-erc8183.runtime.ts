@@ -10,7 +10,7 @@
 
 import type { Address, Hex } from 'viem';
 import { db } from '../../db/client.js';
-import { env, escrowEvaluatorAddress } from '../../config/env.js';
+import { env, escrowEvaluatorAddress, evaluatorProofTag, evaluatorRecoveryCaps } from '../../config/env.js';
 import { getContracts } from '../../config/contracts.js';
 import { createChainPublicClient } from '../../config/chains.js';
 import { escrowConfigGate } from '../../config/escrow-verification.runtime.js';
@@ -18,6 +18,8 @@ import { logger } from '../../api/middleware/logger.js';
 import { transactionQueue } from '../../queues/transaction.queue.js';
 import { addSettlementJob } from '../../queues/escrow-settlement.queue.js';
 import { getEvaluatorSigner } from '../escrow/evaluator-signer.js';
+import { readNodeViews } from '../escrow/evaluator-rpc.js';
+import { prismaEvaluatorLedger } from './escrow-evaluator-a1.js';
 import { releaseJobEscrow } from '../policy/escrow.service.js';
 import { notificationService } from '../notification.service.js';
 import { walletLaneLock } from '../transaction/wallet-lane.runtime.js';
@@ -88,6 +90,20 @@ export const erc8183Config: Erc8183Config = {
 
 const publicClients = new Map<number, ReturnType<typeof createChainPublicClient>>();
 
+/** C3g-A1 settings from env (P17 margins, alert thresholds). */
+export const evaluatorA1Settings: svc.EvaluatorA1Settings = {
+  leaseMinRemainingMs: env.EVALUATOR_LANE_MIN_REMAINING_MS,
+  criticalSectionMaxMs: env.EVALUATOR_CRITICAL_SECTION_MAX_MS,
+  ...(env.EVALUATOR_SEND_LOST_ALERT_AFTER_MS !== undefined ? { sendLostAlertAfterMs: env.EVALUATOR_SEND_LOST_ALERT_AFTER_MS } : {}),
+  ...(env.EVALUATOR_EARLY_ALERT_BEFORE_EXPIRY_SECONDS !== undefined ? { earlyAlertBeforeExpirySeconds: env.EVALUATOR_EARLY_ALERT_BEFORE_EXPIRY_SECONDS } : {}),
+  // The proof head is watched only for a block tag that can stall (safe / finalized).
+  proofStalledAlertAfterMs:
+    evaluatorProofTag === 'safe' || evaluatorProofTag === 'finalized' ? (env.EVALUATOR_PROOF_STALLED_ALERT_AFTER_MS ?? svc.EVALUATOR_STUCK_ALERT_AFTER_MS) : null,
+  rpcUnhealthyAfterFailures: env.EVALUATOR_RPC_UNHEALTHY_AFTER_FAILURES,
+};
+
+const evaluatorLedger = prismaEvaluatorLedger(db);
+
 export function erc8183Deps(): Erc8183Deps {
   return {
     db,
@@ -117,6 +133,13 @@ export function erc8183Deps(): Erc8183Deps {
     configGate: (chainId) => escrowConfigGate(chainId),
     // G1 review P3-1: "may this settlement still mine?" asks every RPC node, not the first that answers.
     isKnownTransaction: (chainId, hash) => isTransactionKnownOnAnyRpc(chainId, hash),
+    // C3g-A1: the candidate ledger, per-node reads at the proof tag, the evaluator lane (the same Redis lane lock).
+    evaluatorLedger,
+    readNodeViews: (chainId, evaluator, hashes) => readNodeViews(chainId, evaluator, hashes, { proofTag: evaluatorProofTag }),
+    proofTag: evaluatorProofTag,
+    recoveryCaps: (chainId) => evaluatorRecoveryCaps(chainId),
+    evaluatorLanes: walletLaneLock,
+    evaluatorA1: evaluatorA1Settings,
   };
 }
 

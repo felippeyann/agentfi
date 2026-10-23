@@ -16,7 +16,10 @@ import { sanitizeText } from '../api/errors/sanitize.js';
 import { notificationService } from '../services/notification.service.js';
 import { createChainPublicClient } from './chains.js';
 import { getContracts } from './contracts.js';
+import * as envModule from './env.js';
 import { configuredEscrowChainIds, env, escrowEvaluatorAddress } from './env.js';
+import { proofTagNodeProblem } from './evaluator-a1.js';
+import type { EvaluatorProofTag } from '../services/escrow/evaluator-rpc.js';
 import {
   checkEscrowDeployments,
   escrowBootVerdict,
@@ -201,9 +204,52 @@ function startRecheckLoop(role: ProcessRole): void {
  * unverified — new escrow operations wait — until a re-check reads it.
  * Never throws.
  */
+/**
+ * A1 review P2-2: refuses to boot (exit 1) when an escrow chain is served by an Anvil node and the proof tag
+ * is the implicit `safe` / `finalized` default — it would never advance there. An explicit
+ * EVALUATOR_PROOF_TAG passes. A node whose client version cannot be read is not refused (real chains).
+ */
+export async function checkEvaluatorProofTag(
+  chainIds: readonly number[],
+  opts: {
+    proofTag?: EvaluatorProofTag;
+    explicit?: boolean;
+    clientVersion?: (chainId: number) => Promise<string | null>;
+    exit?: (message: string) => never;
+  } = {},
+): Promise<void> {
+  let proofTag: EvaluatorProofTag;
+  let explicit: boolean;
+  try {
+    proofTag = opts.proofTag ?? envModule.evaluatorProofTag;
+    explicit = opts.explicit ?? envModule.evaluatorProofTagExplicit;
+  } catch {
+    return; // a test environment without the A1 settings
+  }
+  if (proofTag === undefined) return;
+  const readVersion =
+    opts.clientVersion ??
+    (async (chainId: number) => {
+      try {
+        return (await createChainPublicClient(chainId).request({ method: 'web3_clientVersion' } as never)) as string;
+      } catch {
+        return null;
+      }
+    });
+  for (const chainId of chainIds) {
+    const problem = proofTagNodeProblem({ chainId, proofTag, explicit, clientVersion: await readVersion(chainId) });
+    if (!problem) continue;
+    if (opts.exit) opts.exit(problem);
+    console.error(problem);
+    logger.fatal?.({ chainId }, problem);
+    process.exit(1);
+  }
+}
+
 export async function runEscrowBootCheck(role: ProcessRole): Promise<EscrowBootVerdict | null> {
   const chains = escrowExpectations();
   if (chains.length === 0) return null;
+  if (escrowEvaluatorAddress) await checkEvaluatorProofTag(chains.map((c) => c.chainId));
   publishRoles.add(role);
   let verdict: EscrowBootVerdict;
   try {
@@ -220,6 +266,27 @@ export async function runEscrowBootCheck(role: ProcessRole): Promise<EscrowBootV
   }
   startRecheckLoop(role);
   return verdict;
+}
+
+/**
+ * A1 §8.2 / R2-P3-7 (the recovery script): ONE full verification of the deployed escrow / hook of
+ * `chainId` in this process — `checkEscrowDeployments` + `recordEscrowChecks`, no re-check loop — then
+ * the gate's verdict. Run after the operator's confirmation, before the lane.
+ */
+export async function verifyEscrowConfigOnce(chainId: number): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const chains = escrowExpectations().filter((c) => c.chainId === chainId);
+  if (chains.length === 0) return { ok: false, reason: `no AGENT_JOB_ESCROW_ADDRESS_${chainId} configured in this process` };
+  try {
+    const checks = await checkEscrowDeployments({ chains, reader, chainIdReader, codeReader, attempts: 1 });
+    recordEscrowChecks(checks, chains);
+    const verdict = escrowBootVerdict(env.NODE_ENV, checks);
+    if (verdict.errors.length > 0 || !verdict.verified.includes(chainId)) {
+      return { ok: false, reason: verdict.errors.join('; ') || `chain ${chainId} not verified` };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: `verification crashed: ${(err as Error)?.message ?? String(err)}` };
+  }
 }
 
 /** Testing hook: stops the background re-check and forgets the published roles. */

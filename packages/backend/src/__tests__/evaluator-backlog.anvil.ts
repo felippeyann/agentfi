@@ -49,6 +49,7 @@ vi.mock('../api/middleware/logger.js', () => {
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { parseGwei, type Hex } from 'viem';
 import { anvilAccount, anvilTestPort, startLocalChain, type LocalChain } from './helpers/anvil-contracts.js';
+import { inMemoryEvaluatorLedger } from './helpers/in-memory-evaluator-ledger.js';
 import {
   EVALUATOR_STUCK_ALERT_AFTER_MS,
   __resetEvaluatorBacklogForTests,
@@ -67,9 +68,26 @@ beforeAll(async () => {
 afterAll(() => chain?.stop());
 beforeEach(() => __resetEvaluatorBacklogForTests());
 
-/** The deps the check reads: the evaluator address, the real read client, a job table holding `jobs`, a clock and the alert channel. */
-function depsFor(jobs: Array<{ id: string; settleTxHash: Hex }>, alerts: EscrowAlert[], now: () => Date): Erc8183Deps {
+/**
+ * The deps the check reads: the evaluator address, the real read client, a job table holding `jobs`, a clock,
+ * the alert channel and (A1) the candidate ledger — the head is read from it, each job's transaction recorded
+ * with the nonce the node gave it.
+ */
+async function depsFor(jobs: Array<{ id: string; settleTxHash: Hex }>, alerts: EscrowAlert[], now: () => Date): Promise<Erc8183Deps> {
+  const evaluatorLedger = inMemoryEvaluatorLedger(async () => ({ count: 1 }));
+  for (const j of jobs) {
+    const tx = await chain.publicClient.getTransaction({ hash: j.settleTxHash });
+    await evaluatorLedger.insertCandidateWithJobStamp({
+      candidate: {
+        chainId: CHAIN_ID, evaluator: evaluator.address, nonce: Number(tx.nonce), jobId: j.id, kind: 'ORIGINAL', action: 'COMPLETE',
+        toAddress: tx.to!, calldata: tx.input, gasLimit: tx.gas, maxFeePerGas: tx.maxFeePerGas!, maxPriorityFeePerGas: tx.maxPriorityFeePerGas!,
+        txHash: j.settleTxHash, origin: 'WORKER',
+      },
+      job: { id: j.id, expectedSettleTxHash: null, setSettleTxHash: true, stampAttempt: true },
+    });
+  }
   return {
+    evaluatorLedger,
     config: { evaluatorAddress: evaluator.address } as never,
     publicClient: () => chain.publicClient as never,
     db: { job: { findMany: async () => jobs } } as never,
@@ -111,7 +129,7 @@ describe('C3f item 1 — an evaluator key blocked behind one unmined transaction
 
     const alerts: EscrowAlert[] = [];
     let now = Date.now();
-    const deps = depsFor([{ id: 'job-behind', settleTxHash: behind }, { id: 'job-stuck', settleTxHash: stuck }], alerts, () => new Date(now));
+    const deps = await depsFor([{ id: 'job-behind', settleTxHash: behind }, { id: 'job-stuck', settleTxHash: stuck }], alerts, () => new Date(now));
     expect(await checkEvaluatorBacklog(deps, CHAIN_ID)).toBeNull(); // first sight
     now += EVALUATOR_STUCK_ALERT_AFTER_MS + 1_000;
     const backlog = await checkEvaluatorBacklog(deps, CHAIN_ID);

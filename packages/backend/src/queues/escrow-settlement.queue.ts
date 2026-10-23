@@ -23,6 +23,7 @@ import {
   EscrowConfigUnverifiedError,
   handleFailedSettlementJob,
   processSettlementJob,
+  reconcileAllEvaluatorCandidates,
   type Erc8183Deps,
   type EscrowSettlementJobData,
 } from '../services/job/escrow-erc8183.service.js';
@@ -151,5 +152,10 @@ export function startEscrowSettlementWorker(getDeps: () => Erc8183Deps): Worker<
   worker.on('error', (err) => logger.error({ err }, 'Escrow settlement worker runtime error'));
 
   logger.info({ queue: ESCROW_SETTLEMENT_QUEUE_NAME }, 'Escrow settlement worker started');
+  // C3g-A1 §5.2: the evaluator candidate reconciliation runs once at boot (then on every sweep tick):
+  // backfill of legacy in-flight settlements, winners / dead candidates from the chain, lost heads.
+  void reconcileAllEvaluatorCandidates(getDeps())
+    .then((summaries) => logger.info({ summaries }, 'ERC-8183 evaluator candidate reconciliation at boot'))
+    .catch((err) => logger.warn({ err: (err as Error)?.message ?? String(err) }, 'ERC-8183 evaluator candidate reconciliation at boot failed — the sweep retries it'));
   return worker;
 }

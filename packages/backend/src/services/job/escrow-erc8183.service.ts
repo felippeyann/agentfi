@@ -80,6 +80,7 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
 import type { Queue } from 'bullmq';
 import {
+  decodeFunctionData,
   encodeAbiParameters,
   encodeFunctionData,
   getAbiItem,
@@ -100,11 +101,36 @@ import { AGENT_JOB_ESCROW_ABI } from '../../abi/AgentJobEscrow.abi.js';
 import { REPUTATION_HOOK_ABI } from '../../abi/ReputationHook.abi.js';
 import { getKnownTokenBySymbol } from '../transaction/token-registry.js';
 import { publicErrorMessage, sanitizeContextFromEnv, sanitizeStoredError, sanitizeText, sanitizeValue } from '../../api/errors/sanitize.js';
-import type { EvaluatorReceipt, EvaluatorSigner, EvaluatorWriteParams } from '../escrow/evaluator-signer.js';
+import type { EvaluatorA1Signer, EvaluatorReceipt, EvaluatorSigner, EvaluatorWriteParams, PreparedEvaluatorTx } from '../escrow/evaluator-signer.js';
 import type { EscrowGateVerdict } from '../../config/escrow-verification.js';
 import type { FinalizeA2APaymentJobParams } from './payment-finalizer.service.js';
 import type { ProcessorLogger, TransactionJobData } from '../../queues/transaction.processor.js';
-import { NO_LANE, fundingLaneKey, type LaneLock } from '../transaction/wallet-lane.js';
+import { NO_LANE, evaluatorLaneKey, fundingLaneKey, type LaneLease, type LaneLock, type LeaseLock } from '../transaction/wallet-lane.js';
+import {
+  chooseNonce,
+  isLiveStatus,
+  nonceConsumed,
+  rebroadcastAllowed,
+  resolveNonceDecision,
+  legacyResignAllowed,
+  type CandidateRow,
+  type NodeView,
+  type ReceiptView,
+  type RecoveryCaps,
+} from '../escrow/evaluator-candidates.js';
+import type { EvaluatorNodeRead, EvaluatorProofTag } from '../escrow/evaluator-rpc.js';
+import {
+  prismaEvaluatorLedger,
+  singleClientNodeReads,
+  toNodeViews,
+  type CandidateIntent,
+  type EvaluatorLedgerPort,
+  type EvaluatorNodeReader,
+  type LedgerCandidate,
+} from './escrow-evaluator-a1.js';
+import { SettlementStillPendingError, SettlementSupersededError } from './escrow-errors.js';
+
+export { SettlementStillPendingError, SettlementSupersededError };
 import {
   enqueueAgentStep,
   IN_FLIGHT_TX,
@@ -268,7 +294,26 @@ export interface Erc8183Config {
 }
 
 export type EscrowPublicClient = Pick<PublicClient, 'getTransactionReceipt' | 'readContract'> &
-  Partial<Pick<PublicClient, 'getBalance' | 'getTransaction' | 'getTransactionCount' | 'getLogs' | 'getBlockNumber'>>;
+  Partial<Pick<PublicClient, 'getBalance' | 'getTransaction' | 'getTransactionCount' | 'getLogs' | 'getBlockNumber' | 'getBlock' | 'call'>>;
+
+/**
+ * C3g-A1 settings of the evaluator key (`config/env.ts`; every field has the
+ * documented fallback when absent).
+ */
+export interface EvaluatorA1Settings {
+  /** P17: minimum lane TTL left at each `assertHeld` before the broadcast (ms). */
+  leaseMinRemainingMs: number;
+  /** P17: the critical section (lane requested → candidate recorded) may not be older than this (ms). */
+  criticalSectionMaxMs: number;
+  /** R2-P1-3: a live head candidate unknown to every node for this long → `evaluator-send-lost`. Default EVALUATOR_STUCK_ALERT_AFTER_MS. */
+  sendLostAlertAfterMs?: number;
+  /** R2-P2-5 T: an affected delivered job this close to expiresAt (vs the last block time) alerts at first sight. Default: `reviewAlertBeforeExpirySeconds`. */
+  earlyAlertBeforeExpirySeconds?: number;
+  /** R2-P2-2 item 4: the proof-tag head not advancing for this long → `evaluator-proof-stalled`. Null/absent → not watched (proof tag `latest` / `latest−K`). */
+  proofStalledAlertAfterMs?: number | null;
+  /** R2-P3-10: consecutive failed reads of one node before `rpc-node-unhealthy`. */
+  rpcUnhealthyAfterFailures?: number;
+}
 
 export interface SettlementEnqueue {
   add(data: EscrowSettlementJobData, opts?: { delayMs?: number }): Promise<void>;
@@ -306,7 +351,23 @@ export interface EscrowAlert {
      * operator's "pay"), ended refunded on-chain (claimRefund by anyone, or a reject) — the provider
      * was not paid. Once per job (the row's transition to its final on-chain status).
      */
-    | 'provider-unpaid';
+    | 'provider-unpaid'
+    /** A1 R2-P1-3: a live evaluator candidate at the head of the key that no RPC node knows (lost send), or whose identical rebroadcast was refused. */
+    | 'evaluator-send-lost'
+    /** A1 R2-P2-2: an evaluator candidate's outcome proven only at `latest` was reorganised away (or a row proven at the proof depth lost its block). */
+    | 'evaluator-reorg'
+    /** A1 R2-P2-2 item 4: the proof-tag head (`safe` / `finalized`) has not advanced for a while — every proof-depth gate stays closed. */
+    | 'evaluator-proof-stalled'
+    /** A1 R2-P3-10: an RPC node of the chain failed its reads several times in a row — "consumed" needs every node, nothing is concluded by majority. */
+    | 'rpc-node-unhealthy'
+    /** A1 §4.3: a nonce of the evaluator key was consumed by a transaction no ledger row covers (a manual send, another environment, a compromised key). */
+    | 'evaluator-nonce-foreign'
+    /** A1 §4.2: the ledger and the chain disagree in a way nothing may be written for (more than one receipt for a nonce). */
+    | 'evaluator-ledger-conflict'
+    /** Rechecagem R-P3-b: a nonce consumed without a receipt while a node knows our candidate, persisting past the send-lost / stuck threshold. */
+    | 'evaluator-proof-uncertain'
+    /** A1 plan §3: the recovery script refused an execution (a cap, the budget, the reserve, a replacement limit) — escalate to the owner. */
+    | 'evaluator-recovery-refused';
   message: string;
   jobId?: string;
   chainId?: number | null;
@@ -347,7 +408,39 @@ export interface Erc8183Deps {
    * `publicClient(chainId).getTransaction`.
    */
   isKnownTransaction?(chainId: number, hash: Hex): Promise<boolean>;
+  /**
+   * C3g-A1: the evaluator candidate ledger (`EvaluatorTransaction` and the
+   * chain state). Absent → the Prisma ledger on `db` (the runtime and the DB
+   * suites); unit tests with a mocked Prisma inject an in-memory double.
+   */
+  evaluatorLedger?: EvaluatorLedgerPort;
+  /**
+   * C3g-A1: per-node reads of the evaluator key (nonces at latest / pending /
+   * proof tag, known, receipts) over EVERY RPC candidate of the chain — the
+   * runtime binds `readNodeViews` with the configured proof tag. Absent (test
+   * doubles) → one node: `publicClient(chainId)`, proof = latest.
+   */
+  readNodeViews?: EvaluatorNodeReader;
+  /**
+   * C3g-A1 D-g / R2-P2-2: the proof tag (`latest`, `safe`, `finalized`, or a
+   * bigint K = `latest − K`). Finalizing a job in the DB (terminal status,
+   * finalizer, reservation release) requires the job terminal AT this tag
+   * (orchestrator decision A3). Absent → `latest` (test doubles).
+   */
+  proofTag?: EvaluatorProofTag;
+  /** C3g-A1 §8.5: the configured recovery caps of a chain; null = none configured (every recovery execution refused). Read by the recovery script. */
+  recoveryCaps?(chainId: number): RecoveryCaps | null;
+  /** C3g-A1 §7.1: the evaluator lane lock (a `LeaseLock`). Absent → `lanes` when it hands out leases; neither → no lane (single caller, test doubles). */
+  evaluatorLanes?: LeaseLock;
+  /** C3g-A1 settings (`config/env.ts`). Absent → `DEFAULT_EVALUATOR_A1_SETTINGS`. */
+  evaluatorA1?: EvaluatorA1Settings;
 }
+
+/** Fallback A1 settings (P17: half / a quarter of the 120 s lane TTL — the plan's proposal, see `.env.example`). */
+export const DEFAULT_EVALUATOR_A1_SETTINGS: EvaluatorA1Settings = {
+  leaseMinRemainingMs: 30_000,
+  criticalSectionMaxMs: 60_000,
+};
 
 /** The slice of a BullMQ job the settlement processor reads — a plain object satisfies it in tests. */
 export interface SettlementJobLike {
@@ -386,6 +479,11 @@ function alertText(value: string | null | undefined, max = ALERT_TEXT_MAX_CHARS)
  * Returns whether the alert was delivered (true without a channel: the log
  * line is the alert).
  */
+/** The sanitized alert channel, for the A1 recovery script (same rules as every orchestrator alert). */
+export function raiseEscrowAlert(deps: Erc8183Deps, alert: EscrowAlert): Promise<boolean> {
+  return raiseAlert(deps, alert);
+}
+
 async function raiseAlert(deps: Erc8183Deps, alert: EscrowAlert): Promise<boolean> {
   const ctx = sanitizeContextFromEnv();
   const clean: EscrowAlert = {
@@ -911,6 +1009,65 @@ async function readChainJob(deps: Erc8183Deps, job: Pick<EscrowJobRow, 'escrowCh
   return { status: Number(raw.status), budget: BigInt(raw.budget ?? 0n) };
 }
 
+/**
+ * C3g-A1, orchestrator decision A3 (R2-P2-2): finalizing a job in the DB
+ * changes what can happen to it (terminal status, finalizer, reservation
+ * release), so the chain's terminal status must hold AT THE PROOF TAG. With
+ * proof tag `latest` (or none: test doubles) it is the `latest` read. Returns
+ * the on-chain status at the proof tag; throws when unreadable.
+ */
+async function readChainJobAtProof(deps: Erc8183Deps, job: Pick<EscrowJobRow, 'escrowChainId' | 'escrowContract' | 'onChainJobId'>): Promise<ChainJob> {
+  const tag = deps.proofTag ?? 'latest';
+  if (tag === 'latest' || tag === 0n) return readChainJob(deps, job);
+  const client = deps.publicClient(job.escrowChainId!);
+  let at: { blockTag: 'safe' | 'finalized' } | { blockNumber: bigint };
+  if (typeof tag === 'bigint') {
+    if (!client.getBlockNumber) throw new Error('the read client cannot tell the latest block (proof tag latest − K)');
+    const latest = await client.getBlockNumber();
+    at = { blockNumber: latest > tag ? latest - tag : 0n };
+  } else {
+    at = { blockTag: tag };
+  }
+  const raw = (await client.readContract({
+    address: getAddress(job.escrowContract!),
+    abi: AGENT_JOB_ESCROW_ABI,
+    functionName: 'getJob',
+    args: [BigInt(job.onChainJobId!)],
+    ...at,
+  } as never)) as { status: number; budget: bigint };
+  return { status: Number(raw.status), budget: BigInt(raw.budget ?? 0n) };
+}
+
+/**
+ * A3: the job is terminal on-chain at `latest` but not (yet, or not readably)
+ * at the proof tag: nothing is finalized — the job keeps its live status, its
+ * mined candidate stays at proof level `latest` (a reorg below the proof
+ * depth reopens it via `revertForReorg` without anything finalized). The
+ * reconciliation pass enqueues the job again once the outcome is proven.
+ */
+export class SettlementAwaitingProofError extends Error {
+  constructor(
+    readonly jobId: string,
+    readonly chainStatus: number,
+  ) {
+    super(`ERC-8183 job ${jobId} is terminal on-chain (status ${chainStatus}) at latest but not yet at the proof tag — not finalized yet`);
+    this.name = 'SettlementAwaitingProofError';
+  }
+}
+
+/** A3: throws `SettlementAwaitingProofError` unless the job is terminal at the proof tag (with the same status family). */
+async function assertTerminalAtProof(deps: Erc8183Deps, job: EscrowJobRow, latestStatus: number): Promise<void> {
+  if ((deps.proofTag ?? 'latest') === 'latest') return;
+  let proven: ChainJob;
+  try {
+    proven = await readChainJobAtProof(deps, job);
+  } catch (err) {
+    deps.logger.warn({ jobId: job.id, err: errorMessage(err) }, 'ERC-8183 getJob at the proof tag unreadable — not finalized yet');
+    throw new SettlementAwaitingProofError(job.id, latestStatus);
+  }
+  if (proven.status !== latestStatus) throw new SettlementAwaitingProofError(job.id, latestStatus);
+}
+
 /** `readChainJob`, or null (logged) when the job has no on-chain id or the RPC fails. */
 async function tryReadChainJob(deps: Erc8183Deps, job: EscrowJobRow): Promise<ChainJob | null> {
   if (!job.onChainJobId || !job.escrowContract || !job.escrowChainId) return null;
@@ -1094,7 +1251,12 @@ async function handleStepFailure(
       return;
     }
     if (chain.status >= CHAIN_JOB_STATUS.Completed) {
-      await reconcileTerminal(deps, job, chain.status);
+      try {
+        await reconcileTerminal(deps, job, chain.status);
+      } catch (err) {
+        if (!(err instanceof SettlementAwaitingProofError)) throw err;
+        deps.logger.warn({ jobId: job.id, step }, 'ERC-8183 step failed and the job is terminal on-chain but not yet at the proof tag — left for reconciliation');
+      }
       return;
     }
     if (chain.status === CHAIN_JOB_STATUS.Submitted) {
@@ -1353,22 +1515,173 @@ export async function requestCancellationReject(
   return true;
 }
 
+// ── C3g-A1: the evaluator candidate ledger as a gate ───────────────────────
+
+function ledgerOf(deps: Erc8183Deps): EvaluatorLedgerPort {
+  return deps.evaluatorLedger ?? prismaEvaluatorLedger(deps.db);
+}
+
+function a1Settings(deps: Erc8183Deps): EvaluatorA1Settings {
+  return deps.evaluatorA1 ?? DEFAULT_EVALUATOR_A1_SETTINGS;
+}
+
+/** Per-node reads of the evaluator key and `hashes` (every RPC node; one node for test doubles). Never throws. */
+async function readEvaluatorNodes(deps: Erc8183Deps, chainId: number, evaluator: Address, hashes: readonly string[]): Promise<EvaluatorNodeRead[]> {
+  const list = hashes.map((h) => h.toLowerCase() as Hex);
+  try {
+    if (deps.readNodeViews) return await deps.readNodeViews(chainId, evaluator, list);
+    return await singleClientNodeReads(deps.publicClient(chainId) as never, evaluator, list);
+  } catch (err) {
+    return [{ node: '#? reader', index: 0, ok: false, error: errorMessage(err) }];
+  }
+}
+
+/** The evaluator key that signed a job's candidates (the configured one; the candidate rows carry it too). */
+function evaluatorOf(deps: Erc8183Deps, cands: readonly LedgerCandidate[]): Address | null {
+  const fromRow = cands.find((c) => c.evaluator)?.evaluator;
+  return (fromRow ? getAddress(fromRow) : deps.config.evaluatorAddress) ?? null;
+}
+
+type Verdict = { state: 'clear' } | { state: 'blocks'; reason: string; txHash: string } | { state: 'uncertain'; reason: string; txHash: string };
+
+function receiptsOf(views: readonly NodeView[], hash: string): Array<ReceiptView | null | undefined> {
+  return views.map((v) => {
+    const r = v.receipts;
+    if (!r) return undefined;
+    const key = Object.keys(r).find((k) => k.toLowerCase() === hash.toLowerCase());
+    return key === undefined ? undefined : r[key];
+  });
+}
+
+/**
+ * A1 §6.1 + R2-P2-2: can this candidate of the job still change what happens
+ * to the job, at `depth`?
+ *  - `proof` (contest, resolve, a different decision, claimRefund, the
+ *    cancellation reject, rebuilding the feedback file): clear only when its
+ *    nonce is consumed at the proof tag by consensus of every node AND its own
+ *    receipt is absent or a revert on every node (a mined success of a
+ *    decision candidate settled the job: blocks). A CANCEL settles nothing.
+ *  - `latest` (re-signing the SAME calldata): clear once its nonce is consumed
+ *    at `latest` by consensus (the worker's C3e rule; a mined success would
+ *    have made the chain terminal, which the caller read first).
+ * A row already proven at the proof depth is decided by its status. Any node
+ * in error or an answer missing → uncertain. Time never clears anything.
+ * A LEGACY row without a nonce follows today's rule (R2-P3-1): `proof` →
+ * clear only with a reverted receipt; `latest` → `legacyResignAllowed`.
+ */
+function candidateVerdict(c: CandidateRow, views: readonly NodeView[], depth: 'latest' | 'proof'): Verdict {
+  const settles = c.kind !== 'CANCEL';
+  const tx = c.txHash;
+  if (c.proofLevel === 'proof') {
+    if (c.status === 'MINED_SUCCESS' && settles && depth === 'proof') return { state: 'blocks', reason: `the evaluator transaction ${tx} was mined`, txHash: tx };
+    return { state: 'clear' };
+  }
+  if (!isLiveStatus(c.status) && depth === 'latest') return { state: 'clear' };
+  if (views.length === 0 || views.some((v) => !v.ok)) {
+    return { state: 'uncertain', reason: `the RPC nodes could not all be read for candidate ${tx}${c.nonce !== null ? ` at nonce ${c.nonce}` : ''}`, txHash: tx };
+  }
+  if (c.nonce === null) {
+    if (depth === 'latest') {
+      const mined = receiptsOf(views, tx);
+      // Today's rule: mined (any status) → the caller read the chain first, a new attempt is safe.
+      if (mined.length > 0 && mined.every((r) => r !== undefined && r !== null)) return { state: 'clear' };
+      return legacyResignAllowed(c, [...views])
+        ? { state: 'clear' }
+        : { state: 'blocks', reason: `legacy settlement ${tx} has no receipt and is not proven dropped (a node knows it, or a node could not tell)`, txHash: tx };
+    }
+    const rs = receiptsOf(views, tx);
+    if (rs.some((r) => r === undefined)) return { state: 'uncertain', reason: `the receipt of ${tx} could not be read on every node`, txHash: tx };
+    if (rs.length > 0 && rs.every((r) => r && r.status === 'reverted')) return { state: 'clear' };
+    if (rs.some((r) => r && r.status === 'success')) return { state: 'blocks', reason: `the settlement transaction ${tx} was mined`, txHash: tx };
+    return { state: 'blocks', reason: `the settlement transaction ${tx} is pending (no receipt yet)`, txHash: tx };
+  }
+  const consumed = nonceConsumed([...views], c.nonce, depth);
+  if (consumed === null) return { state: 'uncertain', reason: `the nonce ${c.nonce} of ${tx} could not be read on every node`, txHash: tx };
+  if (!consumed) {
+    return {
+      state: 'blocks',
+      reason: `candidate tx ${tx} at nonce ${c.nonce} may still mine${depth === 'proof' && !isLiveStatus(c.status) ? ` (its outcome is not yet at the proof depth)` : ''}`,
+      txHash: tx,
+    };
+  }
+  if (depth === 'latest' || !settles) return { state: 'clear' };
+  const rs = receiptsOf(views, tx);
+  if (rs.some((r) => r === undefined)) return { state: 'uncertain', reason: `the receipt of ${tx} could not be read on every node`, txHash: tx };
+  if (rs.some((r) => r && r.status === 'success')) return { state: 'blocks', reason: `the evaluator transaction ${tx} was mined`, txHash: tx };
+  return { state: 'clear' };
+}
+
+/** Candidates of the job a gate must look at (rows still undecided at the proof depth, plus mined decisions). */
+function gateRows(cands: readonly LedgerCandidate[]): LedgerCandidate[] {
+  return cands.filter((c) => isLiveStatus(c.status) || c.proofLevel === 'latest' || (c.status === 'MINED_SUCCESS' && c.kind !== 'CANCEL'));
+}
+
+/**
+ * A1 gate over the ledger: the first candidate of the job that blocks (or is
+ * uncertain) at `depth`; null when every candidate is clear. `sameCalldataHash`
+ * lowers the depth to `latest` for the candidates carrying exactly that
+ * calldata (re-signing the same decision, R2-P2-2).
+ */
+async function jobCandidatesVerdict(
+  deps: Erc8183Deps,
+  chainId: number,
+  cands: readonly LedgerCandidate[],
+  depth: 'latest' | 'proof',
+  sameCalldataHash: string | null = null,
+): Promise<Exclude<Verdict, { state: 'clear' }> | null> {
+  const rows = gateRows(cands);
+  if (rows.length === 0) return null;
+  const evaluator = evaluatorOf(deps, rows);
+  if (!evaluator) return { state: 'uncertain', reason: 'no evaluator key configured to read its nonces', txHash: rows[0]!.txHash };
+  const views = toNodeViews(await readEvaluatorNodes(deps, chainId, evaluator, rows.map((c) => c.txHash)));
+  let uncertain: Exclude<Verdict, { state: 'clear' }> | null = null;
+  for (const c of rows) {
+    // Re-signing the SAME decision (the worker gate passes its calldata hash): `latest` is enough (R2-P2-2) for
+    //  - a candidate carrying exactly that calldata;
+    //  - D-B (row 33): a CANCEL of the job — it never settles anything, its nonce consumed at `latest` is enough
+    //    to re-sign the decision (a reorg costs at worst the gas of a revert);
+    //  - D-A (row 32, R2-P3-1): a LEGACY row without nonce — today's worker rule (`legacyResignAllowed`),
+    //    whatever its (unknown) calldata.
+    // Contest, resolve with another decision and the backend's claimRefund / cancellation reject still call
+    // with `sameCalldataHash = null`: the proof depth.
+    const resign = depth === 'proof' && sameCalldataHash !== null;
+    const d: 'latest' | 'proof' =
+      resign && (c.calldataHash === sameCalldataHash!.toLowerCase() || c.kind === 'CANCEL' || c.nonce === null) ? 'latest' : depth;
+    const v = candidateVerdict(c, views, d);
+    if (v.state === 'blocks') return v;
+    if (v.state === 'uncertain' && !uncertain) uncertain = v;
+  }
+  return uncertain;
+}
+
 // ── Contest → operator review (C3d, decision D9) ───────────────────────────
 
 /**
- * True when no evaluator settlement of the job can still change the chain:
- * none was ever broadcast, or the last one has a receipt and it reverted. A
- * broadcast without a receipt (pending, or dropped and unknown) or a mined
- * one is "in flight" — the contest race rule refuses then.
+ * True when no evaluator transaction of the job can still change the chain.
+ *
+ * C3g-A1 (§6.1, R2-P2-2): with candidates in the ledger, every candidate of
+ * the job (any origin) must be clear at the PROOF depth: nonce consumed at the
+ * proof tag by consensus of every RPC node, and no mined success of a
+ * decision. Unreadable → `unverifiable` (contest 503 CONTEST_UNVERIFIABLE,
+ * resolve `unverifiable`). A job without any candidate (a legacy row, R2-P3-1)
+ * keeps today's rule: no broadcast, or the last one reverted.
  */
 async function noSettlementInFlight(
   deps: Erc8183Deps,
-  job: Pick<EscrowJobRow, 'settleTxHash' | 'escrowChainId' | 'settleAttemptAt'>,
-): Promise<{ ok: boolean; reason?: string }> {
+  job: Pick<EscrowJobRow, 'id' | 'settleTxHash' | 'escrowChainId' | 'settleAttemptAt'>,
+): Promise<{ ok: boolean; reason?: string; unverifiable?: boolean }> {
+  const cands = await ledgerOf(deps).candidatesForJob(job.id);
+  const recorded = job.settleTxHash ? cands.some((c) => c.txHash.toLowerCase() === job.settleTxHash!.toLowerCase()) : false;
+  if (cands.length > 0 && (!job.settleAttemptAt || recorded)) {
+    const verdict = await jobCandidatesVerdict(deps, job.escrowChainId!, cands, 'proof');
+    if (!verdict) return { ok: true };
+    return { ok: false, reason: verdict.reason, ...(verdict.state === 'uncertain' ? { unverifiable: true } : {}) };
+  }
   // C3e item 2 / G1 review P3-2: an evaluator send is stamped (with its
   // signed hash) before it leaves and the stamp is cleared once the send is
   // resolved; a stamp still set means a send in progress, or a process that
-  // died mid-send: it may still mine.
+  // died mid-send: it may still mine. (A1: a stamp whose hash has a ledger
+  // row is decided by the ledger above.)
   if (job.settleAttemptAt) {
     return {
       ok: false,
@@ -1442,6 +1755,9 @@ export async function contestEscrowJob(deps: Erc8183Deps, params: { jobId: strin
     return { outcome: 'refused', reason: `The job is no longer Submitted on-chain (status ${chain.status}): settlement already happened` };
   }
   const inFlight = await noSettlementInFlight(deps, job);
+  if (!inFlight.ok && inFlight.unverifiable) {
+    return { outcome: 'unverifiable', reason: `Whether an evaluator transaction of this job may still mine could not be verified (${inFlight.reason}); retry the contest` };
+  }
   if (!inFlight.ok) return { outcome: 'refused', reason: `Settlement already started: ${inFlight.reason}` };
 
   const contestedAt = nowOf(deps);
@@ -1550,6 +1866,9 @@ export async function resolveEscrowJob(deps: Erc8183Deps, params: ResolveParams)
     );
   }
   const inFlight = await noSettlementInFlight(deps, job);
+  if (!inFlight.ok && inFlight.unverifiable) {
+    return { outcome: 'unverifiable', message: `Whether an evaluator transaction of this job may still mine could not be verified (${inFlight.reason}); retry` };
+  }
   if (!inFlight.ok) return refusal('SETTLEMENT_IN_PROGRESS', `A settlement transaction may still mine: ${inFlight.reason}`);
 
   const at = nowOf(deps);
@@ -1836,8 +2155,15 @@ async function awaitOwnReceipt(
 async function reconcileFromChainOrThrow(deps: Erc8183Deps, job: EscrowJobRow, err: Error, settledBy: Hex | null = null): Promise<SettlementResult> {
   const chain = await tryReadChainJob(deps, job);
   if (chain && chain.status >= CHAIN_JOB_STATUS.Completed) {
-    const onChainStatus = await reconcileTerminal(deps, job, chain.status, { settledBy });
-    return { outcome: 'reconciled', onChainStatus };
+    try {
+      const onChainStatus = await reconcileTerminal(deps, job, chain.status, { settledBy });
+      return { outcome: 'reconciled', onChainStatus };
+    } catch (awaiting) {
+      // A1 review P2-3 (A3): terminal at latest, not yet at the proof tag — a no-op like the other A3 call
+      // sites: no retry storm, no hand-back of a job the chain already settled, no "settlement-failed".
+      if (awaiting instanceof SettlementAwaitingProofError) return { outcome: 'noop', reason: awaiting.message };
+      throw awaiting;
+    }
   }
   throw err;
 }
@@ -2051,8 +2377,6 @@ async function checkEvaluatorBalance(deps: Erc8183Deps, chainId: number): Promis
  * is 2 s — ten minutes without that nonce moving is a stuck key, not a busy one).
  */
 export const EVALUATOR_STUCK_ALERT_AFTER_MS = 10 * 60_000;
-/** Per chain: the evaluator key's lowest pending nonce, since when it has not moved, and when it was alerted. */
-const evaluatorBacklogs = new Map<number, { nonce: number; since: number; alertedAt: number | null }>();
 
 export interface EvaluatorBacklog {
   chainId: number;
@@ -2062,7 +2386,7 @@ export interface EvaluatorBacklog {
   /** Evaluator transactions known to the node and not mined (`pending` − `latest`), the stuck one included. */
   queued: number;
   since: Date;
-  /** The job's settlement transaction carrying `stuckNonce`, when one of the live jobs has it. */
+  /** A1: the live ledger candidate at `stuckNonce` (the head read from the table), when one is recorded. */
   stuckTxHash: Hex | null;
   jobId: string | null;
   /**
@@ -2071,27 +2395,10 @@ export interface EvaluatorBacklog {
    * can claimRefund it — also a Submitted job, whose work was delivered.
    */
   earliestExpiry: { jobId: string; expiresAt: Date } | null;
-}
-
-/** C3f item 1: the live escrow job whose recorded evaluator transaction carries `nonce`, if any. */
-async function evaluatorTxWithNonce(deps: Erc8183Deps, chainId: number, nonce: number): Promise<{ jobId: string; hash: Hex } | null> {
-  const client = deps.publicClient(chainId);
-  if (!client.getTransaction) return null;
-  const candidates = await deps.db.job.findMany({
-    where: { escrowKind: ESCROW_KIND, escrowChainId: chainId, settleTxHash: { not: null }, onChainStatus: { notIn: [...FINAL_ON_CHAIN_STATUSES] } },
-    select: { id: true, settleTxHash: true },
-    orderBy: { updatedAt: 'desc' },
-    take: 100,
-  });
-  for (const candidate of candidates) {
-    try {
-      const tx = await client.getTransaction({ hash: candidate.settleTxHash as Hex });
-      if (Number(tx.nonce) === nonce) return { jobId: candidate.id, hash: candidate.settleTxHash as Hex };
-    } catch {
-      // unknown or unreadable: not this one
-    }
-  }
-  return null;
+  /** A1 R2-P2-5: the earliest expiresAt among the DELIVERED jobs waiting on the key (candidates in [latest, pending) or a settlement due and not signed). */
+  earliestDeliveredExpiry: { jobId: string; expiresAt: Date } | null;
+  /** A1 R2-P2-5: alerted at first sight because a delivered job is within T of expiresAt (vs the last block time). */
+  early: boolean;
 }
 
 /**
@@ -2113,20 +2420,101 @@ async function earliestLiveExpiry(deps: Erc8183Deps, chainId: number): Promise<{
 }
 
 /**
- * C3f item 1 — visibility only. The evaluator signs with the node's `pending`
- * nonce, so one transaction that is never mined (priced below the network,
- * stuck in the mempool) makes every later evaluator transaction of the key —
- * other jobs' settlements, cancellation refunds, expiry claims — queue behind
- * it; each of those jobs then fails on its own (`settlement-failed`) and
- * nothing named the transaction that blocks them. Compares the key's `latest`
- * and `pending` transaction counts: a lowest pending nonce that has not moved
- * for EVALUATOR_STUCK_ALERT_AFTER_MS is alerted once (then at most every
- * SETTLEMENT_FAILURE_ALERT_INTERVAL_MS), with the job and transaction that
- * hold it and (review P3-1) the earliest expiresAt of the chain's live jobs:
- * the funds stay in the escrow only until then. Nothing is replaced or
- * cancelled: that needs an operator decision (C3f proposal). Without
- * `getTransactionCount` (unit-test clients) or with a node that does not see
- * the mempool, nothing is reported.
+ * A1 R2-P2-5 item 2: the earliest expiresAt among the delivered jobs that wait
+ * on the evaluator key — those with a live candidate at a nonce ≥ `fromNonce`
+ * (or without a nonce), plus the settlements due and not signed yet (deliverable
+ * Submitted on-chain: SUBMITTED / SETTLING, or a CONTESTED / held job with a
+ * recorded decision). Null when none (or unreadable: the caller then keeps
+ * the 10-minute rule).
+ */
+async function earliestAffectedDeliveredExpiry(
+  deps: Erc8183Deps,
+  chainId: number,
+  evaluator: Address,
+  fromNonce: number,
+): Promise<{ jobId: string; expiresAt: Date } | null> {
+  try {
+    const live = await ledgerOf(deps).liveCandidates(chainId, evaluator);
+    const ids = [...new Set(live.filter((c) => c.jobId && (c.nonce === null || c.nonce >= fromNonce)).map((c) => c.jobId!))];
+    const [first] = await deps.db.job.findMany({
+      where: {
+        escrowKind: ESCROW_KIND,
+        escrowChainId: chainId,
+        onChainStatus: { notIn: [...FINAL_ON_CHAIN_STATUSES] },
+        expiresAt: { not: null },
+        OR: [
+          ...(ids.length > 0 ? [{ id: { in: ids } }] : []),
+          { onChainStatus: { in: ['SUBMITTED', 'SETTLING'] } },
+          { onChainStatus: 'CONTESTED', resolution: { not: null } },
+        ],
+      },
+      select: { id: true, expiresAt: true },
+      orderBy: [{ expiresAt: 'asc' }, { id: 'asc' }],
+      take: 1,
+    });
+    return first?.expiresAt instanceof Date ? { jobId: first.id, expiresAt: first.expiresAt } : null;
+  } catch (err) {
+    deps.logger.warn({ chainId, err: errorMessage(err) }, 'ERC-8183 evaluator alert — the delivered jobs waiting on the key could not be read');
+    return null;
+  }
+}
+
+/** Timestamp of the latest block (R2-P3-5: deadlines are compared with the chain's clock); the process clock when unreadable. */
+async function lastBlockTime(deps: Erc8183Deps, chainId: number): Promise<Date> {
+  const client = deps.publicClient(chainId);
+  try {
+    if (client.getBlock) {
+      const block = await client.getBlock({ blockTag: 'latest' });
+      if (typeof block.timestamp === 'bigint') return new Date(Number(block.timestamp) * 1000);
+    }
+  } catch {
+    // fall back to the process clock
+  }
+  return nowOf(deps);
+}
+
+function earlyAlertLeadMs(deps: Erc8183Deps): number {
+  const seconds = a1Settings(deps).earlyAlertBeforeExpirySeconds ?? deps.config.reviewAlertBeforeExpirySeconds ?? DEFAULT_REVIEW_ALERT_BEFORE_EXPIRY_SECONDS;
+  return Math.max(0, seconds) * 1000;
+}
+
+/**
+ * A1 R2-P1-3 item 3: an evaluator-key alert with its clock and its "already
+ * told" mark PERSISTED (`EvaluatorChainState`): not again within `intervalMs`
+ * of the last DELIVERED one, unless the condition restarted after it (`since`).
+ * `recordAlertDelivered` runs only after `raiseAlert` reports the delivery, so
+ * an alert that could not be delivered is tried again on the next tick.
+ */
+async function raiseEvaluatorKeyAlert(
+  deps: Erc8183Deps,
+  chainId: number,
+  evaluator: Address,
+  key: string,
+  alert: EscrowAlert,
+  opts: { intervalMs: number; since?: Date | null },
+): Promise<boolean> {
+  const ledger = ledgerOf(deps);
+  const now = nowOf(deps);
+  const state = await ledger.readChainState(chainId, evaluator);
+  const last = state?.lastAlertAt[key];
+  if (last && (!opts.since || last.getTime() >= opts.since.getTime()) && now.getTime() - last.getTime() < opts.intervalMs) return false;
+  const delivered = await raiseAlert(deps, alert);
+  if (delivered) await ledger.recordAlertDelivered(chainId, evaluator, key, now);
+  return delivered;
+}
+
+/**
+ * C3f item 1 — visibility only, A1 edition. The evaluator signs with the
+ * node's `pending` nonce, so one transaction that is never mined makes every
+ * later evaluator transaction of the key queue behind it. Compares the key's
+ * `latest` and `pending` transaction counts; the head transaction is read from
+ * the candidate ledger (no `getTransaction` over the live jobs); the "since"
+ * clock and the "already alerted" mark are persisted (`EvaluatorChainState`,
+ * they survive a restart), and the mark is written only once the alert was
+ * delivered. Alerted after EVALUATOR_STUCK_ALERT_AFTER_MS, or at FIRST SIGHT
+ * when a delivered job waiting on the key is within T of its expiresAt (R2-P2-5,
+ * T = `earlyAlertBeforeExpirySeconds`), then at most every
+ * SETTLEMENT_FAILURE_ALERT_INTERVAL_MS. Nothing is replaced or cancelled here.
  */
 export async function checkEvaluatorBacklog(deps: Erc8183Deps, chainId: number): Promise<EvaluatorBacklog | null> {
   const evaluator = deps.config.evaluatorAddress;
@@ -2142,21 +2530,24 @@ export async function checkEvaluatorBacklog(deps: Erc8183Deps, chainId: number):
   } catch {
     return null;
   }
-  const now = nowOf(deps).getTime();
+  const ledger = ledgerOf(deps);
+  const nowDate = nowOf(deps);
+  const now = nowDate.getTime();
   if (pending <= latest) {
-    evaluatorBacklogs.delete(chainId);
+    await ledger.observeHeadClock(chainId, evaluator, 'stuck', null, nowDate);
     return null;
   }
-  const seen = evaluatorBacklogs.get(chainId);
-  if (!seen || seen.nonce !== latest) {
-    // First sight of this nonce at the head of the backlog: a busy key, not (yet) a stuck one.
-    evaluatorBacklogs.set(chainId, { nonce: latest, since: now, alertedAt: null });
-    return null;
-  }
-  if (now - seen.since < EVALUATOR_STUCK_ALERT_AFTER_MS) return null;
-  if (seen.alertedAt !== null && now - seen.alertedAt < SETTLEMENT_FAILURE_ALERT_INTERVAL_MS) return null;
-  seen.alertedAt = now;
-  const stuck = await evaluatorTxWithNonce(deps, chainId, latest);
+  const since = (await ledger.observeHeadClock(chainId, evaluator, 'stuck', latest, nowDate)) ?? nowDate;
+  const lead = earlyAlertLeadMs(deps);
+  const delivered = lead > 0 ? await earliestAffectedDeliveredExpiry(deps, chainId, evaluator, latest) : null;
+  const early = delivered !== null && lead > 0 && delivered.expiresAt.getTime() - (await lastBlockTime(deps, chainId)).getTime() < lead;
+  if (!early && now - since.getTime() < EVALUATOR_STUCK_ALERT_AFTER_MS) return null;
+  const state = await ledger.readChainState(chainId, evaluator);
+  const last = state?.lastAlertAt['evaluator-stuck'];
+  if (last && last.getTime() >= since.getTime() && now - last.getTime() < SETTLEMENT_FAILURE_ALERT_INTERVAL_MS) return null;
+
+  const head = (await ledger.candidatesAtNonce(chainId, evaluator, latest)).filter((c) => isLiveStatus(c.status));
+  const stuck = head.find((c) => c.kind !== 'CANCEL') ?? head[0] ?? null;
   let expiry: { jobId: string; expiresAt: Date } | null | 'unreadable';
   try {
     expiry = await earliestLiveExpiry(deps, chainId);
@@ -2170,10 +2561,12 @@ export async function checkEvaluatorBacklog(deps: Erc8183Deps, chainId: number):
     evaluator,
     stuckNonce: latest,
     queued: pending - latest,
-    since: new Date(seen.since),
-    stuckTxHash: stuck?.hash ?? null,
+    since,
+    stuckTxHash: (stuck?.txHash as Hex | undefined) ?? null,
     jobId: stuck?.jobId ?? null,
     earliestExpiry: earliest,
+    earliestDeliveredExpiry: delivered,
+    early,
   };
   // Review P3-1: "funds stay in the escrow" holds only until each job's expiresAt — never a made-up date.
   const deadline =
@@ -2183,58 +2576,101 @@ export async function checkEvaluatorBacklog(deps: Erc8183Deps, chainId: number):
         ? 'no live escrow job on this chain has an expiresAt recorded'
         : `the earliest among the live escrow jobs on this chain is ${expiry.expiresAt.toISOString()} (job ${expiry.jobId}` +
           `${expiry.expiresAt.getTime() <= now ? ', already passed' : ''})`;
-  await raiseAlert(deps, {
+  const holder = stuck
+    ? `${stuck.txHash}, ${stuck.jobId ? `the ${stuck.kind === 'CANCEL' ? 'cancel of a transaction' : 'settlement'} of job ${stuck.jobId}` : `a ${stuck.kind} transaction`}`
+    : 'head transaction not recorded in the ledger — foreign or unknown';
+  const delivered1 = await raiseAlert(deps, {
     kind: 'evaluator-stuck',
     chainId,
-    ...(stuck ? { jobId: stuck.jobId } : {}),
+    ...(stuck?.jobId ? { jobId: stuck.jobId } : {}),
     message:
-      `Evaluator ${evaluator} on chain ${chainId}: transaction nonce ${latest} ` +
-      `(${stuck ? `${stuck.hash}, the settlement of job ${stuck.jobId}` : 'not the recorded settlement of a live job'}) ` +
-      `has not been mined since ${backlog.since.toISOString()}; ${backlog.queued} evaluator transaction(s) wait behind it ` +
+      `Evaluator ${evaluator} on chain ${chainId}: transaction nonce ${latest} (${holder}) ` +
+      `has not been mined since ${since.toISOString()}; ${backlog.queued} evaluator transaction(s) wait behind it ` +
       '(settlements, cancellation refunds, expiry claims of every job on this chain). Funds stay in the escrow only until ' +
       `each job's expiresAt (${deadline}): after it anyone can call claimRefund and refund the requester's budget, also for ` +
-      'work already delivered (a Submitted job), and the provider goes unpaid. The backend does not replace or cancel the stuck ' +
-      'transaction on its own: it is mined when the network fee falls back to its price, or the operator replaces that nonce ' +
-      '(C3f proposal).',
+      'work already delivered (a Submitted job), and the provider goes unpaid. ' +
+      (early && delivered
+        ? `Alerted at first sight: delivered job ${delivered.jobId} waiting on this key expires at ${delivered.expiresAt.toISOString()}. `
+        : '') +
+      'The backend does not replace or cancel the stuck transaction on its own: it is mined when the network fee falls back ' +
+      'to its price, or the operator replaces that nonce (A1 recovery).',
     details: {
       evaluator,
       stuckNonce: latest,
       queued: backlog.queued,
       stuckTxHash: backlog.stuckTxHash,
-      since: backlog.since.toISOString(),
+      since: since.toISOString(),
       earliestExpiresAt: earliest?.expiresAt.toISOString() ?? null,
       earliestExpiringJobId: earliest?.jobId ?? null,
+      earliestDeliveredExpiresAt: delivered?.expiresAt.toISOString() ?? null,
+      earliestDeliveredJobId: delivered?.jobId ?? null,
+      early,
     },
   });
+  if (delivered1) await ledger.recordAlertDelivered(chainId, evaluator, 'evaluator-stuck', nowDate);
   return backlog;
 }
 
-/** C3f item 1: the backlog check of every chain that has a live escrow job (run by the expiry sweep). */
+/**
+ * C3f item 1 + A1 §5.2: on the expiry-sweep cadence, for every chain with a
+ * live escrow job or a live evaluator candidate: the candidate reconciliation
+ * pass first, then the backlog check.
+ */
 async function checkEvaluatorBacklogs(deps: Erc8183Deps): Promise<void> {
-  let chains: Array<{ escrowChainId: number | null }>;
-  try {
-    chains = await deps.db.job.findMany({
-      where: { escrowKind: ESCROW_KIND, escrowChainId: { not: null }, onChainStatus: { notIn: [...FINAL_ON_CHAIN_STATUSES] } },
-      select: { escrowChainId: true },
-      distinct: ['escrowChainId'],
-    });
-  } catch (err) {
-    deps.logger.warn({ err: errorMessage(err) }, 'ERC-8183 evaluator backlog check skipped — live escrow chains could not be read');
-    return;
-  }
-  for (const { escrowChainId } of chains) {
-    if (escrowChainId === null) continue;
+  const chainIds = await evaluatorWorkChains(deps);
+  if (chainIds === null) return;
+  for (const chainId of chainIds) {
     try {
-      await checkEvaluatorBacklog(deps, escrowChainId);
+      await reconcileEvaluatorCandidates(deps, chainId);
     } catch (err) {
-      deps.logger.warn({ chainId: escrowChainId, err: errorMessage(err) }, 'ERC-8183 evaluator backlog check failed for a chain');
+      deps.logger.warn({ chainId, err: errorMessage(err) }, 'ERC-8183 evaluator candidate reconciliation failed for a chain');
+    }
+    try {
+      await checkEvaluatorBacklog(deps, chainId);
+    } catch (err) {
+      deps.logger.warn({ chainId, err: errorMessage(err) }, 'ERC-8183 evaluator backlog check failed for a chain');
     }
   }
 }
 
-/** Testing hook. */
+/** Chains with a live escrow job or a live evaluator candidate; null (logged) when unreadable. */
+async function evaluatorWorkChains(deps: Erc8183Deps): Promise<number[] | null> {
+  try {
+    const chains = await deps.db.job.findMany({
+      where: { escrowKind: ESCROW_KIND, escrowChainId: { not: null }, onChainStatus: { notIn: [...FINAL_ON_CHAIN_STATUSES] } },
+      select: { escrowChainId: true },
+      distinct: ['escrowChainId'],
+    });
+    let chainIds = (Array.isArray(chains) ? chains : []).map((c) => c.escrowChainId).filter((c): c is number => c !== null);
+    const evaluator = deps.config.evaluatorAddress;
+    if (evaluator) chainIds = [...new Set([...chainIds, ...(await ledgerOf(deps).chainsWithLiveCandidates(evaluator))])];
+    return chainIds;
+  } catch (err) {
+    deps.logger.warn({ err: errorMessage(err) }, 'ERC-8183 evaluator checks skipped — live escrow chains could not be read');
+    return null;
+  }
+}
+
+/**
+ * C3g-A1 §5.2: the candidate reconciliation pass of every chain with work, at
+ * settlement-worker boot (`startEscrowSettlementWorker`). Never throws.
+ */
+export async function reconcileAllEvaluatorCandidates(deps: Erc8183Deps): Promise<EvaluatorCandidateReconcileSummary[]> {
+  const out: EvaluatorCandidateReconcileSummary[] = [];
+  const chainIds = await evaluatorWorkChains(deps);
+  for (const chainId of chainIds ?? []) {
+    try {
+      out.push(await reconcileEvaluatorCandidates(deps, chainId));
+    } catch (err) {
+      deps.logger.warn({ chainId, err: errorMessage(err) }, 'ERC-8183 evaluator candidate reconciliation failed for a chain');
+    }
+  }
+  return out;
+}
+
+/** Testing hook. A1: the backlog clock is persisted (`EvaluatorChainState`) — nothing in memory to reset any more. */
 export function __resetEvaluatorBacklogForTests(): void {
-  evaluatorBacklogs.clear();
+  // kept for the existing suites; the state lives in the ledger tables (cleaned with them)
 }
 
 /**
@@ -2263,22 +2699,16 @@ function assertEscrowConfigVerified(deps: Erc8183Deps, chainId: number): void {
 }
 
 /**
- * C3e item 1: thrown INSTEAD of a new evaluator broadcast while the job's
- * previous settlement transaction may still mine. A retry used to sign a
- * second complete/reject/claimRefund (simulation passes against the latest
- * block) that queued behind the first by nonce and reverted once it mined:
- * evaluator gas spent, and `settleTxHash` then pointed at the reverted retry,
- * so the hook outcome and the platform fee of the transaction that settled
- * were never recorded. The settlement is retried later (BullMQ / recovery);
- * once the first one has a receipt the chain read settles the job.
+ * A1 P17: the critical section (lane requested → candidate recorded) took
+ * longer than allowed — nothing was recorded, nothing is broadcast. Retried.
  */
-export class SettlementStillPendingError extends Error {
+export class EvaluatorCriticalSectionError extends Error {
   constructor(
-    readonly txHash: Hex,
-    detail: string,
+    readonly elapsedMs: number,
+    readonly maxMs: number,
   ) {
-    super(`ERC-8183 settlement ${txHash} may still mine (${detail}) — not signing another one`);
-    this.name = 'SettlementStillPendingError';
+    super(`Evaluator critical section took ${elapsedMs} ms (> ${maxMs} ms, plan P17): nothing recorded, nothing broadcast`);
+    this.name = 'EvaluatorCriticalSectionError';
   }
 }
 
@@ -2311,17 +2741,35 @@ async function isEvaluatorTxKnown(deps: Erc8183Deps, chainId: number, hash: Hex)
 }
 
 /**
- * C3e item 1: refuses (`SettlementStillPendingError`) while the job's last
- * evaluator transaction is still pending. Mined (any status) → a new attempt
- * is safe (a success would have made the chain terminal, which the caller read
- * first; a revert changed nothing). Unknown to every node (dropped, or never
- * sent) → safe, the new transaction replaces it. Unreadable → refused
- * (retried later). G1 review P3-1: "unknown" is asked of every RPC node, not
- * only the first one that answers. Without any transaction lookup (unit-test
- * clients) pending cannot be told from dropped: allowed, as before.
+ * C3e item 1 + A1 §6.1 / §7.3 (replaces the in-memory `unconfirmedSends` of
+ * C3f item 3): refuses (`SettlementStillPendingError`) a new evaluator
+ * signature for the job while any of its ledger candidates may still mine —
+ * read from the TABLE, so it holds across restarts and processes:
+ *  - a candidate carrying the SAME calldata (re-signing the same decision):
+ *    clear once its nonce is consumed at `latest` by consensus of every node;
+ *  - any other candidate (another decision, a CANCEL): clear only at the proof
+ *    depth (R2-P2-2);
+ *  - a node in error or an answer missing: refused (retried later);
+ *  - "not found" and elapsed time prove nothing: a SEND_UNCONFIRMED candidate
+ *    stays live until its nonce is consumed.
+ * A job without any candidate (pre-A1 row not yet backfilled) keeps today's
+ * rule on `settleTxHash` (R2-P3-1): mined → allowed; unknown to every node →
+ * allowed; pending / unreadable → refused. A LEGACY row without a nonce
+ * follows the same rule (`legacyResignAllowed`).
  */
-async function assertNoPendingSettlement(deps: Erc8183Deps, job: Pick<EscrowJobRow, 'settleTxHash' | 'escrowChainId'>): Promise<void> {
-  if (!job.settleTxHash || job.escrowChainId === null) return;
+async function assertNoPendingSettlement(
+  deps: Erc8183Deps,
+  job: Pick<EscrowJobRow, 'id' | 'settleTxHash' | 'escrowChainId'>,
+  calldataHash: string | null,
+): Promise<void> {
+  if (job.escrowChainId === null) return;
+  const cands = await ledgerOf(deps).candidatesForJob(job.id);
+  if (cands.length > 0) {
+    const verdict = await jobCandidatesVerdict(deps, job.escrowChainId, cands, 'proof', calldataHash);
+    if (verdict) throw new SettlementStillPendingError(verdict.txHash, verdict.state === 'uncertain' ? `cannot be told: ${verdict.reason}` : verdict.reason);
+    return;
+  }
+  if (!job.settleTxHash) return;
   const hash = job.settleTxHash as Hex;
   const client = deps.publicClient(job.escrowChainId);
   try {
@@ -2339,205 +2787,840 @@ async function assertNoPendingSettlement(deps: Erc8183Deps, job: Pick<EscrowJobR
   if (known) throw new SettlementStillPendingError(hash, 'no receipt yet and an RPC node still knows it');
 }
 
-/**
- * C3f item 3: evaluator sends that threw and that no RPC node knew at that
- * moment — P3-2 gave their job's hash slot back ("never left"). A node can
- * learn a transaction a moment after the send reported an error
- * (propagation, a load-balanced node behind), and a retry used to sign a
- * second settlement that queued behind the first by nonce and reverted once
- * it mined (evaluator gas; `settleTxHash` lost the transaction that settled,
- * so its hook outcome and fee were not recorded). The next attempt of the
- * job asks about that hash again before signing (`readoptUnconfirmedSend`).
- * In memory: the settlement worker (concurrency 1) is the only sender; after
- * a restart the nodes' "not found" stands, as before C3f.
- */
-const unconfirmedSends = new Map<string, Hex>();
-
-/** Testing hook. */
-export function __resetUnconfirmedSendsForTests(): void {
-  unconfirmedSends.clear();
+/** The answer `sendEvaluatorTx` returns: the signer (for the receipt wait), the hash and its ledger row. */
+interface EvaluatorSend {
+  signer: EvaluatorSigner;
+  txHash: Hex;
+  candidateId: string;
 }
 
 /**
- * C3f item 3: before a new evaluator signature for `job`, the hash of its
- * last send that threw while unknown to every node is asked about again:
- *  - mined: a revert changed nothing (forgotten); a success is adopted as the
- *    job's settlement transaction and nothing new is signed (the next read of
- *    the chain finds the job settled and records that transaction's outcome);
- *  - no receipt and a node knows it now: it left — adopted (P3-2's own rule:
- *    "a node knows it → in flight, hash kept") and nothing new is signed
- *    while it may mine (C3e item 1);
- *  - still unknown to every node: P3-2's verdict stands (never left);
- *  - the nodes cannot tell: nothing is signed, asked again on the next attempt.
- * The adoption is conditional on the hash slot as read, so a newer attempt
- * that recorded its own hash is never overwritten. A contest does not touch
- * that slot (review P3-3): one accepted in the interval — P3-2 gave the slot
- * back and the API process cannot see this map — leaves it empty, and the
- * next attempt, the operator's `resolve` of the CONTESTED job, re-adopts the
- * known hash and signs nothing while it may still mine. The chain decides:
- * if it settles against the decision, `reconcileTerminal` alerts
- * `review-overridden`.
- */
-async function readoptUnconfirmedSend(deps: Erc8183Deps, job: Pick<EscrowJobRow, 'id' | 'settleTxHash' | 'escrowChainId'>): Promise<void> {
-  const hash = unconfirmedSends.get(job.id);
-  if (!hash || job.escrowChainId === null) return;
-  if (hash === job.settleTxHash) {
-    unconfirmedSends.delete(job.id);
-    return;
-  }
-  const adopt = async (detail: string): Promise<never> => {
-    const adopted = await deps.db.job.updateMany({ where: { id: job.id, settleTxHash: job.settleTxHash }, data: { settleTxHash: hash } });
-    unconfirmedSends.delete(job.id);
-    deps.logger.warn(
-      { jobId: job.id, txHash: hash, adopted: adopted.count > 0 },
-      `ERC-8183 settlement send reported failed earlier and no node knew it then — ${detail}: kept as the job's settlement, nothing new signed`,
-    );
-    throw new SettlementStillPendingError(hash, detail);
-  };
-  try {
-    const receipt = await deps.publicClient(job.escrowChainId).getTransactionReceipt({ hash });
-    if (receipt.status === 'success') await adopt('it was mined');
-    unconfirmedSends.delete(job.id); // reverted: it changed nothing
-    return;
-  } catch (err) {
-    if (err instanceof SettlementStillPendingError) throw err;
-    if (!errorNamed(err, 'TransactionReceiptNotFoundError')) throw new SettlementStillPendingError(hash, 'its receipt could not be read');
-  }
-  let known: boolean | null;
-  try {
-    known = await isEvaluatorTxKnown(deps, job.escrowChainId, hash);
-  } catch {
-    throw new SettlementStillPendingError(hash, 'the RPC nodes cannot tell whether a send reported failed earlier left');
-  }
-  if (known) await adopt('a node knows it now (it left after all)');
-  unconfirmedSends.delete(job.id);
-}
-
-/**
- * G1 review P3-2: thrown from the broadcast hook — nothing is sent — when the
- * conditional write of the signed hash finds the job changed since it was
- * read: another attempt recorded its own transaction, or (for a claimed
- * settlement) the row is no longer SETTLING. Retried like any failure; the
- * retry reads the job again.
- */
-export class SettlementSupersededError extends Error {
-  constructor(readonly jobId: string) {
-    super(`ERC-8183 settlement of job ${jobId} not sent: the job changed since it was read (another attempt, or the claim was handed back)`);
-    this.name = 'SettlementSupersededError';
-  }
-}
-
-/**
- * Every evaluator transaction goes through here: Q7 gate, no second broadcast
- * while the job's previous one may still mine (C3e item 1), balance check,
- * then sign → record → send.
- *
- * G1 review P3-2 (replaces C3e item 2's stamp-then-hash): the evaluator signs
- * locally, so the signed hash is recorded in `settleTxHash` together with the
- * `settleAttemptAt` stamp BEFORE anything is sent — a conditional write on
- * the hash as read (and on SETTLING for a claimed settlement), so two
- * attempts cannot both send. Then the send:
- *  - it succeeds → the stamp is cleared; the recorded hash keeps contest /
- *    resolve refusing and a retry waiting (`assertNoPendingSettlement`) while
- *    it may mine — a lost write after the send cannot open a second one;
- *  - it throws (node refused it, out of gas, lost answer) → the nodes are
- *    asked about that hash: every node answered "not found" → it never left:
- *    the hash slot is given back (the previous hash) and the stamp cleared, so
- *    a contest and a new decision are allowed again; a node knows it → in
- *    flight: the hash is kept, the stamp cleared; uncertain (no node knows it
- *    and one could not be asked — it may be the one that took it) → both
- *    kept.
- * A call that reverts in simulation never reaches the hook: it stamps nothing.
- * A signer that does not call the hook (test doubles) gets its hash recorded
- * after the send, as before.
+ * Every evaluator transaction goes through here (A1 §2.4, §7.1, R2-P2-3,
+ * R2-P3-2/3):
+ *  1. Q7 gate; the ledger gate (`assertNoPendingSettlement`); balance check;
+ *  2. the evaluator LANE is acquired (`evaluatorLaneKey`, the same lane as any
+ *     other sender of that key — the recovery script included) and held from
+ *     the nonce choice to the send's answer, NEVER during the receipt wait;
+ *  3. the signer simulates, prepares and picks the nonce
+ *     `max(pending, highest live candidate + 1)` (never on top of a live one);
+ *  4. in `onBeforeBroadcast(hash, tx)`: the Q7 gate again, the critical-section
+ *     age (P17), then ONE database transaction inserts the SIGNED candidate
+ *     (nonce, gas, fees, calldata, raw bytes, decision) AND writes the job's
+ *     stamp conditionally (`settleTxHash` as read, SETTLING for a claim) —
+ *     a lost conditional write rolls both back and nothing is sent; then
+ *     `markBroadcast`;
+ *  5. the signer asserts the lease IMMEDIATELY before the send.
+ * The send's answer: accepted → SENT; an error → asked of every node
+ * (`resolveFailedSend`): known → SENT; "not found" everywhere →
+ * SEND_UNCONFIRMED (still live: nothing gives the slot back); uncertain →
+ * stays SIGNED with the error. A `LeaseLostError` after the record means NOT
+ * broadcast: the candidate stays SIGNED and live (identical rebroadcast by the
+ * reconciliation pass, or the next transaction of the key consumes it).
+ * The stamp (`settleAttemptAt`) is cleared after the answer: the ledger row is
+ * the gate from then on.
  */
 async function sendEvaluatorTx(
   deps: Erc8183Deps,
   job: Pick<EscrowJobRow, 'id' | 'escrowChainId' | 'settleTxHash'>,
   params: EvaluatorWriteParams,
-  opts: { claimed?: boolean } = {},
-): Promise<{ signer: EvaluatorSigner; txHash: Hex }> {
+  opts: { claimed?: boolean; intent: CandidateIntent },
+): Promise<EvaluatorSend> {
   const chainId = job.escrowChainId!;
   assertEscrowConfigVerified(deps, chainId);
-  await readoptUnconfirmedSend(deps, job);
-  await assertNoPendingSettlement(deps, job);
+  const calldata = encodeFunctionData({ abi: params.abi, functionName: params.functionName, args: params.args as never });
+  await assertNoPendingSettlement(deps, job, keccak256(calldata).toLowerCase());
   await checkEvaluatorBalance(deps, chainId);
   const signer = deps.evaluatorSigner(chainId);
+  const ledger = ledgerOf(deps);
+  const settings = a1Settings(deps);
   const previous = (job.settleTxHash as Hex | null) ?? null;
   // Assigned by the broadcast hook (a closure): typed so the checks below are not narrowed away.
-  let recorded = null as Hex | null;
-  let txHash: Hex;
+  let recorded = null as { id: string; hash: Hex } | null;
+  const lanes = (deps.evaluatorLanes ?? deps.lanes) as Partial<LeaseLock> | undefined;
+  // A1 review P3-4: never sign or send an evaluator transaction outside the evaluator lane (fail closed).
+  if (!lanes || typeof lanes.acquire !== 'function') {
+    throw new Error('ERC-8183 evaluator send refused: no evaluator lane lock (LeaseLock) is wired — nothing is signed or sent without the lane');
+  }
+  const lease: LaneLease = await lanes.acquire(evaluatorLaneKey(chainId, signer.address));
+  // A1 review P3-2: the critical section (P17) is measured from the moment the lane was OBTAINED, not from
+  // the start of the wait (the lease's own deadline is still taken before its SET: `assertHeld` stays strict).
+  const leaseObtainedAt = Date.now();
+  let sendError: unknown = null;
+  let sent = false;
   try {
-    txHash = await signer.writeContract(params, {
-      onBeforeBroadcast: async (signedTxHash: Hex) => {
+    await signer.writeContract(params, {
+      lease,
+      minLeaseMs: settings.leaseMinRemainingMs,
+      // R2-P2-3: never sign on top of a live candidate's nonce (a lagging `pending`).
+      chooseNonce: async (pending: number) => chooseNonce(pending, await ledger.liveNonces(chainId, signer.address)),
+      onBeforeBroadcast: async (signedTxHash: Hex, tx?: PreparedEvaluatorTx) => {
         // #182 review: the Q7 gate checked above may have closed while the
-        // signer simulated, estimated and signed (TTL ran out, a re-check
-        // failed): asked again before the stamp, so a refusal leaves nothing
-        // recorded (the claim is handed back) and nothing sent.
+        // signer simulated, estimated and signed: asked again before the
+        // record, so a refusal leaves nothing recorded and nothing sent.
         assertEscrowConfigVerified(deps, chainId);
-        const stamped = await deps.db.job.updateMany({
-          where: { id: job.id, settleTxHash: previous, ...(opts.claimed ? { onChainStatus: 'SETTLING' } : {}) },
-          data: { settleTxHash: signedTxHash, settleAttemptAt: nowOf(deps) },
+        const elapsed = Date.now() - leaseObtainedAt;
+        if (elapsed > settings.criticalSectionMaxMs) throw new EvaluatorCriticalSectionError(elapsed, settings.criticalSectionMaxMs);
+        if (!tx) throw new Error('evaluator signer did not hand over the signed transaction — nothing may be broadcast without its ledger row');
+        const { id } = await ledger.insertCandidateWithJobStamp({
+          candidate: {
+            chainId,
+            evaluator: signer.address,
+            nonce: tx.nonce,
+            jobId: job.id,
+            kind: 'ORIGINAL',
+            action: opts.intent.action,
+            decision: opts.intent.decision,
+            reasonHex: opts.intent.reasonHex,
+            toAddress: tx.to,
+            valueWei: tx.value,
+            calldata: tx.data,
+            gasLimit: tx.gas,
+            maxFeePerGas: tx.maxFeePerGas,
+            maxPriorityFeePerGas: tx.maxPriorityFeePerGas,
+            txHash: signedTxHash,
+            rawTx: tx.raw,
+            origin: 'WORKER',
+          },
+          job: {
+            id: job.id,
+            expectedSettleTxHash: previous,
+            setSettleTxHash: true,
+            stampAttempt: true,
+            ...(opts.claimed ? { expectedOnChainStatus: 'SETTLING' } : {}),
+          },
         });
-        if (stamped.count === 0) throw new SettlementSupersededError(job.id);
-        recorded = signedTxHash;
+        recorded = { id, hash: signedTxHash.toLowerCase() as Hex };
+        await ledger.markBroadcast(id);
       },
     });
+    sent = true;
   } catch (err) {
-    if (recorded !== null) await resolveFailedSend(deps, { jobId: job.id, chainId, hash: recorded, previous, err });
-    throw err;
+    sendError = err;
+  } finally {
+    // The lane covers the nonce choice up to the send's answer — never the receipt wait.
+    await lease.release();
   }
+  if (sendError !== null || !sent) {
+    if (recorded !== null) await resolveFailedSend(deps, { jobId: job.id, chainId, hash: recorded.hash, candidateId: recorded.id, err: sendError });
+    throw sendError;
+  }
+  if (recorded === null) {
+    // A signer that broadcast without calling the hook (never the A1 signer): fail loudly.
+    throw new Error(`ERC-8183 evaluator signer broadcast job ${job.id}'s transaction without recording its ledger candidate first`);
+  }
+  const rec = recorded as { id: string; hash: Hex };
   try {
-    if (recorded === null) {
-      await deps.db.job.update({ where: { id: job.id }, data: { settleTxHash: txHash, settleAttemptAt: null } });
-    } else {
-      await deps.db.job.updateMany({ where: { id: job.id, settleTxHash: recorded }, data: { settleAttemptAt: null } });
-    }
+    await ledger.markAnswered(rec.id, 'SENT');
+    await deps.db.job.updateMany({ where: { id: job.id, settleTxHash: rec.hash }, data: { settleAttemptAt: null } });
   } catch (err) {
-    if (recorded === null) throw err;
-    // The hash was recorded before the send: a lost stamp clear only keeps
-    // contest / resolve refusing until the outcome is recorded.
-    deps.logger.warn({ jobId: job.id, txHash, err: errorMessage(err) }, 'ERC-8183 settle-attempt stamp not cleared after the send — the recorded hash stands');
+    // The candidate was recorded before the send: a lost answer write only keeps the gates refusing until the pass resolves it.
+    deps.logger.warn({ jobId: job.id, txHash: rec.hash, err: errorMessage(err) }, 'ERC-8183 evaluator send answer not recorded — the ledger candidate stands');
   }
-  return { signer, txHash: recorded ?? txHash };
+  return { signer, txHash: rec.hash, candidateId: rec.id };
 }
 
-/** P3-2: the send of a recorded settlement threw — decide from the nodes whether it may still mine. */
+/**
+ * A1 §2.4-3 (replaces the P3-2 give-back): the send of a recorded candidate
+ * threw. Nothing is given back — the candidate stays live until a chain proof:
+ *  - `LeaseLostError`: the signer refused to broadcast (lease lost / margin):
+ *    NOT sent; stays SIGNED (rebroadcast by the reconciliation pass);
+ *  - otherwise every node is asked about the hash: known → SENT;
+ *    "not found" everywhere → SEND_UNCONFIRMED; a node could not be asked →
+ *    stays SIGNED with the error.
+ * The job's stamp is cleared: from now on the ledger row is the gate.
+ */
 async function resolveFailedSend(
   deps: Erc8183Deps,
-  failure: { jobId: string; chainId: number; hash: Hex; previous: Hex | null; err: unknown },
+  failure: { jobId: string; chainId: number; hash: Hex; candidateId: string; err: unknown },
 ): Promise<void> {
-  const { jobId, chainId, hash, previous } = failure;
-  let known: boolean | null;
+  const { jobId, chainId, hash, candidateId } = failure;
+  const ledger = ledgerOf(deps);
   try {
-    known = await isEvaluatorTxKnown(deps, chainId, hash);
-  } catch {
-    known = null;
-  }
-  try {
-    if (known === false) {
-      await deps.db.job.updateMany({ where: { id: jobId, settleTxHash: hash }, data: { settleTxHash: previous, settleAttemptAt: null } });
-      // C3f item 3: a node may still learn it (propagation) — asked again before the job's next signature.
-      unconfirmedSends.set(jobId, hash);
+    if (errorNamed(failure.err, 'LeaseLostError')) {
+      await ledger.markAnswered(candidateId, 'UNCERTAIN', `not broadcast: ${publicErrorMessage(failure.err)}`);
       deps.logger.warn(
         { jobId, txHash: hash, err: publicErrorMessage(failure.err) },
-        'ERC-8183 settlement send failed and no RPC node knows the transaction — never sent: settle-attempt stamp cleared',
-      );
-    } else if (known === true) {
-      await deps.db.job.updateMany({ where: { id: jobId, settleTxHash: hash }, data: { settleAttemptAt: null } });
-      deps.logger.warn(
-        { jobId, txHash: hash, err: publicErrorMessage(failure.err) },
-        'ERC-8183 settlement send reported an error but a node knows the transaction — in flight, hash kept',
+        'ERC-8183 evaluator lane lost before the broadcast — recorded candidate NOT sent; it stays live (identical rebroadcast or the next transaction of the key settles its nonce)',
       );
     } else {
-      deps.logger.error(
-        { jobId, txHash: hash, err: publicErrorMessage(failure.err) },
-        'ERC-8183 settlement send failed and the RPC nodes cannot tell whether it left (a node could not be asked) — hash and stamp kept (may still mine)',
+      let known: boolean | null;
+      try {
+        known = await isEvaluatorTxKnown(deps, chainId, hash);
+      } catch {
+        known = null;
+      }
+      const outcome = known === true ? 'SENT' : known === false ? 'SEND_UNCONFIRMED' : 'UNCERTAIN';
+      await ledger.markAnswered(candidateId, outcome, publicErrorMessage(failure.err));
+      deps.logger.warn(
+        { jobId, txHash: hash, outcome, err: publicErrorMessage(failure.err) },
+        known === true
+          ? 'ERC-8183 evaluator send reported an error but a node knows the transaction — in flight (SENT)'
+          : known === false
+            ? 'ERC-8183 evaluator send failed and no RPC node knows the transaction — SEND_UNCONFIRMED: still live until its nonce is proven consumed'
+            : 'ERC-8183 evaluator send failed and the RPC nodes cannot tell whether it left — candidate stays SIGNED (may still mine)',
       );
     }
+    await deps.db.job.updateMany({ where: { id: jobId, settleTxHash: hash }, data: { settleAttemptAt: null } });
   } catch (dbErr) {
-    deps.logger.error({ jobId, txHash: hash, err: errorMessage(dbErr) }, 'ERC-8183 settlement send failed and its record could not be updated — hash and stamp kept');
+    deps.logger.error({ jobId, txHash: hash, err: errorMessage(dbErr) }, 'ERC-8183 evaluator send failed and its record could not be updated — the candidate stands as recorded');
   }
+}
+
+/** Best effort: our own receipt with this job's event marks the candidate MINED at `latest` (the pass proves it deeper). */
+async function markOwnMined(deps: Erc8183Deps, candidateId: string, receipt: TransactionReceipt): Promise<void> {
+  try {
+    const blockHash = (receipt.blockHash as string | undefined)?.toLowerCase();
+    if (!blockHash || !/^0x[0-9a-f]{64}$/.test(blockHash) || receipt.blockNumber === undefined || receipt.blockNumber === null) return;
+    await ledgerOf(deps).markResolved(candidateId, receipt.status === 'success' ? 'MINED_SUCCESS' : 'MINED_REVERTED', {
+      level: 'latest',
+      blockNumber: BigInt(receipt.blockNumber),
+      blockHash,
+    });
+  } catch (err) {
+    deps.logger.warn({ candidateId, err: errorMessage(err) }, 'ERC-8183 evaluator candidate not marked mined — the reconciliation pass will');
+  }
+}
+
+// ── C3g-A1 §5.2: the candidate reconciliation pass ─────────────────────────
+
+export interface EvaluatorCandidateReconcileSummary {
+  chainId: number;
+  nonces: number;
+  resolved: number;
+  dead: number;
+  reorged: number;
+  foreign: number;
+  uncertain: number;
+  rebroadcast: number;
+  backfilled: number;
+  enqueued: number;
+}
+
+/** Map a decision recorded on a candidate back to the job's idempotent settlement action. */
+function actionOfCandidate(c: Pick<LedgerCandidate, 'action' | 'decision'>, job: { resolution: string | null }): EscrowSettlementJobData['action'] | { action: 'reject'; reason: CancellationReason } {
+  if (c.action === 'CLAIM_REFUND') return 'claimRefund';
+  if (c.decision === 'cancelled' || c.decision === 'provider-failed') return { action: 'reject', reason: c.decision };
+  return job.resolution ? 'resolve' : 'settle';
+}
+
+/** Enqueues the job's own idempotent action so the existing path reconciles it (it reads `getJob` first). */
+async function enqueueCandidateJob(deps: Erc8183Deps, jobId: string): Promise<boolean> {
+  try {
+    const job = await deps.db.job.findUnique({ where: { id: jobId }, select: { onChainStatus: true, resolution: true, escrowKind: true } });
+    if (!job || job.escrowKind !== ESCROW_KIND || (FINAL_ON_CHAIN_STATUSES as readonly string[]).includes(job.onChainStatus ?? '')) return false;
+    const cands = await ledgerOf(deps).candidatesForJob(jobId);
+    const last = [...cands].reverse().find((c) => c.kind !== 'CANCEL' && c.kind !== 'EXTERNAL');
+    const mapped = last ? actionOfCandidate(last, job) : job.resolution ? 'resolve' : 'settle';
+    if (typeof mapped === 'string') await deps.settlement.add({ jobId, action: mapped });
+    else await deps.settlement.add({ jobId, action: mapped.action, reason: mapped.reason });
+    return true;
+  } catch (err) {
+    deps.logger.warn({ jobId, err: errorMessage(err) }, 'ERC-8183 evaluator candidate reconciled but its job could not be enqueued — the recovery tick will');
+    return false;
+  }
+}
+
+/** `simulateContract`-equivalent of a recorded candidate (same calldata, from the evaluator): `eth_call` on the read client. */
+async function simulateCandidate(deps: Erc8183Deps, chainId: number, evaluator: Address, c: LedgerCandidate): Promise<boolean> {
+  const client = deps.publicClient(chainId);
+  if (!client.call || !c.toAddress || c.calldata === null) return false;
+  try {
+    await client.call({ account: evaluator, to: getAddress(c.toAddress), data: c.calldata as Hex, value: c.valueWei } as never);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function consensusLatest(views: readonly NodeView[]): number | null {
+  if (views.length === 0 || views.some((v) => !v.ok || v.nonceLatest === undefined)) return null;
+  const n = views[0]!.nonceLatest!;
+  return views.every((v) => v.nonceLatest === n) ? n : null;
+}
+
+/** Every node answered "not found" for the hash (not known, no receipt). Null when a node could not be read. */
+function unknownEverywhere(views: readonly NodeView[], hash: string): boolean | null {
+  if (views.length === 0 || views.some((v) => !v.ok)) return null;
+  const h = hash.toLowerCase();
+  for (const v of views) {
+    const k = v.known?.[h];
+    const r = v.receipts?.[h];
+    if (k === undefined || r === undefined) return null;
+    if (k || r !== null) return false;
+  }
+  return true;
+}
+
+/**
+ * §4.3: the transaction of the evaluator key that consumed `nonce` without a
+ * ledger row — binary search of the block where the key's nonce went from
+ * `nonce` to `nonce + 1`, then that block's transaction from the key. Best
+ * effort (null when the client cannot search).
+ */
+async function locateForeignTransaction(
+  deps: Erc8183Deps,
+  chainId: number,
+  evaluator: Address,
+  nonce: number,
+): Promise<{ hash: Hex; to: Address | null; input: Hex; value: bigint; gas: bigint; maxFeePerGas: bigint; maxPriorityFeePerGas: bigint; status: 'success' | 'reverted'; blockNumber: bigint; blockHash: Hex } | null> {
+  const client = deps.publicClient(chainId) as EscrowPublicClient & {
+    getBlock?: (args: { blockNumber: bigint; includeTransactions: true }) => Promise<{ transactions: Array<{ hash: Hex; from: Address; nonce: number; to: Address | null; input: Hex; value: bigint; gas: bigint; maxFeePerGas?: bigint; maxPriorityFeePerGas?: bigint; gasPrice?: bigint }> }>;
+  };
+  if (!client.getBlockNumber || !client.getTransactionCount || !client.getBlock) return null;
+  try {
+    // D-C: never viem's per-client cached block number (cacheTime ≈ pollingInterval): a head read before the
+    // foreign transaction's block would make the search give up on the pass right after it.
+    const head = await client.getBlockNumber({ cacheTime: 0 });
+    let lo = head > REFUND_LOOKUP_BLOCKS ? head - REFUND_LOOKUP_BLOCKS : 0n;
+    let hi = head;
+    const countAt = (b: bigint) => client.getTransactionCount!({ address: evaluator, blockNumber: b } as never);
+    if ((await countAt(hi)) <= nonce || (await countAt(lo)) > nonce) return null;
+    while (hi - lo > 1n) {
+      const mid = (lo + hi) / 2n;
+      if ((await countAt(mid)) > nonce) hi = mid;
+      else lo = mid;
+    }
+    const block = await client.getBlock({ blockNumber: hi, includeTransactions: true });
+    const tx = block.transactions.find((t) => t.from.toLowerCase() === evaluator.toLowerCase() && Number(t.nonce) === nonce);
+    if (!tx) return null;
+    const receipt = await client.getTransactionReceipt({ hash: tx.hash });
+    return {
+      hash: tx.hash,
+      to: tx.to,
+      input: tx.input,
+      value: tx.value,
+      gas: tx.gas,
+      maxFeePerGas: tx.maxFeePerGas ?? tx.gasPrice ?? 0n,
+      maxPriorityFeePerGas: tx.maxPriorityFeePerGas ?? tx.gasPrice ?? 0n,
+      status: receipt.status,
+      blockNumber: receipt.blockNumber,
+      blockHash: receipt.blockHash,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** R2-P3-10 / R2-P2-2 item 4: node health and the proof-tag head, persisted; alerted once over their thresholds. */
+async function watchNodesAndProofHead(deps: Erc8183Deps, chainId: number, evaluator: Address, reads: readonly EvaluatorNodeRead[]): Promise<void> {
+  const ledger = ledgerOf(deps);
+  const settings = a1Settings(deps);
+  const now = nowOf(deps);
+  const threshold = settings.rpcUnhealthyAfterFailures ?? 5;
+  for (const r of reads) {
+    if (r.node.startsWith('#? ')) continue;
+    try {
+      const failures = await ledger.recordNodeRead(chainId, evaluator, r.node, r.ok, now);
+      if (!r.ok && failures >= threshold) {
+        await raiseEvaluatorKeyAlert(deps, chainId, evaluator, `rpc-node-unhealthy:${r.node}`, {
+          kind: 'rpc-node-unhealthy',
+          chainId,
+          message:
+            `RPC node ${r.node} of chain ${chainId} failed ${failures} consecutive evaluator reads (${r.error ?? 'error'}). ` +
+            'Every A1 proof ("nonce consumed", "not found") needs EVERY node to answer: until it recovers, contests, resolves and ' +
+            'new decisions of jobs with an evaluator transaction in flight are refused as unverifiable. Fix the node or remove it ' +
+            'from the configured RPC candidates (RPC_URL_<chainId> / provider keys).',
+          details: { node: r.node, failures, error: r.error ?? null },
+        }, { intervalMs: SETTLEMENT_FAILURE_ALERT_INTERVAL_MS });
+      }
+    } catch (err) {
+      deps.logger.warn({ chainId, node: r.node, err: errorMessage(err) }, 'ERC-8183 evaluator node health not recorded');
+    }
+  }
+  // Watched whenever the proof tag can stall (safe / finalized): an explicit threshold, else the stuck threshold;
+  // an explicit null turns it off.
+  const stallable = deps.proofTag === 'safe' || deps.proofTag === 'finalized';
+  const stalledAfter =
+    settings.proofStalledAlertAfterMs !== undefined ? settings.proofStalledAlertAfterMs : stallable ? EVALUATOR_STUCK_ALERT_AFTER_MS : null;
+  if (!stalledAfter || reads.length === 0 || reads.some((r) => !r.ok || r.proofBlockNumber === undefined)) return;
+  const block = reads.reduce((min, r) => (r.proofBlockNumber! < min ? r.proofBlockNumber! : min), reads[0]!.proofBlockNumber!);
+  try {
+    const head = await ledger.observeSafeHead(chainId, evaluator, block, now);
+    if (!head.advanced && now.getTime() - head.seenAt.getTime() >= stalledAfter) {
+      await raiseEvaluatorKeyAlert(deps, chainId, evaluator, 'evaluator-proof-stalled', {
+        kind: 'evaluator-proof-stalled',
+        chainId,
+        message:
+          `The proof-tag head of chain ${chainId} has not advanced past block ${block} since ${head.seenAt.toISOString()}. ` +
+          'Evaluator outcomes cannot be proven at the configured depth: contests, resolves with another decision, backend ' +
+          'claimRefund / cancellation rejects of jobs with an evaluator transaction are refused (fail closed). Re-signing the ' +
+          'same decision is not affected. Moving to `latest − K` is an owner decision (D-g).',
+        details: { proofBlock: block.toString(), since: head.seenAt.toISOString() },
+      }, { intervalMs: SETTLEMENT_FAILURE_ALERT_INTERVAL_MS, since: head.seenAt });
+    }
+  } catch (err) {
+    deps.logger.warn({ chainId, err: errorMessage(err) }, 'ERC-8183 evaluator proof head not recorded');
+  }
+}
+
+/** §10-2: one idempotent LEGACY / BACKFILL row per in-flight job whose `settleTxHash` predates the ledger. */
+async function backfillLegacyInFlight(deps: Erc8183Deps, chainId: number, evaluator: Address): Promise<number> {
+  const jobs = await deps.db.job.findMany({
+    where: {
+      escrowKind: ESCROW_KIND,
+      escrowChainId: chainId,
+      settleTxHash: { not: null },
+      onChainStatus: { notIn: [...FINAL_ON_CHAIN_STATUSES] },
+      evaluatorTransactions: { none: {} },
+    },
+    select: { id: true, settleTxHash: true, resolution: true, status: true },
+    take: 100,
+  });
+  if (!Array.isArray(jobs) || jobs.length === 0) return 0;
+  const client = deps.publicClient(chainId);
+  const ledger = ledgerOf(deps);
+  let inserted = 0;
+  for (const job of jobs) {
+    const hash = job.settleTxHash as Hex;
+    let tx: Awaited<ReturnType<NonNullable<EscrowPublicClient['getTransaction']>>> | null = null;
+    try {
+      if (!client.getTransaction) continue;
+      tx = await client.getTransaction({ hash });
+    } catch (err) {
+      if (!errorNamed(err, 'TransactionNotFoundError')) continue; // unreadable: next tick
+      tx = null;
+    }
+    let action: CandidateIntent['action'] = 'UNKNOWN';
+    const input = (tx?.input ?? null) as Hex | null;
+    if (input && input.length >= 10) {
+      try {
+        const name = decodeFunctionData({ abi: AGENT_JOB_ESCROW_ABI, data: input }).functionName;
+        action = name === 'complete' ? 'COMPLETE' : name === 'reject' ? 'REJECT' : name === 'claimRefund' ? 'CLAIM_REFUND' : 'UNKNOWN';
+      } catch {
+        action = 'UNKNOWN';
+      }
+    }
+    try {
+      const res = await ledger.backfillLegacyCandidate({
+        chainId,
+        evaluator,
+        jobId: job.id,
+        txHash: hash,
+        action,
+        decision: job.resolution ?? (job.status === 'PAYMENT_PENDING' ? 'pay' : null),
+        tx:
+          tx && tx.to
+            ? {
+                nonce: Number(tx.nonce),
+                toAddress: tx.to,
+                calldata: tx.input,
+                gasLimit: tx.gas,
+                maxFeePerGas: (tx as { maxFeePerGas?: bigint }).maxFeePerGas ?? (tx as { gasPrice?: bigint }).gasPrice ?? 0n,
+                maxPriorityFeePerGas: (tx as { maxPriorityFeePerGas?: bigint }).maxPriorityFeePerGas ?? (tx as { gasPrice?: bigint }).gasPrice ?? 0n,
+                valueWei: tx.value ?? 0n,
+              }
+            : null,
+      });
+      if (res.inserted) inserted++;
+    } catch (err) {
+      deps.logger.warn({ jobId: job.id, txHash: hash, err: errorMessage(err) }, 'ERC-8183 legacy settlement not backfilled into the candidate ledger');
+    }
+  }
+  return inserted;
+}
+
+/**
+ * C3g-A1 §5.2 — the candidate reconciliation pass of one chain (worker boot,
+ * every expiry-sweep tick next to the backlog check, the start of the
+ * recovery script). Idempotent; writes only with a chain proof:
+ *  1. backfill of in-flight legacy jobs (§10-2);
+ *  2. ONE per-node read (every RPC node) of the evaluator key and of every
+ *     candidate still to watch (live, or proven only at `latest`);
+ *  3. per nonce, `resolveNonceDecision`:
+ *     - winner → MINED_* (+ the others DEAD) at the level proven; the job's
+ *       `settleTxHash` moves to the winner (conditional write); the job's
+ *       idempotent action is enqueued so the existing path reconciles it
+ *       (`getJob` → `reconcileTerminal`, fee / feedback from the WINNER's
+ *       receipt filtered by the job id);
+ *     - consumed by a transaction outside the ledger → its candidates DEAD;
+ *       the foreign transaction located (binary search) and recorded as
+ *       EXTERNAL; `evaluator-nonce-foreign`; their jobs enqueued;
+ *     - reorg → back to live (`evaluator-reorg`);
+ *     - uncertain → nothing written (alerted on MULTIPLE_RECEIPTS / a reorg
+ *       beyond the proof depth);
+ *  4. the identical rebroadcast of a lost head (R2-P1-3, inside the lane, at
+ *     most once per pass per candidate) and `evaluator-send-lost`;
+ *  5. stamps (`settleAttemptAt`) of recorded candidates are cleared — the
+ *     ledger row is the gate (§7.3).
+ * Node health (`rpc-node-unhealthy`) and the proof head
+ * (`evaluator-proof-stalled`) are tracked from the same read.
+ */
+export async function reconcileEvaluatorCandidates(deps: Erc8183Deps, chainId: number): Promise<EvaluatorCandidateReconcileSummary> {
+  const summary: EvaluatorCandidateReconcileSummary = { chainId, nonces: 0, resolved: 0, dead: 0, reorged: 0, foreign: 0, uncertain: 0, rebroadcast: 0, backfilled: 0, enqueued: 0 };
+  const evaluator = deps.config.evaluatorAddress;
+  if (!evaluator) return summary;
+  const ledger = ledgerOf(deps);
+  try {
+    summary.backfilled = await backfillLegacyInFlight(deps, chainId, evaluator);
+  } catch (err) {
+    deps.logger.warn({ chainId, err: errorMessage(err) }, 'ERC-8183 legacy settlement backfill skipped this tick');
+  }
+
+  const nonces = await ledger.noncesToReconcile(chainId, evaluator);
+  const legacy = await ledger.liveLegacyWithoutNonce(chainId, evaluator);
+  summary.nonces = nonces.length;
+  const rowsByNonce = new Map<number, LedgerCandidate[]>();
+  for (const n of nonces) rowsByNonce.set(n, await ledger.candidatesAtNonce(chainId, evaluator, n));
+  const hashes = [...[...rowsByNonce.values()].flat().map((c) => c.txHash), ...legacy.map((c) => c.txHash)];
+  if (hashes.length === 0) {
+    await ledger.observeHeadClock(chainId, evaluator, 'sendLost', null, nowOf(deps));
+    return summary;
+  }
+  const reads = await readEvaluatorNodes(deps, chainId, evaluator, hashes);
+  await watchNodesAndProofHead(deps, chainId, evaluator, reads);
+  const views = toNodeViews(reads);
+  const touchedJobs = new Set<string>();
+
+  for (const nonce of nonces) {
+    const rows = rowsByNonce.get(nonce) ?? [];
+    const res = resolveNonceDecision(rows, views, nonce);
+    switch (res.kind) {
+      case 'winner': {
+        const winner = rows.find((c) => c.id === res.winnerId)!;
+        // A1 review P2-1 (b): a row marked DEAD at `latest` whose own receipt is now seen by consensus was
+        // killed by a read that straddled a block (or a lagging node): corrected like a reorg — back to live,
+        // then resolved as mined below. A row DEAD at `proof` stays immutable (alerted, nothing written).
+        let corrected = false;
+        if (winner.status === 'DEAD') {
+          if (winner.proofLevel !== 'latest' || !(await ledger.revertForReorg(winner.id))) {
+            summary.uncertain++;
+            await raiseEvaluatorKeyAlert(deps, chainId, evaluator, `evaluator-ledger-conflict:${nonce}:dead-with-receipt`, {
+              kind: 'evaluator-ledger-conflict',
+              chainId,
+              message:
+                `Evaluator nonce ${nonce} on chain ${chainId}: candidate ${winner.txHash} is recorded DEAD at the proof depth but every node ` +
+                'returns its receipt — nothing is written; operator check required.',
+              details: { nonce, txHash: winner.txHash, jobId: winner.jobId },
+            }, { intervalMs: SETTLEMENT_FAILURE_ALERT_INTERVAL_MS });
+            break;
+          }
+          corrected = true;
+          deps.logger.warn({ chainId, nonce, txHash: winner.txHash, jobId: winner.jobId }, 'ERC-8183 evaluator candidate recorded DEAD at latest has its receipt now — corrected to mined');
+        }
+        const moved = await ledger.markResolved(winner.id, res.receipt.status === 'success' ? 'MINED_SUCCESS' : 'MINED_REVERTED', {
+          level: res.proofLevel,
+          blockNumber: res.receipt.blockNumber,
+          blockHash: res.receipt.blockHash,
+        });
+        const wasLive = isLiveStatus(winner.status) || corrected;
+        // A3: an outcome reaching the proof depth (from live, or upgraded from `latest`) lets its job be finalized.
+        const nowProven = moved && res.proofLevel === 'proof' && winner.proofLevel !== 'proof';
+        if (moved && wasLive) summary.resolved++;
+        for (const id of res.losers) {
+          const loser = rows.find((c) => c.id === id)!;
+          if (!isLiveStatus(loser.status) && !(loser.status === 'DEAD' && loser.proofLevel === 'latest')) continue;
+          if ((await ledger.markResolved(id, 'DEAD', { level: res.proofLevel })) && isLiveStatus(loser.status)) {
+            summary.dead++;
+            if (loser.jobId && loser.jobId !== winner.jobId) touchedJobs.add(loser.jobId);
+          }
+        }
+        if (winner.jobId && winner.kind !== 'CANCEL' && winner.kind !== 'EXTERNAL') {
+          await moveSettleTxHashToWinner(deps, winner.jobId, winner.txHash);
+          if ((wasLive || nowProven) && res.receipt.status === 'success') touchedJobs.add(winner.jobId);
+        }
+        if (winner.kind === 'CANCEL' && wasLive) for (const r of rows) if (r.jobId) touchedJobs.add(r.jobId);
+        break;
+      }
+      case 'consumed-foreign': {
+        for (const id of res.ids) {
+          const row = rows.find((c) => c.id === id)!;
+          if ((await ledger.markResolved(id, 'DEAD', { level: res.proofLevel })) && isLiveStatus(row.status)) {
+            summary.dead++;
+            if (row.jobId) touchedJobs.add(row.jobId);
+          }
+        }
+        summary.foreign++;
+        await recordForeignNonce(deps, chainId, evaluator, nonce, rows, res.proofLevel);
+        break;
+      }
+      case 'reorg': {
+        for (const id of res.ids) if (await ledger.revertForReorg(id)) summary.reorged++;
+        await raiseEvaluatorKeyAlert(deps, chainId, evaluator, `evaluator-reorg:${nonce}`, {
+          kind: 'evaluator-reorg',
+          chainId,
+          message:
+            `Evaluator nonce ${nonce} on chain ${chainId}: an outcome proven only at \`latest\` was reorganised away — its ` +
+            `candidate(s) are live again (${res.ids.length}) and every proof-depth gate of their jobs refuses until the chain ` +
+            'settles it again. A job the DB already mirrored as terminal from that block needs an operator check.',
+          details: { nonce, candidates: rows.filter((c) => res.ids.includes(c.id)).map((c) => ({ txHash: c.txHash, jobId: c.jobId })) },
+        }, { intervalMs: SETTLEMENT_FAILURE_ALERT_INTERVAL_MS });
+        break;
+      }
+      case 'uncertain': {
+        summary.uncertain++;
+        if (res.reason === 'KNOWN_WITHOUT_RECEIPT') await watchKnownWithoutReceipt(deps, chainId, evaluator, nonce, res.detail ?? null, views);
+        if (res.reason === 'MULTIPLE_RECEIPTS' || res.reason === 'PROOF_LEVEL_REORG') {
+          await raiseEvaluatorKeyAlert(deps, chainId, evaluator, `evaluator-ledger-conflict:${nonce}:${res.reason}`, {
+            kind: res.reason === 'PROOF_LEVEL_REORG' ? 'evaluator-reorg' : 'evaluator-ledger-conflict',
+            chainId,
+            message:
+              res.reason === 'PROOF_LEVEL_REORG'
+                ? `Evaluator nonce ${nonce} on chain ${chainId}: an outcome proven at the proof depth lost its block (${res.detail ?? ''}) — ` +
+                  'a reorg deeper than the configured proof tag. Nothing is written; operator check required.'
+                : `Evaluator nonce ${nonce} on chain ${chainId}: more than one recorded candidate has a receipt (${res.detail ?? ''}) — ` +
+                  'impossible for one key and nonce (a data or node error). Nothing is written; operator check required.',
+            details: { nonce, reason: res.reason, detail: res.detail ?? null },
+          }, { intervalMs: SETTLEMENT_FAILURE_ALERT_INTERVAL_MS });
+        }
+        break;
+      }
+      case 'alive':
+        break;
+    }
+  }
+
+  await resolveLegacyRows(deps, legacy, views);
+  summary.rebroadcast = await rebroadcastLostHead(deps, chainId, evaluator, views);
+  await clearRecordedStamps(deps, chainId);
+  for (const jobId of touchedJobs) if (await enqueueCandidateJob(deps, jobId)) summary.enqueued++;
+  return summary;
+}
+
+/**
+ * Rechecagem R-P3-b: a nonce consumed with no receipt while a node KNOWS our candidate is "uncertain" (a read
+ * straddling a block). Normally the next pass sees the receipt; when it persists — a node keeps serving a
+ * stale view, or keeps "knowing" a transaction the others do not have — the operator is told
+ * (`evaluator-proof-uncertain`) once past the send-lost / stuck threshold, with the nonce, the hash and the
+ * nodes that disagree. The first sight is persisted in `EvaluatorChainState.lastAlertAt` under an
+ * `observed:` key (written once), so the clock survives restarts; the alert itself is marked delivered only
+ * after `raiseAlert` delivered it.
+ */
+async function watchKnownWithoutReceipt(
+  deps: Erc8183Deps,
+  chainId: number,
+  evaluator: Address,
+  nonce: number,
+  txHash: string | null,
+  views: readonly NodeView[],
+): Promise<void> {
+  try {
+    const ledger = ledgerOf(deps);
+    const now = nowOf(deps);
+    const seenKey = `observed:evaluator-proof-uncertain:${nonce}:${(txHash ?? '').toLowerCase()}`;
+    const state = await ledger.readChainState(chainId, evaluator);
+    let since = state?.lastAlertAt[seenKey];
+    if (!since) {
+      await ledger.recordAlertDelivered(chainId, evaluator, seenKey, now);
+      since = now;
+    }
+    const after = a1Settings(deps).sendLostAlertAfterMs ?? EVALUATOR_STUCK_ALERT_AFTER_MS;
+    if (now.getTime() - since.getTime() < after) return;
+    const h = (txHash ?? '').toLowerCase();
+    const nodes = views.map((v) => `${v.node}: ${!v.ok ? 'error' : `latest ${v.nonceLatest ?? '?'}, ${v.known?.[h] ? 'knows it' : 'does not know it'}, ${v.receipts?.[h] ? 'receipt' : 'no receipt'}`}`);
+    await raiseEvaluatorKeyAlert(deps, chainId, evaluator, `evaluator-proof-uncertain:${nonce}`, {
+      kind: 'evaluator-proof-uncertain',
+      chainId,
+      message:
+        `Evaluator nonce ${nonce} on chain ${chainId}: consumed with no receipt for candidate ${txHash ?? '?'} while a node still KNOWS it, ` +
+        `since ${since.toISOString()} — nothing is concluded (neither mined nor dead); its job's gates stay closed. Nodes: ${nodes.join(' | ')}. ` +
+        'Check the RPC nodes (a lagging or inconsistent one); remove a broken node from the configured candidates.',
+      details: { nonce, txHash, since: since.toISOString(), nodes },
+    }, { intervalMs: SETTLEMENT_FAILURE_ALERT_INTERVAL_MS });
+  } catch (err) {
+    deps.logger.warn({ chainId, nonce, err: errorMessage(err) }, 'ERC-8183 persistent uncertain nonce not tracked this tick');
+  }
+}
+
+/** §5.1: `Job.settleTxHash` points to the candidate that mined (conditional on the value read). */
+async function moveSettleTxHashToWinner(deps: Erc8183Deps, jobId: string, winnerHash: string): Promise<void> {
+  try {
+    const job = await deps.db.job.findUnique({ where: { id: jobId }, select: { settleTxHash: true } });
+    if (!job || job.settleTxHash?.toLowerCase() === winnerHash.toLowerCase()) return;
+    await deps.db.job.updateMany({ where: { id: jobId, settleTxHash: job.settleTxHash }, data: { settleTxHash: winnerHash } });
+  } catch (err) {
+    deps.logger.warn({ jobId, txHash: winnerHash, err: errorMessage(err) }, 'ERC-8183 settleTxHash not moved to the mined candidate — next pass');
+  }
+}
+
+/** R2-P3-1: a live LEGACY row without a nonce: a receipt (every node) resolves it; a re-read that finds its nonce makes it a normal row. */
+async function resolveLegacyRows(deps: Erc8183Deps, legacy: readonly LedgerCandidate[], views: readonly NodeView[]): Promise<void> {
+  if (legacy.length === 0 || views.length === 0 || views.some((v) => !v.ok)) return;
+  const ledger = ledgerOf(deps);
+  for (const c of legacy) {
+    const rs = receiptsOf(views, c.txHash);
+    if (rs.some((r) => r === undefined)) continue;
+    const first = rs[0];
+    if (first && rs.every((r) => r && r.blockHash.toLowerCase() === first.blockHash.toLowerCase())) {
+      await ledger.markResolved(c.id, first.status === 'success' ? 'MINED_SUCCESS' : 'MINED_REVERTED', { level: 'latest', blockNumber: first.blockNumber, blockHash: first.blockHash });
+    }
+  }
+}
+
+/** §7.3: once the ledger has the row, the job's send stamp is no longer the gate — cleared (stale stamps only, never a send in progress). */
+async function clearRecordedStamps(deps: Erc8183Deps, chainId: number): Promise<void> {
+  try {
+    const settings = a1Settings(deps);
+    const before = new Date(nowOf(deps).getTime() - settings.criticalSectionMaxMs - 120_000);
+    const stamped = await deps.db.job.findMany({
+      where: { escrowKind: ESCROW_KIND, escrowChainId: chainId, settleAttemptAt: { not: null, lt: before }, settleTxHash: { not: null } },
+      select: { id: true, settleTxHash: true, settleAttemptAt: true },
+      take: 100,
+    });
+    if (!Array.isArray(stamped)) return;
+    const ledger = ledgerOf(deps);
+    for (const job of stamped) {
+      const cands = await ledger.candidatesForJob(job.id);
+      if (!cands.some((c) => c.txHash.toLowerCase() === job.settleTxHash!.toLowerCase())) continue;
+      await deps.db.job.updateMany({ where: { id: job.id, settleTxHash: job.settleTxHash, settleAttemptAt: job.settleAttemptAt }, data: { settleAttemptAt: null } });
+    }
+  } catch (err) {
+    deps.logger.warn({ chainId, err: errorMessage(err) }, 'ERC-8183 recorded send stamps not cleared this tick');
+  }
+}
+
+/** §4.3: candidates of `nonce` died to a transaction outside the ledger — locate, record EXTERNAL, alert once per nonce. */
+async function recordForeignNonce(
+  deps: Erc8183Deps,
+  chainId: number,
+  evaluator: Address,
+  nonce: number,
+  rows: readonly LedgerCandidate[],
+  proofLevel: 'latest' | 'proof',
+): Promise<void> {
+  const ledger = ledgerOf(deps);
+  const found = await locateForeignTransaction(deps, chainId, evaluator, nonce);
+  // A1 review P2-1 (c): the transaction that consumed the nonce is one of OUR ledger rows (its receipt was
+  // not visible to the read yet): no foreign transaction, no incident — the next pass records it as mined.
+  if (found && rows.some((c) => c.txHash.toLowerCase() === found.hash.toLowerCase())) {
+    deps.logger.warn({ chainId, nonce, txHash: found.hash }, 'ERC-8183 evaluator nonce consumed by a recorded candidate whose receipt was not visible yet — no foreign alert');
+    return;
+  }
+  if (found && found.to) {
+    try {
+      await ledger.recordExternalCandidate({
+        chainId,
+        evaluator,
+        nonce,
+        toAddress: found.to,
+        valueWei: found.value,
+        calldata: found.input,
+        gasLimit: found.gas,
+        maxFeePerGas: found.maxFeePerGas,
+        maxPriorityFeePerGas: found.maxPriorityFeePerGas,
+        txHash: found.hash,
+        status: found.status === 'success' ? 'MINED_SUCCESS' : 'MINED_REVERTED',
+        proofLevel,
+        blockNumber: found.blockNumber,
+        blockHash: found.blockHash,
+        note: 'nonce consumed outside the ledger (A1 §4.3)',
+      });
+    } catch (err) {
+      deps.logger.warn({ chainId, nonce, err: errorMessage(err) }, 'ERC-8183 foreign evaluator transaction not recorded');
+    }
+  }
+  const selector = found && found.input.length >= 10 ? found.input.slice(0, 10) : found ? '0x' : null;
+  await raiseEvaluatorKeyAlert(deps, chainId, evaluator, `evaluator-nonce-foreign:${nonce}`, {
+    kind: 'evaluator-nonce-foreign',
+    chainId,
+    message:
+      `Evaluator ${evaluator} nonce ${nonce} on chain ${chainId} was consumed by a transaction no ledger row covers ` +
+      `(${found ? `${found.hash} in block ${found.blockNumber}, to ${found.to ?? 'contract creation'}, selector ${selector}` : 'not located'}): ` +
+      'a manual send with the evaluator key, another environment sharing the key, or a COMPROMISED key. The recorded ' +
+      `candidate(s) of that nonce are dead (${rows.length}); their jobs go back to the normal path. Treat it as an incident ` +
+      'until the sender is identified.',
+    details: { nonce, txHash: found?.hash ?? null, block: found?.blockNumber?.toString() ?? null, to: found?.to ?? null, selector, candidates: rows.map((c) => c.txHash) },
+  }, { intervalMs: Number.MAX_SAFE_INTEGER });
+}
+
+/**
+ * R2-P1-3 — the identical rebroadcast of a lost head and `evaluator-send-lost`.
+ * The head is the nonce every node reports at `latest`. When its ONLY live
+ * candidate is unknown to every node, inside the evaluator lane: fresh reads,
+ * `rebroadcastAllowed` (head, sole live candidate, "not found" everywhere,
+ * simulation passes, Q7 open, raw bytes kept), then `sendRaw` of the SAME
+ * bytes (never a replacement: same nonce, same fees, same decision). At most
+ * once per pass. "already known" / accepted → SENT; "nonce too low" → the next
+ * pass proves the nonce; "underpriced" → an ordinary backlog (evaluator-stuck);
+ * transport → next tick; any refusal → alerted. Returns how many were sent.
+ */
+async function rebroadcastLostHead(deps: Erc8183Deps, chainId: number, evaluator: Address, views: readonly NodeView[]): Promise<number> {
+  const ledger = ledgerOf(deps);
+  const now = nowOf(deps);
+  const head = consensusLatest(views);
+  const headRows = head === null ? [] : (await ledger.candidatesAtNonce(chainId, evaluator, head)).filter((c) => isLiveStatus(c.status));
+  const lost = headRows.length > 0 && headRows.every((c) => unknownEverywhere(views, c.txHash) === true);
+  const since = await ledger.observeHeadClock(chainId, evaluator, 'sendLost', lost ? head : null, now);
+  if (!lost || head === null) return 0;
+
+  let refusal: string | null = null;
+  let sent = 0;
+  let signer: (EvaluatorSigner & Partial<Pick<EvaluatorA1Signer, 'sendRaw'>>) | null = null;
+  try {
+    signer = deps.evaluatorSigner(chainId) as EvaluatorSigner & Partial<Pick<EvaluatorA1Signer, 'sendRaw'>>;
+  } catch (err) {
+    deps.logger.warn({ chainId, err: errorMessage(err) }, 'ERC-8183 identical rebroadcast impossible — no evaluator signer in this process');
+  }
+  const lanes = (deps.evaluatorLanes ?? deps.lanes) as Partial<LeaseLock> | undefined;
+  if (!signer) refusal = 'NO_REBROADCAST: no evaluator signer in this process';
+  else if (headRows.length > 1) refusal = 'OTHER_LIVE_CANDIDATE: more than one live candidate at the head nonce — no automatic rebroadcast (the recovery script decides)';
+  else if (typeof signer.sendRaw !== 'function' || !lanes || typeof lanes.acquire !== 'function') refusal = 'NO_REBROADCAST: this process has no A1 signer or no evaluator lane';
+  else {
+    let lease: LaneLease | null = null;
+    try {
+      lease = await lanes.acquire(evaluatorLaneKey(chainId, signer.address), { waitMs: 5_000 });
+      // Every condition read again INSIDE the lane (R2-P1-3).
+      const rowsAt = await ledger.candidatesAtNonce(chainId, evaluator, head);
+      const cand = rowsAt.find((c) => c.id === headRows[0]!.id)!;
+      const fresh = toNodeViews(await readEvaluatorNodes(deps, chainId, evaluator, [cand.txHash]));
+      const gate = deps.configGate?.(chainId);
+      const verdict = rebroadcastAllowed({
+        candidate: cand,
+        candidatesAtNonce: rowsAt,
+        views: fresh,
+        hasRawTx: !!cand.rawTx,
+        simulationOk: await simulateCandidate(deps, chainId, evaluator, cand),
+        gateOpen: !gate || gate.allowed,
+      });
+      if (!verdict.ok) {
+        // NODE_ERROR / NOT_HEAD / KNOWN_OR_MINED: the situation moved; the next pass looks again.
+        if (['OTHER_LIVE_CANDIDATE', 'SIMULATION_REVERTS', 'NO_RAW_TX', 'GATE_CLOSED', 'NO_NONCE'].includes(verdict.reason)) {
+          refusal = `${verdict.reason}${verdict.detail ? `: ${verdict.detail}` : ''}`;
+        }
+      } else {
+        await ledger.markBroadcast(cand.id);
+        const out = await signer.sendRaw!(cand.rawTx as Hex, { lease, minLeaseMs: a1Settings(deps).leaseMinRemainingMs });
+        if (out.kind === 'accepted' || out.kind === 'already-known') {
+          await ledger.markAnswered(cand.id, 'SENT');
+          sent++;
+          deps.logger.warn({ chainId, nonce: head, txHash: cand.txHash, jobId: cand.jobId, answer: out.kind }, 'ERC-8183 lost evaluator transaction rebroadcast (identical bytes)');
+        } else if (out.kind === 'rejected') {
+          refusal = `the node refused the identical rebroadcast: ${out.message}`;
+        } else {
+          deps.logger.warn({ chainId, nonce: head, txHash: cand.txHash, answer: out.kind, message: out.message }, 'ERC-8183 identical rebroadcast not accepted — next pass decides');
+        }
+      }
+    } catch (err) {
+      deps.logger.warn({ chainId, nonce: head, err: errorMessage(err) }, 'ERC-8183 identical rebroadcast skipped this pass');
+    } finally {
+      if (lease) await lease.release();
+    }
+  }
+  if (sent > 0) {
+    await ledger.observeHeadClock(chainId, evaluator, 'sendLost', null, now);
+    return sent;
+  }
+  const lostSince = since ?? now;
+  const afterMs = a1Settings(deps).sendLostAlertAfterMs ?? EVALUATOR_STUCK_ALERT_AFTER_MS;
+  const c = headRows[0]!;
+  const lead = earlyAlertLeadMs(deps);
+  const delivered = lead > 0 ? await earliestAffectedDeliveredExpiry(deps, chainId, evaluator, head) : null;
+  const early = delivered !== null && lead > 0 && delivered.expiresAt.getTime() - (await lastBlockTime(deps, chainId)).getTime() < lead;
+  if (refusal === null && !early && now.getTime() - lostSince.getTime() < afterMs) return 0;
+  await raiseEvaluatorKeyAlert(deps, chainId, evaluator, 'evaluator-send-lost', {
+    kind: 'evaluator-send-lost',
+    chainId,
+    ...(c.jobId ? { jobId: c.jobId } : {}),
+    message:
+      `Evaluator ${evaluator} on chain ${chainId}: transaction ${c.txHash} at the head nonce ${head}` +
+      `${c.jobId ? ` (job ${c.jobId})` : ''} is unknown to every RPC node since ${lostSince.toISOString()}` +
+      `${refusal ? ` and was not rebroadcast (${refusal})` : ''}. It may still mine (it was recorded before its send), so the job's ` +
+      'settlement, contest and resolve stay blocked until its nonce is consumed. ' +
+      `${delivered ? `The earliest delivered job waiting on this key expires at ${delivered.expiresAt.toISOString()} (job ${delivered.jobId}). ` : ''}` +
+      'After expiresAt anyone can call claimRefund on a Funded or Submitted job and refund the requester in full, also for work ' +
+      'already delivered; the provider is then unpaid. Operator: run the evaluator recovery dry-run.',
+    details: { nonce: head, txHash: c.txHash, jobId: c.jobId, since: lostSince.toISOString(), refusal, earliestDeliveredExpiresAt: delivered?.expiresAt.toISOString() ?? null },
+  }, { intervalMs: SETTLEMENT_FAILURE_ALERT_INTERVAL_MS, since: lostSince });
+  return 0;
 }
 
 /**
@@ -2564,8 +3647,14 @@ export async function processSettlementJob(deps: Erc8183Deps, jobLike: Settlemen
 
   const chain = await readChainJob(deps, job);
   if (chain.status >= CHAIN_JOB_STATUS.Completed) {
-    const onChainStatus = await reconcileTerminal(deps, job, chain.status);
-    return { outcome: 'reconciled', onChainStatus };
+    try {
+      const onChainStatus = await reconcileTerminal(deps, job, chain.status);
+      return { outcome: 'reconciled', onChainStatus };
+    } catch (err) {
+      // A3: terminal at latest, not yet at the proof tag — nothing finalized; the candidate pass re-enqueues it once proven.
+      if (err instanceof SettlementAwaitingProofError) return { outcome: 'noop', reason: err.message };
+      throw err;
+    }
   }
 
   switch (data.action) {
@@ -2728,6 +3817,14 @@ export function settlementPlan(job: Pick<EscrowJobRow, 'contestedAt' | 'status'>
   }
 }
 
+/** A1 §6.1: refuses (SettlementStillPendingError) to rebuild / drop the feedback file while a candidate of the job may still mine (proof depth). */
+async function assertFeedbackFileMutable(deps: Erc8183Deps, job: EscrowJobRow): Promise<void> {
+  const cands = await ledgerOf(deps).candidatesForJob(job.id);
+  if (cands.length === 0 || job.escrowChainId === null) return;
+  const verdict = await jobCandidatesVerdict(deps, job.escrowChainId, cands, 'proof');
+  if (verdict) throw new SettlementStillPendingError(verdict.txHash, `the feedback file is not rebuilt while ${verdict.reason}`);
+}
+
 /**
  * Sends the evaluator transaction of a claimed (SETTLING) job and records the
  * outcome. Only `pay` and the `quality-rejected` verdict carry feedback
@@ -2745,17 +3842,22 @@ async function executeDecision(deps: Erc8183Deps, job: EscrowJobRow, decision: R
     // after an earlier, unmined attempt.
     let file = (job.feedbackFile ?? null) as FeedbackFile | null;
     if (!file || file.outcome !== plan.feedback) {
+      // C3g-A1 §6.1: the calldata of a live candidate commits the hash of the
+      // current file (a speed-up re-signs it byte for byte): never rebuilt
+      // while any candidate of the job may still mine (proof depth).
+      await assertFeedbackFileMutable(deps, job);
       file = await buildFeedbackFile(deps, job, plan.feedback);
       await deps.db.job.update({ where: { id: job.id }, data: { feedbackFile: file as unknown as Prisma.InputJsonValue } });
     }
     optParams = encodeAbiParameters([{ type: 'string' }, { type: 'bytes32' }], [feedbackUriFor(deps.config, job.id), feedbackHashOf(file)]);
   } else if (job.feedbackFile != null) {
     // Nothing is committed by a "0x" reject: drop a file an earlier, unmined attempt generated.
+    await assertFeedbackFileMutable(deps, job);
     await deps.db.job.update({ where: { id: job.id }, data: { feedbackFile: Prisma.DbNull } });
   }
 
   const escrow = getAddress(job.escrowContract!);
-  const { signer, txHash } = await sendEvaluatorTx(
+  const { signer, txHash, candidateId } = await sendEvaluatorTx(
     deps,
     job,
     {
@@ -2765,7 +3867,7 @@ async function executeDecision(deps: Erc8183Deps, job: EscrowJobRow, decision: R
       args: [BigInt(job.onChainJobId!), plan.reason, optParams],
     },
     // The job was claimed (SETTLING): the hash is recorded only while it still is.
-    { claimed: true },
+    { claimed: true, intent: { action: plan.functionName === 'complete' ? 'COMPLETE' : 'REJECT', decision, reasonHex: plan.reason } },
   );
   deps.logger.info({ jobId: job.id, action: plan.functionName, decision, resolution: job.resolution, txHash }, 'ERC-8183 settlement sent');
 
@@ -2784,6 +3886,14 @@ async function executeDecision(deps: Erc8183Deps, job: EscrowJobRow, decision: R
   // "REJECTED because no JobCompleted": a receipt without this job's event settled nothing here.
   const parsed = parseSettlementReceipt(receipt.logs, escrow, hook, BigInt(job.onChainJobId!));
   if (!parsed.completed && !parsed.rejected) return ownOutcomeUnproven(deps, job, action, txHash);
+  await markOwnMined(deps, candidateId, receipt);
+  try {
+    await assertTerminalAtProof(deps, job, parsed.completed ? CHAIN_JOB_STATUS.Completed : CHAIN_JOB_STATUS.Rejected);
+  } catch (err) {
+    // A3: terminal at latest only — nothing finalized; the candidate pass re-enqueues the job once proven.
+    if (err instanceof SettlementAwaitingProofError) return { outcome: 'noop', reason: err.message };
+    throw err;
+  }
   const ratedAgentId = parsed.ratedAgentId ?? (parsed.feedbackStatus === 'skipped:penalized' ? await readCanonicalAgentId(deps, job, hook) : null);
   const onChainStatus: OnChainStatus = parsed.completed ? 'COMPLETED' : 'REJECTED';
   await deps.db.job.update({
@@ -2906,12 +4016,18 @@ async function rejectForCancellation(
     return { outcome: 'noop', reason: 'the operator decision "pay" is recorded — cancellation reject dropped' };
   }
   const escrow = getAddress(job.escrowContract!);
-  const { signer, txHash } = await sendEvaluatorTx(deps, job, {
-    address: escrow,
-    abi: AGENT_JOB_ESCROW_ABI,
-    functionName: 'reject',
-    args: [BigInt(job.onChainJobId!), reason === 'cancelled' ? SETTLEMENT_REASONS.cancelled : SETTLEMENT_REASONS.providerFailed, '0x'],
-  });
+  const rejectReason = reason === 'cancelled' ? SETTLEMENT_REASONS.cancelled : SETTLEMENT_REASONS.providerFailed;
+  const { signer, txHash, candidateId } = await sendEvaluatorTx(
+    deps,
+    job,
+    {
+      address: escrow,
+      abi: AGENT_JOB_ESCROW_ABI,
+      functionName: 'reject',
+      args: [BigInt(job.onChainJobId!), rejectReason, '0x'],
+    },
+    { intent: { action: 'REJECT', decision: reason, reasonHex: rejectReason } },
+  );
   let receipt: TransactionReceipt;
   try {
     receipt = await awaitOwnReceipt(deps, job, signer, txHash, 'reject');
@@ -2923,6 +4039,14 @@ async function rejectForCancellation(
   const parsed = parseSettlementReceipt(receipt.logs, escrow, deps.config.chain(job.escrowChainId!)?.hook ?? null, BigInt(job.onChainJobId!));
   // C3h D2: REJECTED only from this job's JobRejected event.
   if (!parsed.rejected) return ownOutcomeUnproven(deps, job, 'reject', txHash);
+  await markOwnMined(deps, candidateId, receipt);
+  try {
+    await assertTerminalAtProof(deps, job, CHAIN_JOB_STATUS.Rejected);
+  } catch (err) {
+    // A3: terminal at latest only — nothing finalized; the candidate pass re-enqueues the job once proven.
+    if (err instanceof SettlementAwaitingProofError) return { outcome: 'noop', reason: err.message };
+    throw err;
+  }
   await deps.db.job.update({
     where: { id: job.id },
     data: {
@@ -2964,12 +4088,17 @@ async function claimRefund(deps: Erc8183Deps, job: EscrowJobRow, chainStatus: nu
   }
   const before = reviewSnapshot(job);
   const escrow = getAddress(job.escrowContract!);
-  const { signer, txHash } = await sendEvaluatorTx(deps, job, {
-    address: escrow,
-    abi: AGENT_JOB_ESCROW_ABI,
-    functionName: 'claimRefund',
-    args: [BigInt(job.onChainJobId!)],
-  });
+  const { signer, txHash, candidateId } = await sendEvaluatorTx(
+    deps,
+    job,
+    {
+      address: escrow,
+      abi: AGENT_JOB_ESCROW_ABI,
+      functionName: 'claimRefund',
+      args: [BigInt(job.onChainJobId!)],
+    },
+    { intent: { action: 'CLAIM_REFUND', decision: 'expiry', reasonHex: null } },
+  );
   let receipt: TransactionReceipt;
   try {
     receipt = await awaitOwnReceipt(deps, job, signer, txHash, 'claimRefund');
@@ -2980,6 +4109,14 @@ async function claimRefund(deps: Erc8183Deps, job: EscrowJobRow, chainStatus: nu
   // C3h D2: EXPIRED only from this job's JobExpired event.
   const parsed = parseSettlementReceipt(receipt.logs, escrow, null, BigInt(job.onChainJobId!));
   if (!parsed.expired) return ownOutcomeUnproven(deps, job, 'claimRefund', txHash);
+  await markOwnMined(deps, candidateId, receipt);
+  try {
+    await assertTerminalAtProof(deps, job, CHAIN_JOB_STATUS.Expired);
+  } catch (err) {
+    // A3: terminal at latest only — nothing finalized; the candidate pass re-enqueues the job once proven.
+    if (err instanceof SettlementAwaitingProofError) return { outcome: 'noop', reason: err.message };
+    throw err;
+  }
 
   await deps.db.job.update({
     where: { id: job.id },
@@ -3204,6 +4341,8 @@ async function reconcileTerminal(
   chainStatus: number,
   opts: { settledBy?: Hex | null } = {},
 ): Promise<OnChainStatus> {
+  // A3: finalization needs the terminal status at the proof tag.
+  await assertTerminalAtProof(deps, job, chainStatus);
   const onChainStatus: OnChainStatus =
     chainStatus === CHAIN_JOB_STATUS.Completed ? 'COMPLETED' : chainStatus === CHAIN_JOB_STATUS.Rejected ? 'REJECTED' : 'EXPIRED';
   const before = reviewSnapshot(job);
@@ -3253,6 +4392,17 @@ async function reconcileTerminal(
   return onChainStatus;
 }
 
+/** A3: `reconcileTerminal`, or false (nothing written) while the terminal status is not yet at the proof tag. */
+async function reconcileTerminalWhenProven(deps: Erc8183Deps, job: EscrowJobRow, chainStatus: number): Promise<boolean> {
+  try {
+    await reconcileTerminal(deps, job, chainStatus);
+    return true;
+  } catch (err) {
+    if (err instanceof SettlementAwaitingProofError) return false;
+    throw err;
+  }
+}
+
 /**
  * C3d: a settlement whose receipt the worker never saw (timeout, crash after
  * broadcast) and that the chain shows mined: read its receipt once and record
@@ -3260,8 +4410,20 @@ async function reconcileTerminal(
  * outcome does not depend on which attempt observed it. Best effort.
  */
 async function recordLostSettlementReceipt(deps: Erc8183Deps, job: EscrowJobRow, settledBy: Hex | null = null): Promise<void> {
-  const hash = settledBy ?? (job.settleTxHash as Hex | null);
-  if (!hash || !job.escrowContract || !job.onChainJobId || job.escrowChainId === null || job.feedbackStatus != null) return;
+  if (!job.escrowContract || !job.onChainJobId || job.escrowChainId === null || job.feedbackStatus != null) return;
+  // A1 §5.1: the WINNER of the job's nonce (a speed-up, a re-sign) — the ledger's mined decision
+  // candidate — not merely the last hash written to the job row.
+  let winner: Hex | null = null;
+  if (!settledBy) {
+    try {
+      const mined = (await ledgerOf(deps).candidatesForJob(job.id)).filter((c) => c.status === 'MINED_SUCCESS' && c.kind !== 'CANCEL');
+      winner = (mined[mined.length - 1]?.txHash as Hex | undefined) ?? null;
+    } catch {
+      winner = null;
+    }
+  }
+  const hash = settledBy ?? winner ?? (job.settleTxHash as Hex | null);
+  if (!hash) return;
   try {
     const receipt = await deps.publicClient(job.escrowChainId).getTransactionReceipt({ hash });
     if (receipt.status !== 'success') return;
@@ -3275,7 +4437,7 @@ async function recordLostSettlementReceipt(deps: Erc8183Deps, job: EscrowJobRow,
         ...(parsed.ratedAgentId ? { ratedAgentId: parsed.ratedAgentId } : {}),
         ...(parsed.platformFee !== null ? { platformFeeAmount: parsed.platformFee.toString() } : {}),
         // A same-nonce replacement that carries this job's terminal event (a speed-up) is the settling transaction.
-        ...(settledBy ? { settleTxHash: settledBy } : {}),
+        ...(settledBy || winner ? { settleTxHash: hash } : {}),
       },
     });
   } catch {
@@ -3644,7 +4806,7 @@ export async function recoverErc8183Job(
     const chain = await tryReadChainJob(deps, full);
     if (!chain) return 'chainUnreadable';
     if (chain.status >= CHAIN_JOB_STATUS.Completed) {
-      await reconcileTerminal(deps, full, chain.status);
+      if (!(await reconcileTerminalWhenProven(deps, full, chain.status))) return 'inFlight';
       return 'reconciled';
     }
     if (chain.status === CHAIN_JOB_STATUS.Submitted) {
@@ -3760,7 +4922,7 @@ export async function reconcileEscrowJob(deps: Erc8183Deps, jobId: string): Prom
   if (!chain) return 'chainUnreadable';
 
   if (chain.status >= CHAIN_JOB_STATUS.Completed) {
-    await reconcileTerminal(deps, job, chain.status);
+    if (!(await reconcileTerminalWhenProven(deps, job, chain.status))) return 'inFlight';
     return 'reconciled';
   }
 
@@ -3861,7 +5023,7 @@ export async function reconcileHeldReview(deps: Erc8183Deps, jobId: string): Pro
   const chain = await tryReadChainJob(deps, job);
   if (!chain) return 'chainUnreadable';
   if (chain.status >= CHAIN_JOB_STATUS.Completed) {
-    await reconcileTerminal(deps, job, chain.status);
+    if (!(await reconcileTerminalWhenProven(deps, job, chain.status))) return 'inFlight';
     return 'reconciled';
   }
   return chain.status === CHAIN_JOB_STATUS.Submitted ? 'heldForReview' : 'unchanged';

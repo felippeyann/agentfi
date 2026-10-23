@@ -53,10 +53,10 @@ import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 
 import { ANVIL_KEYS, anvilAccount, anvilTestPort, readArtifact, startLocalChain, type LocalChain } from './helpers/anvil-contracts.js';
 import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
 import { createEvaluatorSigner, type EvaluatorSigner } from '../services/escrow/evaluator-signer.js';
+import { InMemoryLaneLock } from '../services/transaction/wallet-lane.js';
 import {
   CHAIN_JOB_STATUS,
   SETTLEMENT_REASONS,
-  __resetUnconfirmedSendsForTests,
   processSettlementJob,
   type Erc8183Deps,
   type EscrowAlert,
@@ -120,6 +120,8 @@ async function submittedOnChain(): Promise<{ onChainJobId: bigint; expiredAt: bi
 
 async function wipe(): Promise<void> {
   const agents = { name: { startsWith: NAME_PREFIX } };
+  // A1 (R2-P3-8): candidate rows reference Job with ON DELETE RESTRICT — deleted first.
+  await db.evaluatorTransaction.deleteMany({ where: { job: { OR: [{ requester: agents }, { provider: agents }] } } });
   await db.job.deleteMany({ where: { OR: [{ requester: agents }, { provider: agents }] } });
   await db.agent.deleteMany({ where: agents });
 }
@@ -193,6 +195,8 @@ function harness(): Harness {
     alert: (a) => {
       alerts.push(a);
     },
+    // A1 review P3-4: an evaluator send needs the evaluator lane (fail closed without it).
+    lanes: new InMemoryLaneLock(),
   };
   return { deps, alerts, finalized, released };
 }
@@ -257,7 +261,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   if (!DB_READY) return;
-  __resetUnconfirmedSendsForTests();
+  // A1: the memory of unconfirmed sends is the candidate ledger now (cleaned with the DB rows).
   await chain.rpc('evm_setAutomine', [true]);
 });
 
@@ -306,6 +310,58 @@ describeDb('C3h D2 — a same-nonce replacement of the evaluator settlement whil
     expect(done.settleTxHash).not.toBe(cancel);
     expect(h.finalized).toEqual([{ jobId, outcome: 'CONFIRMED' }]);
   });
+
+  // A1-DEFECT F-B1 — FIXED (23/10): one viem client per receipt wait in the evaluator signer (it.fails → it).
+  it('F-B1: two settlements waiting on the SAME signer — the second one\'s transaction is replaced (cancel): detected promptly (evaluator-replaced), nothing finalized from the replacement\'s receipt', async () => {
+    const x = await submittedOnChain();
+    const y = await submittedOnChain();
+    const xJob = await deliveredRow(x);
+    const yJob = await deliveredRow(y);
+    const h = harness();
+    await chain.rpc('evm_setAutomine', [false]);
+
+    const { outcome: xOutcome } = await settleUntilPending(h, xJob);
+    // Y signs behind X (nonce + 1) on the same signer, so its receipt wait is the SECOND one on that client.
+    const latest = await chain.publicClient.getTransactionCount({ address: evaluator.address, blockTag: 'latest' });
+    const yOutcome = processSettlementJob(h.deps, { data: { jobId: yJob, action: 'settle' }, attemptsMade: 0, opts: { attempts: 3 } }).then(
+      (result) => ({ result, error: null as Error | null }),
+      (error: Error) => ({ result: null, error }),
+    );
+    for (let i = 0; i < 200; i++) {
+      if ((await chain.publicClient.getTransactionCount({ address: evaluator.address, blockTag: 'pending' })) > latest + 1) break;
+      await sleep(50);
+    }
+    const yTx = await chain.publicClient.getTransaction({ hash: (await db.job.findUniqueOrThrow({ where: { id: yJob } })).settleTxHash as Hex });
+    expect(yTx.nonce).toBe(latest + 1);
+    await sleep(1_500); // both waits are watching
+    // The operator cancels Y's transaction in its nonce (a 0-value self-transfer) and the block mines X's complete and the cancel.
+    const cancel = await chain.wallet(evaluator).sendTransaction({
+      account: evaluator, chain: null, to: evaluator.address, value: 0n, gas: 21_000n, nonce: yTx.nonce, ...replacementFees(yTx),
+    });
+    await chain.rpc('evm_mine', []);
+
+    const timeout = Symbol('timeout');
+    const y1 = await Promise.race([yOutcome, sleep(20_000).then(() => timeout)]);
+    // Before the fix (viem 2.57.3): the second wait on the client never read its transaction while it was
+    // pending (the shared block watcher had already emitted), so it could not recognise the replacement and
+    // only ended at EVALUATOR_RECEIPT_TIMEOUT_MS (180 s), without the alert.
+    expect(y1).not.toBe(timeout);
+    const { result, error } = y1 as Awaited<typeof yOutcome>;
+    expect(JSON.stringify(result)).toBe('null');
+    expect(error?.name).toBe('SettlementReplacedError');
+    expect(h.alerts.filter((a) => a.kind === ('evaluator-replaced' as EscrowAlert['kind']) && a.jobId === yJob)).toEqual([
+      expect.objectContaining({ details: expect.objectContaining({ txHash: yTx.hash, replacedBy: cancel }) }),
+    ]);
+    expect(await chainStatus(y.onChainJobId)).toBe(CHAIN_JOB_STATUS.Submitted);
+    expect(h.finalized.filter((f) => f.jobId === yJob)).toEqual([]);
+    const yRow = await db.job.findUniqueOrThrow({ where: { id: yJob } });
+    expect(yRow.onChainStatus).not.toBe('REJECTED');
+    expect(yRow.onChainStatus).not.toBe('COMPLETED');
+    // X settled normally, from its own receipt.
+    expect((await xOutcome).result).toMatchObject({ outcome: 'settled', onChainStatus: 'COMPLETED' });
+    expect(h.finalized.filter((f) => f.jobId === xJob)).toEqual([{ jobId: xJob, outcome: 'CONFIRMED' }]);
+    await chain.rpc('evm_setAutomine', [true]);
+  }, 60_000);
 
   it("another job's complete mined in this job's nonce: this job is not marked paid by that receipt; the retry pays it", async () => {
     const x = await submittedOnChain();
