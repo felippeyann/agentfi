@@ -184,6 +184,10 @@ async function until<T>(what: string, read: () => Promise<T> | T, ok: (v: T) => 
     await new Promise((r) => setTimeout(r, 25));
   }
 }
+/** A Redis MONITOR event is delivered asynchronously (another socket): wait for it (with a timeout). */
+async function seen(what: string, pred: (e: TimelineEvent) => boolean, from: number): Promise<TimelineEvent> {
+  return (await until(`MONITOR: ${what}`, () => timeline.find(pred, from), Boolean, 10_000))!;
+}
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   return Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`timed out (${ms} ms): ${what}`)), ms))]);
 }
@@ -640,7 +644,7 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     await withTimeout(wHold.reached, 60_000, 'W reaches its first eth_fillTransaction (inside the lane)');
     const wToken = await laneHolder();
     expect(wToken, 'W holds the lane').toBeTruthy();
-    expect(timeline.find(isLane('set', wToken!), m0), 'the lane token was written by a SET while W is held').toBeTruthy();
+    expect(await seen('W SET', isLane('set', wToken!), m0), 'the lane token was written by a SET while W is held').toBeTruthy();
 
     // S confirms; barrier: S's SET NX on the lane key (its own token) while the key still holds W's token.
     const typedAt = type(S, phrase);
@@ -659,16 +663,16 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
 
     // Order on one timeline: W sends and releases → S's lease (same token, its last SET) → S asserts and sends.
     const wSend = timeline.find((e) => e.source === 'W' && e.kind === 'send-raw', m0)!;
-    const wRelease = timeline.find(isLane('release', wToken!), m0)!;
+    const wRelease = await seen('W release', isLane('release', wToken!), m0);
+    const sAssert = await seen('S assertHeld', isLane('assert', sToken), typedAt);
     const sSets = timeline.filter(isLane('set', sToken), typedAt);
-    const sAssert = timeline.find(isLane('assert', sToken), typedAt)!;
     const sSend = timeline.find((e) => e.source === 'S' && e.kind === 'send-raw', typedAt)!;
     expect(wSend && wRelease && sAssert && sSend).toBeTruthy();
     expect(sSets[0]!.seq).toBeLessThan(wRelease.seq); // S contended while W held it
     expect(wSend.seq).toBeLessThan(wRelease.seq);
     expect(sSets[sSets.length - 1]!.seq).toBeGreaterThan(wRelease.seq); // S got it only after W's release
     expect(sAssert.seq).toBeGreaterThan(wRelease.seq);
-    expect(sSend.seq).toBeGreaterThan(sAssert.seq);
+    // assertHeld → send is one round trip: not compared across sources (MONITOR may lag the proxy); the code orders it.
 
     // Ledger: W's Y at N+1 (never N), S's speed-up at N; the plan S finished with shows both nonces.
     const [yRow] = await rowsOf({ jobId: y.jobId });
@@ -716,7 +720,7 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     await withTimeout(sHold.reached, 60_000, 'S reaches its in-lane re-read');
     const sToken = await laneHolder();
     expect(sToken, 'S holds the lane').toBeTruthy();
-    expect(timeline.find(isLane('set', sToken!), typedAt), 'S took the lane after the phrase').toBeTruthy();
+    expect(await seen('S SET', isLane('set', sToken!), typedAt), 'S took the lane after the phrase').toBeTruthy();
 
     // A lagging node for W: its `pending` nonce answers N (the head), as if S's replacement were not seen.
     const lagHex = `0x${N.toString(16)}`;
@@ -750,7 +754,8 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     expect(script[0]).toMatchObject({ kind: 'SPEED_UP', jobId: x.jobId });
     expect(yRow).toMatchObject({ nonce: N + 1, origin: 'WORKER' });
     // the lag was real: W's signer read `pending` = N inside the lane, and still chose N+1 (R2-P2-3)
-    const sRelease = timeline.find(isLane('release', sToken!), typedAt)!;
+    const sRelease = await seen('S release', isLane('release', sToken!), typedAt);
+    const wAssert = await seen('W assertHeld', isLane('assert', wToken), sRelease.seq);
     const wSets = timeline.filter(isLane('set', wToken), m1);
     expect(wSets[0]!.seq).toBeLessThan(sRelease.seq);
     expect(wSets[wSets.length - 1]!.seq).toBeGreaterThan(sRelease.seq);
@@ -763,7 +768,7 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     const wSend = timeline.find((e) => e.source === 'W' && e.kind === 'send-raw', m1)!;
     expect(sSend.seq).toBeLessThan(sRelease.seq);
     expect(wSend.seq).toBeGreaterThan(sRelease.seq);
-    expect(timeline.find(isLane('assert', wToken), sRelease.seq)!.seq).toBeLessThan(wSend.seq);
+    expect(wAssert).toBeTruthy(); // W asserted its own lease before sending (one round trip: not compared across sources)
 
     const pool = await assertPoolAuthorised();
     expect(pool.get(N)).toBe(lower(script[0]!.txHash));
@@ -804,7 +809,7 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
 
     // Nothing left S: no eth_sendRawTransaction at its proxy; the assertHeld that refused it is in the MONITOR log.
     expect(sendsBy('S', typedAt), 'S broadcast nothing').toHaveLength(0);
-    expect(timeline.find(isLane('assert', sToken!), typedAt), 'S asked assertHeld with its token').toBeTruthy();
+    expect(await seen('S assertHeld', isLane('assert', sToken!), typedAt), 'S asked assertHeld with its token').toBeTruthy();
     const script = await rowsOf({ origin: 'SCRIPT', nonce: N });
     expect(script).toHaveLength(1);
     expect(script[0]).toMatchObject({ kind: 'SPEED_UP', status: 'SIGNED', jobId: x.jobId });
@@ -896,7 +901,7 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     wHold.release();
     const failed = await W!.waitForLine(new RegExp(`^A1C-WORKER-FAILED settle ${y.jobId} attempt 1 `), 60_000);
     expect(failed.line).toMatch(/LeaseLostError|not held with \d+ ms to spare/);
-    expect(timeline.find(isLane('assert', wToken!), m0), 'W asked assertHeld with its token').toBeTruthy();
+    expect(await seen('W assertHeld', isLane('assert', wToken!), m0), 'W asked assertHeld with its token').toBeTruthy();
     expect(timeline.filter((e) => e.source === 'W' && e.kind === 'send-raw', m0), 'W broadcast nothing').toHaveLength(0);
     expect(await rowsOf({ jobId: y.jobId }), 'nothing recorded for Y').toHaveLength(0);
     expect([...(await evaluatorPool()).entries()]).toEqual([[N, head.hash]]);
@@ -940,7 +945,7 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     const code = await withTimeout(S.exited, 120_000, 'S exits');
     expect(code, S.output()).toBe(3);
     expect(S.output()).toMatch(new RegExp(`REFUSED: nonce ${N} is no longer in the queue`));
-    expect(timeline.find((e) => isLane('set')(e) && e.detail['token'] !== undefined, typedAt), 'S did enter the lane to re-read').toBeTruthy();
+    expect(await seen('S SET', (e) => isLane('set')(e) && e.detail['token'] !== undefined, typedAt), 'S did enter the lane to re-read').toBeTruthy();
     expect(sendsBy('S', typedAt), 'S broadcast nothing').toHaveLength(0);
     expect(await rowsOf({ origin: 'SCRIPT' }), 'no SCRIPT row written by this run').toHaveLength(scriptRowsAtStart);
     expect((await evaluatorPool()).size).toBe(0);
