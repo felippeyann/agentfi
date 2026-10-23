@@ -717,7 +717,9 @@ export async function adminRoutes(fastify: FastifyInstance) {
    * own and is the process that signs settlements and sends escrow steps), as
    * it last published it to Redis — `reported` (with its age; `stale` past
    * two re-check periods), `missing` (no report for three re-check periods)
-   * or `unreadable`.
+   * or `unreadable`. A single process that also runs the settlement worker
+   * (TRANSACTION_WORKER_ENABLED=true) publishes its own state as `worker`
+   * too, so `worker` is then this same process (same `host`).
    */
   fastify.get('/admin/escrow/verification', async (request, reply) => {
     if (!requireAdmin(request, reply)) return;

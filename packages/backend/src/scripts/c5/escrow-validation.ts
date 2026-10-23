@@ -511,7 +511,8 @@ async function preflightChecks(cfg: Config, state: State | null, keys: AgentKeys
     checks.push(check('admin escrow verification reachable (local, admin secret)', 200, admin.status));
     // The real run has a separate worker process (checklist 2.5), which signs the settlements: its own Q7
     // state must be current and verified too. The fork rehearsal runs API and worker in one process
-    // (in-memory local wallets), which reports as `api` only, so the check applies to the real run.
+    // (in-memory local wallets); that process publishes its own state as `worker` too once its
+    // settlement worker starts (#193 finding 2), but the check is required for the real run only.
     if (cfg.mode === 'testnet') checks.push(workerVerificationCheck(admin.body?.worker));
     const delay = admin.body?.escrowWindow?.evaluationDelaySeconds;
     checks.push(check('backend contest window (ESCROW_EVALUATION_DELAY_SECONDS)', cfg.windowSeconds, delay ?? 'absent'));
