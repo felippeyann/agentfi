@@ -34,6 +34,11 @@ class FakeRedis {
   /** When set, keys never expire in the store (to prove the holder's own clock still refuses). */
   frozen = false;
   failEval = false;
+  /**
+   * #194 review (id 4363039159): a SLOW answer — the assert-held script is evaluated at call time, then the
+   * (fake) clock moves this many ms before the answer is returned, as a delayed network reply would.
+   */
+  assertHeldReplyDelayMs = 0;
 
   private live(key: string) {
     const entry = this.store.get(key);
@@ -63,7 +68,9 @@ class FakeRedis {
       if (!entry || entry.value !== args[0]) return [-1, -2];
       if (entry.expiresAt === null) return [-2, -1];
       const ttl = entry.expiresAt - Date.now();
-      return ttl < Number(args[1]) ? [0, ttl] : [1, ttl];
+      const answer = ttl < Number(args[1]) ? [0, ttl] : [1, ttl];
+      if (this.assertHeldReplyDelayMs > 0) vi.setSystemTime(Date.now() + this.assertHeldReplyDelayMs);
+      return answer;
     }
     if (script.includes("redis.call('del'")) {
       if (entry && entry.value === args[0]) {
@@ -219,6 +226,26 @@ describe('RedisLaneLock leases — Lua semantics on a fake Redis', () => {
     expect(await lock.run('k', async () => (redis.store.has('agentfi:lane:k') ? 'held' : 'free'))).toBe('held');
     expect(redis.store.has('agentfi:lane:k')).toBe(false);
   });
+
+  // #194 review id 4363039159 (P2, exclusion safety): the local remaining time and the PTTL were taken BEFORE the
+  // awaited Redis answer. A reply delayed past the deadline (or below the margin) must not be accepted: both
+  // evaluator send paths broadcast right after assertHeld.
+  it.fails('#194-4363039159: a Redis answer delayed PAST the lease deadline → expired (not accepted)', async () => {
+    const redis = new FakeRedis();
+    redis.frozen = true; // the store still shows the token: only the holder's clock can refuse
+    const lock = new RedisLaneLock(redis as never, { ttlMs: 1_000 });
+    const lease = await lock.acquire('k');
+    redis.assertHeldReplyDelayMs = 1_200;
+    expect(await lostReason(lease.assertHeld(0))).toBe('expired');
+  });
+
+  it.fails('#194-4363039159: a Redis answer delayed BELOW the margin → margin (not accepted)', async () => {
+    const redis = new FakeRedis();
+    const lock = new RedisLaneLock(redis as never, { ttlMs: 1_000 });
+    const lease = await lock.acquire('k');
+    redis.assertHeldReplyDelayMs = 600; // evaluated with 1 000 ms left (≥ 500), answered with ~400 ms left
+    expect(await lostReason(lease.assertHeld(500))).toBe('margin');
+  });
 });
 
 describe('recovery lock — owner + PID, compare-and-delete (fake Redis)', () => {
@@ -249,6 +276,14 @@ describe('recovery lock — owner + PID, compare-and-delete (fake Redis)', () =>
     expect(await bobs.release()).toBe(true);
     expect(await readRecoveryLock(redis as never, 84532)).toBeNull();
     expect(await bobs.release()).toBe(false);
+  });
+
+  it.fails('#194-4363039159: the recovery lock — a Redis answer delayed past its deadline → expired (not accepted)', async () => {
+    const redis = new FakeRedis();
+    redis.frozen = true;
+    const mine = await acquireRecoveryLock(redis as never, 84532, { owner: 'alice', pid: 4242 }, { ttlMs: 10_000 });
+    redis.assertHeldReplyDelayMs = 10_500;
+    expect(await lostReason(mine.assertHeld())).toBe('expired');
   });
 
   it('refuses an empty owner', async () => {
