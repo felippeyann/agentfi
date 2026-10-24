@@ -1713,7 +1713,7 @@ describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () =
   }
   const sendLostClock = async () => (await ledger.readChainState(m.db, CHAIN_ID, getAddress(SIM_EVALUATOR)))?.lastAlertAt['evaluator-send-lost'];
 
-  it.fails('P3-9: a dry-run while the head is lost (Q7 of the script\'s process not verified yet at its first pass) delivers no evaluator-send-lost, writes no alert clock and gives no circular "run the dry-run" guidance — the state is in its output', async () => {
+  it('P3-9: a dry-run while the head is lost (Q7 of the script\'s process not verified yet at its first pass) delivers no evaluator-send-lost, writes no alert clock and gives no circular "run the dry-run" guidance — the state is in its output', async () => {
     const { txHash } = await lostHead();
     await reconcile(); // the worker's first sight (t0): below the threshold, nothing alerted
     expect(alertsOf('evaluator-send-lost')).toHaveLength(0);
@@ -1730,7 +1730,7 @@ describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () =
     expect(r.output).not.toMatch(/run the evaluator recovery dry-run/);
   });
 
-  it.fails('P3-9: after a dry-run, the worker still alerts evaluator-send-lost at ITS threshold (first sight + 10 min), not later; once; with the operator guidance', async () => {
+  it('P3-9: after a dry-run, the worker still alerts evaluator-send-lost at ITS threshold (first sight + 10 min), not later; once; with the operator guidance', async () => {
     const { jobId } = await lostHead();
     await reconcile(); // t0: the worker's first sight
     sim.setNowOffset(60_000);
@@ -1748,6 +1748,36 @@ describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () =
     expect(await sendLostClock()).toBeDefined();
     await reconcile(); // not again within the interval
     expect(alertsOf('evaluator-send-lost', jobId).slice(before)).toHaveLength(1);
+  });
+
+  it('P3-9 (other condition alerts): a node failing past its threshold during dry-runs is shown in their output, not delivered, no clock written; the worker\'s next pass alerts rpc-node-unhealthy once', async () => {
+    await stuckHead();
+    sim.deps.evaluatorA1 = { ...(sim.deps.evaluatorA1 ?? m.svc.DEFAULT_EVALUATOR_A1_SETTINGS), rpcUnhealthyAfterFailures: 2 };
+    sim.chain.nodes[1]!.error = 'node-b: 503 Service Unavailable';
+    const outputs: string[] = [];
+    for (let i = 0; i < 2; i++) outputs.push((await cliMod.runEvaluatorRecovery(['--chain', String(CHAIN_ID)], scriptProcessDeps())).output);
+    expect(alertsOf('rpc-node-unhealthy')).toHaveLength(0);
+    expect(outputs[1]).toMatch(/reconciliation \(rpc-node-unhealthy; shown here, not alerted/);
+    const state = await ledger.readChainState(m.db, CHAIN_ID, getAddress(SIM_EVALUATOR));
+    expect(Object.keys(state?.lastAlertAt ?? {}).filter((k) => k.startsWith('rpc-node-unhealthy'))).toEqual([]);
+    await reconcile(); // the worker: third consecutive failure, over the threshold — its alert, on time
+    expect(alertsOf('rpc-node-unhealthy')).toHaveLength(1);
+    await reconcile();
+    expect(alertsOf('rpc-node-unhealthy')).toHaveLength(1); // its interval
+  });
+
+  it('P3-9 (no suppression): when the dry-run\'s pass is the FIRST to see a nonce consumed outside the ledger, it records the EXTERNAL row and still DELIVERS evaluator-nonce-foreign once — the worker would never see that change again', async () => {
+    const a = await stuckHead();
+    const foreign = await sim.chain.signFields({ to: getAddress(SIM_EVALUATOR), data: '0x', nonce: 0, gas: CANCEL_GAS, ...bumped(a.head) });
+    await sim.chain.acceptRaw(foreign.raw);
+    sim.chain.mineBlocks(3);
+    const r = await cliMod.runEvaluatorRecovery(['--chain', String(CHAIN_ID)], scriptProcessDeps());
+    expect(r.exitCode, r.output).toBe(0);
+    expect(byHash(await atNonce(0), foreign.hash)).toMatchObject({ kind: 'EXTERNAL', origin: 'RECONCILE' });
+    expect(byHash(await atNonce(0), a.head.hash).status).toBe('DEAD');
+    expect(alertsOf('evaluator-nonce-foreign')).toHaveLength(1);
+    await reconcile(); // the worker's next pass: nothing new to tell, not repeated
+    expect(alertsOf('evaluator-nonce-foreign')).toHaveLength(1);
   });
 
   it('no caps configured → the dry-run says so; --execute refused (fail closed), nothing signed', async () => {
