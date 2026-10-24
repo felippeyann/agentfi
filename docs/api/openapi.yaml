@@ -1820,7 +1820,12 @@ paths:
         reason when new escrow operations are blocked, and the TTL / re-check
         settings. The worker verifies on its own; `worker` is its state as it
         last published it (read-only: nothing is gated on it, and `missing` /
-        `unreadable` / `stale` never mean verified). While a chain is not
+        `unreadable` / `stale` never mean verified). In a single-process
+        deployment (this API process with `TRANSACTION_WORKER_ENABLED=true`
+        and its escrow settlement worker started), `worker` is this same
+        process: it publishes its own verification under both roles (same
+        `host`, same chains as `chains`), from its first check on — not a
+        second, independent verification. While a chain is not
         verified, NEW escrow-dependent signatures wait: escrow job creation and
         escrow delivery / cancellation answer `503 ESCROW_CONFIG_UNVERIFIED`,
         queued escrow steps, ERC-8004 identity transactions and evaluator
@@ -1851,7 +1856,10 @@ paths:
                     description: |
                       The worker's own verification as it last published it to Redis
                       after a check (C3f). Each chain is as of `publishedAt`.
-                      Read-only diagnostics: no gate depends on it.
+                      Read-only diagnostics: no gate depends on it. In a single
+                      process (`TRANSACTION_WORKER_ENABLED=true` on this API, its
+                      settlement worker started) it is this process's own state,
+                      published as `worker` too (same `host`).
                     oneOf:
                       - type: object
                         required: [state, role, host, publishedAt, ageSeconds, stale, ttlSeconds, recheckSeconds, chains]

@@ -19,6 +19,7 @@ Use it when one of these alerts fires:
 | `evaluator-send-lost` | A recorded transaction at the head is unknown to every RPC node, and the automatic identical rebroadcast was not possible or was refused. |
 | `evaluator-nonce-foreign` | A nonce of the key was consumed by a transaction **not** in the ledger: a manual send, another environment using the same key, or a **compromised key**. Treat it as an incident first. |
 | `evaluator-proof-uncertain` / `rpc-node-unhealthy` / `evaluator-proof-stalled` | The proofs cannot be closed: an RPC node disagrees, fails, or the `safe` head stopped. Fix or remove the node. A recovery does not fix this. |
+| `evaluator-replaced` | A transaction the worker was waiting for was replaced in its nonce by one **not** recorded as a recovery operation: a manual send with the evaluator key or a second settlement worker. Treat it as an incident. (The script's own recorded replacement is reported as `evaluator-replaced-by-recovery`, informational — §3.3.) |
 
 Do not use it to change a decision. An operator decision (D9: pay / refund / verdict) changes only
 through `POST /admin/jobs/:id/resolve`, once the uncertainty has closed by proof.
@@ -41,7 +42,21 @@ worker runs on every tick.** In the worker that pass may send the **identical** 
 script it runs before this process has verified the on-chain configuration (Q7), so its own rebroadcast is
 refused there and a dry-run transmits nothing; use `--execute rebroadcast` for a lost head. The script then
 verifies the configuration once (read-only) so the plan sees the real gate, and verifies it again after the
-typed confirmation. It never signs a new transaction on a dry-run. The dry-run then shows:
+typed confirmation. It never signs a new transaction on a dry-run.
+
+**The script's pass is a diagnostic, not a second alert source (P3-9, 24/10).** It writes what the worker's
+pass writes, but an alert about a condition that persists — `evaluator-send-lost`, `rpc-node-unhealthy`,
+`evaluator-proof-stalled`, `evaluator-proof-uncertain`, a ledger conflict with nothing written — is **printed**
+in the script's output (`! reconciliation (<kind>; shown here, not alerted — the settlement worker alerts it):
+…`) and **not** delivered. The script never reads or writes those alerts' clocks: running a dry-run neither
+consumes nor postpones the worker's alert, which still fires on the worker's own threshold and interval. A
+lost head shows there with the reason this pass did not rebroadcast it; `GATE_CLOSED` on that line is the
+script's own gate, read before its Q7 verification — the plan's `config gate` line has the verified state, and
+the plan's `rebroadcast` line says whether `--execute rebroadcast` is admitted. A change the pass itself
+records — a nonce consumed outside the ledger (`evaluator-nonce-foreign`), an outcome reorganised away
+(`evaluator-reorg`) — is still **alerted** by the script: the worker would not see it again.
+
+The dry-run then shows:
 
 - **Key and nonces:** the evaluator address and its balance; the `latest`, `pending` and proof-tag nonces.
 - **The queue `[latest, pending)`**, for each nonce:
@@ -156,10 +171,21 @@ later (final review F-P2-1).
       line.
 5. It waits for the receipt **outside** the lane, for at most `EVALUATOR_RECOVERY_RECEIPT_WAIT_SECONDS`
    (90 s).
-6. It runs the reconciliation. The existing path settles the job from the chain.
+6. It runs the reconciliation (the same diagnostic pass as at the start). The existing path settles the
+   job from the chain.
 7. It closes the incident once the queue is unblocked.
 
 A range stops at the first deviation.
+
+**What the worker reports when your replacement mines (P3-6, 24/10).** If the worker is waiting for the
+receipt of the transaction you replaced, its wait ends with your transaction's receipt. The worker never
+reads that receipt as the job's outcome (C3h D2): the next attempt reads the job on-chain. Because your
+speed-up or cancel was recorded in the ledger before its send (origin `SCRIPT`, with the incident), the worker
+reports it as the known operation it is: `evaluator-replaced-by-recovery`, `severity: info`, naming the
+incident and the operator. Any other replacement of a worker transaction — no ledger row, another origin, no
+incident, another nonce or key, or a ledger that cannot be read at that moment — stays
+`evaluator-replaced`, an incident alert: a manual send with the evaluator key or a second settlement worker.
+Treat that one as an incident.
 
 ## 4. Speed-up ≠ cancel
 
