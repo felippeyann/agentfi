@@ -1681,11 +1681,13 @@ describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () =
   // In production the script is its OWN process: its Q7 gate starts empty and `verifyConfig` (the full
   // verification) runs AFTER its first reconciliation pass. Modelled here: a gate of the script's process,
   // closed until `verifyConfig` ran; the worker (sim.deps) keeps its own, open gate.
-  function scriptProcessDeps(o: Parameters<typeof recoveryDeps>[0] = {}) {
+  function scriptProcessDeps(o: Parameters<typeof recoveryDeps>[0] & { readNodeViews?: Erc8183Deps['readNodeViews'] } = {}) {
     const base = recoveryDeps(o);
     let verified = false;
     const erc8183: Erc8183Deps = {
       ...sim.deps,
+      // The script's own RPC set (its process env) may see what the worker's does not.
+      ...(o.readNodeViews ? { readNodeViews: o.readNodeViews } : {}),
       configGate: (chainId: number) =>
         verified ? simGate(chainId) : { allowed: false, chainId, block: 'not-verified-yet', reason: `chain ${chainId} not verified in this process yet`, retryAfterSeconds: 120 },
     };
@@ -1764,6 +1766,69 @@ describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () =
     expect(alertsOf('rpc-node-unhealthy')).toHaveLength(1);
     await reconcile();
     expect(alertsOf('rpc-node-unhealthy')).toHaveLength(1); // its interval
+  });
+
+  // ── review P3-1 (24/10): the diagnostic pass only STARTS the worker's condition clocks, never resets them ──
+  /** The script's reads of the node set: node-b answers with an error (a transient error on the script's side only). */
+  const scriptSeesNodeBError: Erc8183Deps['readNodeViews'] = async (chainId, evaluator, hashes) =>
+    (await sim.chain.readNodeViews(chainId, evaluator, hashes, { proofTag: 'safe' })).map((r) => (r.node === 'node-b' ? { node: r.node, index: r.index, ok: false, error: 'node-b: transient 502' } : r));
+  /** The script's reads with node-b healthy while the worker's node-b keeps failing (another RPC set / a transient recovery). */
+  const scriptSeesNodeBHealthy: Erc8183Deps['readNodeViews'] = async (chainId, evaluator, hashes) => {
+    const node = sim.chain.nodes[1]!;
+    const err = node.error;
+    node.error = null;
+    try {
+      return await sim.chain.readNodeViews(chainId, evaluator, hashes, { proofTag: 'safe' });
+    } finally {
+      node.error = err;
+    }
+  };
+
+  it.fails('review P3-1: a dry-run whose reads do not see the head lost (a transient node error on its side) does NOT restart the worker\'s send-lost clock — the worker alerts at first sight + 10 min, as without the dry-run', async () => {
+    const { jobId } = await lostHead();
+    await reconcile(); // t0: the worker's first sight
+    sim.setNowOffset(8 * 60_000);
+    expect((await cliMod.runEvaluatorRecovery(['--chain', String(CHAIN_ID)], scriptProcessDeps({ readNodeViews: scriptSeesNodeBError }))).exitCode).toBe(0);
+    const state = await ledger.readChainState(m.db, CHAIN_ID, getAddress(SIM_EVALUATOR));
+    expect(state?.sendLostSince, 'the worker\'s first sight is kept').not.toBeNull();
+    sim.setNowOffset(10 * 60_000 + 1_000);
+    await reconcile();
+    expect(alertsOf('evaluator-send-lost', jobId)).toHaveLength(1);
+  });
+
+  it.fails('review P3-1: a dry-run whose read of a failing node succeeds does NOT reset the worker\'s failure count — rpc-node-unhealthy at the worker\'s third consecutive failure, as without the dry-run', async () => {
+    await stuckHead();
+    sim.deps.evaluatorA1 = { ...(sim.deps.evaluatorA1 ?? m.svc.DEFAULT_EVALUATOR_A1_SETTINGS), rpcUnhealthyAfterFailures: 3 };
+    sim.chain.nodes[1]!.error = 'node-b: 503 Service Unavailable';
+    await reconcile();
+    await reconcile(); // the worker: 2 consecutive failures
+    expect((await cliMod.runEvaluatorRecovery(['--chain', String(CHAIN_ID)], scriptProcessDeps({ readNodeViews: scriptSeesNodeBHealthy }))).exitCode).toBe(0);
+    await reconcile(); // the worker's 3rd consecutive failure
+    expect(alertsOf('rpc-node-unhealthy')).toHaveLength(1);
+  });
+
+  it('review P3-1 (the worker still resets): when the condition clears on the WORKER\'s own reads, its send-lost clock and node failure count go back to zero', async () => {
+    const { txHash } = await lostHead();
+    sim.chain.nodes[1]!.error = 'node-b: 503 Service Unavailable';
+    await reconcile();
+    sim.chain.nodes[1]!.error = null;
+    await reconcile(); // t0: lost head seen by every node; node-b healthy again
+    let state = await ledger.readChainState(m.db, CHAIN_ID, getAddress(SIM_EVALUATOR));
+    expect(state?.sendLostSince).not.toBeNull();
+    expect(state?.rpcFailures['node-b']).toBe(0);
+    // the condition clears for the worker: its identical rebroadcast reaches the nodes, which know the head again
+    sim.chain.refuseSend = null;
+    await reconcile();
+    expect(sim.chain.evaluatorSends.filter((s) => s.outcome === 'accepted' && sameHash(s.hash, txHash))).toHaveLength(1);
+    state = await ledger.readChainState(m.db, CHAIN_ID, getAddress(SIM_EVALUATOR));
+    expect(state?.sendLostSince ?? null).toBeNull();
+    // and a failing node's count: the worker's next successful read resets it
+    sim.chain.nodes[1]!.error = 'node-b: 503 Service Unavailable';
+    await reconcile();
+    expect((await ledger.readChainState(m.db, CHAIN_ID, getAddress(SIM_EVALUATOR)))?.rpcFailures['node-b']).toBe(1);
+    sim.chain.nodes[1]!.error = null;
+    await reconcile();
+    expect((await ledger.readChainState(m.db, CHAIN_ID, getAddress(SIM_EVALUATOR)))?.rpcFailures['node-b']).toBe(0);
   });
 
   it('P3-9 (no suppression): when the dry-run\'s pass is the FIRST to see a nonce consumed outside the ledger, it records the EXTERNAL row and still DELIVERS evaluator-nonce-foreign once — the worker would never see that change again', async () => {
