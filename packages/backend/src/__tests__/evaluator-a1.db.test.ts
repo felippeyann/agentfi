@@ -178,6 +178,8 @@ interface CandidateRowDb {
   txHash: string;
   rawTx: string | null;
   origin: string;
+  incidentId: string | null;
+  operator: string | null;
   status: string;
   proofLevel: string | null;
   replacesId: string | null;
@@ -1369,6 +1371,41 @@ describeA1('A1 core — candidates, reconciliation, gate, lane (Postgres + fake 
     expect(done).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', platformFeeAmount: FEE.toString(), feedbackStatus: 'written' });
     expect(sameHash(done.settleTxHash, speedHash)).toBe(true);
     expect(byHash(await atNonce(0), speedHash!).status).toBe('MINED_SUCCESS');
+  });
+
+  // P3-6 (24/10): a replacement the RECOVERY SCRIPT made and recorded (SCRIPT row of its incident) is a known
+  // operation — the worker's receipt wait reports it as such, not as a manual send or a second worker.
+  it.fails('P3-6: the recovery script\'s speed-up (SCRIPT row of an open incident) mined while the worker waits → one informational evaluator-replaced-by-recovery naming the incident; no evaluator-replaced incident; the job still settles once on the speed-up', async () => {
+    const { provider, jobId } = await delivered();
+    sim.chain.evaluatorAutoMine = false;
+    let speed: PreparedEvaluatorTx | null = null;
+    sim.chain.onReceiptWait = async (hash) => {
+      const own = sim.chain.signed.get(hash)!;
+      const head = { ...own, value: own.value, chainId: CHAIN_ID, from: getAddress(SIM_EVALUATOR) } as PreparedEvaluatorTx;
+      speed = await scriptReplace(head, 'speed-up', jobId);
+      sim.chain.mineBlock();
+    };
+    await sim.drive(1);
+    expect(speed).not.toBeNull();
+    const script = byHash(await candidates(jobId), speed!.hash);
+    expect(script).toMatchObject({ origin: 'SCRIPT', kind: 'SPEED_UP' });
+    expect(alertsOf('evaluator-replaced', jobId)).toEqual([]);
+    const notices = alertsOf('evaluator-replaced-by-recovery', jobId);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ severity: 'info', details: expect.objectContaining({ replacedBy: expect.stringMatching(/^0x/), recovery: expect.objectContaining({ incidentId: script.incidentId, operator: 'f3-test', kind: 'SPEED_UP' }) }) });
+    expect(sameHash(notices[0]!.details!['replacedBy'] as string, speed!.hash)).toBe(true);
+    expect(notices[0]!.message).toContain(script.incidentId!);
+    expect(notices[0]!.message).not.toMatch(/manual send|second settlement worker|Do not replace/);
+    // nothing changed in the money path: the speed-up is the job's settlement, paid once
+    sim.chain.evaluatorAutoMine = true;
+    await reconcile();
+    await m.runPaymentRecoveryTick();
+    await sim.drive();
+    await reconcile();
+    const done = await job(jobId);
+    expect(done).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', platformFeeAmount: FEE.toString() });
+    expect(sameHash(done.settleTxHash, speed!.hash)).toBe(true);
+    expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
   });
 
   it('row 27: another job\'s complete mines in this job\'s nonce during the wait — X not paid nor rejected; Y\'s JobCompleted ignored for X; X stays Submitted', async () => {
