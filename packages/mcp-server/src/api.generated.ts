@@ -950,7 +950,7 @@ export interface paths {
         put?: never;
         /**
          * Execute a Uniswap V3 swap
-         * @description An ETH-input swap is routed through the chain's AgentExecutor (it receives the value + fee). S9: while this process has not verified that executor against this build (runtime bytecode + bindings), such a swap answers `503` `{ "code": "CONTRACTS_UNVERIFIED" }` with `Retry-After` before anything is simulated or written.
+         * @description An ETH-input swap is routed through the chain's AgentExecutor (it receives the value + fee). S9: while this process has not verified that executor against this build (runtime bytecode + bindings), such a swap answers `503` `{ "code": "CONTRACTS_UNVERIFIED" }` with `Retry-After` before anything is simulated or written. A6e(2): for a swap routed through the executor, the 202 `fee` is the fee the executor charges on every tier — `bps` 30 (its `feeBps()`) and `amountWei` = floor(amountIn × 30 / 10 000) in wei, sent on top of `amountIn` and paid to `feeWallet`; the PRO / ENTERPRISE schedule (15 / 5 bps) is not applied on-chain and was reported here before A6e(2). A swap that is not routed through the executor (an ERC-20 input, or a chain without one) is charged no on-chain fee; its `fee` is still the agent tier's schedule applied to `amountIn` (unchanged, not collected).
          */
         post: {
             parameters: {
@@ -1324,7 +1324,7 @@ export interface paths {
         put?: never;
         /**
          * Execute up to 20 actions atomically via the AgentExecutor
-         * @description An action may not target the chain's AgentPolicyModule (403 `POLICY_MODULE_TARGET`, S8): through the executor its admin calls always revert, and its unauthenticated `validateTransaction` would only restart a wallet's on-chain cooldown. The on-chain policy is synced by the operator. S9: while this process has not verified the executor against this build (runtime bytecode + bindings), the batch answers `503` `{ "code": "CONTRACTS_UNVERIFIED" }` with `Retry-After` before anything is simulated or written. A6d: the batch is sent with `msg.value` = the actions' total `value` plus the executor fee, floor(total × 30 / 10 000) on the sum (the executor's `feeBps()`); that total is what `maxOutflowPerTxUsd` and the daily volume limit count, so a batch whose value alone is exactly at either limit is refused.
+         * @description An action may not target the chain's AgentPolicyModule (403 `POLICY_MODULE_TARGET`, S8): through the executor its admin calls always revert, and its unauthenticated `validateTransaction` would only restart a wallet's on-chain cooldown. The on-chain policy is synced by the operator. S9: while this process has not verified the executor against this build (runtime bytecode + bindings), the batch answers `503` `{ "code": "CONTRACTS_UNVERIFIED" }` with `Retry-After` before anything is simulated or written. A6d: the batch is sent with `msg.value` = the actions' total `value` plus the executor fee, floor(total × 30 / 10 000) on the sum (the executor's `feeBps()`); that total is what `maxOutflowPerTxUsd` and the daily volume limit count, so a batch whose value alone is exactly at either limit is refused. A6e(2): the 202 `fee` is that executor fee on every tier — `bps` 30 and `amountWei` = floor(total × 30 / 10 000) in wei (0 for a batch without native value), the amount sent on top of the actions' value and paid to `feeWallet`. Before A6e(2) it showed the agent tier's schedule (PRO 15 / ENTERPRISE 5 bps), which the executor does not apply.
          */
         post: {
             parameters: {
@@ -3579,7 +3579,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Revenue breakdown by tier */
+        /**
+         * Revenue breakdown by tier
+         * @description Sums the last 1000 FeeEvents (fees collected on-chain through the AgentExecutor). A6e(2): `byFeeTier` groups by the paying agent's current tier and `byFeeBps` by the rate actually applied (`FeeEvent.feeBps`, 30 for every executor-routed fee). Before A6e(2) `byFeeTier` grouped by the recorded bps, which followed the tier schedule, and named the tier from it; its entries no longer carry `feeBps`.
+         */
         get: {
             parameters: {
                 query?: never;
@@ -3594,7 +3597,26 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": {
+                            /** @description USD, 2 decimals. */
+                            totalFeesUsd?: string;
+                            feeEventCount?: number;
+                            byFeeTier?: {
+                                /** @enum {string} */
+                                tierName?: "FREE" | "PRO" | "ENTERPRISE";
+                                totalUsd?: string;
+                            }[];
+                            byFeeBps?: {
+                                feeBps?: number;
+                                totalUsd?: string;
+                            }[];
+                            /** @description The 20 most recent FeeEvents, with `billing.agentId` and `billing.agent.tier`. */
+                            recentEvents?: {
+                                [key: string]: unknown;
+                            }[];
+                        };
+                    };
                 };
             };
         };
@@ -4449,8 +4471,11 @@ export interface components {
         TransactionAccepted: {
             transactionId?: string;
             status?: components["schemas"]["TxStatus"];
+            /** @description Returned by the swap, batch and GMX routes. On a transaction routed through the AgentExecutor (a batch; an ETH-input swap) it is the fee the executor charges, on every tier (A6e(2)). Otherwise it is the agent tier's schedule (FREE 30 / PRO 15 / ENTERPRISE 5 bps) applied to the amount, and is not collected on-chain. */
             fee?: {
+                /** @description Basis points. Executor-routed: the executor's `feeBps()`, 30, whatever the agent's tier. */
                 bps?: number;
+                /** @description Fee in wei (decimal string), rounded down. Executor-routed: floor(native value × bps / 10 000), sent on top of the value (msg.value = value + fee) and paid to `feeWallet`; it is the FeeEvent recorded on confirmation. */
                 amountWei?: string;
                 feeWallet?: string;
             } | null;

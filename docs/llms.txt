@@ -52,4 +52,4 @@ Set AGENTFI_API_KEY=agfi_live_xxx before running.
 - Transaction status polling: call get_transaction_status after submitting; terminal statuses are CONFIRMED, FAILED, REVERTED
 - Amounts are always in human-readable decimal format (e.g. "1.5" for 1.5 ETH, not wei)
 - Chain IDs: 1=Ethereum, 8453=Base, 42161=Arbitrum, 137=Polygon
-- A protocol fee is charged on each transaction (0.30% FREE, 0.15% PRO, 0.05% ENTERPRISE)
+- A protocol fee of 0.30% is charged on-chain, on every tier, on transactions routed through the AgentExecutor (batches, ETH-input swaps); the response's `fee` reports it. The tier rates (0.30% FREE, 0.15% PRO, 0.05% ENTERPRISE) are not applied on-chain
