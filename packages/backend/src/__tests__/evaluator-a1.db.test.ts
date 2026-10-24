@@ -1673,6 +1673,79 @@ describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () =
     expect((await candidates(a.jobId)).length).toBe(before);
   });
 
+  // ── P3-9 (24/10): the script's reconciliation pass is a diagnostic, not the worker ─────────────────
+  // In production the script is its OWN process: its Q7 gate starts empty and `verifyConfig` (the full
+  // verification) runs AFTER its first reconciliation pass. Modelled here: a gate of the script's process,
+  // closed until `verifyConfig` ran; the worker (sim.deps) keeps its own, open gate.
+  function scriptProcessDeps(o: Parameters<typeof recoveryDeps>[0] = {}) {
+    const base = recoveryDeps(o);
+    let verified = false;
+    const erc8183: Erc8183Deps = {
+      ...sim.deps,
+      configGate: (chainId: number) =>
+        verified ? simGate(chainId) : { allowed: false, chainId, block: 'not-verified-yet', reason: `chain ${chainId} not verified in this process yet`, retryAfterSeconds: 120 },
+    };
+    return {
+      ...base,
+      erc8183,
+      verifyConfig: async () => {
+        verified = true;
+        return { ok: true } as const;
+      },
+    };
+  }
+  /** The head lost for good in transport: the worker's identical rebroadcasts never reach a node (no refusal → the threshold rule). */
+  async function lostHead(): Promise<{ jobId: string; txHash: string }> {
+    const { jobId } = await delivered();
+    // No early alert near expiry here (simConfig's TTL is 1 h): only the send-lost threshold decides.
+    sim.deps.evaluatorA1 = { ...(sim.deps.evaluatorA1 ?? m.svc.DEFAULT_EVALUATOR_A1_SETTINGS), earlyAlertBeforeExpirySeconds: 0 };
+    sim.chain.evaluatorAutoMine = false;
+    sim.chain.refuseSend = () => 'fetch failed (the request never reached the node)';
+    await sim.drive(1);
+    sim.settlements.clear();
+    const [row] = await candidates(jobId);
+    expect(row!.status).toBe('SEND_UNCONFIRMED');
+    return { jobId, txHash: row!.txHash };
+  }
+  const sendLostClock = async () => (await ledger.readChainState(m.db, CHAIN_ID, getAddress(SIM_EVALUATOR)))?.lastAlertAt['evaluator-send-lost'];
+
+  it.fails('P3-9: a dry-run while the head is lost (Q7 of the script\'s process not verified yet at its first pass) delivers no evaluator-send-lost, writes no alert clock and gives no circular "run the dry-run" guidance — the state is in its output', async () => {
+    const { txHash } = await lostHead();
+    await reconcile(); // the worker's first sight (t0): below the threshold, nothing alerted
+    expect(alertsOf('evaluator-send-lost')).toHaveLength(0);
+    sim.setNowOffset(60_000);
+    const r = await cliMod.runEvaluatorRecovery(['--chain', String(CHAIN_ID)], scriptProcessDeps());
+    expect(r.exitCode, r.output).toBe(0);
+    expect(r.output).toMatch(/config gate \(Q7, this process\): verified/);
+    expect(alertsOf('evaluator-send-lost')).toHaveLength(0);
+    expect(await sendLostClock()).toBeUndefined();
+    // the operator still sees the state of the lost head in the CLI's output, without circular guidance
+    const diag = r.output.split('\n').filter((l) => /unknown to every RPC node/.test(l));
+    expect(diag.length, r.output).toBeGreaterThan(0);
+    expect(diag.join('\n')).toContain(txHash.toLowerCase());
+    expect(r.output).not.toMatch(/run the evaluator recovery dry-run/);
+  });
+
+  it.fails('P3-9: after a dry-run, the worker still alerts evaluator-send-lost at ITS threshold (first sight + 10 min), not later; once; with the operator guidance', async () => {
+    const { jobId } = await lostHead();
+    await reconcile(); // t0: the worker's first sight
+    sim.setNowOffset(60_000);
+    expect((await cliMod.runEvaluatorRecovery(['--chain', String(CHAIN_ID)], scriptProcessDeps())).exitCode).toBe(0);
+    const before = alertsOf('evaluator-send-lost').length;
+    sim.setNowOffset(5 * 60_000);
+    await reconcile(); // below the threshold
+    expect(alertsOf('evaluator-send-lost').length).toBe(before);
+    sim.setNowOffset(10 * 60_000 + 1_000);
+    await reconcile(); // past the threshold: the worker's own alert, on time
+    const worker = alertsOf('evaluator-send-lost', jobId).slice(before);
+    expect(worker).toHaveLength(1);
+    expect(worker[0]!.message).toMatch(/run the evaluator recovery dry-run/);
+    expect(worker[0]!.message).not.toMatch(/GATE_CLOSED/);
+    expect(await sendLostClock()).toBeDefined();
+    await reconcile(); // not again within the interval
+    expect(alertsOf('evaluator-send-lost', jobId).slice(before)).toHaveLength(1);
+  });
+
   it('no caps configured → the dry-run says so; --execute refused (fail closed), nothing signed', async () => {
     const a = await stuckHead();
     sim.setNowOffset(61_000);
