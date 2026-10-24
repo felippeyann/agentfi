@@ -1784,7 +1784,7 @@ describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () =
     }
   };
 
-  it.fails('review P3-1: a dry-run whose reads do not see the head lost (a transient node error on its side) does NOT restart the worker\'s send-lost clock — the worker alerts at first sight + 10 min, as without the dry-run', async () => {
+  it('review P3-1: a dry-run whose reads do not see the head lost (a transient node error on its side) does NOT restart the worker\'s send-lost clock — the worker alerts at first sight + 10 min, as without the dry-run', async () => {
     const { jobId } = await lostHead();
     await reconcile(); // t0: the worker's first sight
     sim.setNowOffset(8 * 60_000);
@@ -1796,7 +1796,7 @@ describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () =
     expect(alertsOf('evaluator-send-lost', jobId)).toHaveLength(1);
   });
 
-  it.fails('review P3-1: a dry-run whose read of a failing node succeeds does NOT reset the worker\'s failure count — rpc-node-unhealthy at the worker\'s third consecutive failure, as without the dry-run', async () => {
+  it('review P3-1: a dry-run whose read of a failing node succeeds does NOT reset the worker\'s failure count — rpc-node-unhealthy at the worker\'s third consecutive failure, as without the dry-run', async () => {
     await stuckHead();
     sim.deps.evaluatorA1 = { ...(sim.deps.evaluatorA1 ?? m.svc.DEFAULT_EVALUATOR_A1_SETTINGS), rpcUnhealthyAfterFailures: 3 };
     sim.chain.nodes[1]!.error = 'node-b: 503 Service Unavailable';

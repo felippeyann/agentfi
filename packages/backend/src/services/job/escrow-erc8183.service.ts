@@ -2594,9 +2594,11 @@ async function raiseEvaluatorKeyAlert(
  * pass sees that condition again and alerts it on its own clock. Such alerts are handed, sanitized, to
  * `observe` (the script prints them) and NO alert clock is read or written for them. Alerts about a change
  * the pass itself WROTE (a latest-level outcome reorganised back to live, a nonce consumed outside the
- * ledger) are delivered and recorded as usual: the worker would never see them again. The facts a pass
- * observes (first sight of a lost head, node read counters, the proof head, `observed:` first sights) are
- * recorded by either pass: they only make the worker's clock start at the true first observation.
+ * ledger) are delivered and recorded as usual: the worker would never see them again. Review P3-1: of the
+ * condition clocks a diagnostic pass only STARTS what is not running — the first sight of a lost head, the
+ * first proof head, an `observed:` first sight — and adds its failed node reads to the count. It never clears
+ * or moves them: a head not lost on its reads, a healthy read of a node, a proof head that advanced on its RPC
+ * set are not written. Only the worker's pass resets them, so a dry-run can never postpone the worker's alert.
  */
 export interface EvaluatorReconcileOptions {
   diagnostic?: { observe(note: EscrowAlert): void };
@@ -3226,6 +3228,9 @@ async function watchNodesAndProofHead(deps: Erc8183Deps, chainId: number, evalua
   for (const r of reads) {
     if (r.node.startsWith('#? ')) continue;
     try {
+      // Review P3-1: a diagnostic pass never resets the worker's failure count (a healthy read on the script's
+      // side is not recorded); its failed reads only move the count toward the threshold.
+      if (pass.diagnostic && r.ok) continue;
       const failures = await ledger.recordNodeRead(chainId, evaluator, r.node, r.ok, now);
       if (!r.ok && failures >= threshold) {
         await raiseConditionAlert(deps, pass, chainId, evaluator, `rpc-node-unhealthy:${r.node}`, {
@@ -3251,7 +3256,15 @@ async function watchNodesAndProofHead(deps: Erc8183Deps, chainId: number, evalua
   if (!stalledAfter || reads.length === 0 || reads.some((r) => !r.ok || r.proofBlockNumber === undefined)) return;
   const block = reads.reduce((min, r) => (r.proofBlockNumber! < min ? r.proofBlockNumber! : min), reads[0]!.proofBlockNumber!);
   try {
-    const head = await ledger.observeSafeHead(chainId, evaluator, block, now);
+    // Review P3-1: a diagnostic pass records the proof head only at FIRST sight (it starts the clock); an advance seen
+    // on the script's side never moves the worker's `safeHeadSeenAt` (that would postpone evaluator-proof-stalled).
+    let head: { advanced: boolean; seenAt: Date };
+    const stored = pass.diagnostic ? await ledger.readChainState(chainId, evaluator) : null;
+    if (pass.diagnostic && stored?.safeHeadBlock != null && stored.safeHeadSeenAt) {
+      head = { advanced: block > BigInt(stored.safeHeadBlock), seenAt: stored.safeHeadSeenAt };
+    } else {
+      head = await ledger.observeSafeHead(chainId, evaluator, block, now);
+    }
     if (!head.advanced && now.getTime() - head.seenAt.getTime() >= stalledAfter) {
       await raiseConditionAlert(deps, pass, chainId, evaluator, 'evaluator-proof-stalled', {
         kind: 'evaluator-proof-stalled',
@@ -3385,7 +3398,8 @@ export async function reconcileEvaluatorCandidates(
   for (const n of nonces) rowsByNonce.set(n, await ledger.candidatesAtNonce(chainId, evaluator, n));
   const hashes = [...[...rowsByNonce.values()].flat().map((c) => c.txHash), ...legacy.map((c) => c.txHash)];
   if (hashes.length === 0) {
-    await ledger.observeHeadClock(chainId, evaluator, 'sendLost', null, nowOf(deps));
+    // Review P3-1: only the worker's pass clears the send-lost clock.
+    if (!pass.diagnostic) await ledger.observeHeadClock(chainId, evaluator, 'sendLost', null, nowOf(deps));
     return summary;
   }
   const reads = await readEvaluatorNodes(deps, chainId, evaluator, hashes);
@@ -3646,6 +3660,20 @@ async function recordForeignNonce(
 }
 
 /**
+ * Review P3-1: the send-lost clock as a DIAGNOSTIC pass may touch it — it only STARTS it. A lost head with no
+ * clock running starts it (the true first observation); a running clock is read, never moved; a head not lost
+ * on the script's reads (a transient error, another RPC set) or lost at another nonce writes nothing. Only the
+ * worker's pass clears or restarts it. Returns the clock's start when it is running for `nonce`.
+ */
+async function diagnosticSendLostSince(deps: Erc8183Deps, chainId: number, evaluator: Address, nonce: number | null, now: Date): Promise<Date | null> {
+  const ledger = ledgerOf(deps);
+  const state = await ledger.readChainState(chainId, evaluator);
+  if (nonce === null) return null;
+  if (!state?.sendLostSince) return ledger.observeHeadClock(chainId, evaluator, 'sendLost', nonce, now);
+  return state.sendLostNonce === nonce ? state.sendLostSince : null;
+}
+
+/**
  * R2-P1-3 — the identical rebroadcast of a lost head and `evaluator-send-lost`.
  * The head is the nonce every node reports at `latest`. When its ONLY live
  * candidate is unknown to every node, inside the evaluator lane: fresh reads,
@@ -3662,7 +3690,9 @@ async function rebroadcastLostHead(deps: Erc8183Deps, chainId: number, evaluator
   const head = consensusLatest(views);
   const headRows = head === null ? [] : (await ledger.candidatesAtNonce(chainId, evaluator, head)).filter((c) => isLiveStatus(c.status));
   const lost = headRows.length > 0 && headRows.every((c) => unknownEverywhere(views, c.txHash) === true);
-  const since = await ledger.observeHeadClock(chainId, evaluator, 'sendLost', lost ? head : null, now);
+  const since = pass.diagnostic
+    ? await diagnosticSendLostSince(deps, chainId, evaluator, lost ? head : null, now)
+    : await ledger.observeHeadClock(chainId, evaluator, 'sendLost', lost ? head : null, now);
   if (!lost || head === null) return 0;
 
   let refusal: string | null = null;
@@ -3719,7 +3749,8 @@ async function rebroadcastLostHead(deps: Erc8183Deps, chainId: number, evaluator
     }
   }
   if (sent > 0) {
-    await ledger.observeHeadClock(chainId, evaluator, 'sendLost', null, now);
+    // Review P3-1: the worker's next pass clears the clock once it sees the head known; a diagnostic pass never does.
+    if (!pass.diagnostic) await ledger.observeHeadClock(chainId, evaluator, 'sendLost', null, now);
     return sent;
   }
   const lostSince = since ?? now;

@@ -44,17 +44,29 @@ refused there and a dry-run transmits nothing; use `--execute rebroadcast` for a
 verifies the configuration once (read-only) so the plan sees the real gate, and verifies it again after the
 typed confirmation. It never signs a new transaction on a dry-run.
 
-**The script's pass is a diagnostic, not a second alert source (P3-9, 24/10).** It writes what the worker's
-pass writes, but an alert about a condition that persists — `evaluator-send-lost`, `rpc-node-unhealthy`,
-`evaluator-proof-stalled`, `evaluator-proof-uncertain`, a ledger conflict with nothing written — is **printed**
-in the script's output (`! reconciliation (<kind>; shown here, not alerted — the settlement worker alerts it):
-…`) and **not** delivered. The script never reads or writes those alerts' clocks: running a dry-run neither
-consumes nor postpones the worker's alert, which still fires on the worker's own threshold and interval. A
-lost head shows there with the reason this pass did not rebroadcast it; `GATE_CLOSED` on that line is the
-script's own gate, read before its Q7 verification — the plan's `config gate` line has the verified state, and
-the plan's `rebroadcast` line says whether `--execute rebroadcast` is admitted. A change the pass itself
-records — a nonce consumed outside the ledger (`evaluator-nonce-foreign`), an outcome reorganised away
-(`evaluator-reorg`) — is still **alerted** by the script: the worker would not see it again.
+**The script's pass is a diagnostic, not a second alert source (P3-9, 24/10).** It writes the ledger as the
+worker's pass does, but an alert about a condition that persists — `evaluator-send-lost`, `rpc-node-unhealthy`,
+`evaluator-proof-stalled`, `evaluator-proof-uncertain`, a ledger conflict or a reorg deeper than the proof tag
+with nothing written — is **printed** in the script's output (`! reconciliation (<kind>; shown here, not alerted —
+the settlement worker alerts it): …`) and **not** delivered. The script never reads or writes those alerts'
+"last alerted" marks, and it only **starts** the condition clocks the worker counts from: the first sight of a
+lost head, the first proof-tag head, its own failed node reads. It never clears or moves them — a head its RPC
+set still knows, a node answering on its side, a proof head that advanced there are not written (review P3-1).
+Only the worker resets them. So running a dry-run neither consumes nor postpones the worker's alert, which still
+fires on the worker's own threshold and interval. A lost head shows there with the reason this pass did not
+rebroadcast it; `GATE_CLOSED` on that line is the script's own gate, read before its Q7 verification — the
+plan's `config gate` line has the verified state, and the plan's `rebroadcast` line says whether `--execute
+rebroadcast` is admitted.
+
+A change the pass itself records is still **alerted** by the script, because the worker would not see it again:
+a nonce consumed outside the ledger (`evaluator-nonce-foreign`), and an outcome proven only at `latest` that a
+reorg took away — the pass puts its candidate back to live (`evaluator-reorg`). A reorg **deeper** than the proof
+tag also uses the kind `evaluator-reorg`, but nothing is written for it: the script only **prints** it, and the
+worker alerts it on its next pass.
+
+**If the settlement worker is not running, nobody alerts these conditions.** The script's output is then the
+only signal of a lost head, a failing node, a stalled proof head or a deep reorg: start the worker (or read
+that output) before relying on the alerts.
 
 The dry-run then shows:
 
