@@ -9,7 +9,7 @@ import {
   assertSimulationUsable,
   ensureSimulationUsable,
 } from '../../services/transaction/simulation-guard.js';
-import { ExecutorService, executorBatchValue } from '../../services/transaction/executor.service.js';
+import { ExecutorService, executorBatchValue, executorChargedFee } from '../../services/transaction/executor.service.js';
 import { AGENT_EXECUTOR_ABI } from '../../abi/AgentExecutor.abi.js';
 import { PolicyService, type PolicyValidationResult } from '../../services/policy/policy.service.js';
 import { createTransactionWithVolume, settleVolumeAfterFailure } from '../../services/policy/daily-volume.js';
@@ -393,6 +393,14 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       grossAmountWei: amountInWei,
       tier: request.agentTier,
     });
+    // A6e(2): routed through the executor, the swap is charged F = the
+    // executor's 30 bps on every tier (`wrapSingle`), and that is what is
+    // reported and recorded. Not routed (an ERC-20 input, or no executor on
+    // the chain), nothing is collected on-chain and the tier schedule is
+    // reported as before (no FeeEvent is written for it).
+    const chargedFee = wrapped.routedViaExecutor
+      ? executorChargedFee(wrapped.feeWei)
+      : { feeBps: feeCalc.feeBps, feeAmountWei: feeCalc.feeAmountWei };
 
     // Create transaction record
     const tx = await createWithVolumeReservation(reply, {
@@ -414,10 +422,8 @@ export async function transactionRoutes(fastify: FastifyInstance) {
             to: wrapped.to,
             data: wrapped.data,
             value: wrapped.value.toString(),
-            feeAmountWei: wrapped.routedViaExecutor
-              ? wrapped.feeWei.toString()
-              : feeCalc.feeAmountWei.toString(),
-            feeBps: feeCalc.feeBps,
+            feeAmountWei: chargedFee.feeAmountWei.toString(),
+            feeBps: chargedFee.feeBps,
             routedViaExecutor: wrapped.routedViaExecutor,
           },
         },
@@ -439,11 +445,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
           value: wrapped.value.toString(),
           agentId: request.agentId,
           tier: request.agentTier,
-          feeAmountWei: wrapped.routedViaExecutor
-            ? wrapped.feeWei.toString()
-            : feeCalc.feeAmountWei.toString(),
+          feeAmountWei: chargedFee.feeAmountWei.toString(),
           feeUsd: '0',
-          feeBps: feeCalc.feeBps,
+          feeBps: chargedFee.feeBps,
           routedViaExecutor: wrapped.routedViaExecutor,
         },
         { priority: 1 },
@@ -464,8 +468,8 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       status: tx.status,
       simulationId: sim.simulationId,
       fee: {
-        bps: feeCalc.feeBps,
-        amountWei: feeCalc.feeAmountWei.toString(),
+        bps: chargedFee.feeBps,
+        amountWei: chargedFee.feeAmountWei.toString(),
         feeWallet: feeCalc.feeWallet,
       },
     });
@@ -2107,9 +2111,10 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       });
     }
 
-    // Display and the recorded bps follow the swap route (tier schedule); the
-    // recorded fee AMOUNT is what the executor collects on-chain (F), as the
-    // swap records `wrapped.feeWei` when routed through the executor.
+    // A6e(2): the response and the recorded fee are what the executor charges
+    // (F at its 30 bps, on every tier) — never the tier schedule, which is
+    // not applied on-chain. `calculateFee` only supplies the fee wallet.
+    const chargedFee = executorChargedFee(executorFeeWei);
     const feeCalc = feeService.calculateFee({ grossAmountWei: actionsValueWei, tier: request.agentTier });
 
     // The batch's daily-volume spend: its native value with the executor fee
@@ -2136,8 +2141,8 @@ export async function transactionRoutes(fastify: FastifyInstance) {
             to: contracts.executor,
             data: batchCalldata,
             value: msgValueWei.toString(),
-            feeAmountWei: executorFeeWei.toString(),
-            feeBps: feeCalc.feeBps,
+            feeAmountWei: chargedFee.feeAmountWei.toString(),
+            feeBps: chargedFee.feeBps,
             routedViaExecutor: true,
           },
         },
@@ -2155,9 +2160,9 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       value: msgValueWei.toString(),
       agentId: request.agentId,
       tier: request.agentTier,
-      feeAmountWei: executorFeeWei.toString(),
+      feeAmountWei: chargedFee.feeAmountWei.toString(),
       feeUsd: '0',
-      feeBps: feeCalc.feeBps,
+      feeBps: chargedFee.feeBps,
       routedViaExecutor: true,
     });
 
@@ -2167,8 +2172,8 @@ export async function transactionRoutes(fastify: FastifyInstance) {
       actionCount: body.actions.length,
       simulationId: sim.simulationId,
       fee: {
-        bps: feeCalc.feeBps,
-        amountWei: feeCalc.feeAmountWei.toString(),
+        bps: chargedFee.feeBps,
+        amountWei: chargedFee.feeAmountWei.toString(),
         feeWallet: feeCalc.feeWallet,
       },
     });

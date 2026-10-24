@@ -688,8 +688,8 @@ describeDb('A6e(2) on Anvil — the 202 fee is what the executor takes from the 
   const ROUTER_84532 = getAddress('0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4');
   type Revenue = {
     totalFeesUsd: string;
-    byFeeTier: Array<{ tierName: string; totalUsd: string; feeBps?: number }>;
-    byFeeBps?: Array<{ feeBps: number; totalUsd: string }>;
+    byFeeTier: Array<{ tierName: string; totalUsd: string }>;
+    byFeeBps: Array<{ feeBps: number; totalUsd: string }>;
   };
   const revenue = async (): Promise<Revenue> => {
     const res = await app.inject({ method: 'GET', url: '/admin/revenue', headers: { 'x-admin-secret': ADMIN_SECRET } });
@@ -698,9 +698,8 @@ describeDb('A6e(2) on Anvil — the 202 fee is what the executor takes from the 
   };
   const tierUsd = (r: Revenue, tier: string) =>
     r.byFeeTier.filter((e) => e.tierName === tier).reduce((s, e) => s + Number(e.totalUsd), 0);
-  /** The bps grouping (byFeeBps; before A6e(2) it was byFeeTier's feeBps). */
   const bpsUsd = (r: Revenue, bps: number) =>
-    (r.byFeeBps ?? r.byFeeTier).filter((e) => e.feeBps === bps).reduce((s, e) => s + Number(e.totalUsd), 0);
+    r.byFeeBps.filter((e) => e.feeBps === bps).reduce((s, e) => s + Number(e.totalUsd), 0);
   const stats = async () => {
     const { FeeService } = await import('../services/policy/fee.service.js');
     return new FeeService(m.db).getRevenueStats();
