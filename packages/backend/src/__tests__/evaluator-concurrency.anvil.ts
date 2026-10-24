@@ -727,6 +727,15 @@ describeA1('A1 row 9 — settlement worker (W) and recovery CLI (S) as two OS pr
     await mine();
     await automine(true);
     await head.outcome; // P0's wait follows the replacement (not interpreted)
+    // P3-6 (24/10): S's speed-up is a recorded recovery operation (SCRIPT row of its incident): P0's wait reports it
+    // as such — informational, with the incident and the operator — never as a manual send or a second worker.
+    expect(p0Alerts.filter((a) => a.kind === 'evaluator-replaced' && a.jobId === x.jobId)).toEqual([]);
+    expect(p0Alerts.filter((a) => a.kind === 'evaluator-replaced-by-recovery' && a.jobId === x.jobId)).toEqual([
+      expect.objectContaining({
+        severity: 'info',
+        details: expect.objectContaining({ txHash: head.hash, recovery: expect.objectContaining({ incidentId: script[0]!.incidentId, operator: OPERATOR, kind: 'SPEED_UP' }) }),
+      }),
+    ]);
     await settleAndCheck([
       { job: x, winner: script[0]!.txHash, settledBy: 'P0' },
       { job: y, winner: yRow!.txHash, settledBy: 'W' },

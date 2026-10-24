@@ -178,6 +178,8 @@ interface CandidateRowDb {
   txHash: string;
   rawTx: string | null;
   origin: string;
+  incidentId: string | null;
+  operator: string | null;
   status: string;
   proofLevel: string | null;
   replacesId: string | null;
@@ -1338,6 +1340,10 @@ describeA1('A1 core — candidates, reconciliation, gate, lane (Postgres + fake 
     expect(j.reservationStatus).toBe('PENDING');
     expect(onChain(j.onChainJobId).status).toBe(JobStatus.Submitted);
     expect(alertsOf('evaluator-replaced', jobId)).toHaveLength(1);
+    // P3-6: a cancel the ledger does not know is not a recovery operation — the incident alert, not the notice.
+    expect(alertsOf('evaluator-replaced', jobId)[0]!.severity).toBeUndefined();
+    expect(alertsOf('evaluator-replaced', jobId)[0]!.message).toMatch(/a manual send with the evaluator key or a second settlement worker/);
+    expect(alertsOf('evaluator-replaced-by-recovery')).toHaveLength(0);
     await reconcile();
     const rows = await atNonce(0);
     expect(rows.find((r) => r.kind === 'EXTERNAL' || r.kind === 'CANCEL')).toBeDefined();
@@ -1369,6 +1375,41 @@ describeA1('A1 core — candidates, reconciliation, gate, lane (Postgres + fake 
     expect(done).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', platformFeeAmount: FEE.toString(), feedbackStatus: 'written' });
     expect(sameHash(done.settleTxHash, speedHash)).toBe(true);
     expect(byHash(await atNonce(0), speedHash!).status).toBe('MINED_SUCCESS');
+  });
+
+  // P3-6 (24/10): a replacement the RECOVERY SCRIPT made and recorded (SCRIPT row of its incident) is a known
+  // operation — the worker's receipt wait reports it as such, not as a manual send or a second worker.
+  it('P3-6: the recovery script\'s speed-up (SCRIPT row of an open incident) mined while the worker waits → one informational evaluator-replaced-by-recovery naming the incident; no evaluator-replaced incident; the job still settles once on the speed-up', async () => {
+    const { provider, jobId } = await delivered();
+    sim.chain.evaluatorAutoMine = false;
+    let speed: PreparedEvaluatorTx | null = null;
+    sim.chain.onReceiptWait = async (hash) => {
+      const own = sim.chain.signed.get(hash)!;
+      const head = { ...own, value: own.value, chainId: CHAIN_ID, from: getAddress(SIM_EVALUATOR) } as PreparedEvaluatorTx;
+      speed = await scriptReplace(head, 'speed-up', jobId);
+      sim.chain.mineBlock();
+    };
+    await sim.drive(1);
+    expect(speed).not.toBeNull();
+    const script = byHash(await candidates(jobId), speed!.hash);
+    expect(script).toMatchObject({ origin: 'SCRIPT', kind: 'SPEED_UP' });
+    expect(alertsOf('evaluator-replaced', jobId)).toEqual([]);
+    const notices = alertsOf('evaluator-replaced-by-recovery', jobId);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ severity: 'info', details: expect.objectContaining({ replacedBy: expect.stringMatching(/^0x/), recovery: expect.objectContaining({ incidentId: script.incidentId, operator: 'f3-test', kind: 'SPEED_UP' }) }) });
+    expect(sameHash(notices[0]!.details!['replacedBy'] as string, speed!.hash)).toBe(true);
+    expect(notices[0]!.message).toContain(script.incidentId!);
+    expect(notices[0]!.message).not.toMatch(/manual send|second settlement worker|Do not replace/);
+    // nothing changed in the money path: the speed-up is the job's settlement, paid once
+    sim.chain.evaluatorAutoMine = true;
+    await reconcile();
+    await m.runPaymentRecoveryTick();
+    await sim.drive();
+    await reconcile();
+    const done = await job(jobId);
+    expect(done).toMatchObject({ status: 'COMPLETED', onChainStatus: 'COMPLETED', platformFeeAmount: FEE.toString() });
+    expect(sameHash(done.settleTxHash, speed!.hash)).toBe(true);
+    expect(sim.chain.usdcOf(provider.safeAddress as Hex)).toBe(START_USDC + BUDGET - FEE);
   });
 
   it('row 27: another job\'s complete mines in this job\'s nonce during the wait — X not paid nor rejected; Y\'s JobCompleted ignored for X; X stays Submitted', async () => {
@@ -1634,6 +1675,109 @@ describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () =
     expect(r.output).toContain('After expiresAt anyone can call claimRefund on a Funded or Submitted job and refund the requester in full');
     expect(r.output).toContain('CANCEL does not settle the job.');
     expect((await candidates(a.jobId)).length).toBe(before);
+  });
+
+  // ── P3-9 (24/10): the script's reconciliation pass is a diagnostic, not the worker ─────────────────
+  // In production the script is its OWN process: its Q7 gate starts empty and `verifyConfig` (the full
+  // verification) runs AFTER its first reconciliation pass. Modelled here: a gate of the script's process,
+  // closed until `verifyConfig` ran; the worker (sim.deps) keeps its own, open gate.
+  function scriptProcessDeps(o: Parameters<typeof recoveryDeps>[0] = {}) {
+    const base = recoveryDeps(o);
+    let verified = false;
+    const erc8183: Erc8183Deps = {
+      ...sim.deps,
+      configGate: (chainId: number) =>
+        verified ? simGate(chainId) : { allowed: false, chainId, block: 'not-verified-yet', reason: `chain ${chainId} not verified in this process yet`, retryAfterSeconds: 120 },
+    };
+    return {
+      ...base,
+      erc8183,
+      verifyConfig: async () => {
+        verified = true;
+        return { ok: true } as const;
+      },
+    };
+  }
+  /** The head lost for good in transport: the worker's identical rebroadcasts never reach a node (no refusal → the threshold rule). */
+  async function lostHead(): Promise<{ jobId: string; txHash: string }> {
+    const { jobId } = await delivered();
+    // No early alert near expiry here (simConfig's TTL is 1 h): only the send-lost threshold decides.
+    sim.deps.evaluatorA1 = { ...(sim.deps.evaluatorA1 ?? m.svc.DEFAULT_EVALUATOR_A1_SETTINGS), earlyAlertBeforeExpirySeconds: 0 };
+    sim.chain.evaluatorAutoMine = false;
+    sim.chain.refuseSend = () => 'fetch failed (the request never reached the node)';
+    await sim.drive(1);
+    sim.settlements.clear();
+    const [row] = await candidates(jobId);
+    expect(row!.status).toBe('SEND_UNCONFIRMED');
+    return { jobId, txHash: row!.txHash };
+  }
+  const sendLostClock = async () => (await ledger.readChainState(m.db, CHAIN_ID, getAddress(SIM_EVALUATOR)))?.lastAlertAt['evaluator-send-lost'];
+
+  it('P3-9: a dry-run while the head is lost (Q7 of the script\'s process not verified yet at its first pass) delivers no evaluator-send-lost, writes no alert clock and gives no circular "run the dry-run" guidance — the state is in its output', async () => {
+    const { txHash } = await lostHead();
+    await reconcile(); // the worker's first sight (t0): below the threshold, nothing alerted
+    expect(alertsOf('evaluator-send-lost')).toHaveLength(0);
+    sim.setNowOffset(60_000);
+    const r = await cliMod.runEvaluatorRecovery(['--chain', String(CHAIN_ID)], scriptProcessDeps());
+    expect(r.exitCode, r.output).toBe(0);
+    expect(r.output).toMatch(/config gate \(Q7, this process\): verified/);
+    expect(alertsOf('evaluator-send-lost')).toHaveLength(0);
+    expect(await sendLostClock()).toBeUndefined();
+    // the operator still sees the state of the lost head in the CLI's output, without circular guidance
+    const diag = r.output.split('\n').filter((l) => /unknown to every RPC node/.test(l));
+    expect(diag.length, r.output).toBeGreaterThan(0);
+    expect(diag.join('\n')).toContain(txHash.toLowerCase());
+    expect(r.output).not.toMatch(/run the evaluator recovery dry-run/);
+  });
+
+  it('P3-9: after a dry-run, the worker still alerts evaluator-send-lost at ITS threshold (first sight + 10 min), not later; once; with the operator guidance', async () => {
+    const { jobId } = await lostHead();
+    await reconcile(); // t0: the worker's first sight
+    sim.setNowOffset(60_000);
+    expect((await cliMod.runEvaluatorRecovery(['--chain', String(CHAIN_ID)], scriptProcessDeps())).exitCode).toBe(0);
+    const before = alertsOf('evaluator-send-lost').length;
+    sim.setNowOffset(5 * 60_000);
+    await reconcile(); // below the threshold
+    expect(alertsOf('evaluator-send-lost').length).toBe(before);
+    sim.setNowOffset(10 * 60_000 + 1_000);
+    await reconcile(); // past the threshold: the worker's own alert, on time
+    const worker = alertsOf('evaluator-send-lost', jobId).slice(before);
+    expect(worker).toHaveLength(1);
+    expect(worker[0]!.message).toMatch(/run the evaluator recovery dry-run/);
+    expect(worker[0]!.message).not.toMatch(/GATE_CLOSED/);
+    expect(await sendLostClock()).toBeDefined();
+    await reconcile(); // not again within the interval
+    expect(alertsOf('evaluator-send-lost', jobId).slice(before)).toHaveLength(1);
+  });
+
+  it('P3-9 (other condition alerts): a node failing past its threshold during dry-runs is shown in their output, not delivered, no clock written; the worker\'s next pass alerts rpc-node-unhealthy once', async () => {
+    await stuckHead();
+    sim.deps.evaluatorA1 = { ...(sim.deps.evaluatorA1 ?? m.svc.DEFAULT_EVALUATOR_A1_SETTINGS), rpcUnhealthyAfterFailures: 2 };
+    sim.chain.nodes[1]!.error = 'node-b: 503 Service Unavailable';
+    const outputs: string[] = [];
+    for (let i = 0; i < 2; i++) outputs.push((await cliMod.runEvaluatorRecovery(['--chain', String(CHAIN_ID)], scriptProcessDeps())).output);
+    expect(alertsOf('rpc-node-unhealthy')).toHaveLength(0);
+    expect(outputs[1]).toMatch(/reconciliation \(rpc-node-unhealthy; shown here, not alerted/);
+    const state = await ledger.readChainState(m.db, CHAIN_ID, getAddress(SIM_EVALUATOR));
+    expect(Object.keys(state?.lastAlertAt ?? {}).filter((k) => k.startsWith('rpc-node-unhealthy'))).toEqual([]);
+    await reconcile(); // the worker: third consecutive failure, over the threshold — its alert, on time
+    expect(alertsOf('rpc-node-unhealthy')).toHaveLength(1);
+    await reconcile();
+    expect(alertsOf('rpc-node-unhealthy')).toHaveLength(1); // its interval
+  });
+
+  it('P3-9 (no suppression): when the dry-run\'s pass is the FIRST to see a nonce consumed outside the ledger, it records the EXTERNAL row and still DELIVERS evaluator-nonce-foreign once — the worker would never see that change again', async () => {
+    const a = await stuckHead();
+    const foreign = await sim.chain.signFields({ to: getAddress(SIM_EVALUATOR), data: '0x', nonce: 0, gas: CANCEL_GAS, ...bumped(a.head) });
+    await sim.chain.acceptRaw(foreign.raw);
+    sim.chain.mineBlocks(3);
+    const r = await cliMod.runEvaluatorRecovery(['--chain', String(CHAIN_ID)], scriptProcessDeps());
+    expect(r.exitCode, r.output).toBe(0);
+    expect(byHash(await atNonce(0), foreign.hash)).toMatchObject({ kind: 'EXTERNAL', origin: 'RECONCILE' });
+    expect(byHash(await atNonce(0), a.head.hash).status).toBe('DEAD');
+    expect(alertsOf('evaluator-nonce-foreign')).toHaveLength(1);
+    await reconcile(); // the worker's next pass: nothing new to tell, not repeated
+    expect(alertsOf('evaluator-nonce-foreign')).toHaveLength(1);
   });
 
   it('no caps configured → the dry-run says so; --execute refused (fail closed), nothing signed', async () => {

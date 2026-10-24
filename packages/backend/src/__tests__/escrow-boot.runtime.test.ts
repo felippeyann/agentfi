@@ -16,6 +16,8 @@ const { state, logged, redisStore, notified } = vi.hoisted(() => ({
     hookHasCode: true,
     hookConfigured: true,
     servedChainId: 84532,
+    /** The deployment check itself throws (runEscrowBootCheck's catch: no state recorded). */
+    checkCrashes: false,
   },
   logged: { error: [] as string[], warn: [] as string[], info: [] as string[] },
   redisStore: new Map<string, string>(),
@@ -81,6 +83,15 @@ vi.mock('../config/chains.js', async () => {
   }),
   };
 });
+// P3 (#193 review): the boot check falling into runEscrowBootCheck's catch — the deployment check throws.
+vi.mock('../config/escrow-boot-check.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../config/escrow-boot-check.js')>();
+  return {
+    ...real,
+    checkEscrowDeployments: (params: Parameters<typeof real.checkEscrowDeployments>[0]) =>
+      state.checkCrashes ? Promise.reject(new Error('boot check crashed')) : real.checkEscrowDeployments(params),
+  };
+});
 vi.mock('../api/middleware/logger.js', () => ({
   logger: {
     info: (_o: unknown, m?: string) => logged.info.push(String(m ?? _o)),
@@ -126,6 +137,7 @@ beforeEach(() => {
   state.hookHasCode = true;
   state.hookConfigured = true;
   state.servedChainId = 84532;
+  state.checkCrashes = false;
   logged.error.length = 0;
   logged.warn.length = 0;
   logged.info.length = 0;
@@ -359,6 +371,64 @@ describe('C3f item 4 — every check publishes this process\'s verification stat
     await runEscrowBootCheck('worker');
     await flush();
     expect([...redisStore.keys()]).toEqual(['agentfi:escrow-verification:worker']);
+  });
+
+  // P3 of the #193 fix review (24/10), by behaviour: `alsoPublishAs('worker')` called BEFORE the first check
+  // publishes nothing while this process has no state; the first check that records one publishes both keys.
+  const keys = () => [...redisStore.keys()].sort();
+  const reportOf = (role: 'api' | 'worker') => JSON.parse(redisStore.get(`agentfi:escrow-verification:${role}`) ?? 'null');
+
+  it('single process: alsoPublishAs(\'worker\') before the first check publishes nothing; the boot check then publishes `api` and `worker` with the same state', async () => {
+    alsoPublishAs('worker');
+    await flush();
+    expect(keys()).toEqual([]);
+    await runEscrowBootCheck('api');
+    await flush();
+    expect(keys()).toEqual(['agentfi:escrow-verification:api', 'agentfi:escrow-verification:worker']);
+    expect(reportOf('worker').chains).toEqual([expect.objectContaining({ chainId: 84532, state: 'verified', allowed: true })]);
+    expect(reportOf('worker').chains).toEqual(reportOf('api').chains);
+    expect(reportOf('worker').role).toBe('worker');
+  });
+
+  it('single process: the boot check falls into its catch (no state recorded) after alsoPublishAs(\'worker\') → nothing published, the gate stays closed; the next re-check publishes BOTH keys', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    alsoPublishAs('worker');
+    state.checkCrashes = true;
+    expect(await runEscrowBootCheck('api')).toBeNull();
+    await flush();
+    expect(logged.error.join('\n')).toMatch(/boot check crashed — deployment NOT verified/);
+    expect(keys()).toEqual([]);
+    expect(escrowConfigGate(84532)).toMatchObject({ allowed: false, block: 'not-verified-yet' });
+    // a later alsoPublishAs (idempotent) still publishes nothing without state
+    alsoPublishAs('worker');
+    await flush();
+    expect(keys()).toEqual([]);
+
+    state.checkCrashes = false;
+    await vi.advanceTimersByTimeAsync(120_000);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    await flush();
+    expect(keys()).toEqual(['agentfi:escrow-verification:api', 'agentfi:escrow-verification:worker']);
+    for (const role of ['api', 'worker'] as const) {
+      expect(reportOf(role)).toMatchObject({ role, chains: [expect.objectContaining({ chainId: 84532, state: 'verified', allowed: true })] });
+    }
+    expect(escrowConfigGate(84532).allowed).toBe(true);
+  });
+
+  it('single process: a re-check that crashes again keeps publishing nothing until a check records state', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    alsoPublishAs('worker');
+    state.checkCrashes = true;
+    await runEscrowBootCheck('api');
+    await vi.advanceTimersByTimeAsync(120_000); // the re-check crashes too (the loop's own catch)
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    await flush();
+    expect(keys()).toEqual([]);
+    state.checkCrashes = false;
+    await vi.advanceTimersByTimeAsync(120_000);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    await flush();
+    expect(keys()).toEqual(['agentfi:escrow-verification:api', 'agentfi:escrow-verification:worker']);
   });
 
   it('an unreadable chain is published as unverified, with its reason', async () => {

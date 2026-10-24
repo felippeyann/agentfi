@@ -54,6 +54,7 @@ import {
   raiseEscrowAlert,
   reconcileEvaluatorCandidates,
   type Erc8183Deps,
+  type EscrowAlert,
 } from '../services/job/escrow-erc8183.service.js';
 
 // ── Dependencies ─────────────────────────────────────────────────────────────
@@ -815,6 +816,21 @@ async function answer(deps: RecoveryDeps, id: string, out: EvaluatorSendRawOutco
 // ── Entry ────────────────────────────────────────────────────────────────────
 
 /**
+ * P3-9: the script's reconciliation pass (`reconcileEvaluatorCandidates` with `diagnostic`): the same writes as
+ * the worker's pass, but every alert about a condition the worker sees again is printed here — to the operator
+ * running the script — and neither delivered nor counted against the worker's persisted alert clock. Alerts
+ * about a change this pass itself wrote (a reorg reverted, a foreign nonce recorded) are still delivered.
+ */
+async function diagnosticPass(deps: RecoveryDeps, chainId: number, print: (l: string) => void): Promise<void> {
+  const notes: EscrowAlert[] = [];
+  try {
+    await reconcileEvaluatorCandidates(deps.erc8183, chainId, { diagnostic: { observe: (n) => notes.push(n) } });
+  } finally {
+    for (const n of notes) print(`  ! reconciliation (${n.kind}; shown here, not alerted — the settlement worker alerts it): ${n.message}`);
+  }
+}
+
+/**
  * The script, testable: parses `argv`, prints the dry-run, and executes only with every gate passed.
  * Never throws for an expected refusal (exit code 2 / 3 with the reason in the output).
  */
@@ -828,9 +844,11 @@ export async function runEvaluatorRecovery(argv: readonly string[], deps: Recove
   try {
     const args = parseRecoveryArgs(argv);
     if (deps.erc8183.config.evaluatorAddress === null && !deps.signer) throw new Refused('no evaluator key configured');
-    // §5.2: the reconciliation pass at the start of every run.
+    // §5.2: the reconciliation pass at the start of every run. P3-9: a DIAGNOSTIC pass — it delivers no alert about
+    // a condition the worker sees again on its next pass (send-lost, node health, proof head, uncertain nonces) and
+    // never reads or writes their alert clocks (the worker owns them); those are printed here instead.
     try {
-      await reconcileEvaluatorCandidates(deps.erc8183, args.chainId);
+      await diagnosticPass(deps, args.chainId, print);
     } catch (err) {
       print(`  ! reconciliation pass failed: ${(err as Error).message}`);
     }
@@ -941,7 +959,7 @@ export async function runEvaluatorRecovery(argv: readonly string[], deps: Recove
         print(`  nonce ${sent.nonce}: no receipt within ${waitMs} ms — the reconciliation pass will prove the winner`);
       }
     }
-    await reconcileEvaluatorCandidates(deps.erc8183, args.chainId);
+    await diagnosticPass(deps, args.chainId, print);
     s = await readSituation(deps, args);
     if (s.pending !== null && s.latest !== null && s.pending <= s.latest && s.queue.every((n) => (s.plans.get(n)?.live.length ?? 0) === 0)) {
       await ledger.closeIncident(db(deps), incident.id, 'queue unblocked');

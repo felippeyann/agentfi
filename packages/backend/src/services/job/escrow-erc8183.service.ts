@@ -344,6 +344,15 @@ export interface EscrowAlert {
      * is not read as this job's outcome. The job keeps its uncertain state; the chain decides.
      */
     | 'evaluator-replaced'
+    /**
+     * P3-6 (24/10): the same detection as `evaluator-replaced`, when the replacement is a KNOWN recovery
+     * operation: the recovery script's SPEED_UP / CANCEL of this nonce, recorded in the ledger (origin
+     * SCRIPT, with its incident) before its send. Informational (`severity: 'info'`), with the incident; the
+     * settlement path is the same (nothing recorded from that receipt, the chain decides). Any other
+     * replacement — no ledger row, another origin, no incident, another nonce or key, an unreadable ledger —
+     * stays `evaluator-replaced`.
+     */
+    | 'evaluator-replaced-by-recovery'
     /** C3h D2: the job's own evaluator transaction mined without this job's terminal event — nothing is recorded from it. */
     | 'settlement-unproven'
     /**
@@ -372,6 +381,11 @@ export interface EscrowAlert {
   jobId?: string;
   chainId?: number | null;
   details?: Record<string, unknown>;
+  /**
+   * P3-6: `info` = an operator notice about a known operation (logged as a warning, delivered with
+   * `severity: info`), not an incident. Absent = an alert (the default for every kind).
+   */
+  severity?: 'info';
 }
 
 export interface Erc8183Deps {
@@ -484,14 +498,23 @@ export function raiseEscrowAlert(deps: Erc8183Deps, alert: EscrowAlert): Promise
   return raiseAlert(deps, alert);
 }
 
-async function raiseAlert(deps: Erc8183Deps, alert: EscrowAlert): Promise<boolean> {
+/** The S5 sanitizer over an alert's message and every string of its details (the alert channel and the CLI output). */
+function sanitizeAlert(alert: EscrowAlert): EscrowAlert {
   const ctx = sanitizeContextFromEnv();
-  const clean: EscrowAlert = {
+  return {
     ...alert,
     message: sanitizeText(alert.message, ctx),
     ...(alert.details ? { details: sanitizeValue(alert.details, ctx) as Record<string, unknown> } : {}),
   };
-  deps.logger.error({ alert: clean.kind, jobId: clean.jobId, chainId: clean.chainId, ...clean.details }, `ESCROW ALERT: ${clean.message}`);
+}
+
+async function raiseAlert(deps: Erc8183Deps, alert: EscrowAlert): Promise<boolean> {
+  const clean = sanitizeAlert(alert);
+  if (clean.severity === 'info') {
+    deps.logger.warn({ alert: clean.kind, severity: 'info', jobId: clean.jobId, chainId: clean.chainId, ...clean.details }, `ESCROW NOTICE: ${clean.message}`);
+  } else {
+    deps.logger.error({ alert: clean.kind, jobId: clean.jobId, chainId: clean.chainId, ...clean.details }, `ESCROW ALERT: ${clean.message}`);
+  }
   if (!deps.alert) return true;
   try {
     await deps.alert(clean);
@@ -2106,7 +2129,11 @@ export class SettlementUnprovenError extends Error {
  * never interpreted: alerted (`evaluator-replaced`) and thrown as
  * `SettlementReplacedError` (the caller reconciles from `getJob` when the
  * chain is terminal). A nonce consumed, a hash confirmed or a transaction
- * replaced is not proof of this job's outcome.
+ * replaced is not proof of this job's outcome. P3-6: when the replacement is
+ * the recovery script's own SPEED_UP / CANCEL of this nonce, recorded in the
+ * ledger (`recoveryReplacementOf`), the notice is informational
+ * (`evaluator-replaced-by-recovery`, with its incident); the error and
+ * everything after it are the same.
  */
 async function awaitOwnReceipt(
   deps: Erc8183Deps,
@@ -2118,6 +2145,33 @@ async function awaitOwnReceipt(
   const receipt: EvaluatorReceipt = await signer.waitForTransactionReceipt(txHash);
   const minedHash = (receipt.transactionHash as Hex | undefined) ?? null;
   if (minedHash === null || minedHash.toLowerCase() !== txHash.toLowerCase()) {
+    const recovery = minedHash === null ? null : await recoveryReplacementOf(deps, job.id, txHash, minedHash);
+    if (recovery) {
+      // P3-6: a known recovery operation (recorded before its send) — informational, with its incident.
+      await raiseAlert(deps, {
+        kind: 'evaluator-replaced-by-recovery',
+        severity: 'info',
+        jobId: job.id,
+        chainId: job.escrowChainId,
+        message:
+          `Evaluator ${action} of job ${job.id} (on-chain job ${job.onChainJobId}) ${txHash} was replaced at nonce ${recovery.nonce} by the ` +
+          `recovery script's ${recovery.kind === 'CANCEL' ? 'cancel' : 'speed-up'} ${minedHash}${receipt.replacedReason ? ` (${receipt.replacedReason})` : ''} — ` +
+          `incident ${recovery.incidentId}, operator ${recovery.operator ?? '?'}, recorded in the ledger before its send: a known recovery ` +
+          'operation, not an incident of its own. Nothing is recorded from the receipt this wait returned; the job keeps its state and the ' +
+          'next attempt reads the job on-chain (reconciled if it is terminal, settled again by its recorded decision if it is still Submitted).',
+        details: {
+          action,
+          txHash,
+          replacedBy: minedHash,
+          replacedReason: receipt.replacedReason ?? null,
+          replacementStatus: receipt.status ?? null,
+          onChainJobId: job.onChainJobId,
+          expiresAt: job.expiresAt?.toISOString() ?? null,
+          recovery,
+        },
+      });
+      throw new SettlementReplacedError(action, txHash, minedHash);
+    }
     await raiseAlert(deps, {
       kind: 'evaluator-replaced',
       jobId: job.id,
@@ -2142,6 +2196,33 @@ async function awaitOwnReceipt(
   }
   if (receipt.status !== 'success') throw new SettlementRevertedError(action, txHash);
   return receipt;
+}
+
+/**
+ * P3-6: is the transaction that replaced `txHash` in its nonce the recovery script's own replacement?
+ * Only a ledger row of the mined hash with origin SCRIPT, an incident, kind SPEED_UP / CANCEL, the SAME
+ * nonce and evaluator key as the job's own candidate `txHash`. Anything else — no row, another origin,
+ * no incident, another nonce or key, an unreadable ledger — is null: the caller keeps the incident alert.
+ */
+async function recoveryReplacementOf(
+  deps: Erc8183Deps,
+  jobId: string,
+  txHash: Hex,
+  minedHash: Hex,
+): Promise<{ incidentId: string; operator: string | null; kind: 'SPEED_UP' | 'CANCEL'; candidateId: string; nonce: number } | null> {
+  try {
+    // A SCRIPT speed-up carries the job; a SCRIPT cancel carries the job of the candidate it replaces (§2.1).
+    const rows = await ledgerOf(deps).candidatesForJob(jobId);
+    const own = rows.find((c) => c.txHash.toLowerCase() === txHash.toLowerCase());
+    const by = rows.find((c) => c.txHash.toLowerCase() === minedHash.toLowerCase());
+    if (!own || !by || own.nonce === null) return null;
+    if (by.origin !== 'SCRIPT' || !by.incidentId || (by.kind !== 'SPEED_UP' && by.kind !== 'CANCEL')) return null;
+    if (by.nonce !== own.nonce || by.chainId !== own.chainId || by.evaluator.toLowerCase() !== own.evaluator.toLowerCase()) return null;
+    return { incidentId: by.incidentId, operator: by.operator ?? null, kind: by.kind, candidateId: by.id, nonce: own.nonce };
+  } catch (err) {
+    deps.logger.warn({ jobId, txHash, minedHash, err: errorMessage(err) }, 'ERC-8183 replacement not matched against the ledger — alerted as unknown');
+    return null;
+  }
 }
 
 /**
@@ -2501,6 +2582,41 @@ async function raiseEvaluatorKeyAlert(
   const delivered = await raiseAlert(deps, alert);
   if (delivered) await ledger.recordAlertDelivered(chainId, evaluator, key, now);
   return delivered;
+}
+
+/**
+ * P3-9: how a reconciliation pass of the evaluator candidates reports.
+ *
+ * The settlement worker's pass (no options) delivers its alerts and owns their persisted clocks.
+ * A DIAGNOSTIC pass — the recovery script's, run before and after its own operation, in its own process —
+ * delivers no alert about a CONDITION its writes leave as it was (send-lost, rpc-node-unhealthy,
+ * proof-stalled, proof-uncertain, a ledger conflict or deep reorg with nothing written): the worker's next
+ * pass sees that condition again and alerts it on its own clock. Such alerts are handed, sanitized, to
+ * `observe` (the script prints them) and NO alert clock is read or written for them. Alerts about a change
+ * the pass itself WROTE (a latest-level outcome reorganised back to live, a nonce consumed outside the
+ * ledger) are delivered and recorded as usual: the worker would never see them again. The facts a pass
+ * observes (first sight of a lost head, node read counters, the proof head, `observed:` first sights) are
+ * recorded by either pass: they only make the worker's clock start at the true first observation.
+ */
+export interface EvaluatorReconcileOptions {
+  diagnostic?: { observe(note: EscrowAlert): void };
+}
+
+/** P3-9: a condition alert — delivered by the worker's pass (its clock), only observed by a diagnostic pass. */
+async function raiseConditionAlert(
+  deps: Erc8183Deps,
+  pass: EvaluatorReconcileOptions,
+  chainId: number,
+  evaluator: Address,
+  key: string,
+  alert: EscrowAlert,
+  opts: { intervalMs: number; since?: Date | null },
+): Promise<boolean> {
+  if (pass.diagnostic) {
+    pass.diagnostic.observe(sanitizeAlert(alert));
+    return false;
+  }
+  return raiseEvaluatorKeyAlert(deps, chainId, evaluator, key, alert, opts);
 }
 
 /**
@@ -3102,7 +3218,7 @@ async function locateForeignTransaction(
 }
 
 /** R2-P3-10 / R2-P2-2 item 4: node health and the proof-tag head, persisted; alerted once over their thresholds. */
-async function watchNodesAndProofHead(deps: Erc8183Deps, chainId: number, evaluator: Address, reads: readonly EvaluatorNodeRead[]): Promise<void> {
+async function watchNodesAndProofHead(deps: Erc8183Deps, chainId: number, evaluator: Address, reads: readonly EvaluatorNodeRead[], pass: EvaluatorReconcileOptions): Promise<void> {
   const ledger = ledgerOf(deps);
   const settings = a1Settings(deps);
   const now = nowOf(deps);
@@ -3112,7 +3228,7 @@ async function watchNodesAndProofHead(deps: Erc8183Deps, chainId: number, evalua
     try {
       const failures = await ledger.recordNodeRead(chainId, evaluator, r.node, r.ok, now);
       if (!r.ok && failures >= threshold) {
-        await raiseEvaluatorKeyAlert(deps, chainId, evaluator, `rpc-node-unhealthy:${r.node}`, {
+        await raiseConditionAlert(deps, pass, chainId, evaluator, `rpc-node-unhealthy:${r.node}`, {
           kind: 'rpc-node-unhealthy',
           chainId,
           message:
@@ -3137,7 +3253,7 @@ async function watchNodesAndProofHead(deps: Erc8183Deps, chainId: number, evalua
   try {
     const head = await ledger.observeSafeHead(chainId, evaluator, block, now);
     if (!head.advanced && now.getTime() - head.seenAt.getTime() >= stalledAfter) {
-      await raiseEvaluatorKeyAlert(deps, chainId, evaluator, 'evaluator-proof-stalled', {
+      await raiseConditionAlert(deps, pass, chainId, evaluator, 'evaluator-proof-stalled', {
         kind: 'evaluator-proof-stalled',
         chainId,
         message:
@@ -3244,8 +3360,14 @@ async function backfillLegacyInFlight(deps: Erc8183Deps, chainId: number, evalua
  *     ledger row is the gate (§7.3).
  * Node health (`rpc-node-unhealthy`) and the proof head
  * (`evaluator-proof-stalled`) are tracked from the same read.
+ * P3-9: `pass.diagnostic` (the recovery script) hands the condition alerts
+ * to `observe` instead of delivering them — see `EvaluatorReconcileOptions`.
  */
-export async function reconcileEvaluatorCandidates(deps: Erc8183Deps, chainId: number): Promise<EvaluatorCandidateReconcileSummary> {
+export async function reconcileEvaluatorCandidates(
+  deps: Erc8183Deps,
+  chainId: number,
+  pass: EvaluatorReconcileOptions = {},
+): Promise<EvaluatorCandidateReconcileSummary> {
   const summary: EvaluatorCandidateReconcileSummary = { chainId, nonces: 0, resolved: 0, dead: 0, reorged: 0, foreign: 0, uncertain: 0, rebroadcast: 0, backfilled: 0, enqueued: 0 };
   const evaluator = deps.config.evaluatorAddress;
   if (!evaluator) return summary;
@@ -3267,7 +3389,7 @@ export async function reconcileEvaluatorCandidates(deps: Erc8183Deps, chainId: n
     return summary;
   }
   const reads = await readEvaluatorNodes(deps, chainId, evaluator, hashes);
-  await watchNodesAndProofHead(deps, chainId, evaluator, reads);
+  await watchNodesAndProofHead(deps, chainId, evaluator, reads, pass);
   const views = toNodeViews(reads);
   const touchedJobs = new Set<string>();
 
@@ -3284,7 +3406,7 @@ export async function reconcileEvaluatorCandidates(deps: Erc8183Deps, chainId: n
         if (winner.status === 'DEAD') {
           if (winner.proofLevel !== 'latest' || !(await ledger.revertForReorg(winner.id))) {
             summary.uncertain++;
-            await raiseEvaluatorKeyAlert(deps, chainId, evaluator, `evaluator-ledger-conflict:${nonce}:dead-with-receipt`, {
+            await raiseConditionAlert(deps, pass, chainId, evaluator, `evaluator-ledger-conflict:${nonce}:dead-with-receipt`, {
               kind: 'evaluator-ledger-conflict',
               chainId,
               message:
@@ -3348,9 +3470,9 @@ export async function reconcileEvaluatorCandidates(deps: Erc8183Deps, chainId: n
       }
       case 'uncertain': {
         summary.uncertain++;
-        if (res.reason === 'KNOWN_WITHOUT_RECEIPT') await watchKnownWithoutReceipt(deps, chainId, evaluator, nonce, res.detail ?? null, views);
+        if (res.reason === 'KNOWN_WITHOUT_RECEIPT') await watchKnownWithoutReceipt(deps, chainId, evaluator, nonce, res.detail ?? null, views, pass);
         if (res.reason === 'MULTIPLE_RECEIPTS' || res.reason === 'PROOF_LEVEL_REORG') {
-          await raiseEvaluatorKeyAlert(deps, chainId, evaluator, `evaluator-ledger-conflict:${nonce}:${res.reason}`, {
+          await raiseConditionAlert(deps, pass, chainId, evaluator, `evaluator-ledger-conflict:${nonce}:${res.reason}`, {
             kind: res.reason === 'PROOF_LEVEL_REORG' ? 'evaluator-reorg' : 'evaluator-ledger-conflict',
             chainId,
             message:
@@ -3370,7 +3492,7 @@ export async function reconcileEvaluatorCandidates(deps: Erc8183Deps, chainId: n
   }
 
   await resolveLegacyRows(deps, legacy, views);
-  summary.rebroadcast = await rebroadcastLostHead(deps, chainId, evaluator, views);
+  summary.rebroadcast = await rebroadcastLostHead(deps, chainId, evaluator, views, pass);
   await clearRecordedStamps(deps, chainId);
   for (const jobId of touchedJobs) if (await enqueueCandidateJob(deps, jobId)) summary.enqueued++;
   return summary;
@@ -3392,6 +3514,7 @@ async function watchKnownWithoutReceipt(
   nonce: number,
   txHash: string | null,
   views: readonly NodeView[],
+  pass: EvaluatorReconcileOptions,
 ): Promise<void> {
   try {
     const ledger = ledgerOf(deps);
@@ -3407,7 +3530,7 @@ async function watchKnownWithoutReceipt(
     if (now.getTime() - since.getTime() < after) return;
     const h = (txHash ?? '').toLowerCase();
     const nodes = views.map((v) => `${v.node}: ${!v.ok ? 'error' : `latest ${v.nonceLatest ?? '?'}, ${v.known?.[h] ? 'knows it' : 'does not know it'}, ${v.receipts?.[h] ? 'receipt' : 'no receipt'}`}`);
-    await raiseEvaluatorKeyAlert(deps, chainId, evaluator, `evaluator-proof-uncertain:${nonce}`, {
+    await raiseConditionAlert(deps, pass, chainId, evaluator, `evaluator-proof-uncertain:${nonce}`, {
       kind: 'evaluator-proof-uncertain',
       chainId,
       message:
@@ -3533,7 +3656,7 @@ async function recordForeignNonce(
  * pass proves the nonce; "underpriced" → an ordinary backlog (evaluator-stuck);
  * transport → next tick; any refusal → alerted. Returns how many were sent.
  */
-async function rebroadcastLostHead(deps: Erc8183Deps, chainId: number, evaluator: Address, views: readonly NodeView[]): Promise<number> {
+async function rebroadcastLostHead(deps: Erc8183Deps, chainId: number, evaluator: Address, views: readonly NodeView[], pass: EvaluatorReconcileOptions): Promise<number> {
   const ledger = ledgerOf(deps);
   const now = nowOf(deps);
   const head = consensusLatest(views);
@@ -3602,6 +3725,31 @@ async function rebroadcastLostHead(deps: Erc8183Deps, chainId: number, evaluator
   const lostSince = since ?? now;
   const afterMs = a1Settings(deps).sendLostAlertAfterMs ?? EVALUATOR_STUCK_ALERT_AFTER_MS;
   const c = headRows[0]!;
+  if (pass.diagnostic) {
+    // P3-9: the recovery script's pass — the state for its output, every time the head is lost; never an alert,
+    // never the worker's clock, never "run the dry-run" (the operator is running it). Before the script's own Q7
+    // verification its gate is still empty: GATE_CLOSED there says nothing about the on-chain configuration.
+    const why =
+      refusal === null
+        ? 'no node took it on this pass'
+        : refusal.startsWith('GATE_CLOSED')
+          ? `${refusal} — this process's Q7 gate, read before the script's own verification; the "config gate" line of the plan shows the verified state`
+          : refusal;
+    pass.diagnostic.observe(
+      sanitizeAlert({
+        kind: 'evaluator-send-lost',
+        chainId,
+        ...(c.jobId ? { jobId: c.jobId } : {}),
+        message:
+          `transaction ${c.txHash} at the head nonce ${head}${c.jobId ? ` (job ${c.jobId})` : ''} is unknown to every RPC node since ` +
+          `${lostSince.toISOString()}; this pass of the recovery script did not rebroadcast it (${why}). It may still mine, so the job's ` +
+          'settlement, contest and resolve stay blocked until its nonce is consumed. Whether the identical rebroadcast is allowed is the ' +
+          '"rebroadcast" line of the plan (--execute rebroadcast). Not alerted from here: the settlement worker alerts it on its own clock.',
+        details: { nonce: head, txHash: c.txHash, jobId: c.jobId, since: lostSince.toISOString(), refusal },
+      }),
+    );
+    return 0;
+  }
   const lead = earlyAlertLeadMs(deps);
   const delivered = lead > 0 ? await earliestAffectedDeliveredExpiry(deps, chainId, evaluator, head) : null;
   const early = delivered !== null && lead > 0 && delivered.expiresAt.getTime() - (await lastBlockTime(deps, chainId)).getTime() < lead;
