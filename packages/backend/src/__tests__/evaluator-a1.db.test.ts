@@ -1831,6 +1831,56 @@ describeA1('A1 recovery script (CLI) — Postgres + fake multi-node chain', () =
     expect((await ledger.readChainState(m.db, CHAIN_ID, getAddress(SIM_EVALUATOR)))?.rpcFailures['node-b']).toBe(0);
   });
 
+  it('review P3-1 (proof head): a dry-run whose RPC set sees the proof-tag head ADVANCED does not move the worker\'s clock — evaluator-proof-stalled at the worker\'s first sight + 10 min', async () => {
+    await stuckHead();
+    sim.chain.safeHead = sim.chain.head; // safe stalls here for the worker
+    await reconcile(); // t0: the worker's first sight of that proof head
+    sim.setNowOffset(8 * 60_000);
+    const advanced: Erc8183Deps['readNodeViews'] = async (chainId, evaluator, hashes) =>
+      (await sim.chain.readNodeViews(chainId, evaluator, hashes, { proofTag: 'safe' })).map((r) => (r.ok && r.proofBlockNumber !== undefined ? { ...r, proofBlockNumber: r.proofBlockNumber + 5n } : r));
+    expect((await cliMod.runEvaluatorRecovery(['--chain', String(CHAIN_ID)], scriptProcessDeps({ readNodeViews: advanced }))).exitCode).toBe(0);
+    sim.setNowOffset(10 * 60_000 + 1_000);
+    await reconcile();
+    expect(alertsOf('evaluator-proof-stalled')).toHaveLength(1);
+  });
+
+  // ── review P3-2 (24/10): the script never suppresses an EVENT its pass wrote, and its post-execution pass is a diagnostic too ──
+  it('review P3-2: a dry-run that is the FIRST to see a latest-level outcome reorganised away puts the candidate back to live and DELIVERS evaluator-reorg once; the worker does not repeat it', async () => {
+    const { jobId } = await delivered();
+    sim.chain.proofDepth = 3;
+    await sim.drive();
+    await reconcile();
+    expect((await candidates(jobId))[0]).toMatchObject({ status: 'MINED_SUCCESS', proofLevel: 'latest' });
+    sim.settlements.clear();
+    sim.chain.reorg(1); // back in the pool
+    const r = await cliMod.runEvaluatorRecovery(['--chain', String(CHAIN_ID)], scriptProcessDeps());
+    expect(r.exitCode, r.output).toBe(0);
+    expect(LIVE).toContain((await candidates(jobId))[0]!.status);
+    expect(alertsOf('evaluator-reorg')).toHaveLength(1);
+    await reconcile(); // the worker: the row is live again, nothing to revert, nothing to tell
+    expect(alertsOf('evaluator-reorg')).toHaveLength(1);
+  });
+
+  it('review P3-2: --execute with a condition that persists after the send (a stalled proof head) delivers nothing from EITHER pass of the script — both print it; the worker alerts it on its next pass', async () => {
+    const a = await stuckHead();
+    sim.chain.safeHead = sim.chain.head; // the proof head stalls here
+    await reconcile(); // t0: the worker's first sight of it
+    sim.setNowOffset(11 * 60_000);
+    sim.chain.baseFee = 5_000_000n; // the bumped fees clear the base fee
+    const r = await cliMod.runEvaluatorRecovery(['--chain', String(CHAIN_ID), ...EXEC('speed-up', 0)], scriptProcessDeps());
+    expect(r.exitCode, r.output).toBe(0);
+    expect((await candidates(a.jobId)).filter((c) => c.origin === 'SCRIPT')).toHaveLength(1);
+    expect(alertsOf('evaluator-proof-stalled')).toHaveLength(0);
+    const lines = r.output.split('\n');
+    const incidentAt = lines.findIndex((l) => /^Incident \S+ \(head nonce/.test(l));
+    expect(incidentAt, r.output).toBeGreaterThan(0);
+    const stalledNotes = lines.map((l, i) => (/reconciliation \(evaluator-proof-stalled; shown here, not alerted/.test(l) ? i : -1)).filter((i) => i >= 0);
+    expect(stalledNotes.some((i) => i < incidentAt), 'printed by the first pass').toBe(true);
+    expect(stalledNotes.some((i) => i > incidentAt), 'printed by the post-execution pass').toBe(true);
+    await reconcile();
+    expect(alertsOf('evaluator-proof-stalled')).toHaveLength(1);
+  });
+
   it('P3-9 (no suppression): when the dry-run\'s pass is the FIRST to see a nonce consumed outside the ledger, it records the EXTERNAL row and still DELIVERS evaluator-nonce-foreign once — the worker would never see that change again', async () => {
     const a = await stuckHead();
     const foreign = await sim.chain.signFields({ to: getAddress(SIM_EVALUATOR), data: '0x', nonce: 0, gas: CANCEL_GAS, ...bumped(a.head) });
