@@ -525,7 +525,7 @@ describeA1('A1 recovery script on Anvil — real contracts, real signer', () => 
 
   // P3-6 (24/10): the worker's receipt wait sees the CLI's recorded speed-up replace its transaction — a known
   // recovery operation of an open incident, reported as such (not as a manual send or a second worker).
-  it.fails('P3-6 (script, AV): the CLI\'s speed-up mined while the worker waits for the original → the worker reports the known recovery operation (evaluator-replaced-by-recovery, its incident and operator), no evaluator-replaced incident; the job follows the speed-up; paid once', async () => {
+  it('P3-6 (script, AV): the CLI\'s speed-up mined while the worker waits for the original → the worker reports the known recovery operation (evaluator-replaced-by-recovery, its incident and operator), no evaluator-replaced incident; the job follows the speed-up; paid once', async () => {
     const onChain = await submittedOnChain();
     const jobId = await deliveredRow(onChain);
     const h = harness();

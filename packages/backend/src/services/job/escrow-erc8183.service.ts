@@ -344,6 +344,15 @@ export interface EscrowAlert {
      * is not read as this job's outcome. The job keeps its uncertain state; the chain decides.
      */
     | 'evaluator-replaced'
+    /**
+     * P3-6 (24/10): the same detection as `evaluator-replaced`, when the replacement is a KNOWN recovery
+     * operation: the recovery script's SPEED_UP / CANCEL of this nonce, recorded in the ledger (origin
+     * SCRIPT, with its incident) before its send. Informational (`severity: 'info'`), with the incident; the
+     * settlement path is the same (nothing recorded from that receipt, the chain decides). Any other
+     * replacement — no ledger row, another origin, no incident, another nonce or key, an unreadable ledger —
+     * stays `evaluator-replaced`.
+     */
+    | 'evaluator-replaced-by-recovery'
     /** C3h D2: the job's own evaluator transaction mined without this job's terminal event — nothing is recorded from it. */
     | 'settlement-unproven'
     /**
@@ -372,6 +381,11 @@ export interface EscrowAlert {
   jobId?: string;
   chainId?: number | null;
   details?: Record<string, unknown>;
+  /**
+   * P3-6: `info` = an operator notice about a known operation (logged as a warning, delivered with
+   * `severity: info`), not an incident. Absent = an alert (the default for every kind).
+   */
+  severity?: 'info';
 }
 
 export interface Erc8183Deps {
@@ -484,14 +498,23 @@ export function raiseEscrowAlert(deps: Erc8183Deps, alert: EscrowAlert): Promise
   return raiseAlert(deps, alert);
 }
 
-async function raiseAlert(deps: Erc8183Deps, alert: EscrowAlert): Promise<boolean> {
+/** The S5 sanitizer over an alert's message and every string of its details (the alert channel and the CLI output). */
+function sanitizeAlert(alert: EscrowAlert): EscrowAlert {
   const ctx = sanitizeContextFromEnv();
-  const clean: EscrowAlert = {
+  return {
     ...alert,
     message: sanitizeText(alert.message, ctx),
     ...(alert.details ? { details: sanitizeValue(alert.details, ctx) as Record<string, unknown> } : {}),
   };
-  deps.logger.error({ alert: clean.kind, jobId: clean.jobId, chainId: clean.chainId, ...clean.details }, `ESCROW ALERT: ${clean.message}`);
+}
+
+async function raiseAlert(deps: Erc8183Deps, alert: EscrowAlert): Promise<boolean> {
+  const clean = sanitizeAlert(alert);
+  if (clean.severity === 'info') {
+    deps.logger.warn({ alert: clean.kind, severity: 'info', jobId: clean.jobId, chainId: clean.chainId, ...clean.details }, `ESCROW NOTICE: ${clean.message}`);
+  } else {
+    deps.logger.error({ alert: clean.kind, jobId: clean.jobId, chainId: clean.chainId, ...clean.details }, `ESCROW ALERT: ${clean.message}`);
+  }
   if (!deps.alert) return true;
   try {
     await deps.alert(clean);
@@ -2106,7 +2129,11 @@ export class SettlementUnprovenError extends Error {
  * never interpreted: alerted (`evaluator-replaced`) and thrown as
  * `SettlementReplacedError` (the caller reconciles from `getJob` when the
  * chain is terminal). A nonce consumed, a hash confirmed or a transaction
- * replaced is not proof of this job's outcome.
+ * replaced is not proof of this job's outcome. P3-6: when the replacement is
+ * the recovery script's own SPEED_UP / CANCEL of this nonce, recorded in the
+ * ledger (`recoveryReplacementOf`), the notice is informational
+ * (`evaluator-replaced-by-recovery`, with its incident); the error and
+ * everything after it are the same.
  */
 async function awaitOwnReceipt(
   deps: Erc8183Deps,
@@ -2118,6 +2145,33 @@ async function awaitOwnReceipt(
   const receipt: EvaluatorReceipt = await signer.waitForTransactionReceipt(txHash);
   const minedHash = (receipt.transactionHash as Hex | undefined) ?? null;
   if (minedHash === null || minedHash.toLowerCase() !== txHash.toLowerCase()) {
+    const recovery = minedHash === null ? null : await recoveryReplacementOf(deps, job.id, txHash, minedHash);
+    if (recovery) {
+      // P3-6: a known recovery operation (recorded before its send) — informational, with its incident.
+      await raiseAlert(deps, {
+        kind: 'evaluator-replaced-by-recovery',
+        severity: 'info',
+        jobId: job.id,
+        chainId: job.escrowChainId,
+        message:
+          `Evaluator ${action} of job ${job.id} (on-chain job ${job.onChainJobId}) ${txHash} was replaced at nonce ${recovery.nonce} by the ` +
+          `recovery script's ${recovery.kind === 'CANCEL' ? 'cancel' : 'speed-up'} ${minedHash}${receipt.replacedReason ? ` (${receipt.replacedReason})` : ''} — ` +
+          `incident ${recovery.incidentId}, operator ${recovery.operator ?? '?'}, recorded in the ledger before its send: a known recovery ` +
+          'operation, not an incident of its own. Nothing is recorded from the receipt this wait returned; the job keeps its state and the ' +
+          'next attempt reads the job on-chain (reconciled if it is terminal, settled again by its recorded decision if it is still Submitted).',
+        details: {
+          action,
+          txHash,
+          replacedBy: minedHash,
+          replacedReason: receipt.replacedReason ?? null,
+          replacementStatus: receipt.status ?? null,
+          onChainJobId: job.onChainJobId,
+          expiresAt: job.expiresAt?.toISOString() ?? null,
+          recovery,
+        },
+      });
+      throw new SettlementReplacedError(action, txHash, minedHash);
+    }
     await raiseAlert(deps, {
       kind: 'evaluator-replaced',
       jobId: job.id,
@@ -2142,6 +2196,33 @@ async function awaitOwnReceipt(
   }
   if (receipt.status !== 'success') throw new SettlementRevertedError(action, txHash);
   return receipt;
+}
+
+/**
+ * P3-6: is the transaction that replaced `txHash` in its nonce the recovery script's own replacement?
+ * Only a ledger row of the mined hash with origin SCRIPT, an incident, kind SPEED_UP / CANCEL, the SAME
+ * nonce and evaluator key as the job's own candidate `txHash`. Anything else — no row, another origin,
+ * no incident, another nonce or key, an unreadable ledger — is null: the caller keeps the incident alert.
+ */
+async function recoveryReplacementOf(
+  deps: Erc8183Deps,
+  jobId: string,
+  txHash: Hex,
+  minedHash: Hex,
+): Promise<{ incidentId: string; operator: string | null; kind: 'SPEED_UP' | 'CANCEL'; candidateId: string; nonce: number } | null> {
+  try {
+    // A SCRIPT speed-up carries the job; a SCRIPT cancel carries the job of the candidate it replaces (§2.1).
+    const rows = await ledgerOf(deps).candidatesForJob(jobId);
+    const own = rows.find((c) => c.txHash.toLowerCase() === txHash.toLowerCase());
+    const by = rows.find((c) => c.txHash.toLowerCase() === minedHash.toLowerCase());
+    if (!own || !by || own.nonce === null) return null;
+    if (by.origin !== 'SCRIPT' || !by.incidentId || (by.kind !== 'SPEED_UP' && by.kind !== 'CANCEL')) return null;
+    if (by.nonce !== own.nonce || by.chainId !== own.chainId || by.evaluator.toLowerCase() !== own.evaluator.toLowerCase()) return null;
+    return { incidentId: by.incidentId, operator: by.operator ?? null, kind: by.kind, candidateId: by.id, nonce: own.nonce };
+  } catch (err) {
+    deps.logger.warn({ jobId, txHash, minedHash, err: errorMessage(err) }, 'ERC-8183 replacement not matched against the ledger — alerted as unknown');
+    return null;
+  }
 }
 
 /**

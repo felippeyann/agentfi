@@ -1340,6 +1340,10 @@ describeA1('A1 core — candidates, reconciliation, gate, lane (Postgres + fake 
     expect(j.reservationStatus).toBe('PENDING');
     expect(onChain(j.onChainJobId).status).toBe(JobStatus.Submitted);
     expect(alertsOf('evaluator-replaced', jobId)).toHaveLength(1);
+    // P3-6: a cancel the ledger does not know is not a recovery operation — the incident alert, not the notice.
+    expect(alertsOf('evaluator-replaced', jobId)[0]!.severity).toBeUndefined();
+    expect(alertsOf('evaluator-replaced', jobId)[0]!.message).toMatch(/a manual send with the evaluator key or a second settlement worker/);
+    expect(alertsOf('evaluator-replaced-by-recovery')).toHaveLength(0);
     await reconcile();
     const rows = await atNonce(0);
     expect(rows.find((r) => r.kind === 'EXTERNAL' || r.kind === 'CANCEL')).toBeDefined();
@@ -1375,7 +1379,7 @@ describeA1('A1 core — candidates, reconciliation, gate, lane (Postgres + fake 
 
   // P3-6 (24/10): a replacement the RECOVERY SCRIPT made and recorded (SCRIPT row of its incident) is a known
   // operation — the worker's receipt wait reports it as such, not as a manual send or a second worker.
-  it.fails('P3-6: the recovery script\'s speed-up (SCRIPT row of an open incident) mined while the worker waits → one informational evaluator-replaced-by-recovery naming the incident; no evaluator-replaced incident; the job still settles once on the speed-up', async () => {
+  it('P3-6: the recovery script\'s speed-up (SCRIPT row of an open incident) mined while the worker waits → one informational evaluator-replaced-by-recovery naming the incident; no evaluator-replaced incident; the job still settles once on the speed-up', async () => {
     const { provider, jobId } = await delivered();
     sim.chain.evaluatorAutoMine = false;
     let speed: PreparedEvaluatorTx | null = null;

@@ -2025,7 +2025,7 @@ describe('P3-6 — a replacement of the worker\'s evaluator transaction: the rec
   }
   const alertsOf = (ctx: Ctx) => ctx.alert.mock.calls.map((c) => c[0] as EscrowAlert);
 
-  it.fails('the recovery script\'s speed-up recorded in the ledger (SCRIPT row, its incident) → an informational notice naming the incident and the operator; no incident alert; nothing recorded from the receipt', async () => {
+  it('the recovery script\'s speed-up recorded in the ledger (SCRIPT row, its incident) → an informational notice naming the incident and the operator; no incident alert; nothing recorded from the receipt', async () => {
     const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
     replacedBy(ctx, RECOVERY, () => ({}));
     await expect(processSettlementJob(ctx.deps, settleJob())).rejects.toThrow(/replaced in its nonce/);
@@ -2093,7 +2093,7 @@ describe('P3-6 — a replacement of the worker\'s evaluator transaction: the rec
     const alerts = alertsOf(ctx);
     expect(alerts.filter((a) => (a.kind as string) === 'evaluator-replaced-by-recovery')).toEqual([]);
     expect(alerts.filter((a) => a.kind === 'evaluator-replaced')).toHaveLength(1);
-    void failed;
+    expect(failed).toBe(1); // the lookup was tried and failed
   });
 });
 
