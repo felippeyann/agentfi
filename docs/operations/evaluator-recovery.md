@@ -199,6 +199,11 @@ incident, another nonce or key, or a ledger that cannot be read at that moment �
 `evaluator-replaced`, an incident alert: a manual send with the evaluator key or a second settlement worker.
 Treat that one as an incident.
 
+**On Telegram and Discord both arrive as "ESCROW_ALERT"**: those channels show neither the `kind` nor the
+`severity`, only the text — read it (the notice names the recovery incident; the incident alert names a manual
+send or a second worker). The generic webhook (`OPERATOR_NOTIFICATION_WEBHOOK`) carries `metadata.kind` and
+`metadata.severity` (`info` / `alert`) for routing.
+
 ## 4. Speed-up ≠ cancel
 
 | | Speed-up | Cancel |
