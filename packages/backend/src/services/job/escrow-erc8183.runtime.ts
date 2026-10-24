@@ -49,7 +49,10 @@ function evaluatorMinBalanceWei(): bigint | null {
  * Operator alerts from the orchestrator (cancellation refused, chain conflict,
  * evaluator low on gas; C3d: contest held for review, review expiring /
  * expired / overridden, settlement failing). P3-6: `severity` is `info` for
- * an operator notice about a known operation, `alert` otherwise.
+ * an operator notice about a known operation, `alert` otherwise — set after
+ * the details, so no detail can override it (review P3-5). Telegram and
+ * Discord show neither `kind` nor `severity` (title ESCROW_ALERT, the text);
+ * the generic webhook carries the metadata.
  */
 async function sendEscrowAlert(alert: EscrowAlert): Promise<void> {
   await notificationService.notify({
@@ -57,7 +60,7 @@ async function sendEscrowAlert(alert: EscrowAlert): Promise<void> {
     agentId: alert.jobId ?? 'escrow',
     agentName: 'ERC-8183 escrow',
     message: alert.message,
-    metadata: { kind: alert.kind, severity: alert.severity ?? 'alert', jobId: alert.jobId, chainId: alert.chainId, ...alert.details },
+    metadata: { kind: alert.kind, jobId: alert.jobId, chainId: alert.chainId, ...alert.details, severity: alert.severity ?? 'alert' },
   });
 }
 

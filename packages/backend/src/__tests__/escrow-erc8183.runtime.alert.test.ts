@@ -77,7 +77,7 @@ describe('review P3-5 — severity in the escrow alert notification (runtime)', 
   });
 
   // Found while writing this test: `...alert.details` was spread AFTER `severity`, so a detail could override it.
-  it.fails('a detail named "severity" cannot override the alert\'s own severity', async () => {
+  it('a detail named "severity" cannot override the alert\'s own severity', async () => {
     await erc8183Deps().alert!({ kind: 'evaluator-replaced', message: 'm', details: { severity: 'info' } });
     expect(notified[0]!.metadata['severity']).toBe('alert');
   });
