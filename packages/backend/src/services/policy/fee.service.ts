@@ -4,8 +4,12 @@
  * Revenue model (current implementation):
  *  - Tier fee schedule is computed for all transaction types.
  *  - On-chain fee collection is recorded only when a transaction is routed
- *    through AgentExecutor (routedViaExecutor=true), currently swap paths.
- *  - Subscription tiers reduce the fee rate:
+ *    through AgentExecutor (routedViaExecutor=true): ETH-input swaps and
+ *    batches. The executor charges its own immutable 30 bps on EVERY tier;
+ *    those routes report and record that fee and that bps (A6e(2),
+ *    `executorChargedFee`), not the schedule below. Whether the tier
+ *    discount should apply to them is an open commercial decision.
+ *  - The schedule (subscription tiers reduce the fee rate):
  *      FREE:       30 bps (0.30%)
  *      PRO:        15 bps (0.15%) — $99/month
  *      ENTERPRISE:  5 bps (0.05%) — custom
@@ -178,6 +182,13 @@ export class FeeService {
 
   /**
    * Returns aggregate revenue stats for the admin dashboard.
+   *
+   * A6e(2): `feesByTier` attributes each fee to the paying agent's tier
+   * (FeeEvent → AgentBilling → Agent.tier). `FeeEvent.feeBps` is the rate
+   * actually applied (30 for every executor-routed fee since A6e(2), whatever
+   * the tier), so it can no longer stand in for the tier. The tier read is
+   * the agent's CURRENT tier: a fee collected before a tier change is shown
+   * under the new tier.
    */
   async getRevenueStats(): Promise<{
     totalFeesUsd: string;
@@ -185,7 +196,9 @@ export class FeeService {
     txCount: number;
   }> {
     const [events, txCount] = await Promise.all([
-      this.db.feeEvent.findMany({ select: { feeUsd: true } }),
+      this.db.feeEvent.findMany({
+        select: { feeUsd: true, billing: { select: { agent: { select: { tier: true } } } } },
+      }),
       this.db.transaction.count({ where: { status: 'CONFIRMED' } }),
     ]);
 
@@ -193,14 +206,9 @@ export class FeeService {
       .reduce((acc, e) => acc + parseFloat(e.feeUsd), 0)
       .toFixed(2);
 
-    const tierEvents = await this.db.feeEvent.findMany({
-      select: { feeUsd: true, feeBps: true },
-    });
-
     const feesByTier: Record<string, string> = { FREE: '0', PRO: '0', ENTERPRISE: '0' };
-    for (const e of tierEvents) {
-      const tier =
-        e.feeBps === FEE_BPS.FREE ? 'FREE' : e.feeBps === FEE_BPS.PRO ? 'PRO' : 'ENTERPRISE';
+    for (const e of events) {
+      const tier = e.billing.agent.tier;
       feesByTier[tier] = (parseFloat(feesByTier[tier] ?? '0') + parseFloat(e.feeUsd)).toFixed(2);
     }
 

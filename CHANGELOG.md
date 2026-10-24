@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (A6e(2), 2026-10-24: fee transparency; no migration, no contract change)
+
+- **The fee reported for a batch or an ETH-input swap is now the fee actually charged.** The `AgentExecutor` charges ⌊value × 30 / 10 000⌋ on every tier, sent on top of the value. The `202` `fee` of `POST /v1/transactions/batch` and of an executor-routed `POST /v1/transactions/swap` showed the agent tier's schedule instead, so PRO and ENTERPRISE clients saw 15 / 5 bps and an amount 2× / 6× below what left their wallet.
+  - **Client-visible change:** for PRO and ENTERPRISE agents, `fee.bps` is now `30` and `fee.amountWei` is the wei sent to `feeWallet` (for FREE nothing changes). The response shape is unchanged. Clients that reconcile against `fee.amountWei` now match the chain; clients that displayed `fee.bps` as "your discounted rate" now display the rate the contract applies.
+  - **Unchanged:** what is charged, the tier discount (still not applied on-chain — whether it should be is an open commercial decision), the USD limits and daily volume, the operator rev-share, and ERC-20-input swaps (not routed through the executor: no on-chain fee, still the tier schedule in `fee`).
+- **`FeeEvent.feeBps` is the rate applied** (30 for every executor fee, the agent and admin batches included), as the schema documents. Revenue by tier now follows the paying agent's current tier: `GET /admin/revenue` `byFeeTier` groups by tier and its entries no longer carry `feeBps`; the new `byFeeBps` groups by the applied rate. Rows written before this change keep their tier-schedule bps.
+
 ### Fixed (C3h, 2026-10-21: escrow settlement; no migration, no contract change)
 
 - **The backend no longer refunds a job against a recorded `pay` decision (D1).** After failed settlement attempts or a Q7 deferral, the expiry sweep could make AgentFi's own evaluator sign `claimRefund` (or a cancellation `reject`) on a delivered job the operator had decided to pay. Such a job is now held (`delivery-held` alert) and the decision keeps being retried. **This stops only AgentFi's key: after `expiresAt` the contract lets anyone call `claimRefund`, and the requester can still be refunded for delivered work.**

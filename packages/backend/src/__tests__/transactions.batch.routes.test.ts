@@ -457,3 +457,84 @@ describe('POST /v1/transactions/batch — A6d: msg.value carries the executor fe
     await app.close();
   });
 });
+
+/**
+ * A6e(2) — the 202 `fee` and the recorded `feeBps` describe the fee the
+ * executor actually charges. `AgentExecutor` charges F = floor(ΣV × 30 /
+ * 10 000) on every tier; before A6e(2) the response and the recorded bps
+ * followed the tier schedule (PRO 15 / ENTERPRISE 5), so a PRO / ENTERPRISE
+ * client saw 2× / 6× less than what left its wallet.
+ *
+ * Each case compares the response with the DEBIT (what the simulation, the job
+ * and queuePayload send: msg.value − ΣV), with the LEDGER (the job's and
+ * queuePayload's `feeAmountWei` / `feeBps`, which the processor turns into the
+ * FeeEvent: transaction.processor.ts → recordFeeEvent(feeTokens =
+ * feeAmountWei, feeBps)) and with the contract's own formula — never only with
+ * a new formula. The FeeEvent itself (feeTokens / feeUsd on Postgres) and the
+ * on-chain debit are checked on Anvil (transactions.batch.anvil.ts).
+ */
+describe('POST /v1/transactions/batch — A6e(2): the 202 fee is the fee the executor charges', () => {
+  const POLICY = {
+    active: true,
+    allowedTokens: [],
+    allowedRecipients: [],
+    allowedContracts: [],
+    maxDailyVolumeUsd: '0',
+    maxOutflowPerTxUsd: '1000',
+  };
+  /** AgentExecutor.calculateFee, written out here: floor(ΣV × 30 / 10 000). */
+  const contractFee = (sum: bigint) => (sum * 30n) / 10_000n;
+
+  beforeEach(async () => {
+    const { weiToUsd } = await import('../services/transaction/price.service.js');
+    vi.mocked(weiToUsd).mockImplementation(async (wei: bigint) => ((Number(wei) / 1e18) * 2000).toFixed(6));
+    getPolicyMock.mockResolvedValue(POLICY);
+  });
+
+  const cases: Array<[string, string[], bigint]> = [
+    ['333 wei (F rounds down to 0)', ['333'], 0n],
+    ['334 wei (the smallest F of 1 wei; PRO 15 bps would give 0)', ['334'], 1n],
+    ['200 + 200 wei (F on the sum: 1)', ['200', '200'], 1n],
+    ['667 wei (F = 2; PRO 15 bps would give 1, ENTERPRISE 0)', ['667'], 2n],
+    ['0.01 ETH', ['10000000000000000'], 30_000_000_000_000n],
+  ];
+  const tiers = ['FREE', 'PRO', 'ENTERPRISE'] as const;
+
+  it.each(tiers.flatMap((tier) => cases.map(([label, values, fee]) => [tier, label, values, fee] as const)))(
+    '%s, %s: fee.amountWei = the debit (msg.value − ΣV) = the recorded feeAmountWei; fee.bps = the recorded feeBps = 30',
+    async (tier, _label, values, fee) => {
+      const app = await buildApp(tier);
+
+      const res = await app.inject(batch(values.map((value) => ({ to: TARGET, value, data: '0x' }))));
+
+      expect(res.statusCode, res.body).toBe(202);
+      const sum = values.reduce((s, v) => s + BigInt(v), 0n);
+      const sim = simulateMock.mock.calls[0][0] as { value: bigint };
+      const job = queueAddMock.mock.calls[0][1] as Record<string, unknown>;
+      const payload = (mockDb.transaction.create.mock.calls[0][0].data as { metadata: { queuePayload: Record<string, unknown> } })
+        .metadata.queuePayload;
+      // The debit: what the wallet sends beyond the actions' value, in wei.
+      const debit = sim.value - sum;
+      expect(debit).toBe(fee);
+      expect(debit).toBe(contractFee(sum));
+      expect(BigInt(job['value'] as string) - sum).toBe(debit);
+      expect(BigInt(payload['value'] as string) - sum).toBe(debit);
+      // The ledger: what the processor records as the FeeEvent.
+      expect(job['feeAmountWei']).toBe(debit.toString());
+      expect(payload['feeAmountWei']).toBe(debit.toString());
+      // The response, against the debit and the ledger.
+      const body = res.json() as { fee: { bps: number; amountWei: string; feeWallet: string } };
+      expect(body.fee.amountWei).toBe(debit.toString());
+      expect(body.fee.amountWei).toBe(job['feeAmountWei']);
+      expect(body.fee.bps).toBe(30);
+      expect(job['feeBps']).toBe(body.fee.bps);
+      expect(payload['feeBps']).toBe(body.fee.bps);
+      // Units and rounding: amountWei is wei, the floor of ΣV × bps / 10 000.
+      expect(BigInt(body.fee.amountWei)).toBe((sum * BigInt(body.fee.bps)) / 10_000n);
+      expect(getAddress(body.fee.feeWallet)).toBe(getAddress('0x000000000000000000000000000000000000fEe1'));
+      // The tier still travels with the job (unchanged; billing reads the agent).
+      expect(job['tier']).toBe(tier);
+      await app.close();
+    },
+  );
+});

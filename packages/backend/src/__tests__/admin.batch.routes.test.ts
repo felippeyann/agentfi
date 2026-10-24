@@ -178,7 +178,7 @@ describe('POST /admin/transactions/batch — S14(1): msg.value = ΣV + F, feeAmo
       to: '0x00000000000000000000000000000000000000E1',
       value: msgValue.toString(),
       feeAmountWei: fee.toString(),
-      feeBps: 30, // FREE tier — the agent batch's recorded bps (A6d / A6e)
+      feeBps: 30, // the executor's bps, on every tier (A6e(2)), as the agent batch
       routedViaExecutor: true,
     });
     const { metadata } = mockDb.transaction.create.mock.calls[0][0].data;
@@ -203,15 +203,22 @@ describe('POST /admin/transactions/batch — S14(1): msg.value = ΣV + F, feeAmo
     await app.close();
   });
 
-  it('the recorded bps follows the agent tier as on the agent batch (PRO: 15), while F stays the executor\'s 30 bps', async () => {
-    mockDb.agent.findUnique.mockResolvedValue({ ...named, tier: 'PRO' });
-    const app = await buildApp();
-    const res = await post(app, { chainId: 8453, actions: actionsOf(['10000000000000000']), agentId: named.id });
-    expect(res.statusCode, res.body).toBeLessThan(300);
-    const [, job] = queueAdd.mock.calls[0];
-    expect(job).toMatchObject({ value: '10030000000000000', feeAmountWei: '30000000000000', feeBps: 15, tier: 'PRO' });
-    await app.close();
-  });
+  it.each(['PRO', 'ENTERPRISE'] as const)(
+    'A6e(2): a %s agent\'s admin batch records the bps the executor applied (30) next to F, as the agent batch (was the tier\'s 15 / 5)',
+    async (tier) => {
+      mockDb.agent.findUnique.mockResolvedValue({ ...named, tier });
+      const app = await buildApp();
+      const res = await post(app, { chainId: 8453, actions: actionsOf(['10000000000000000']), agentId: named.id });
+      expect(res.statusCode, res.body).toBeLessThan(300);
+      const [, job] = queueAdd.mock.calls[0];
+      expect(job).toMatchObject({ value: '10030000000000000', feeAmountWei: '30000000000000', feeBps: 30, tier });
+      expect(mockDb.transaction.create.mock.calls[0][0].data.metadata.queuePayload).toMatchObject({
+        feeAmountWei: '30000000000000',
+        feeBps: 30,
+      });
+      await app.close();
+    },
+  );
 
   it('authority unchanged: the row is written directly as before (QUEUED, amountIn 0, no USD reservation), the response is the same', async () => {
     const app = await buildApp();

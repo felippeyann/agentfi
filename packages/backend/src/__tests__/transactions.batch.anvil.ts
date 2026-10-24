@@ -54,6 +54,8 @@ const h = vi.hoisted(() => {
   // Q9: Base Sepolia native value priced only with an explicit synthetic price.
   process.env['SYNTHETIC_TEST_PRICES_USD'] = '84532:native=2000';
   return {
+    /** The calling agent (the swap route's simulation-cache lookup checks it). */
+    callerId: '',
     queued: [] as Array<{ name: string; data: Record<string, unknown> }>,
     feeEvents: [] as Array<{ transactionId: string; feeAmountWei: bigint; feeBps: number }>,
     simulations: [] as Array<{ value: bigint; provider: string; success: boolean }>,
@@ -85,6 +87,11 @@ vi.mock('../queues/transaction.queue.js', () => ({
   },
 }));
 vi.mock('../services/notification.service.js', () => ({ notificationService: { notify: async () => undefined } }));
+// A6e(2) swap: the route only checks that a simulation id was issued to this agent (Redis in production).
+vi.mock('../services/transaction/simulation-cache.js', () => ({
+  getSimulation: async () => ({ agentId: h.callerId, success: true }),
+  cacheSimulation: async () => undefined,
+}));
 // Fees / revenue only (the processor prices the collected fee); policy accounting on 84532 uses the synthetic price.
 vi.mock('../services/transaction/price.service.js', () => ({
   weiToUsd: async (wei: bigint) => ((Number(wei) / 1e18) * 2000).toFixed(6),
@@ -171,6 +178,7 @@ let chain: LocalChain;
 let executor: Address;
 let app: FastifyInstance;
 let callerId = '';
+let callerTier: 'FREE' | 'PRO' | 'ENTERPRISE' = 'FREE';
 let seq = 0;
 
 beforeAll(async () => {
@@ -208,6 +216,8 @@ beforeAll(async () => {
   app.decorateRequest('agentTier', 'FREE');
   app.addHook('preHandler', async (request) => {
     (request as unknown as { agentId: string }).agentId = callerId;
+    // As the auth middleware: the tier is the caller's Agent.tier.
+    (request as unknown as { agentTier: string }).agentTier = callerTier;
   });
   await app.register(m.transactionRoutes);
   await app.register(m.adminRoutes);
@@ -242,7 +252,7 @@ async function wipe(): Promise<void> {
 }
 
 /** An EOA-mode agent (local wallet = safeAddress) funded with 1 ETH on Anvil. */
-async function mkAgent(policy: Record<string, unknown> = {}) {
+async function mkAgent(policy: Record<string, unknown> = {}, tier: 'FREE' | 'PRO' | 'ENTERPRISE' = 'FREE') {
   seq++;
   const name = `${NAME_PREFIX} ${RUN}-${seq}`;
   const { walletId, address } = await m.getWalletService().createWallet(name);
@@ -255,6 +265,7 @@ async function mkAgent(policy: Record<string, unknown> = {}) {
       walletId,
       safeAddress: address,
       chainIds: [CHAIN_ID],
+      tier,
       policy: {
         create: {
           maxValuePerTxEth: '0.5',
@@ -271,6 +282,8 @@ async function mkAgent(policy: Record<string, unknown> = {}) {
     },
   });
   callerId = agent.id;
+  h.callerId = agent.id;
+  callerTier = tier;
   return { ...agent, eoa: getAddress(address) };
 }
 
@@ -306,8 +319,11 @@ function executorRevert(err: unknown): string | undefined {
 }
 
 /** Runs every captured job through the real processor (guard → submitter → Anvil) and waits for the receipts. */
-async function drain(): Promise<Array<{ txHash: Hex | null; error?: string }>> {
+async function drain(opts: { realFees?: boolean } = {}): Promise<Array<{ txHash: Hex | null; error?: string }>> {
   const jobs = h.queued.splice(0);
+  // A6e(2): the real FeeService writes the FeeEvent (feeTokens, feeUsd, feeBps) on Postgres.
+  const { FeeService } = await import('../services/policy/fee.service.js');
+  const realFeeService = opts.realFees ? new FeeService(m.db) : undefined;
   const monitors: Promise<void>[] = [];
   const submitter = new m.SubmitterService({ client: () => chain.publicClient as never });
   const monitor = new m.MonitorService(m.db, {
@@ -324,7 +340,7 @@ async function drain(): Promise<Array<{ txHash: Hex | null; error?: string }>> {
           db: m.db,
           submitter,
           monitor,
-          feeService: {
+          feeService: realFeeService ?? {
             incrementTxUsage: async () => undefined,
             recordFeeEvent: async (p: { transactionId: string; feeAmountWei: bigint; feeBps: number }) => {
               h.feeEvents.push({ transactionId: p.transactionId, feeAmountWei: p.feeAmountWei, feeBps: p.feeBps });
@@ -651,3 +667,143 @@ describeDb('S14(1) on Anvil — POST /admin/transactions/batch sends ΣV + F and
     expect(await volume(agent.id)).toBe(0);
   });
 });
+
+/**
+ * A6e(2) — the 202 `fee` against what really happens, per tier: the agent
+ * wallet's debit (balance before − after − gas − the value the actions move),
+ * the fee wallet's credit, the mined transaction's `value`, the ledger
+ * (`queuePayload.feeAmountWei` / `feeBps`) and the FeeEvent the REAL
+ * FeeService writes on Postgres (`feeTokens` in wei, `feeUsd` at the test
+ * oracle's 2000 USD / ETH with 6 decimals, `feeBps`), then the revenue
+ * reports (`/admin/revenue`, `getRevenueStats`).
+ *
+ * The swap: an ETH-input swap (fromToken = WETH) routed through
+ * `executeSingle`. The Uniswap router address has no code on this local chain,
+ * so the swap's value simply lands there — the swap itself is not under test,
+ * the fee is.
+ */
+describeDb('A6e(2) on Anvil — the 202 fee is what the executor takes from the wallet, per tier', () => {
+  const WETH_84532 = getAddress('0x4200000000000000000000000000000000000006');
+  const USDC_84532 = getAddress('0x036CbD53842c5426634e7929541eC2318f3dCF7e');
+  const ROUTER_84532 = getAddress('0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4');
+  type Revenue = {
+    totalFeesUsd: string;
+    byFeeTier: Array<{ tierName: string; totalUsd: string }>;
+    byFeeBps: Array<{ feeBps: number; totalUsd: string }>;
+  };
+  const revenue = async (): Promise<Revenue> => {
+    const res = await app.inject({ method: 'GET', url: '/admin/revenue', headers: { 'x-admin-secret': ADMIN_SECRET } });
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json() as Revenue;
+  };
+  const tierUsd = (r: Revenue, tier: string) =>
+    r.byFeeTier.filter((e) => e.tierName === tier).reduce((s, e) => s + Number(e.totalUsd), 0);
+  const bpsUsd = (r: Revenue, bps: number) =>
+    r.byFeeBps.filter((e) => e.feeBps === bps).reduce((s, e) => s + Number(e.totalUsd), 0);
+  const stats = async () => {
+    const { FeeService } = await import('../services/policy/fee.service.js');
+    return new FeeService(m.db).getRevenueStats();
+  };
+
+  async function checkAgainstReality(params: {
+    agent: Awaited<ReturnType<typeof mkAgent>>;
+    tier: 'FREE' | 'PRO' | 'ENTERPRISE';
+    res: { statusCode: number; body: string; json: () => unknown };
+    movedWei: bigint;
+    before: { wallet: bigint; fee: bigint; revenue: Revenue; stats: Awaited<ReturnType<typeof stats>> };
+    feeUsd: string;
+  }) {
+    const { agent, tier, res, movedWei, before } = params;
+    expect(res.statusCode, res.body).toBe(202);
+    const reported = (res.json() as { fee: { bps: number; amountWei: string; feeWallet: string } }).fee;
+
+    const [result] = await drain({ realFees: true });
+    expect(result!.txHash, result!.error).toMatch(/^0x[0-9a-f]{64}$/);
+    const receipt = await chain.publicClient.getTransactionReceipt({ hash: result!.txHash! });
+    expect(receipt.status).toBe('success');
+    const sent = await chain.publicClient.getTransaction({ hash: result!.txHash! });
+    const gas = receipt.gasUsed * receipt.effectiveGasPrice;
+
+    // On-chain: what left the agent's wallet beyond the moved value and gas, and what the fee wallet received.
+    const debit = before.wallet - (await balance(agent.eoa)) - gas - movedWei;
+    const credited = (await balance(FEE_WALLET)) - before.fee;
+    expect(sent.value - movedWei).toBe(debit);
+    expect(credited).toBe(debit);
+    expect(debit).toBe(feeOf(movedWei)); // the contract's floor(value × 30 / 10 000)
+
+    // The response, against the chain.
+    expect(BigInt(reported.amountWei)).toBe(debit);
+    expect(reported.bps).toBe(30);
+    expect(getAddress(reported.feeWallet)).toBe(FEE_WALLET);
+
+    // The ledger and the FeeEvent (real Postgres).
+    const row = await m.db.transaction.findFirstOrThrow({ where: { agentId: agent.id } });
+    expect(row.status).toBe('CONFIRMED');
+    const payload = (row.metadata as { queuePayload: { feeAmountWei: string; feeBps: number } }).queuePayload;
+    expect(payload.feeAmountWei).toBe(reported.amountWei);
+    expect(payload.feeBps).toBe(reported.bps);
+    const events = await m.db.feeEvent.findMany({ where: { transactionId: row.id } });
+    if (debit === 0n) {
+      expect(events).toEqual([]); // nothing collected, nothing recorded
+      return;
+    }
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ feeTokens: reported.amountWei, feeBps: reported.bps, feeUsd: params.feeUsd });
+
+    // Revenue: the fee counts once, under the agent's tier and under the bps actually applied (30).
+    const after = await revenue();
+    const usd = Number(params.feeUsd);
+    expect(Number(after.totalFeesUsd) - Number(before.revenue.totalFeesUsd)).toBeCloseTo(usd, 2);
+    expect(tierUsd(after, tier) - tierUsd(before.revenue, tier)).toBeCloseTo(usd, 2);
+    expect(bpsUsd(after, 30) - bpsUsd(before.revenue, 30)).toBeCloseTo(usd, 2);
+    const afterStats = await stats();
+    expect(Number(afterStats.feesByTier[tier]) - Number(before.stats.feesByTier[tier])).toBeCloseTo(usd, 2);
+  }
+
+  const tiers = ['FREE', 'PRO', 'ENTERPRISE'] as const;
+  // [label, ΣV in wei, feeUsd recorded at 2000 USD / ETH, 6 decimals]
+  const amounts: Array<[string, bigint, string]> = [
+    ['0.01 ETH (F = 0.00003 ETH = 0.06 USD)', 10_000_000_000_000_000n, '0.060000'],
+    ['667 wei (F = 2 wei; its USD rounds to 0.000000)', 667n, '0.000000'],
+  ];
+  const cases = tiers.flatMap((tier) => amounts.map(([label, wei, usd]) => [tier, label, wei, usd] as const));
+
+  it.each(cases)('batch, %s, %s: response = wallet debit = fee wallet credit = ledger = FeeEvent', async (tier, _label, wei, feeUsd) => {
+    const agent = await mkAgent({}, tier);
+    const before = { wallet: await balance(agent.eoa), fee: await balance(FEE_WALLET), revenue: await revenue(), stats: await stats() };
+
+    const res = await postBatch([wei.toString()]);
+
+    await checkAgainstReality({ agent, tier, res, movedWei: wei, before, feeUsd });
+  });
+
+  it.each(cases)('ETH-input swap via the executor, %s, %s: response = wallet debit = fee wallet credit = ledger = FeeEvent', async (tier, _label, wei, feeUsd) => {
+    const agent = await mkAgent({}, tier);
+    const before = { wallet: await balance(agent.eoa), fee: await balance(FEE_WALLET), revenue: await revenue(), stats: await stats() };
+    const router = await balance(ROUTER_84532);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/transactions/swap',
+      payload: {
+        fromToken: WETH_84532,
+        toToken: USDC_84532,
+        amountIn: formatWei(wei),
+        chainId: CHAIN_ID,
+        slippageTolerance: 0.5,
+        simulationId: 'sim-a6e2',
+      },
+    });
+    expect(h.queued[0]?.data).toMatchObject({ to: executor, routedViaExecutor: true });
+
+    await checkAgainstReality({ agent, tier, res, movedWei: wei, before, feeUsd });
+    expect((await balance(ROUTER_84532)) - router).toBe(wei);
+  });
+});
+
+/** wei → an 18-decimal ETH string (the swap route's `amountIn`). */
+function formatWei(wei: bigint): string {
+  const whole = wei / 10n ** 18n;
+  const fraction = (wei % 10n ** 18n).toString().padStart(18, '0').replace(/0+$/, '');
+  return fraction ? `${whole}.${fraction}` : whole.toString();
+}

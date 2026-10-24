@@ -123,10 +123,13 @@ Two separate fees (plan decision D6):
   deploys `AgentJobEscrow` (30 bps by default), is taken from the USDC budget
   when a job completes; the provider receives the rest. A refunded job
   (cancellation, expiry) pays no fee. It is the same for every tier.
-- **DeFi transactions** (swaps, transfers, deposits): the tier rate below is
-  recorded for each transaction; it is collected on-chain only when the
-  transaction is routed through `AgentExecutor`, on its ETH value, at the
-  executor's deployed `EXECUTOR_FEE_BPS`.
+- **DeFi transactions** (swaps, transfers, deposits): a fee is collected
+  on-chain only when the transaction is routed through `AgentExecutor` (a
+  batch, an ETH-input swap), on its ETH value, at the executor's deployed
+  `feeBps()` — 30 bps (0.30%) on **every** tier today: the tier rates below
+  are not applied on-chain. For those routes the `202` `fee` reports that
+  charged fee (`bps` 30, `amountWei` sent on top of the value). Other routes
+  collect nothing on-chain.
 
 | Tier | Monthly | DeFi fee rate | Tx Limit |
 |------|---------|-------------|----------|

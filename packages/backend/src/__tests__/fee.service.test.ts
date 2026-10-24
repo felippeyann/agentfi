@@ -127,6 +127,32 @@ describe('FeeService.checkTxLimit', () => {
   });
 });
 
+// ── getRevenueStats (A6e(2)) ───────────────────────────────────────────────
+
+describe('FeeService.getRevenueStats — A6e(2): feesByTier follows the agent, not the recorded bps', () => {
+  beforeEach(() => {
+    process.env['OPERATOR_FEE_WALLET'] = '0x000000000000000000000000000000000000fEe1';
+  });
+
+  it('an executor fee recorded at the 30 bps actually applied is attributed to the paying agent\'s tier', async () => {
+    // What the executor-routed routes record since A6e(2): feeBps = 30 on every tier.
+    const events = [
+      { feeUsd: '0.06', feeBps: 30, billing: { agent: { tier: 'FREE' } } },
+      { feeUsd: '0.06', feeBps: 30, billing: { agent: { tier: 'PRO' } } },
+      { feeUsd: '0.12', feeBps: 30, billing: { agent: { tier: 'ENTERPRISE' } } },
+    ];
+    const db = makeMockDb();
+    (db.feeEvent as any).findMany.mockResolvedValue(events);
+    (db.transaction as any).count.mockResolvedValue(3);
+    const stats = await new FeeService(db).getRevenueStats();
+    expect(stats).toEqual({
+      totalFeesUsd: '0.24',
+      feesByTier: { FREE: '0.06', PRO: '0.06', ENTERPRISE: '0.12' },
+      txCount: 3,
+    });
+  });
+});
+
 // ── FEE_BPS constants ──────────────────────────────────────────────────────
 
 describe('FEE_BPS constants', () => {
