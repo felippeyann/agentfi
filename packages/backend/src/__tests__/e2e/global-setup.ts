@@ -103,6 +103,12 @@ export interface StartAnvilOptions {
   forkBlockNumber?: string | undefined;
   /** How long to wait for `eth_chainId` to answer (fork mode fetches state first). */
   readyTimeoutMs?: number | undefined;
+  /**
+   * Anvil network family (`--network`). Anvil 1.8+ applies a Base / OP-stack L1 fee to
+   * Base chain ids (84532, 8453) that no receipt field reports; `ethereum` pins the plain
+   * execution-fee model for tests that account a wallet to the wei. Absent = Anvil default.
+   */
+  network?: 'ethereum' | undefined;
 }
 
 /** Spawns Anvil with `--silent` and resolves once it answers JSON-RPC. */
@@ -112,6 +118,7 @@ export async function startAnvil(opts: StartAnvilOptions): Promise<ChildProcess>
     args.push('--fork-url', opts.forkUrl);
     if (opts.forkBlockNumber) args.push('--fork-block-number', opts.forkBlockNumber);
   }
+  if (opts.network) args.push('--network', opts.network);
 
   const child = spawn(ANVIL_BIN, args, { stdio: 'ignore', detached: false });
   child.on('error', (err) => {

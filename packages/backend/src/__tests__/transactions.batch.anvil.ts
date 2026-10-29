@@ -183,7 +183,9 @@ let seq = 0;
 
 beforeAll(async () => {
   if (!DB_READY) return;
-  chain = await startLocalChain({ port: anvilTestPort(6), chainId: CHAIN_ID });
+  // `network: ethereum`: this file accounts the wallet to the wei (A6e(2)); Anvil 1.8+ would add an
+  // unreported Base L1 fee on chain id 84532 (CI runs Foundry nightly). See startAnvil's `network`.
+  chain = await startLocalChain({ port: anvilTestPort(6), chainId: CHAIN_ID, network: 'ethereum' });
   const operator = anvilAccount(1).address;
   // The S9 verification compares executor.feeWallet() with OPERATOR_FEE_WALLET and feeBps() with FEE_BPS (30).
   const stack = await deployPolicyStack(chain, { deployer: anvilAccount(0), operator, feeWallet: FEE_WALLET });
@@ -722,9 +724,9 @@ describeDb('A6e(2) on Anvil — the 202 fee is what the executor takes from the 
     const receipt = await chain.publicClient.getTransactionReceipt({ hash: result!.txHash! });
     expect(receipt.status).toBe('success');
     const sent = await chain.publicClient.getTransaction({ hash: result!.txHash! });
-    // Chain fees: execution gas plus, on an OP-stack chain (Anvil >= 1.8 applies it to chain id 84532),
-    // the L1 data fee, which is outside gasUsed × effectiveGasPrice. The receipt reports it as l1Fee;
-    // absent (older Anvil) = 0. Without it the "debit beyond gas" would include the L1 fee.
+    // Chain fees: execution gas plus, on a real OP-stack chain, the L1 data fee the receipt reports as
+    // l1Fee (outside gasUsed × effectiveGasPrice). This Anvil runs with `--network ethereum` (see beforeAll),
+    // so l1Fee is absent here and counts 0.
     const l1Fee = BigInt((receipt as { l1Fee?: bigint | string | null }).l1Fee ?? 0);
     const gas = receipt.gasUsed * receipt.effectiveGasPrice + l1Fee;
 
