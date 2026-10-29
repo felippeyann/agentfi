@@ -430,7 +430,7 @@ transaction stays `PENDING_APPROVAL` with its reservation where it was.
 | POST | `/v1/billing/webhook` | Stripe | Webhook receiver (signature verified) |
 | GET | `/v1/billing/status` | Agent | Subscription + usage info |
 
-**Tier Limits**: FREE = 100 tx/month (30 bps) | PRO = 10K tx/month (15 bps) | ENTERPRISE = unlimited (5 bps)
+**Tier Limits**: FREE = 100 tx/month (30 bps) | PRO = 10K tx/month (15 bps) | ENTERPRISE = unlimited (5 bps). The bps schedule is not applied on-chain: the AgentExecutor charges 30 bps on every tier on the routes it handles (batches, ETH-input swaps), and their `202` `fee` reports that (A6e(2)).
 
 ---
 

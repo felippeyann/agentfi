@@ -823,7 +823,18 @@ describeDb('C3c — escrow chain truth (Postgres, real route + orchestrator + pr
         patchJob(provider.id, jobId, { status: 'COMPLETED', result: { take: 'a' } }),
         patchJob(provider.id, jobId, { status: 'COMPLETED', result: { take: 'b' } }),
       ]);
-      expect([a.statusCode, b.statusCode].sort()).toEqual([200, 409]);
+      // Exactly one wins. The loser is refused one of two ways, both without side effects:
+      // it lost at the conditional update (409 JOB_STATUS_CONFLICT, the C3c guard, also pinned
+      // deterministically in jobs.routes.erc8183.test.ts), or the winner had already committed
+      // before it read the job (400, PAYMENT_PENDING → COMPLETED is not a valid transition).
+      const [winner, loser] = a.statusCode === 200 ? [a, b] : [b, a];
+      expect(winner.statusCode).toBe(200);
+      if (loser.statusCode === 409) {
+        expect(loser.json()).toMatchObject({ error: 'JOB_STATUS_CONFLICT', status: 'PAYMENT_PENDING' });
+      } else {
+        expect(loser.statusCode).toBe(400);
+        expect(loser.json()).toMatchObject({ error: 'Invalid status transition from PAYMENT_PENDING to COMPLETED' });
+      }
       expect(await stepRows(jobId, 'submit')).toHaveLength(1);
       expect(await job(jobId)).toMatchObject({ status: 'PAYMENT_PENDING' });
 

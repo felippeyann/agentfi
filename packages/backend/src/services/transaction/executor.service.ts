@@ -45,6 +45,29 @@ export function executorFeeWei(valueWei: bigint): bigint {
   return (valueWei * FEE_BPS) / 10_000n;
 }
 
+/**
+ * A6e(2): the fee an executor-routed call is charged, as the API reports it
+ * (the 202 `fee`) and records it (`feeAmountWei` / `feeBps` in the job and
+ * `queuePayload`, then the FeeEvent): F and the bps the executor applied.
+ * The executor applies `FEE_BPS` on every tier; the tier schedule
+ * (`FeeService.calculateFee`) is not applied on-chain.
+ *
+ * The one place that decides what an executor-routed route reports. Whether
+ * a tier discount should ever apply to executor-routed calls (a rebate, or a
+ * per-tier on-chain fee) is an open commercial decision (plan A6e(2)); none
+ * is implemented, and this helper reports only what the contract takes.
+ */
+export interface ExecutorChargedFee {
+  /** The rate the executor applied, in bps (its immutable `feeBps()`, = FEE_BPS, S9-verified). */
+  feeBps: number;
+  /** F in wei: what leaves the wallet on top of the value and reaches the fee wallet. */
+  feeAmountWei: bigint;
+}
+
+export function executorChargedFee(feeWei: bigint): ExecutorChargedFee {
+  return { feeBps: Number(FEE_BPS), feeAmountWei: feeWei };
+}
+
 /** What an `executeBatch` call must carry (A6d, S14). */
 export interface ExecutorBatchValue {
   /** ΣV: the sum of the actions' native values. */

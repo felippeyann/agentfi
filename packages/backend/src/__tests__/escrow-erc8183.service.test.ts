@@ -46,7 +46,8 @@ import {
 import { AGENT_JOB_ESCROW_ABI } from '../abi/AgentJobEscrow.abi.js';
 import { InMemoryLaneLock } from '../services/transaction/wallet-lane.js';
 import type { EvaluatorWriteOptions, EvaluatorWriteParams, PreparedEvaluatorTx } from '../services/escrow/evaluator-signer.js';
-import { inMemoryEvaluatorLedger } from './helpers/in-memory-evaluator-ledger.js';
+import { inMemoryEvaluatorLedger, type InMemoryLedger } from './helpers/in-memory-evaluator-ledger.js';
+import type { LedgerCandidate } from '../services/job/escrow-evaluator-a1.js';
 import { TransactionLookupUnavailableError } from '../services/transaction/tx-known.js';
 import { REPUTATION_HOOK_ABI } from '../abi/ReputationHook.abi.js';
 import {
@@ -1990,6 +1991,136 @@ describe('C3d review P2-2 — alerts are sanitized', () => {
     expect(details.reason.length).toBeLessThanOrEqual(ALERT_TEXT_MAX_CHARS + 1);
     expect(details.reason).toMatch(/^the deliverable called https:\/\/base-sepolia\.g\.alchemy\.com\/\[redacted\]/);
     expect(jobs.get('job-1')!['contestReason']).toBe(reason);
+  });
+});
+
+describe('P3-6 — a replacement of the worker\'s evaluator transaction: the recovery script\'s own operation vs an unknown one', () => {
+  const RECOVERY = '0xbeef000000000000000000000000000000000000000000000000000000000001' as Hex;
+  const UNKNOWN = '0xdead000000000000000000000000000000000000000000000000000000000002' as Hex;
+  type Ctx = ReturnType<typeof makeDeps>;
+  const ledgerOf = (ctx: Ctx) => ctx.deps.evaluatorLedger as InMemoryLedger;
+
+  /** While the worker waits for its own `complete`, a candidate `replacement(own)` is in the ledger and mines in its place. */
+  function replacedBy(
+    ctx: Ctx,
+    minedHash: Hex,
+    replacement: ((own: LedgerCandidate) => Partial<LedgerCandidate>) | null,
+    /** Review P3-3: what happens to the job's OWN candidate row before the lookup (removed, or changed in place). */
+    ownChange?: 'remove' | ((own: LedgerCandidate) => void),
+  ) {
+    ctx.signer.waitForTransactionReceipt.mockImplementationOnce(async (hash: Hex) => {
+      const own = ledgerOf(ctx).rows.find((r) => r.txHash.toLowerCase() === hash.toLowerCase())!;
+      expect(own).toBeDefined();
+      const snapshot = { ...own };
+      if (ownChange === 'remove') ledgerOf(ctx).rows.splice(ledgerOf(ctx).rows.indexOf(own), 1);
+      else ownChange?.(own);
+      if (replacement) {
+        ledgerOf(ctx).rows.push({
+          ...snapshot,
+          id: 'etx_replacement',
+          txHash: minedHash.toLowerCase(),
+          kind: 'SPEED_UP',
+          origin: 'SCRIPT',
+          incidentId: 'inc_p3_6',
+          operator: 'ops@test',
+          note: 'stuck head',
+          replacesId: own.id,
+          status: 'SENT',
+          ...replacement(own),
+        });
+      }
+      return { status: 'success', logs: [], transactionHash: minedHash, replacedReason: 'repriced' } as never;
+    });
+  }
+  const alertsOf = (ctx: Ctx) => ctx.alert.mock.calls.map((c) => c[0] as EscrowAlert);
+
+  it('the recovery script\'s speed-up recorded in the ledger (SCRIPT row, its incident) → an informational notice naming the incident and the operator; no incident alert; nothing recorded from the receipt', async () => {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    replacedBy(ctx, RECOVERY, () => ({}));
+    await expect(processSettlementJob(ctx.deps, settleJob())).rejects.toThrow(/replaced in its nonce/);
+    expect(ctx.jobs.get('job-1')).toMatchObject({ onChainStatus: 'SETTLING', platformFeeAmount: null });
+    expect(ctx.finalize).not.toHaveBeenCalled();
+    const alerts = alertsOf(ctx);
+    expect(alerts.filter((a) => a.kind === 'evaluator-replaced')).toEqual([]);
+    const notices = alerts.filter((a) => (a.kind as string) === 'evaluator-replaced-by-recovery');
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({
+      jobId: 'job-1',
+      severity: 'info',
+      details: expect.objectContaining({ txHash: SETTLE_HASH, replacedBy: RECOVERY, recovery: expect.objectContaining({ incidentId: 'inc_p3_6', operator: 'ops@test', kind: 'SPEED_UP' }) }),
+    });
+    expect(notices[0]!.message).toMatch(/recovery script/);
+    expect(notices[0]!.message).toContain('inc_p3_6');
+    expect(notices[0]!.message).not.toMatch(/manual send|second settlement worker|Do not replace/);
+  });
+
+  it('an unknown replacement (no ledger row for the mined hash) stays the evaluator-replaced INCIDENT alert, with its text', async () => {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    replacedBy(ctx, UNKNOWN, null);
+    await expect(processSettlementJob(ctx.deps, settleJob())).rejects.toThrow(/replaced in its nonce/);
+    const alerts = alertsOf(ctx);
+    expect(alerts.filter((a) => (a.kind as string) === 'evaluator-replaced-by-recovery')).toEqual([]);
+    const replaced = alerts.filter((a) => a.kind === 'evaluator-replaced');
+    expect(replaced).toHaveLength(1);
+    expect((replaced[0] as { severity?: string }).severity ?? 'incident').toBe('incident');
+    expect(replaced[0]!.message).toMatch(/a manual send with the evaluator key or a second settlement worker/);
+    expect(replaced[0]!.details).toMatchObject({ txHash: SETTLE_HASH, replacedBy: UNKNOWN });
+  });
+
+  it.each([
+    ['a WORKER row (not a recovery operation)', () => ({ origin: 'WORKER' as const, incidentId: null })],
+    ['a SCRIPT row without an incident', () => ({ incidentId: null })],
+    ['a SCRIPT row at ANOTHER nonce', (own: LedgerCandidate) => ({ nonce: (own.nonce ?? 0) + 1 })],
+    ['a SCRIPT row of ANOTHER evaluator key', () => ({ evaluator: '0x1111111111111111111111111111111111111111' })],
+    // Review P3-3: each check of `recoveryReplacementOf` on its own (every other field a valid recovery row).
+    ['a WORKER row that carries an incident (origin alone decides)', () => ({ origin: 'WORKER' as const })],
+    ['a RECONCILE row with an incident', () => ({ origin: 'RECONCILE' as const })],
+    ['a SCRIPT row of kind ORIGINAL (not a replacement kind)', () => ({ kind: 'ORIGINAL' as const })],
+    ['a SCRIPT row of kind EXTERNAL', () => ({ kind: 'EXTERNAL' as const })],
+    ['a SCRIPT row of ANOTHER chain', () => ({ chainId: 8453 })],
+  ])('a ledger row for the mined hash that is not this nonce\'s recovery operation — %s — is treated as unknown: incident alert', async (_label, over) => {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    replacedBy(ctx, RECOVERY, over);
+    await expect(processSettlementJob(ctx.deps, settleJob())).rejects.toThrow(/replaced in its nonce/);
+    const alerts = alertsOf(ctx);
+    expect(alerts.filter((a) => (a.kind as string) === 'evaluator-replaced-by-recovery')).toEqual([]);
+    expect(alerts.filter((a) => a.kind === 'evaluator-replaced')).toHaveLength(1);
+  });
+
+  it.each([
+    ['the job\'s own candidate has no ledger row', 'remove' as const, () => ({})],
+    ['the job\'s own candidate has no nonce (and the SCRIPT row neither)', (own: LedgerCandidate) => void (own.nonce = null), () => ({ nonce: null })],
+  ])('review P3-3: a valid SCRIPT row of an incident, but %s → no nonce to compare: incident alert', async (_label, ownChange, over) => {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    replacedBy(ctx, RECOVERY, over, ownChange);
+    await expect(processSettlementJob(ctx.deps, settleJob())).rejects.toThrow(/replaced in its nonce/);
+    const alerts = alertsOf(ctx);
+    expect(alerts.filter((a) => (a.kind as string) === 'evaluator-replaced-by-recovery')).toEqual([]);
+    expect(alerts.filter((a) => a.kind === 'evaluator-replaced')).toHaveLength(1);
+  });
+
+  it('the ledger cannot be read when the replacement is seen → treated as unknown: incident alert (fail toward the incident)', async () => {
+    const ctx = makeDeps([SUBMITTED_JOB()], { txs: [FUND_TX()], settleLogs: completeLogs('written') });
+    const ledger = ledgerOf(ctx);
+    const real = ledger.candidatesForJob.bind(ledger);
+    let failed = 0;
+    // The recovery row IS in the ledger, but the first ledger read after the receipt wait fails.
+    ctx.signer.waitForTransactionReceipt.mockImplementationOnce(async (hash: Hex) => {
+      const own = ledger.rows.find((r) => r.txHash.toLowerCase() === hash.toLowerCase())!;
+      ledger.rows.push({ ...own, id: 'etx_replacement', txHash: RECOVERY.toLowerCase(), kind: 'SPEED_UP', origin: 'SCRIPT', incidentId: 'inc_p3_6', operator: 'ops@test', replacesId: own.id, status: 'SENT' });
+      ledger.candidatesForJob = async () => {
+        failed++;
+        ledger.candidatesForJob = real;
+        throw new Error('database unreachable');
+      };
+      return { status: 'success', logs: [], transactionHash: RECOVERY, replacedReason: 'repriced' } as never;
+    });
+    await expect(processSettlementJob(ctx.deps, settleJob())).rejects.toThrow(/replaced in its nonce/);
+    ledger.candidatesForJob = real;
+    const alerts = alertsOf(ctx);
+    expect(alerts.filter((a) => (a.kind as string) === 'evaluator-replaced-by-recovery')).toEqual([]);
+    expect(alerts.filter((a) => a.kind === 'evaluator-replaced')).toHaveLength(1);
+    expect(failed).toBe(1); // the lookup was tried and failed
   });
 });
 

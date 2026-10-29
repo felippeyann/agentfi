@@ -523,6 +523,44 @@ describeA1('A1 recovery script on Anvil — real contracts, real signer', () => 
     expect((await usdcOf(provider.address)) - before).toBe(BUDGET - FEE);
   });
 
+  // P3-6 (24/10): the worker's receipt wait sees the CLI's recorded speed-up replace its transaction — a known
+  // recovery operation of an open incident, reported as such (not as a manual send or a second worker).
+  it('P3-6 (script, AV): the CLI\'s speed-up mined while the worker waits for the original → the worker reports the known recovery operation (evaluator-replaced-by-recovery, its incident and operator), no evaluator-replaced incident; the job follows the speed-up; paid once', async () => {
+    const onChain = await submittedOnChain();
+    const jobId = await deliveredRow(onChain);
+    const h = harness();
+    await wireA1(h.deps, h.lanes);
+    await automine(false);
+    const before = await usdcOf(provider.address);
+    const { tx, outcome } = await settleUntilPending(h, jobId);
+    const r = await cli.runEvaluatorRecovery(cliExec('speed-up', tx.nonce), cliDeps(h));
+    expect(r.exitCode, r.output).toBe(0);
+    const incident = /Incident (\S+) \(head nonce/.exec(r.output)?.[1];
+    expect(incident, r.output).toBeTruthy();
+    await mine();
+    await outcome; // the worker's wait follows the replacement
+    await automine(true);
+    const speed = (await rowsOf({ jobId })).find((x) => x.kind === 'SPEED_UP')!;
+    expect(speed).toMatchObject({ origin: 'SCRIPT' });
+    expect(h.alerts.filter((a) => a.kind === ('evaluator-replaced' as EscrowAlert['kind']))).toEqual([]);
+    const notices = h.alerts.filter((a) => a.kind === ('evaluator-replaced-by-recovery' as EscrowAlert['kind']) && a.jobId === jobId);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({
+      severity: 'info',
+      details: expect.objectContaining({ txHash: tx.hash, recovery: expect.objectContaining({ incidentId: incident, operator: 'ops@anvil', kind: 'SPEED_UP' }) }),
+    });
+    expect(same(notices[0]!.details!['replacedBy'] as string, speed.txHash)).toBe(true);
+    expect(notices[0]!.message).toContain(incident!);
+    expect(notices[0]!.message).not.toMatch(/manual send|second settlement worker|Do not replace/);
+    await reconcile(h);
+    await settle(h, jobId, 1);
+    await reconcile(h);
+    const done = await db.job.findUniqueOrThrow({ where: { id: jobId } });
+    expect(done).toMatchObject({ onChainStatus: 'COMPLETED', feedbackStatus: 'written', platformFeeAmount: FEE.toString() });
+    expect(same(done.settleTxHash, speed.txHash)).toBe(true);
+    expect((await usdcOf(provider.address)) - before).toBe(BUDGET - FEE);
+  });
+
   it('row 15 / 40 (AV): anvil_setBalance below cost + reserve (P14) + L1 margin (P15) → the dry-run shows it, --execute refused (evaluator-recovery-refused); nothing signed', async () => {
     const onChain = await submittedOnChain();
     const jobId = await deliveredRow(onChain);
@@ -1327,6 +1365,15 @@ describeA1('A1 on Anvil — candidates, reconciliation and the gate against the 
     await mine();
     await outcome;
     await automine(true);
+    // P3-6 (24/10): a speed-up the ledger does not know (signed outside the backend) is NOT a known recovery
+    // operation — it stays the evaluator-replaced incident alert, with its text.
+    expect(h.alerts.filter((a) => a.kind === ('evaluator-replaced-by-recovery' as EscrowAlert['kind']))).toEqual([]);
+    expect(h.alerts.filter((a) => a.kind === ('evaluator-replaced' as EscrowAlert['kind']) && a.jobId === jobId)).toEqual([
+      expect.objectContaining({
+        message: expect.stringMatching(/a manual send with the evaluator key or a second settlement worker/),
+        details: expect.objectContaining({ txHash: tx.hash, replacedBy: speed }),
+      }),
+    ]);
     await reconcile(h);
     await settle(h, jobId, 1);
     await reconcile(h);

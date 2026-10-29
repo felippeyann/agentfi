@@ -19,8 +19,7 @@ import { transactionQueue } from '../../queues/transaction.queue.js';
 import { transactionJobId } from '../../queues/transaction-job-id.js';
 import { getContracts } from '../../config/contracts.js';
 import { env } from '../../config/env.js';
-import { executorBatchValue } from '../../services/transaction/executor.service.js';
-import { FEE_BPS as TIER_FEE_BPS } from '../../services/policy/fee.service.js';
+import { executorBatchValue, executorChargedFee } from '../../services/transaction/executor.service.js';
 import {
   PolicyService,
   type OperatorResumeOutcome,
@@ -298,15 +297,16 @@ export async function adminRoutes(fastify: FastifyInstance) {
     // computation the agent batch uses — never the tier schedule.
     const { feeWei, msgValueWei } = executorBatchValue(onChainActions.map((a) => a.value));
     // feeAmountWei = F: what the fee wallet receives, recorded as the FeeEvent
-    // on confirmation. The recorded bps follows the agent's tier, as on the
-    // agent batch (A6d; plan row A6e (2): the executor charges 30 bps on
-    // every tier).
+    // on confirmation, with the bps the executor applied (30 on every tier,
+    // A6e(2)), as on the agent batch. Revenue reports attribute it to the
+    // agent's tier through the agent, not through the bps.
+    const charged = executorChargedFee(feeWei);
     const queuePayload = {
       to: contracts.executor,
       data: batchCalldata,
       value: msgValueWei.toString(),
-      feeAmountWei: feeWei.toString(),
-      feeBps: TIER_FEE_BPS[agent.tier],
+      feeAmountWei: charged.feeAmountWei.toString(),
+      feeBps: charged.feeBps,
       routedViaExecutor: true,
     };
 
@@ -1093,23 +1093,33 @@ export async function adminRoutes(fastify: FastifyInstance) {
       orderBy: { collectedAt: 'desc' },
       take: 1000,
       include: {
-        billing: { select: { agentId: true } },
+        billing: { select: { agentId: true, agent: { select: { tier: true } } } },
       },
     });
 
     const totalUsd = feeEvents.reduce((acc, e) => acc + parseFloat(e.feeUsd), 0);
+    // A6e(2): two separate groupings. The tier is the paying agent's (its
+    // current tier); the bps is the rate actually applied (30 for every
+    // executor-routed fee, whatever the tier). Before A6e(2) the tier was
+    // inferred from the recorded bps, which followed the tier schedule.
+    const byTier: Record<string, number> = {};
     const byBps: Record<number, number> = {};
 
     for (const e of feeEvents) {
-      byBps[e.feeBps] = (byBps[e.feeBps] ?? 0) + parseFloat(e.feeUsd);
+      const usd = parseFloat(e.feeUsd);
+      byTier[e.billing.agent.tier] = (byTier[e.billing.agent.tier] ?? 0) + usd;
+      byBps[e.feeBps] = (byBps[e.feeBps] ?? 0) + usd;
     }
 
     return {
       totalFeesUsd: totalUsd.toFixed(2),
       feeEventCount: feeEvents.length,
-      byFeeTier: Object.entries(byBps).map(([bps, usd]) => ({
+      byFeeTier: Object.entries(byTier).map(([tierName, usd]) => ({
+        tierName,
+        totalUsd: usd.toFixed(2),
+      })),
+      byFeeBps: Object.entries(byBps).map(([bps, usd]) => ({
         feeBps: parseInt(bps),
-        tierName: parseInt(bps) === 30 ? 'FREE' : parseInt(bps) === 15 ? 'PRO' : 'ENTERPRISE',
         totalUsd: usd.toFixed(2),
       })),
       recentEvents: feeEvents.slice(0, 20),

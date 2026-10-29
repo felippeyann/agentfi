@@ -92,12 +92,14 @@ export async function startLocalChain(opts: {
   chainId: number;
   forkUrl?: string | undefined;
   forkBlockNumber?: string | undefined;
+  network?: 'ethereum' | undefined;
 }): Promise<LocalChain> {
   const child: ChildProcess = await startAnvil({
     port: opts.port,
     chainId: opts.chainId,
     forkUrl: opts.forkUrl,
     forkBlockNumber: opts.forkBlockNumber,
+    network: opts.network,
     ...(opts.forkUrl ? { readyTimeoutMs: 90_000 } : {}),
   });
   const rpcUrl = `http://127.0.0.1:${opts.port}`;
