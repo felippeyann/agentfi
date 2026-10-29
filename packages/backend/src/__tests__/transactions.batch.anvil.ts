@@ -722,7 +722,11 @@ describeDb('A6e(2) on Anvil — the 202 fee is what the executor takes from the 
     const receipt = await chain.publicClient.getTransactionReceipt({ hash: result!.txHash! });
     expect(receipt.status).toBe('success');
     const sent = await chain.publicClient.getTransaction({ hash: result!.txHash! });
-    const gas = receipt.gasUsed * receipt.effectiveGasPrice;
+    // Chain fees: execution gas plus, on an OP-stack chain (Anvil >= 1.8 applies it to chain id 84532),
+    // the L1 data fee, which is outside gasUsed × effectiveGasPrice. The receipt reports it as l1Fee;
+    // absent (older Anvil) = 0. Without it the "debit beyond gas" would include the L1 fee.
+    const l1Fee = BigInt((receipt as { l1Fee?: bigint | string | null }).l1Fee ?? 0);
+    const gas = receipt.gasUsed * receipt.effectiveGasPrice + l1Fee;
 
     // On-chain: what left the agent's wallet beyond the moved value and gas, and what the fee wallet received.
     const debit = before.wallet - (await balance(agent.eoa)) - gas - movedWei;
