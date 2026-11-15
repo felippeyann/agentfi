@@ -139,7 +139,7 @@ The fake facilitator does **not** prove: signature validity, balances, nonces or
 - No real facilitator (x402.org, CDP) has been called; CDP auth is not implemented.
 - `txHash` and `payer` are whatever the server's `PAYMENT-RESPONSE` says; nothing is checked against an RPC.
 - Receipts have no trust anchor (no issuer registry, no DID resolution, no JWS).
-- Per-job budget, reservation and replay protection exist (§10, P2/P6) but there is no reconciliation of `unknown` or `refused` rows and no `cancelAuthorization` helper yet; the nonce and `validBefore` are stored so the reconciliation task can add both. Until then a server that refuses a signed payment and settles it anyway is only bounded, not detected (§10, *Post-signature refusals*).
+- ~~Per-job budget, reservation and replay protection exist (§10, P2/P6) but there is no reconciliation of `unknown` or `refused` rows and no `cancelAuthorization` helper yet; the nonce and `validBefore` are stored so the reconciliation task can add both. Until then a server that refuses a signed payment and settles it anyway is only bounded, not detected (§10, *Post-signature refusals*).~~ **2026-11-15:** on-chain reconciliation of EIP-3009 rows exists (§11); there is still no `cancelAuthorization` helper, no automatic reconciliation worker and no Permit2 reconciliation.
 - `@x402/express` is not a dependency: its required `express` peer would add ~60 packages to the lockfile for a test-only server, and `@x402/core/server` already provides the full pipeline.
 - The `includeTxHash` quirk (§4) is observed on 2.28.0 and not reported upstream yet.
 
@@ -206,6 +206,8 @@ Anything refused here happened before any signature. The `failed_before_signing`
 
 Pre-signature refusals (`failed_before_signing`) stay uncounted: nothing was signed.
 
+**Superseded 2026-11-15 (§11):** a `refused` row now counts until reconciliation proves it settled or `expired`; the same `paymentId` gets `409 AWAITING_RECONCILIATION`. The paragraph below describes the previous behaviour.
+
 What this does **not** do: after `validBefore` the row stops counting even if the server did settle inside the window, because nothing on our side can tell (that needs the reconciliation task — `authorizationState(payer, nonce)` on USDC, or the `AuthorizationUsed` event). A server that refuses and settles anyway therefore costs at most one payment amount per job and payee per authorization window, within the job budget and the daily limit, instead of an unbounded drain at request speed; the `warn` log is the operator's signal to look.
 
 **Agent policy (P6).** Before P6 this path only checked that the provider's policy was active and unexpired — `PolicyService` (transactions) never saw x402 spend, and x402 never saw the policy's limits. The scenario that made it matter: an attacker posts a job with a large USDC reward to a victim provider, a prompt-injected payload says "pay `https://attacker/x`", the victim spends up to the reward from its own wallet whatever the operator configured, and the attacker cancels and gets its reservation back. Now `services/policy/usdc-spend-policy.ts` (`evaluateUsdcSpend`, written to be reused by the escrow path, C3d) runs inside the reservation, under the locks, before signing; a refusal is `403 POLICY_VIOLATION` with `rule` (and a `failed_before_signing` row):
@@ -242,3 +244,25 @@ P6 regressions: in the route suite (in-memory ledger) a verification rejection, 
 - Reconciliation of `unknown` and `refused` rows (`unknown → settled` with the tx hash, a `refused` row released early once the nonce is proven unused, or cancel the authorization once `validBefore` has passed): a worker that matches `authorizationNonce` against on-chain USDC `AuthorizationUsed` / `Transfer` events to `payTo` (or reads `authorizationState`). Until then an operator resolves them by hand; the `error` (`unknown`) and `warn` (`refused`) log lines carry everything needed.
 - The `mppx` dialect (P4) behind the same route/tool.
 - Facilitator configuration (P3) does not affect this flow — the buyer never calls one.
+
+
+## 11. Reconciliation, operator view and the owner token (first x402 delivery, 2026-11-15)
+
+**Reconciliation** (`services/payments/resource-payment-reconciliation.ts`, CLI `npm run x402:ops -- reconcile`, dry-run unless `--apply`). It reads the USDC contract and moves a row only on proof:
+
+| Evidence | Transition |
+|---|---|
+| `authorizationState(payer, nonce)` used + `AuthorizationUsed` log + a `Transfer(payer → payTo, amount)` in that tx | unknown / pending / refused / settled → `settled` + `chainVerifiedAt` (the chain tx hash replaces a reported one) |
+| unused at a non-reorgable head whose timestamp is ≥ `validBefore` + margin (FiatToken requires `block.timestamp < validBefore`) | → `expired` (new status: not counted, retryable with the same id) |
+| `AuthorizationCanceled` log | → `expired` |
+| `reserved` older than the stale threshold (15 min), no nonce | → `failed_before_signing` (the payload only leaves after `markPending` stored the nonce) |
+
+Everything else is reported, never written: still valid and unused (`wait`), used with a non-matching transfer (`mismatch`), Permit2, rows without `payer` / method (written before migration 0027), chain read failures (`manual`), attempts younger than the threshold (`in-flight`). Evidence comes from ONE RPC per chain (`--rpc` or the primary RPC), never the provider fallback, judged at the `finalized` block by default (`--head safe`, or `--confirmations N`; 0 only with `--local-chain`), and `expired` needs `--expiry-margin-seconds` (default 60) past `validBefore`. The chain id of the RPC is checked. Log search goes newest-first in 2000-block chunks and splits a refused range; the start block is found by bracketing back from the head (pruned nodes and forks do not serve old history).
+
+**Owner token.** Each reservation writes a fresh `attemptId`; `markPending` and every later write of the attempt are conditional on it, and reconciliation transitions clear it. A slow or resumed attempt therefore cannot send after its row was released, cannot send after a retry took the row over (ABA), and cannot overwrite a reconciliation verdict. A takeover clears the previous attempt's `payer`, method, reconciliation and delivery fields.
+
+**Refusals** count until reconciled (they used to stop counting when `validBefore` passed on our clock, which could release budget the server had already spent).
+
+**Delivery vs money.** `resourceSha256` / `resourceBytes` record the paid response as received; `chainVerifiedAt` records proof of the money. `npm run x402:ops -- status [--agent|--job] [--json]` (`resource-payment-report.ts`) shows per agent the operator's limits and today's committed spend, and per job the budget, committed / proven / reported / open amounts, each payment's money state (proven · reported · possibly-moved · held · not-moved), delivery state (delivered · not-delivered · no-response), block reason and required action.
+
+**Tests.** `resource-payment-reconciliation.test.ts` (verdicts on a test-controlled chain), `resource-payment.reconcile.db.test.ts` (real service + Postgres: lost response proven, lapsed → expired and retried with one new signature, dry-run, RPC failure, restart before signing, release during signing, ABA takeover, late write after a verdict, takeover clears evidence, refusals stay counted, two concurrent passes, operator report). The real reader against FiatToken: `npm run demo:x402:fork` (`src/__tests__/e2e/x402-spend.demo.ts`) on a LOCAL Anvil fork of Base Sepolia with the real `@x402/evm` exact facilitator settling on the fork; it asserts the on-chain `Transfer` logs and balances against the ledger. Not run in CI (needs a public RPC to fork); the fake reader ignores block ranges, so confirmations, the search window and reorgs are only exercised by the demo, not by CI.

@@ -104,6 +104,8 @@ export interface ChainEvidenceReader {
 
 /** Max blocks per `eth_getLogs` call (public RPCs cap the range). */
 const LOG_CHUNK = 2000n;
+/** Smallest range that is still split when the node refuses a getLogs range. */
+const MIN_LOG_SPLIT = 8n;
 
 /**
  * Which block verdicts are judged at: a block tag the node only moves past
@@ -146,19 +148,27 @@ export function viemEvidenceReader(client: PublicClient, head: HeadSelector = { 
         (item) => item.type === 'event' && item.name === (kind === 'used' ? 'AuthorizationUsed' : 'AuthorizationCanceled'),
       );
       if (!event || event.type !== 'event') throw new Error('ABI event missing');
-      for (let start = fromBlock; start <= toBlock; start += LOG_CHUNK) {
-        const end = start + LOG_CHUNK - 1n < toBlock ? start + LOG_CHUNK - 1n : toBlock;
-        const logs = await client.getLogs({
-          address: token,
-          event,
-          args: { authorizer, nonce },
-          fromBlock: start,
-          toBlock: end,
-        });
-        const log = logs[0];
-        if (log?.transactionHash && log.blockNumber !== null) {
-          return { txHash: log.transactionHash, blockNumber: log.blockNumber };
+      // Newest first (payments are recent), and a range the node refuses is
+      // split in halves down to MIN_LOG_SPLIT blocks before giving up:
+      // public RPCs cap ranges, and a fork refuses ranges across its fork block.
+      const search = async (start: bigint, end: bigint): Promise<AuthorizationEvent | null> => {
+        try {
+          const logs = await client.getLogs({ address: token, event, args: { authorizer, nonce }, fromBlock: start, toBlock: end });
+          const log = logs[0];
+          return log?.transactionHash && log.blockNumber !== null
+            ? { txHash: log.transactionHash, blockNumber: log.blockNumber }
+            : null;
+        } catch (error) {
+          if (end - start < MIN_LOG_SPLIT) throw error;
+          const mid = start + (end - start) / 2n;
+          return (await search(mid + 1n, end)) ?? (await search(start, mid));
         }
+      };
+      for (let end = toBlock; end >= fromBlock; end -= LOG_CHUNK) {
+        const start = end - LOG_CHUNK + 1n > fromBlock ? end - LOG_CHUNK + 1n : fromBlock;
+        const hit = await search(start, end);
+        if (hit) return hit;
+        if (start === fromBlock) break;
       }
       return null;
     },
@@ -174,8 +184,20 @@ export function viemEvidenceReader(client: PublicClient, head: HeadSelector = { 
     },
     async blockAtOrAfter(timestamp, head) {
       if (head.timestamp < timestamp) return head.number;
-      let lo = 0n;
+      // Bracket backwards from the head with growing steps, so only recent
+      // blocks are read (pruned nodes and forks do not serve old history),
+      // then binary-search inside the bracket.
       let hi = head.number;
+      let lo = hi;
+      for (let step = 256n; ; step *= 2n) {
+        const candidate = hi > step ? hi - step : 0n;
+        const block = await client.getBlock({ blockNumber: candidate });
+        if (block.timestamp < timestamp || candidate === 0n) {
+          lo = candidate;
+          break;
+        }
+        hi = candidate;
+      }
       while (lo < hi) {
         const mid = (lo + hi) / 2n;
         const block = await client.getBlock({ blockNumber: mid });

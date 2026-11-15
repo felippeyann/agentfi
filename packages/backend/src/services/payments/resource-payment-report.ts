@@ -129,7 +129,7 @@ function actionFor(row: ResourcePayment, now: Date, staleAfterMs: number): strin
     case 'settled':
       if (!row.chainVerifiedAt) return 'settlement only reported by the server: run `x402:ops reconcile --apply` to prove it on-chain';
       if (deliveryState(row) !== 'delivered') {
-        return `paid (proven) but the resource was not delivered (HTTP ${row.responseStatus ?? 'none'}): take it up with the seller ${row.payTo}`;
+        return `paid (proven) but the resource was not delivered (${row.responseStatus === null ? 'no paid response arrived' : `HTTP ${row.responseStatus}`}): take it up with the seller ${row.payTo}`;
       }
       return null;
     default:

@@ -143,13 +143,19 @@ describe('ResourcePayment counting rules', () => {
     expect(LEGACY_REFUSAL_WINDOW_SECONDS).toBe(MAX_AUTHORIZATION_WINDOW_SECONDS);
   });
 
-  it('a refused row is live until validBefore, then retryable', () => {
+  it('a refused row is live until validBefore, and never retryable: it waits for reconciliation (2026-11-15)', () => {
     const row = { status: 'refused' as const, authorizationValidBefore: at('2026-10-08T12:05:00Z'), updatedAt: at('2026-10-08T12:00:00Z') };
     expect(refusalLiveUntil(row)).toEqual(at('2026-10-08T12:05:00Z'));
     expect(isLiveRefusal(row, at('2026-10-08T12:04:59Z'))).toBe(true);
     expect(isRetryable(row, at('2026-10-08T12:04:59Z'))).toBe(false);
     expect(isLiveRefusal(row, at('2026-10-08T12:05:00Z'))).toBe(false);
-    expect(isRetryable(row, at('2026-10-08T12:05:00Z'))).toBe(true);
+    expect(isRetryable(row, at('2026-10-08T12:05:00Z'))).toBe(false);
+  });
+
+  it('expired (proven dead by reconciliation) is retryable and never live', () => {
+    const row = { status: 'expired' as const, authorizationValidBefore: at('2026-10-08T12:05:00Z'), updatedAt: NOW };
+    expect(isRetryable(row, NOW)).toBe(true);
+    expect(isLiveRefusal(row, NOW)).toBe(false);
   });
 
   it('a refused row without validBefore (pre-0018) is live for the legacy window after its last update', () => {

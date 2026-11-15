@@ -448,7 +448,8 @@ describe('PolicyService.validateTransaction', () => {
     // The rows queried are the agent's counted ones reserved since midnight UTC.
     const where = (db as any).resourcePayment.findMany.mock.calls[0][0].where;
     expect(where).toMatchObject({ agentId: 'agent-1', reservedAt: { gte: expect.any(Date) } });
-    expect(where.OR).toEqual(expect.arrayContaining([{ status: { in: ['reserved', 'pending', 'settled', 'unknown'] } }]));
+    // 2026-11-15: refused rows count until reconciled; expired / failed_before_signing never.
+    expect(where.status).toEqual({ in: ['reserved', 'pending', 'settled', 'unknown', 'refused'] });
     // A6: the pre-check writes nothing, so there is nothing to roll back.
     expect((db as any).$executeRaw).not.toHaveBeenCalled();
     expect((db as any).$queryRaw).not.toHaveBeenCalled();

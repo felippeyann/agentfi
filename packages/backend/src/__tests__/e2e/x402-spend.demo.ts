@@ -308,6 +308,8 @@ async function main(): Promise<void> {
     const overrides = {
       RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS: 'true',
       TRANSACTION_WORKER_ENABLED: 'false',
+      // The requester's legacy job reservation prices the USDC reward (testnet assets need a synthetic price).
+      SYNTHETIC_TEST_PRICES_USD: '84532:0x036CbD53842c5426634e7929541eC2318f3dCF7e=1',
       DOTENV_CONFIG_PATH: join(tmpdir(), 'agentfi-x402-demo-no-dotenv'),
     };
     const backend = await startBackend(ctx, { name: 'x402-demo', overrides });
@@ -430,7 +432,9 @@ async function main(): Promise<void> {
     const endBalance = await usdcBalanceOf(anvilRpc, USDC_BASE_SEPOLIA, agent.address);
     const sellerBalance = await usdcBalanceOf(anvilRpc, USDC_BASE_SEPOLIA, seller);
     for (const t of transfers) say(`  Transfer ${agent.address} → ${seller} ${usdc(t.value)} in ${t.tx}`);
-    const statusJson = JSON.parse(await runOps(opsEnv, ['status', '--job', jobId, '--json'])) as Array<{
+    const statusOut = await runOps(opsEnv, ['status', '--job', jobId, '--json']);
+    // The backend env prints a WARN line (synthetic test prices) before the JSON.
+    const statusJson = JSON.parse(statusOut.slice(statusOut.search(/^\[/m))) as Array<{
       jobs: Array<{ committedUsdc: string; provenUsdc: string; reportedUsdc: string; openUsdc: string; payments: Array<{ status: string; txHash: string | null; money: string }> }>;
     }>;
     const job = statusJson[0]!.jobs[0]!;
