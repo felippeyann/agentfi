@@ -5,7 +5,7 @@
  *   npm run x402:ops -- reconcile [--agent <id>] [--job <id>] [--apply]
  *                                 [--head finalized|safe | --confirmations N [--local-chain]]
  *                                 [--expiry-margin-seconds S] [--stale-minutes M] [--rpc <url>] [--json]
- *   npm run x402:ops -- auto      [--agent <id>] [--job <id>] [--head … | --confirmations N [--local-chain]] [--expiry-margin-seconds S]
+ *   npm run x402:ops -- auto      [--agent <id>] [--job <id>] [--second-rpc <url>] [--head … | --confirmations N [--local-chain]] [--expiry-margin-seconds S]
  *                                 [--stale-minutes M] [--rpc <url>] [--json]
  *   npm run x402:ops -- resolve   --job <id> --payment <paymentId> --as expired|settled [--tx <hash>]
  *                                 --operator <name> --note "<evidence / why>" [--apply]
@@ -178,6 +178,12 @@ export interface OpsDeps {
   rpcFor: (chainId: number) => string;
   print: (line: string) => void;
   readerFor?: (rpcUrl: string, head: HeadSelector) => ChainEvidenceReader;
+  /** Second evidence source of a chain (default: X402_RECONCILE_SECOND_RPC_URL_<id>). */
+  secondRpcFor?: (chainId: number) => string | undefined;
+}
+
+function defaultSecondRpcFor(chainId: number): string | undefined {
+  return process.env[`X402_RECONCILE_SECOND_RPC_URL_${chainId}`]?.trim() || undefined;
 }
 
 export async function runOps(args: OpsArgs, deps: OpsDeps): Promise<number> {
@@ -199,11 +205,19 @@ export async function runOps(args: OpsArgs, deps: OpsDeps): Promise<number> {
     if (args.expiryMarginSeconds !== undefined) config.expiryMarginSeconds = args.expiryMarginSeconds;
     if (staleAfterMs !== undefined) config.staleAfterMs = staleAfterMs;
     const makeReader = deps.readerFor ?? readerForRpcUrl;
+    // Same evidence configuration as the worker: the second source (needed to
+    // apply an automatic expiry) from --second-rpc, else X402_RECONCILE_SECOND_RPC_URL_<id>.
+    const secondUrl = (chainId: number) => args.secondRpc ?? (deps.secondRpcFor ?? defaultSecondRpcFor)(chainId);
     const outcomes = await runAutoReconcileCycle({
       db: deps.db,
       rpcFor: (chainId) => args.rpc ?? deps.rpcFor(chainId),
+      secondRpcFor: secondUrl,
       config,
       readerFor: (chainId) => makeReader(args.rpc ?? deps.rpcFor(chainId), config.head),
+      secondReaderFor: (chainId) => {
+        const url = secondUrl(chainId);
+        return url ? makeReader(url, config.head) : undefined;
+      },
       ...(args.jobId ? { jobId: args.jobId } : {}),
       ...(args.agentId ? { agentId: args.agentId } : {}),
     });

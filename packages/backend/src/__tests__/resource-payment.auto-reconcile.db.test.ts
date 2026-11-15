@@ -268,6 +268,29 @@ describe('x402 automatic reconciliation on Postgres', () => {
     expect((await rows(t.job.id))[0]!.reconcileState!.escalationReason).toMatch(/second evidence source/);
   });
 
+  it('x402:ops auto uses the second evidence source like the worker (an agreeing source releases, none stops)', async () => {
+    const { parseOpsArgs, runOps } = await import('../scripts/x402-ops.js');
+    const t = await setup('2', { stall: 'paid' });
+    await expect(t.pay(`cliauto_${tag}_0123456789`)).rejects.toMatchObject({ code: 'PAYMENT_OUTCOME_UNKNOWN' });
+    const [unknown] = await rows(t.job.id);
+    t.chain.at(sec(unknown!.authorizationValidBefore!) + 3600);
+    const second = fakeChain();
+    second.at(sec(unknown!.authorizationValidBefore!) + 3600);
+    const args = parseOpsArgs(['auto', '--job', t.job.id, '--second-rpc', 'second://', '--confirmations', '0', '--local-chain']);
+    if (typeof args === 'string') throw new Error(args);
+    const printed: string[] = [];
+    const code = await runOps(args, {
+      db,
+      rpcFor: () => 'primary://',
+      print: (l) => printed.push(l),
+      readerFor: (url) => (url === 'second://' ? second : t.chain),
+      secondRpcFor: () => undefined,
+    });
+    expect(code).toBe(0);
+    expect((await rows(t.job.id))[0]!.status).toBe('expired');
+    expect(second.reads.some((r) => r.startsWith('blockHash:'))).toBe(true);
+  });
+
   it('a partial failure (head answers, authorizationState throws) is transient — never expired', async () => {
     const t = await setup('2', { stall: 'paid' });
     await expect(t.pay(`partfail_${tag}_0123456789`)).rejects.toMatchObject({ code: 'PAYMENT_OUTCOME_UNKNOWN' });
