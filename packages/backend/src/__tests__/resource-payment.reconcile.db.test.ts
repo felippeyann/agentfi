@@ -30,7 +30,7 @@ import type { TypedDataDefinition } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { db } from '../db/client.js';
 import { countedWhere, resourcePaymentSpentToday, sumBaseUnits } from '../services/payments/resource-payment-ledger.js';
-import { reconcileResourcePayments, type ChainEvidenceReader } from '../services/payments/resource-payment-reconciliation.js';
+import { reconcileResourcePayments, resolveManually, type ChainEvidenceReader } from '../services/payments/resource-payment-reconciliation.js';
 import { buildSpendReport } from '../services/payments/resource-payment-report.js';
 import { ResourcePaymentError, ResourcePaymentService } from '../services/payments/resource-payment.service.js';
 import { X402ClientService } from '../services/payments/x402-client.service.js';
@@ -375,6 +375,38 @@ describe('x402 reconciliation on Postgres', () => {
     expect(row.resourceSha256).not.toBe('f'.repeat(64));
     expect(row.authorizationNonce).not.toBe(first.authorizationNonce);
     expect(row.attemptId).not.toBe(first.attemptId);
+  });
+
+  it('a row reconciliation cannot judge (written before 0027: no payer / method) has an operator exit: resolve, recorded, dry-run first', async () => {
+    const t = await setup('0.5');
+    await db.resourcePayment.create({
+      data: {
+        jobId: t.job.id, agentId: t.provider.id, paymentId: `legacy_${tag}_0123456789`, url: t.server.url, method: 'GET',
+        network: 'eip155:84532', asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', amount: '400000', payTo: t.server.seller.address,
+        status: 'refused', authorizationNonce: `0x${'ab'.repeat(32)}`, authorizationValidBefore: new Date(Date.now() - 86_400_000),
+      },
+    });
+    expect(await counted(t.job.id)).toBe(400_000n);
+    expect((await t.reconcile())[0]!.verdict.kind).toBe('manual');
+    let [agent] = await buildSpendReport(db, { jobId: t.job.id });
+    expect(agent!.jobs[0]!.payments[0]!.action).toContain('x402:ops resolve');
+
+    const base = { jobId: t.job.id, paymentId: `legacy_${tag}_0123456789`, outcome: 'expired' as const, operator: 'owner' };
+    expect((await resolveManually(db, { ...base, note: '', apply: true })).ok).toBe(false);
+    expect((await resolveManually(db, { ...base, outcome: 'settled', note: 'x', apply: true })).ok).toBe(false);
+    const dry = await resolveManually(db, { ...base, note: 'seller confirmed no settlement; explorer shows nonce unused', apply: false });
+    expect(dry.ok).toBe(true);
+    expect((await onlyRow(t.job.id)).status).toBe('refused');
+    const done = await resolveManually(db, { ...base, note: 'seller confirmed no settlement; explorer shows nonce unused', apply: true });
+    expect(done.ok).toBe(true);
+    const row = await onlyRow(t.job.id);
+    expect(row).toMatchObject({ status: 'expired', chainVerifiedAt: null, attemptId: null });
+    expect(row.reconcileNote).toMatch(/^MANUAL expired by owner .*seller confirmed/);
+    expect(await counted(t.job.id)).toBe(0n);
+    // Terminal / proven rows are not resolved by hand.
+    expect((await resolveManually(db, { ...base, note: 'again', apply: true })).ok).toBe(false);
+    [agent] = await buildSpendReport(db, { jobId: t.job.id });
+    expect(agent!.jobs[0]!.payments[0]!.action).toBeNull();
   });
 
   it('the operator report separates money from delivery and names the action', async () => {

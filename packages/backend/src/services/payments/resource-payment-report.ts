@@ -109,6 +109,10 @@ function deliveryState(row: ResourcePayment): DeliveryState {
 /** The operator action for a row; null when it concludes (or concluded) on its own. */
 function actionFor(row: ResourcePayment, now: Date, staleAfterMs: number): string | null {
   const age = now.getTime() - row.updatedAt.getTime();
+  const chainJudgeable = row.authorizationMethod === 'eip3009' && row.payer !== null && row.authorizationNonce !== null;
+  if ((row.status === 'unknown' || row.status === 'refused' || (row.status === 'pending' && age >= staleAfterMs)) && !chainJudgeable) {
+    return `reconciliation cannot judge this row (${row.authorizationMethod ?? 'no method'}${row.payer ? '' : ', no payer recorded'}): check the chain / the seller, then \`x402:ops resolve --as expired|settled --operator … --note …\`; it stays counted until then`;
+  }
   switch (row.status) {
     case 'reserved':
       return now.getTime() - row.reservedAt.getTime() >= staleAfterMs

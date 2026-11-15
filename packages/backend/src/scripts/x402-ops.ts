@@ -5,6 +5,13 @@
  *   npm run x402:ops -- reconcile [--agent <id>] [--job <id>] [--apply]
  *                                 [--head finalized|safe | --confirmations N [--local-chain]]
  *                                 [--expiry-margin-seconds S] [--stale-minutes M] [--rpc <url>] [--json]
+ *   npm run x402:ops -- resolve   --job <id> --payment <paymentId> --as expired|settled [--tx <hash>]
+ *                                 --operator <name> --note "<evidence / why>" [--apply]
+ *
+ * `resolve` is the operator's exit for rows reconciliation leaves `manual`
+ * (Permit2, rows written before migration 0027, a chain that cannot be read):
+ * an attestation recorded on the row with who and why, never chain proof
+ * (`chainVerifiedAt` stays null). Only unknown / pending / refused rows.
  *
  * `status` is read-only: authorized limits, committed / proven / reported /
  * open spend per job, delivery evidence, block reasons and the action each
@@ -31,13 +38,19 @@ import {
   readerForRpcUrl,
   reconcilableWhere,
   reconcileResourcePayments,
+  resolveManually,
   type ChainEvidenceReader,
   type ReconcileResult,
 } from '../services/payments/resource-payment-reconciliation.js';
 import { buildSpendReport, renderSpendReport } from '../services/payments/resource-payment-report.js';
 
 export interface OpsArgs {
-  command: 'status' | 'reconcile';
+  command: 'status' | 'reconcile' | 'resolve';
+  paymentId?: string;
+  resolveAs?: 'expired' | 'settled';
+  tx?: string;
+  operator?: string;
+  note?: string;
   agentId?: string;
   jobId?: string;
   apply: boolean;
@@ -50,7 +63,9 @@ export interface OpsArgs {
 
 export function parseOpsArgs(argv: string[]): OpsArgs | string {
   const command = argv[0];
-  if (command !== 'status' && command !== 'reconcile') return 'usage: x402:ops <status|reconcile> [options]';
+  if (command !== 'status' && command !== 'reconcile' && command !== 'resolve') {
+    return 'usage: x402:ops <status|reconcile|resolve> [options]';
+  }
   const value = (flag: string) => {
     const i = argv.indexOf(flag);
     return i >= 0 ? argv[i + 1] : undefined;
@@ -91,7 +106,19 @@ export function parseOpsArgs(argv: string[]): OpsArgs | string {
   if (jobId) args.jobId = jobId;
   if (rpc) args.rpc = rpc;
   if (stale !== undefined) args.staleMinutes = Number(stale);
-  if (args.apply && command !== 'reconcile') return '--apply only applies to reconcile';
+  if (args.apply && command === 'status') return '--apply does not apply to status';
+  if (command === 'resolve') {
+    const as = value('--as');
+    if (as !== 'expired' && as !== 'settled') return 'resolve needs --as expired|settled';
+    const paymentId = value('--payment');
+    if (!jobId || !paymentId) return 'resolve needs --job and --payment';
+    args.paymentId = paymentId;
+    args.resolveAs = as;
+    const tx = value('--tx');
+    if (tx) args.tx = tx;
+    args.operator = value('--operator') ?? '';
+    args.note = value('--note') ?? '';
+  }
   return args;
 }
 
@@ -132,6 +159,20 @@ export async function runOps(args: OpsArgs, deps: OpsDeps): Promise<number> {
     });
     deps.print(args.json ? JSON.stringify(report, null, 2) : renderSpendReport(report));
     return 0;
+  }
+
+  if (args.command === 'resolve') {
+    const result = await resolveManually(deps.db, {
+      jobId: args.jobId!,
+      paymentId: args.paymentId!,
+      outcome: args.resolveAs!,
+      ...(args.tx ? { txHash: args.tx } : {}),
+      operator: args.operator ?? '',
+      note: args.note ?? '',
+      apply: args.apply,
+    });
+    deps.print(args.apply ? result.message : `${result.message} (dry-run — pass --apply to write)`);
+    return result.ok ? 0 : 1;
   }
 
   const networks = await deps.db.resourcePayment.findMany({

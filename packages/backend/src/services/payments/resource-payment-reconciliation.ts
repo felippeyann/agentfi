@@ -526,3 +526,62 @@ const NO_READER: ChainEvidenceReader = {
   transfersInTx: () => Promise.reject(new Error('no reader')),
   blockAtOrAfter: () => Promise.reject(new Error('no reader')),
 };
+
+// ── Operator resolution (no chain proof available) ──────────────────────────
+
+export interface ManualResolution {
+  jobId: string;
+  paymentId: string;
+  /** `expired`: the operator attests the authorization cannot move money; `settled`: it moved, in `txHash`. */
+  outcome: 'expired' | 'settled';
+  txHash?: string;
+  /** Who decided, and why — stored on the row (`reconcileNote`). Both required. */
+  operator: string;
+  note: string;
+  apply: boolean;
+  now?: Date;
+}
+
+/** Statuses an operator may resolve by hand: the ones reconciliation can leave `manual` forever. */
+const MANUALLY_RESOLVABLE: ReadonlySet<ResourcePaymentStatus> = new Set(['unknown', 'pending', 'refused']);
+
+/**
+ * The exit for rows reconciliation cannot judge (Permit2, rows written before
+ * migration 0027 without payer / method, persistent RPC failures). It is an
+ * operator ATTESTATION, not proof: `chainVerifiedAt` stays null (a manual
+ * `settled` is shown as "reported"), the note records who and why, and the
+ * write is conditional on the row not having changed. Dry-run unless `apply`.
+ */
+export async function resolveManually(
+  db: Pick<PrismaClient, 'resourcePayment'>,
+  input: ManualResolution,
+): Promise<{ ok: boolean; message: string; row?: ResourcePayment }> {
+  const operator = input.operator.trim();
+  const note = input.note.trim();
+  if (!operator || !note) return { ok: false, message: '--operator and --note are required' };
+  if (input.outcome === 'settled' && !(input.txHash && /^0x[0-9a-fA-F]{64}$/.test(input.txHash))) {
+    return { ok: false, message: '--as settled needs --tx <the settlement transaction hash>' };
+  }
+  const row = await db.resourcePayment.findUnique({
+    where: { jobId_paymentId: { jobId: input.jobId, paymentId: input.paymentId } },
+  });
+  if (!row) return { ok: false, message: 'no such payment on this job' };
+  if (!MANUALLY_RESOLVABLE.has(row.status)) {
+    return { ok: false, message: `status ${row.status} is not resolved by hand (only unknown, pending, refused)`, row };
+  }
+  const now = input.now ?? new Date();
+  const reconcileNote = `MANUAL ${input.outcome} by ${operator} at ${now.toISOString()} (was ${row.status}): ${note}`.slice(0, 1000);
+  if (!input.apply) return { ok: true, message: `would write: ${reconcileNote}`, row };
+  const { count } = await db.resourcePayment.updateMany({
+    where: { id: row.id, status: row.status, updatedAt: row.updatedAt },
+    data: {
+      status: input.outcome,
+      attemptId: null,
+      reconciledAt: now,
+      reconcileNote,
+      ...(input.outcome === 'settled' ? { settlementTxHash: input.txHash! } : {}),
+    },
+  });
+  if (count !== 1) return { ok: false, message: 'the row changed meanwhile; nothing written — rerun', row };
+  return { ok: true, message: `written: ${reconcileNote}`, row: (await db.resourcePayment.findUnique({ where: { id: row.id } }))! };
+}
