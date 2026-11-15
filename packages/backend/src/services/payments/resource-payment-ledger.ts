@@ -8,6 +8,9 @@
  *                                         moved, or possibly moved.
  *   refused                               while its authorization is LIVE.
  *   failed_before_signing                 never — nothing was signed.
+ *   expired                               never — reconciliation PROVED the
+ *                                         authorization can no longer move
+ *                                         money (migration 0027).
  *
  * `refused` always means "refused AFTER signing": the resource server holds a
  * valid EIP-3009 / Permit2 authorization until `validBefore` and can settle it
@@ -62,13 +65,15 @@ export function countedWhere(now: Date): Prisma.ResourcePaymentWhereInput {
 
 /**
  * Rows a retry with the same `paymentId` may take over: nothing was signed,
- * or a refused authorization has expired. Never `reserved` / `pending` /
+ * a refused authorization has expired, or reconciliation proved the
+ * authorization dead (`expired`). Never `reserved` / `pending` /
  * `settled` / `unknown`, never a live refusal.
  */
 export function retryableWhere(now: Date): Prisma.ResourcePaymentWhereInput {
   return {
     OR: [
       { status: 'failed_before_signing' },
+      { status: 'expired' },
       { status: 'refused', authorizationValidBefore: { lte: now } },
       { status: 'refused', authorizationValidBefore: null, updatedAt: { lte: legacyCutoff(now) } },
     ],
@@ -95,7 +100,7 @@ export function isLiveRefusal(row: RefusalFields, now: Date): boolean {
 
 /** Same predicate as `retryableWhere`, for a row already in memory. */
 export function isRetryable(row: RefusalFields, now: Date): boolean {
-  if (row.status === 'failed_before_signing') return true;
+  if (row.status === 'failed_before_signing' || row.status === 'expired') return true;
   return row.status === 'refused' && !isLiveRefusal(row, now);
 }
 

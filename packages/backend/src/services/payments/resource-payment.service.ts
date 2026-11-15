@@ -71,7 +71,7 @@
  * boot refuses it in production).
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Prisma, PrismaClient, ResourcePayment } from '@prisma/client';
 import type { Agent } from 'undici';
 import { formatUnits, parseUnits } from 'viem';
@@ -273,7 +273,7 @@ const UNKNOWN_OUTCOME_WARNING =
   'Payment outcome is UNKNOWN: a signed authorization reached the server but no settlement was confirmed. ' +
   'The amount stays reserved against the job budget until an operator reconciles it; do not retry with a new paymentId.';
 
-interface JobBudget {
+export interface JobBudget {
   chainId: number;
   network: string;
   usdc: KnownToken;
@@ -301,6 +301,8 @@ interface AttemptContext {
   remaining: bigint;
   /** Effective per-payment cap (base units). */
   cap: bigint;
+  /** Address of the wallet that signs (the payer reconciliation reads on-chain). */
+  payer: string;
 }
 
 interface AttemptState {
@@ -394,6 +396,18 @@ async function destroyDispatcher(dispatcher: Agent): Promise<void> {
   }
 }
 
+/** Delivery evidence stored apart from the money (migration 0027). */
+export interface DeliveryEvidence {
+  resourceSha256: string;
+  resourceBytes: number;
+}
+
+/** SHA-256 and size of the paid response body exactly as received (already bounded by the client). */
+function deliveryEvidence(result: PayResourceResult): DeliveryEvidence {
+  const bytes = Buffer.from(result.body, 'utf8');
+  return { resourceSha256: createHash('sha256').update(bytes).digest('hex'), resourceBytes: bytes.length };
+}
+
 function truncateUtf8(text: string, maxBytes: number): string {
   return Buffer.from(text, 'utf8').subarray(0, maxBytes).toString('utf8');
 }
@@ -476,7 +490,7 @@ export class ResourcePaymentService {
       );
     }
 
-    const budget = this.resolveBudget(job.reward);
+    const budget = ResourcePaymentService.resolveBudget(job.reward);
     const paymentId = input.paymentId ?? randomUUID();
 
     // Policy, before anything is fetched: a token allowlist that does not
@@ -566,6 +580,7 @@ export class ResourcePaymentService {
       budget,
       remaining,
       cap,
+      payer: signer.address,
     };
     const attempt: AttemptState = {};
 
@@ -595,7 +610,7 @@ export class ResourcePaymentService {
         // After signing, before sending: record the nonce and the window. If
         // this write fails the signed payload never leaves the process.
         onAuthorizationSigned: async (authorization) => {
-          attempt.row = await this.markPending(attempt.row, authorization);
+          attempt.row = await this.markPending(attempt.row, authorization, ctx.payer);
         },
       });
     } catch (error) {
@@ -626,9 +641,10 @@ export class ResourcePaymentService {
 
     const row = this.requireRow(attempt, ctx);
     const payment = result.payment;
+    const delivery = deliveryEvidence(result);
 
     if (result.paid) {
-      const settled = await this.markSettled(row, result, payment, ctx);
+      const settled = await this.markSettled(row, result, payment, ctx, undefined, delivery);
       return { payment: settled, remainingBudget: await this.remainingBudget(ctx.jobId, ctx.budget), resource };
     }
 
@@ -640,6 +656,7 @@ export class ResourcePaymentService {
         data: {
           status: 'unknown',
           responseStatus: result.status,
+          ...delivery,
           error: 'Server accepted the paid request without reporting a settlement (no PAYMENT-RESPONSE header)',
         },
       });
@@ -656,10 +673,13 @@ export class ResourcePaymentService {
     // server holds the authorization, so it keeps counting until it expires.
     const refused = await this.db.resourcePayment.update({
       where: { id: row.id },
-      data: this.refusedData(row, attempt, payment.authorization, {
-        responseStatus: result.status,
-        error: `HTTP ${result.status} after signing, no settlement reported`,
-      }),
+      data: {
+        ...this.refusedData(row, attempt, payment.authorization, {
+          responseStatus: result.status,
+          error: `HTTP ${result.status} after signing, no settlement reported`,
+        }),
+        ...delivery,
+      },
     });
     this.logRefusedAfterSigning(ctx, refused, `HTTP ${result.status}`);
     throw new ResourcePaymentError(
@@ -765,11 +785,13 @@ export class ResourcePaymentService {
     payment: NonNullable<PayResourceResult['payment']>,
     ctx: AttemptContext,
     note?: string,
+    delivery: DeliveryEvidence | Record<string, never> = {},
   ): Promise<ResourcePayment> {
     const receiptUnverified = payment.receipt !== undefined && payment.receiptVerified === false;
     const settled = await this.db.resourcePayment.update({
       where: { id: row.id },
       data: {
+        ...delivery,
         status: 'settled',
         settlementTxHash: payment.txHash ?? receiptTransaction(payment.receipt) ?? null,
         ...(payment.receipt !== undefined ? { receipt: payment.receipt as Prisma.InputJsonValue } : {}),
@@ -909,6 +931,8 @@ export class ResourcePaymentService {
           status: 'unknown',
           ...(authorization
             ? {
+                payer: row.payer ?? ctx.payer,
+                authorizationMethod: authorization.method,
                 authorizationNonce: authorization.nonce,
                 authorizationValidBefore: unixSecondsToDate(authorization.validBefore) ?? row.authorizationValidBefore,
               }
@@ -1074,22 +1098,51 @@ export class ResourcePaymentService {
     }
   }
 
+  /**
+   * `reserved → pending`, conditional on the row still being `reserved`: the
+   * reconciliation releases a `reserved` row it judges abandoned (a crash
+   * before signing) back to `failed_before_signing`, and an attempt that was
+   * only slow must then NOT send — its budget may already be someone else's.
+   * Any failure here is `LEDGER_ERROR` and the signed payload never leaves.
+   */
   private async markPending(
     row: ResourcePayment | undefined,
     authorization: AuthorizationInfo,
+    payer: string,
   ): Promise<ResourcePayment> {
     if (!row) {
       throw new ResourcePaymentError('LEDGER_ERROR', 500, 'Authorization signed without a reservation', {});
     }
+    let claimed: number;
     try {
-      return await this.db.resourcePayment.update({
-        where: { id: row.id },
+      ({ count: claimed } = await this.db.resourcePayment.updateMany({
+        where: { id: row.id, status: 'reserved' },
         data: {
           status: 'pending',
+          payer,
+          authorizationMethod: authorization.method,
           authorizationNonce: authorization.nonce,
           authorizationValidBefore: unixSecondsToDate(authorization.validBefore),
         },
-      });
+      }));
+    } catch (error) {
+      throw new ResourcePaymentError(
+        'LEDGER_ERROR',
+        500,
+        `Could not record the signed authorization; the payment was not sent: ${clip(error instanceof Error ? error.message : String(error), 200)}`,
+        {},
+      );
+    }
+    if (claimed !== 1) {
+      throw new ResourcePaymentError(
+        'LEDGER_ERROR',
+        500,
+        'The reservation is no longer held by this attempt (released by reconciliation); the payment was not sent',
+        {},
+      );
+    }
+    try {
+      return await this.db.resourcePayment.findUniqueOrThrow({ where: { id: row.id } });
     } catch (error) {
       throw new ResourcePaymentError(
         'LEDGER_ERROR',
@@ -1121,7 +1174,9 @@ export class ResourcePaymentService {
     return {
       status: 'refused',
       ...(typeof fields.responseStatus === 'number' ? { responseStatus: fields.responseStatus } : {}),
-      ...(authorization ? { authorizationNonce: authorization.nonce } : {}),
+      ...(authorization
+        ? { authorizationNonce: authorization.nonce, authorizationMethod: authorization.method }
+        : {}),
       authorizationValidBefore: validBefore,
       error: clip(fields.error, MAX_STORED_ERROR_LENGTH, clipOptions),
     };
@@ -1322,7 +1377,7 @@ export class ResourcePaymentService {
   // ── Budget ────────────────────────────────────────────────────────────────
 
   /** The job reward must be USDC on the job's chain; anything else cannot be converted without an oracle. */
-  private resolveBudget(reward: unknown): JobBudget {
+  static resolveBudget(reward: unknown): JobBudget {
     const r = (typeof reward === 'object' && reward !== null ? reward : {}) as {
       amount?: unknown;
       token?: unknown;
