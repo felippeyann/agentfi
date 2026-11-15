@@ -223,7 +223,12 @@ export type ReconcileVerdict =
   | { kind: 'wait'; until: Date; note: string }
   | { kind: 'in-flight'; note: string }
   | { kind: 'mismatch'; txHash: Hex; note: string }
-  | { kind: 'manual'; note: string }
+  /**
+   * Cannot judge. `transient`: the evidence source failed (RPC down, wrong
+   * chain answered, log not found yet) — retried with backoff, NEVER read as
+   * absence of payment. Otherwise structural (Permit2, legacy row): operator.
+   */
+  | { kind: 'manual'; note: string; transient?: true }
   | { kind: 'nothing'; note: string };
 
 export interface ReconcileOptions {
@@ -390,6 +395,7 @@ export async function examineRow(
     }
     return {
       kind: 'manual',
+      transient: true,
       note: `authorizationState is used but no AuthorizationUsed / AuthorizationCanceled log found from block ${fromBlock}: check by hand`,
     };
   }
@@ -474,47 +480,65 @@ export async function reconcileResourcePayments(
   const rows = await db.resourcePayment.findMany({ where, orderBy: { reservedAt: 'asc' } });
   const verifiedChains = new Map<number, boolean>();
   const results: ReconcileResult[] = [];
-
-  for (const row of rows) {
-    const now = options.now ?? new Date();
-    let verdict: ReconcileVerdict;
-    const chainId = chainIdOfNetwork(row.network);
-    const reader = chainId === null ? undefined : options.readers.get(chainId);
-    if (row.status !== 'reserved' && !reader) {
-      verdict = { kind: 'manual', note: `no RPC configured for ${row.network}` };
-    } else {
-      try {
-        if (reader && chainId !== null && !verifiedChains.has(chainId)) {
-          verifiedChains.set(chainId, (await reader.chainId()) === chainId);
-        }
-        if (reader && chainId !== null && verifiedChains.get(chainId) === false) {
-          verdict = { kind: 'manual', note: `the RPC for ${row.network} answers a different chain id: refusing to judge` };
-        } else {
-          verdict = await examineRow(row, reader ?? NO_READER, {
-            now,
-            ...(options.staleAfterMs !== undefined ? { staleAfterMs: options.staleAfterMs } : {}),
-            ...(options.expiryMarginSeconds !== undefined ? { expiryMarginSeconds: options.expiryMarginSeconds } : {}),
-          });
-        }
-      } catch (error) {
-        verdict = { kind: 'manual', note: `chain read failed: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}` };
-      }
-    }
-
-    const data = transition(row, verdict, now);
-    let applied = false;
-    let raced = false;
-    if (options.apply && data) {
-      const { count } = await db.resourcePayment.updateMany({
-        where: { id: row.id, status: row.status, updatedAt: row.updatedAt },
-        data,
-      });
-      applied = count === 1;
-      raced = count !== 1;
-    }
-    results.push({ row, verdict, applied, ...(raced ? { raced } : {}) });
-  }
+  for (const row of rows) results.push(await reconcileOneRow(db, row, options, verifiedChains));
   return results;
+}
+
+/**
+ * Judges one row and, with `apply`, writes its transition — conditional on
+ * the row's id, status and updatedAt, so concurrent passes (two workers, a
+ * worker and the CLI) write each transition at most once. Never throws for a
+ * chain failure: that is a `transient` manual verdict, never a proof.
+ */
+export async function reconcileOneRow(
+  db: Pick<PrismaClient, 'resourcePayment'>,
+  row: ResourcePayment,
+  options: Omit<ReconcilePassOptions, 'jobId' | 'agentId'>,
+  verifiedChains: Map<number, boolean> = new Map(),
+): Promise<ReconcileResult> {
+  const now = options.now ?? new Date();
+  let verdict: ReconcileVerdict;
+  const chainId = chainIdOfNetwork(row.network);
+  const reader = chainId === null ? undefined : options.readers.get(chainId);
+  if (row.status !== 'reserved' && !reader) {
+    verdict = { kind: 'manual', note: `no RPC configured for ${row.network}` };
+  } else {
+    try {
+      if (reader && chainId !== null && !verifiedChains.has(chainId)) {
+        verifiedChains.set(chainId, (await reader.chainId()) === chainId);
+      }
+      if (reader && chainId !== null && verifiedChains.get(chainId) === false) {
+        verdict = { kind: 'manual', transient: true, note: `the RPC for ${row.network} answers a different chain id: refusing to judge` };
+      } else {
+        verdict = await examineRow(row, reader ?? NO_READER, {
+          now,
+          ...(options.staleAfterMs !== undefined ? { staleAfterMs: options.staleAfterMs } : {}),
+          ...(options.expiryMarginSeconds !== undefined ? { expiryMarginSeconds: options.expiryMarginSeconds } : {}),
+        });
+      }
+    } catch (error) {
+      // A failed read proves nothing: the row keeps its status and stays counted.
+      verifiedChains.delete(chainId ?? -1);
+      verdict = {
+        kind: 'manual',
+        transient: true,
+        note: `evidence source unavailable (chain read failed): ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`,
+      };
+    }
+  }
+
+  const data = transition(row, verdict, now);
+  let applied = false;
+  let raced = false;
+  if (options.apply && data) {
+    const { count } = await db.resourcePayment.updateMany({
+      where: { id: row.id, status: row.status, updatedAt: row.updatedAt },
+      data,
+    });
+    applied = count === 1;
+    raced = count !== 1;
+  }
+  return { row, verdict, applied, ...(raced ? { raced } : {}) };
 }
 
 /** Placeholder for `reserved` rows, which never need the chain. */

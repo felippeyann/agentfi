@@ -451,13 +451,15 @@ describe('x402 reconciliation on Postgres', () => {
     const lines = agent!.jobs[0]!.payments;
     const unknownLine = lines.find((p) => p.paymentId.startsWith('rep1_'))!;
     const blocked = lines.find((p) => p.paymentId.startsWith('rep2_'))!;
-    expect(unknownLine).toMatchObject({ status: 'unknown', money: 'possibly-moved', delivery: 'no-response', counted: true });
-    expect(unknownLine.action).toContain('reconcile');
+    expect(unknownLine).toMatchObject({ status: 'unknown', money: 'possibly-moved', delivery: 'unknown', counted: true });
+    // Open money is the automation's job: no operator action, an explicit automatic line.
+    expect(unknownLine.action).toBeNull();
+    expect(unknownLine.automatic).toContain('automatic');
     expect(blocked).toMatchObject({ status: 'failed_before_signing', money: 'not-moved', counted: false, action: null });
     expect(blocked.reason).toMatch(/daily/i);
     expect(agent!.policy).toMatchObject({ maxDailyVolumeUsd: '0.6' });
     expect(agent!.today.remainingDailyUsd).toBe('0.2');
-    expect(agent!.pendingActions).toBe(1);
+    expect(agent!.pendingActions).toBe(0);
 
     t.chain.use(await db.resourcePayment.findFirstOrThrow({ where: { jobId: t.job.id, status: 'unknown' } }));
     await t.reconcile();
@@ -465,7 +467,7 @@ describe('x402 reconciliation on Postgres', () => {
     const proven = agent!.jobs[0]!.payments.find((p) => p.paymentId.startsWith('rep1_'))!;
     expect(proven).toMatchObject({ status: 'settled', money: 'proven' });
     // Proven paid, but no paid response ever arrived: the report says so.
-    expect(proven.delivery).toBe('no-response');
+    expect(proven.delivery).toBe('unknown');
     expect(proven.action).toContain('not delivered');
   });
 
@@ -478,7 +480,8 @@ describe('x402 reconciliation on Postgres', () => {
     expect(row.resourceBytes).toBe(JSON.stringify(paid.resource?.body).length);
     const [agent] = await buildSpendReport(db, { jobId: t.job.id });
     expect(agent!.jobs[0]!.payments[0]).toMatchObject({ money: 'reported', delivery: 'delivered' });
-    expect(agent!.jobs[0]!.payments[0]!.action).toContain('prove it on-chain');
+    expect(agent!.jobs[0]!.payments[0]!.action).toBeNull();
+    expect(agent!.jobs[0]!.payments[0]!.automatic).toContain('automatic');
   });
 });
 
