@@ -244,6 +244,30 @@ describe('x402 automatic reconciliation on Postgres', () => {
     expect(agent!.jobs[0]!.payments[0]).toMatchObject({ action: null, automatic: null });
   });
 
+  it('a stop that follows a transient alert is announced again, with its own reason', async () => {
+    const t = await setup('2', { stall: 'paid' });
+    await expect(t.pay(`stopafter_${tag}_0123456789`)).rejects.toMatchObject({ code: 'PAYMENT_OUTCOME_UNKNOWN' });
+    const [unknown] = await rows(t.job.id);
+    t.chain.at(sec(unknown!.authorizationValidBefore!) + 3600);
+    t.chain.failReads('down');
+    const alerts: string[] = [];
+    const cycle = () =>
+      runAutoReconcileCycle({
+        db, rpcFor: () => 'unused', readerFor: () => t.chain, config: CONFIG, now: () => t.clock.now, jobId: t.job.id,
+        onEscalate: (o) => alerts.push(o.stopped ? 'stop' : 'alert'),
+      });
+    for (let i = 0; i < 3; i++) {
+      await cycle();
+      t.advance(120_000);
+    }
+    expect(alerts).toEqual(['alert']);
+    t.chain.failReads(null);
+    const [o] = await cycle(); // expiry, no second source → stop
+    expect(o).toMatchObject({ stopped: true, escalated: true });
+    expect(alerts).toEqual(['alert', 'stop']);
+    expect((await rows(t.job.id))[0]!.reconcileState!.escalationReason).toMatch(/second evidence source/);
+  });
+
   it('a partial failure (head answers, authorizationState throws) is transient — never expired', async () => {
     const t = await setup('2', { stall: 'paid' });
     await expect(t.pay(`partfail_${tag}_0123456789`)).rejects.toMatchObject({ code: 'PAYMENT_OUTCOME_UNKNOWN' });

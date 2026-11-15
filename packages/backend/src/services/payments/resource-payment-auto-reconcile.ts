@@ -285,7 +285,7 @@ function schedule(result: ReconcileResult, attemptsBefore: number, now: Date, co
  * must answer the same chain, agree on the judged block's hash, and see the
  * authorization unused (lapsed) or used (cancelled) there as well.
  */
-async function confirmWithSecondSource(
+export async function confirmWithSecondSource(
   row: ResourcePayment,
   verdict: Extract<ReconcileVerdict, { kind: 'expired' }>,
   primary: ChainEvidenceReader,
@@ -296,7 +296,7 @@ async function confirmWithSecondSource(
     if (config.singleSourceExpiry) return { ok: true, note: 'single-source expiry (declared local chain)' };
     return {
       ok: false,
-      note: `${verdict.note} — NOT applied automatically: releasing budget without a transfer needs a second evidence source (X402_RECONCILE_SECOND_RPC_URL_<chainId>) or an operator (\`x402:ops reconcile --apply\`)`,
+      note: `${verdict.note} — NOT applied automatically: releasing budget without a transfer needs a second evidence source (X402_RECONCILE_SECOND_RPC_URL_<chainId>) or an operator (\`x402:ops reconcile --apply --second-rpc <url>\`)`,
     };
   }
   const chainId = chainIdOfNetwork(row.network);
@@ -324,16 +324,27 @@ export async function runAutoReconcileCycle(deps: AutoReconcileDeps): Promise<Au
   const owner = deps.owner ?? `x402-auto-${randomUUID()}`;
   const start = nowFn();
   const startedAt = Date.now();
-  const rows = await deps.db.resourcePayment.findMany({
-    where: {
-      ...dueWhere(start),
-      ...(deps.jobId ? { jobId: deps.jobId } : {}),
-      ...(deps.agentId ? { agentId: deps.agentId } : {}),
-    },
+  const scope = {
+    ...(deps.jobId ? { jobId: deps.jobId } : {}),
+    ...(deps.agentId ? { agentId: deps.agentId } : {}),
+  };
+  // Rows never looked at first (new payments must not wait behind a backlog), then the most overdue.
+  const fresh = await deps.db.resourcePayment.findMany({
+    where: { AND: [reconcilableWhere(), { reconcileState: { is: null } }], ...scope },
     include: { reconcileState: true },
-    orderBy: [{ reconcileState: { nextAttemptAt: 'asc' } }, { reservedAt: 'asc' }],
+    orderBy: { reservedAt: 'asc' },
     take: config.batchSize,
   });
+  const overdue =
+    fresh.length >= config.batchSize
+      ? []
+      : await deps.db.resourcePayment.findMany({
+          where: { ...dueWhere(start), reconcileState: { isNot: null }, ...scope },
+          include: { reconcileState: true },
+          orderBy: [{ reconcileState: { nextAttemptAt: 'asc' } }, { reservedAt: 'asc' }],
+          take: config.batchSize - fresh.length,
+        });
+  const rows = [...fresh, ...overdue];
   const readers = new Map<number, ChainEvidenceReader>();
   const secondReaders = new Map<number, ChainEvidenceReader | undefined>();
   const verifiedChains = new Map<number, boolean>();
@@ -399,7 +410,10 @@ export async function runAutoReconcileCycle(deps: AutoReconcileDeps): Promise<Au
     }
     const next = schedule(result, attemptsBefore, now, config);
     const alreadyAlerted = row.reconcileState?.escalatedAt !== null && row.reconcileState?.escalatedAt !== undefined;
-    const alertNow = next.alert !== null && !alreadyAlerted;
+    const wasStopped = row.reconcileState?.stopped === true;
+    // A stop is always announced (with its own reason), even after an earlier
+    // transient alert; transient alerts are announced once.
+    const alertNow = next.alert !== null && (next.stop ? !wasStopped : !alreadyAlerted);
     const outcome: AutoReconcileOutcome = {
       resourcePaymentId: row.id,
       jobId: row.jobId,

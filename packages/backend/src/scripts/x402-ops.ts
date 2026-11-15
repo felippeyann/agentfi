@@ -32,6 +32,11 @@
  * `services/payments/resource-payment-reconciliation.ts`). Evidence comes
  * from ONE RPC per chain — `--rpc`, else the chain's primary RPC
  * (`RPC_URL_<chainId>` when set) — never the provider fallback.
+ * An `expired` transition (a release with no transfer to point at) is only
+ * written with `--second-rpc <url>` (an independent node that must agree on
+ * the block hash and the state) or an explicit `--accept-single-source-expiry`
+ * (the operator takes that risk); otherwise it is shown, not written.
+ *
  * Verdicts are judged at the `finalized` block by default (`--head safe`, or
  * `--confirmations N` for `latest − N`); `--confirmations 0` is refused unless
  * `--local-chain` says the RPC is a local chain or fork. `expired` also needs
@@ -55,6 +60,8 @@ import {
 import { buildSpendReport, renderSpendReport } from '../services/payments/resource-payment-report.js';
 import {
   autoReconcileConfigFromEnv,
+  confirmWithSecondSource,
+  DEFAULT_AUTO_RECONCILE_CONFIG,
   rearmAutoReconcile,
   runAutoReconcileCycle,
   type AutoReconcileOutcome,
@@ -77,6 +84,8 @@ export interface OpsArgs {
   expiryMarginSeconds?: number;
   staleMinutes?: number;
   rpc?: string;
+  secondRpc?: string;
+  acceptSingleSourceExpiry?: boolean;
 }
 
 export function parseOpsArgs(argv: string[]): OpsArgs | string {
@@ -121,6 +130,9 @@ export function parseOpsArgs(argv: string[]): OpsArgs | string {
   const agentId = value('--agent');
   const jobId = value('--job');
   const rpc = value('--rpc');
+  const secondRpc = value('--second-rpc');
+  if (secondRpc) args.secondRpc = secondRpc;
+  if (argv.includes('--accept-single-source-expiry')) args.acceptSingleSourceExpiry = true;
   if (agentId) args.agentId = agentId;
   if (jobId) args.jobId = jobId;
   if (rpc) args.rpc = rpc;
@@ -232,9 +244,24 @@ export async function runOps(args: OpsArgs, deps: OpsDeps): Promise<number> {
     if (!args.json) deps.print(`Chain ${chainId}: evidence from ${hostOf(url)} at ${at}`);
     readers.set(chainId, makeReader(url, args.head));
   }
+  const secondReaders = new Map<number, ChainEvidenceReader>();
+  if (args.secondRpc) for (const chainId of readers.keys()) secondReaders.set(chainId, makeReader(args.secondRpc, args.head));
   const results = await reconcileResourcePayments(deps.db, {
     readers,
     apply: args.apply,
+    ...(args.acceptSingleSourceExpiry
+      ? {}
+      : {
+          confirmExpiry: async (row, verdict) => {
+            const chainId = chainIdOfNetwork(row.network);
+            const primary = chainId !== null ? readers.get(chainId) : undefined;
+            if (!primary) return { ok: false, transient: true, note: 'no primary reader' };
+            return confirmWithSecondSource(row, verdict, primary, chainId !== null ? secondReaders.get(chainId) : undefined, {
+              ...DEFAULT_AUTO_RECONCILE_CONFIG,
+              singleSourceExpiry: false,
+            });
+          },
+        }),
     ...(args.agentId ? { agentId: args.agentId } : {}),
     ...(args.jobId ? { jobId: args.jobId } : {}),
     ...(staleAfterMs !== undefined ? { staleAfterMs } : {}),
