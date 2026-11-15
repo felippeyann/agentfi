@@ -402,12 +402,25 @@ async function destroyDispatcher(dispatcher: Agent): Promise<void> {
 export interface DeliveryEvidence {
   resourceSha256: string;
   resourceBytes: number;
+  /** The body exceeded the read limit: only a prefix arrived (the transfer was aborted). */
+  resourceTruncated: boolean;
 }
 
-/** SHA-256 and size of the paid response body exactly as received (already bounded by the client). */
+/**
+ * SHA-256 and size of the paid response body BYTES as received (bounded by
+ * the client), taken before UTF-8 decoding; and whether the read was cut.
+ * Falls back to the decoded text only for a client that reports no digest.
+ */
 function deliveryEvidence(result: PayResourceResult): DeliveryEvidence {
+  if (result.bodySha256 && result.bodyBytes !== undefined) {
+    return { resourceSha256: result.bodySha256, resourceBytes: result.bodyBytes, resourceTruncated: result.bodyTruncated === true };
+  }
   const bytes = Buffer.from(result.body, 'utf8');
-  return { resourceSha256: createHash('sha256').update(bytes).digest('hex'), resourceBytes: bytes.length };
+  return {
+    resourceSha256: createHash('sha256').update(bytes).digest('hex'),
+    resourceBytes: bytes.length,
+    resourceTruncated: result.bodyTruncated === true,
+  };
 }
 
 function truncateUtf8(text: string, maxBytes: number): string {
@@ -1083,6 +1096,7 @@ export class ResourcePaymentService {
           reconcileNote: null,
           resourceSha256: null,
           resourceBytes: null,
+          resourceTruncated: null,
           receiptVerified: null,
           settlementTxHash: null,
           responseStatus: null,

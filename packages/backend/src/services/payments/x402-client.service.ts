@@ -46,6 +46,7 @@
  * make the backend buffer an unbounded answer.
  */
 
+import { createHash } from 'node:crypto';
 import { x402Client, x402HTTPClient } from '@x402/core/client';
 import { decodePaymentRequiredHeader, decodePaymentResponseHeader } from '@x402/core/http';
 import type {
@@ -261,6 +262,13 @@ export interface PayResourceResult {
   body: string;
   /** True when the body was longer than `maxBodyBytes`: the read stopped there and the transfer was aborted. */
   bodyTruncated: boolean;
+  /**
+   * SHA-256 (hex) and length of the body BYTES as received (bounded), before
+   * UTF-8 decoding — decoding can drop a BOM or replace invalid / cut
+   * sequences, so the digest of `body` would not describe what arrived.
+   */
+  bodySha256?: string;
+  bodyBytes?: number;
   headers: Record<string, string>;
   /** True when the server reported a successful settlement in `PAYMENT-RESPONSE`. */
   paid: boolean;
@@ -777,6 +785,7 @@ export class X402ClientService {
     let response: Response;
     let body: string;
     let bodyTruncated: boolean;
+    let bodyEvidence: { bodySha256: string; bodyBytes: number } = { bodySha256: '', bodyBytes: 0 };
     try {
       response = await fetchWithPayment(url, init);
       // The body read is covered by the same deadline as the request itself,
@@ -784,6 +793,7 @@ export class X402ClientService {
       const read = await readBodyLimited(response, maxBodyBytes);
       body = decodeBody(read.bytes, read.truncated);
       bodyTruncated = read.truncated;
+      bodyEvidence = { bodySha256: createHash('sha256').update(read.bytes).digest('hex'), bodyBytes: read.bytes.byteLength };
     } catch (error) {
       if (error instanceof X402PaymentError) throw error;
       if (state.abort) throw state.abort;
@@ -794,14 +804,14 @@ export class X402ClientService {
 
     if (!state.paymentRequired) {
       // Never saw a 402: free resource, or a non-payment error. Return as-is.
-      return { status: response.status, body, bodyTruncated, headers, paid: false };
+      return { status: response.status, body, bodyTruncated, ...bodyEvidence, headers, paid: false };
     }
 
     const selected = state.selected;
     if (!selected || !state.paymentPayload) {
       // The wrapper returned without creating a payment (a hook supplied
       // headers that satisfied the server). Not something we configure.
-      return { status: response.status, body, bodyTruncated, headers, paid: false };
+      return { status: response.status, body, bodyTruncated, ...bodyEvidence, headers, paid: false };
     }
 
     const sent = this.sentDetails(state, paymentId);
@@ -855,6 +865,7 @@ export class X402ClientService {
       status: response.status,
       body,
       bodyTruncated,
+      ...bodyEvidence,
       headers,
       // No PAYMENT-RESPONSE on a 2xx means the server accepted the request
       // without reporting a settlement: treat as unpaid-until-reconciled.

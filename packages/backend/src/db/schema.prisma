@@ -600,6 +600,9 @@ model ResourcePayment {
   /// Null when no paid response arrived (migration 0027).
   resourceSha256     String?
   resourceBytes      Int?
+  /// True when the paid body exceeded the read limit and only a prefix
+  /// arrived (the transfer was aborted) — partial delivery (migration 0028).
+  resourceTruncated  Boolean?
   error              String?
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt

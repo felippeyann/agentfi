@@ -44,6 +44,7 @@ function row(overrides: Partial<ResourcePayment> = {}): ResourcePayment {
     reconcileNote: null,
     resourceSha256: null,
     resourceBytes: null,
+    resourceTruncated: null,
     error: null,
     createdAt: new Date(NOW.getTime() - 3_600_000),
     updatedAt: new Date(NOW.getTime() - 3_600_000),
