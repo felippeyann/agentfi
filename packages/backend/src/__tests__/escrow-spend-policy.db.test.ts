@@ -188,7 +188,7 @@ describeDb('escrow job reservation on Postgres (C3d review P2-3)', () => {
       if (x402Ok) outcomes.x402++;
 
       // What is committed never exceeds the limit: DailyVolume + counted x402 rows.
-      const x402Rows = await db.resourcePayment.findMany({ where: { agentId: x.id, status: { in: ['reserved', 'pending', 'settled', 'unknown'] } } });
+      const x402Rows = await db.resourcePayment.findMany({ where: { agentId: x.id, status: { in: ['reserved', 'pending', 'settled', 'unknown', 'refused'] } } });
       const x402Usd = x402Rows.reduce((sum, row) => sum + Number(row.amount) / 1e6, 0);
       expect((await committedUsd(x.id)) + x402Usd).toBeLessThanOrEqual(5.2);
       expect(await committedUsd(x.id)).toBe(escrowOk ? 5 : 0);

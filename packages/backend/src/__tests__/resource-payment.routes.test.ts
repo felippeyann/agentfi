@@ -701,7 +701,7 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
       expect(ledger.all()).toHaveLength(1);
     });
 
-    it('once the refused authorization has expired the amount stops counting and the same id is retried on the same row', async () => {
+    it('once the refused authorization has expired on OUR clock it still counts and the same id waits for reconciliation (2026-11-15: no release without chain proof)', async () => {
       const f = await fixture({ price: '$0.40', facilitator: 'reject-verify' });
       const app = await buildApp({ base: f.base });
 
@@ -712,14 +712,21 @@ describe('POST /v1/jobs/:id/pay-resource', () => {
       row!.authorizationValidBefore = new Date(Date.now() - 1000);
 
       const free = await pay(app, { url: `${f.base}/free` });
-      expect(free.json().remainingBudget.remaining).toBe('1000000');
+      expect(free.json().remainingBudget.remaining).toBe('600000');
 
       const retry = await pay(app, { url: f.url, paymentId: PAYMENT_ID });
-      expect(retry.statusCode).toBe(402);
-      expect(retry.json().payment.id).toBe(first.json().payment.id);
-      expect(retry.json().payment.status).toBe('refused');
-      expect(retry.json().payment.authorizationNonce).not.toBe(first.json().payment.authorizationNonce);
-      expect(new Date(retry.json().payment.authorizationValidBefore).getTime()).toBeGreaterThan(Date.now());
+      expect(retry.statusCode).toBe(409);
+      expect(retry.json().code).toBe('AWAITING_RECONCILIATION');
+      expect(retry.json().payment.authorizationNonce).toBe(first.json().payment.authorizationNonce);
+      expect(wallet.signatures).toBe(1);
+      expect(ledger.all()).toHaveLength(1);
+
+      // Once reconciliation proved it dead (`expired`), the same id is retried on the same row.
+      row!.status = 'expired' as LedgerRow['status'];
+      const again = await pay(app, { url: f.url, paymentId: PAYMENT_ID });
+      expect(again.statusCode).toBe(402);
+      expect(again.json().payment.id).toBe(first.json().payment.id);
+      expect(again.json().payment.authorizationNonce).not.toBe(first.json().payment.authorizationNonce);
       expect(wallet.signatures).toBe(2);
       expect(ledger.all()).toHaveLength(1);
     });

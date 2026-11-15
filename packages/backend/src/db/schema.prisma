@@ -578,6 +578,28 @@ model ResourcePayment {
   settlementTxHash   String?
   /// HTTP status of the paid response, when one was received.
   responseStatus     Int?
+  /// Owner token of the attempt that last reserved the row (migration 0027).
+  /// Every write an attempt makes after reserving is conditional on it, and
+  /// reconciliation clears it, so a slow or resumed attempt can never send or
+  /// overwrite after its row was released, taken over by a retry, or judged.
+  attemptId          String?
+  /// Signer of the authorization (the payer's wallet address), set once signed
+  /// (migration 0027): what on-chain reconciliation reads `authorizationState` for.
+  payer              String?
+  /// `eip3009` or `permit2`, set once signed (migration 0027).
+  authorizationMethod String?
+  /// When reconciliation PROVED the transfer on-chain (AuthorizationUsed + a
+  /// matching USDC Transfer payer -> payTo in the same tx). Null = the money is
+  /// at most REPORTED by the server, not proven (migration 0027).
+  chainVerifiedAt    DateTime?
+  /// Last reconciliation pass that looked at the row, and what it concluded.
+  reconciledAt       DateTime?
+  reconcileNote      String?
+  /// Delivery evidence, kept apart from the money: SHA-256 (hex) and size in
+  /// bytes of the paid response body as received (capped at the read limit).
+  /// Null when no paid response arrived (migration 0027).
+  resourceSha256     String?
+  resourceBytes      Int?
   error              String?
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
@@ -595,4 +617,5 @@ enum ResourcePaymentStatus {
   unknown               // timeout / transport error after signing: money may have moved; no automatic retry
   refused               // server answered 4xx/5xx/3xx after signing without reporting a settlement; counted until authorizationValidBefore
   failed_before_signing // 402 parse / budget / scheme / policy error before any signature
+  expired               // reconciliation PROVED the signed authorization can no longer move money (unused on-chain at a block past validBefore, or cancelled); not counted
 }

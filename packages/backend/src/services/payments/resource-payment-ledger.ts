@@ -4,10 +4,18 @@
  *
  * Which rows count against a job budget and the payer's daily volume:
  *
- *   reserved, pending, settled, unknown   always — money reserved, in flight,
- *                                         moved, or possibly moved.
- *   refused                               while its authorization is LIVE.
+ *   reserved, pending, settled, unknown,  always — money reserved, in flight,
+ *   refused                               moved, or possibly moved. Since
+ *                                         2026-11-15 a refusal counts until
+ *                                         reconciliation proves it (settled or
+ *                                         expired): before, it stopped counting
+ *                                         once validBefore passed on OUR clock,
+ *                                         which released budget the server
+ *                                         could already have spent.
  *   failed_before_signing                 never — nothing was signed.
+ *   expired                               never — reconciliation PROVED the
+ *                                         authorization can no longer move
+ *                                         money (migration 0027).
  *
  * `refused` always means "refused AFTER signing": the resource server holds a
  * valid EIP-3009 / Permit2 authorization until `validBefore` and can settle it
@@ -24,7 +32,7 @@
 import type { Prisma, PrismaClient, ResourcePaymentStatus } from '@prisma/client';
 
 /** Statuses that count whatever their age. */
-export const ALWAYS_COUNTED_STATUSES: ResourcePaymentStatus[] = ['reserved', 'pending', 'settled', 'unknown'];
+export const ALWAYS_COUNTED_STATUSES: ResourcePaymentStatus[] = ['reserved', 'pending', 'settled', 'unknown', 'refused'];
 
 /**
  * A refused row without a stored `validBefore` is live this long after its
@@ -49,30 +57,22 @@ export function liveRefusalWhere(now: Date): Prisma.ResourcePaymentWhereInput {
   };
 }
 
-/** Rows that count against a job budget and the daily volume at `now`. */
-export function countedWhere(now: Date): Prisma.ResourcePaymentWhereInput {
-  return {
-    OR: [
-      { status: { in: ALWAYS_COUNTED_STATUSES } },
-      { status: 'refused', authorizationValidBefore: { gt: now } },
-      { status: 'refused', authorizationValidBefore: null, updatedAt: { gt: legacyCutoff(now) } },
-    ],
-  };
+/**
+ * Rows that count against a job budget and the daily volume. `now` is kept
+ * for the callers' signature: counting no longer depends on our clock.
+ */
+export function countedWhere(_now: Date): Prisma.ResourcePaymentWhereInput {
+  return { status: { in: ALWAYS_COUNTED_STATUSES } };
 }
 
 /**
  * Rows a retry with the same `paymentId` may take over: nothing was signed,
- * or a refused authorization has expired. Never `reserved` / `pending` /
- * `settled` / `unknown`, never a live refusal.
+ * or reconciliation proved the authorization dead (`expired`). Never
+ * `reserved` / `pending` / `settled` / `unknown` / `refused` (a refusal
+ * waits for reconciliation; taking the row over would drop its nonce).
  */
-export function retryableWhere(now: Date): Prisma.ResourcePaymentWhereInput {
-  return {
-    OR: [
-      { status: 'failed_before_signing' },
-      { status: 'refused', authorizationValidBefore: { lte: now } },
-      { status: 'refused', authorizationValidBefore: null, updatedAt: { lte: legacyCutoff(now) } },
-    ],
-  };
+export function retryableWhere(_now: Date): Prisma.ResourcePaymentWhereInput {
+  return { status: { in: ['failed_before_signing', 'expired'] } };
 }
 
 interface RefusalFields {
@@ -95,8 +95,8 @@ export function isLiveRefusal(row: RefusalFields, now: Date): boolean {
 
 /** Same predicate as `retryableWhere`, for a row already in memory. */
 export function isRetryable(row: RefusalFields, now: Date): boolean {
-  if (row.status === 'failed_before_signing') return true;
-  return row.status === 'refused' && !isLiveRefusal(row, now);
+  void now;
+  return row.status === 'failed_before_signing' || row.status === 'expired';
 }
 
 /** Sum of base-unit amounts; rows with a malformed amount are skipped. */
