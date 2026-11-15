@@ -92,7 +92,8 @@ function moneyState(row: ResourcePayment, now: Date): MoneyState {
     case 'unknown':
       return 'possibly-moved';
     case 'refused':
-      return isLiveRefusal(row, now) ? 'possibly-moved' : 'not-moved';
+      // Counted until reconciliation proves it either way (2026-11-15).
+      return 'possibly-moved';
     case 'reserved':
       return 'held';
     default:
@@ -122,8 +123,8 @@ function actionFor(row: ResourcePayment, now: Date, staleAfterMs: number): strin
     case 'refused': {
       const until = refusalLiveUntil(row);
       return isLiveRefusal(row, now)
-        ? `server refused but still holds the authorization until ${until?.toISOString()}: reconcile after that time (or earlier to catch a settlement)`
-        : 'refusal lapsed (no longer counted): run `x402:ops reconcile --apply` to prove it never settled';
+        ? `server refused but still holds the authorization until ${until?.toISOString()}: stays counted; reconcile after that time (or earlier to catch a settlement)`
+        : 'refusal window passed but the amount stays counted: run `x402:ops reconcile --apply` (settled if it moved, expired → released otherwise)';
     }
     case 'settled':
       if (!row.chainVerifiedAt) return 'settlement only reported by the server: run `x402:ops reconcile --apply` to prove it on-chain';

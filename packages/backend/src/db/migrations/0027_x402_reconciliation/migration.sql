@@ -4,6 +4,9 @@
 --     authorization can no longer move money (authorizationState unused at a
 --     block whose timestamp is >= validBefore, or an AuthorizationCanceled
 --     event). Not counted against the job budget or the daily volume.
+--   "attemptId" - owner token of the attempt that last reserved the row; every
+--     later write of that attempt is conditional on it and reconciliation
+--     clears it (no late send / overwrite after a release or takeover).
 --   "payer", "authorizationMethod" - who signed and how (set once signed):
 --     what reconciliation needs to read `authorizationState(payer, nonce)`.
 --   "chainVerifiedAt" - when the transfer was proven on-chain
@@ -16,6 +19,7 @@
 ALTER TYPE "ResourcePaymentStatus" ADD VALUE 'expired';
 
 ALTER TABLE "ResourcePayment"
+  ADD COLUMN "attemptId" TEXT,
   ADD COLUMN "payer" TEXT,
   ADD COLUMN "authorizationMethod" TEXT,
   ADD COLUMN "chainVerifiedAt" TIMESTAMP(3),

@@ -578,6 +578,11 @@ model ResourcePayment {
   settlementTxHash   String?
   /// HTTP status of the paid response, when one was received.
   responseStatus     Int?
+  /// Owner token of the attempt that last reserved the row (migration 0027).
+  /// Every write an attempt makes after reserving is conditional on it, and
+  /// reconciliation clears it, so a slow or resumed attempt can never send or
+  /// overwrite after its row was released, taken over by a retry, or judged.
+  attemptId          String?
   /// Signer of the authorization (the payer's wallet address), set once signed
   /// (migration 0027): what on-chain reconciliation reads `authorizationState` for.
   payer              String?

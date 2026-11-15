@@ -15,9 +15,9 @@
  *   AuthorizationUsed(payer, nonce) log whose tx        settled  →  settled +
  *   carries Transfer(payer → payTo, amount)             chainVerifiedAt
  *   authorizationState = false at a block whose         unknown / pending / refused /
- *   timestamp is ≥ validBefore (FiatToken requires      settled  →  expired
- *   block.timestamp < validBefore, so it can never      (not counted any more)
- *   execute again)
+ *   timestamp is ≥ validBefore + margin (FiatToken      settled  →  expired
+ *   requires block.timestamp < validBefore, so it can   (not counted any more)
+ *   never execute again)
  *   authorizationState = true AND an                     → expired (cancelled)
  *   AuthorizationCanceled(payer, nonce) log
  *   `reserved` older than `staleAfterMs` with no         reserved → failed_before_signing
@@ -32,8 +32,8 @@
  * `staleAfterMs` (`in-flight`). A transition is a conditional update on the
  * row's id, status and updatedAt, so it cannot overwrite a concurrent change.
  *
- * Evidence comes from ONE explicit RPC per chain at `latest − confirmations`
- * — never the multi-provider fallback: mixing a local fork with the real
+ * Evidence comes from ONE explicit RPC per chain at a non-reorgable head
+ * (`finalized` by default; `latest − n` only by choice) — never the multi-provider fallback: mixing a local fork with the real
  * network (or two nodes at different heads) could "prove" an unused nonce.
  */
 
@@ -105,15 +105,30 @@ export interface ChainEvidenceReader {
 /** Max blocks per `eth_getLogs` call (public RPCs cap the range). */
 const LOG_CHUNK = 2000n;
 
-export function viemEvidenceReader(client: PublicClient, confirmations = 0): ChainEvidenceReader {
-  if (!Number.isInteger(confirmations) || confirmations < 0) throw new Error('confirmations must be a non-negative integer');
+/**
+ * Which block verdicts are judged at: a block tag the node only moves past
+ * once the block cannot reorg (`finalized`, `safe`), or `latest − n`.
+ * `latest − 0` is only for a local chain or fork (the CLI requires a flag).
+ */
+export type HeadSelector = { tag: 'finalized' | 'safe' } | { confirmations: number };
+
+export function viemEvidenceReader(client: PublicClient, head: HeadSelector = { tag: 'finalized' }): ChainEvidenceReader {
+  if ('confirmations' in head && (!Number.isInteger(head.confirmations) || head.confirmations < 0)) {
+    throw new Error('confirmations must be a non-negative integer');
+  }
   return {
     async chainId() {
       return client.getChainId();
     },
     async head() {
+      if ('tag' in head) {
+        const block = await client.getBlock({ blockTag: head.tag });
+        if (block.number === null) throw new Error(`no ${head.tag} block`);
+        return { number: block.number, timestamp: block.timestamp };
+      }
       const latest = await client.getBlockNumber();
-      const number = latest > BigInt(confirmations) ? latest - BigInt(confirmations) : 0n;
+      const depth = BigInt(head.confirmations);
+      const number = latest > depth ? latest - depth : 0n;
       const block = await client.getBlock({ blockNumber: number });
       return { number, timestamp: block.timestamp };
     },
@@ -173,8 +188,8 @@ export function viemEvidenceReader(client: PublicClient, confirmations = 0): Cha
 }
 
 /** A reader over exactly one RPC URL (no provider fallback — see the header). */
-export function readerForRpcUrl(rpcUrl: string, confirmations = 0): ChainEvidenceReader {
-  return viemEvidenceReader(createPublicClient({ transport: http(rpcUrl, { retryCount: 2 }) }) as PublicClient, confirmations);
+export function readerForRpcUrl(rpcUrl: string, head: HeadSelector = { tag: 'finalized' }): ChainEvidenceReader {
+  return viemEvidenceReader(createPublicClient({ transport: http(rpcUrl, { retryCount: 2 }) }) as PublicClient, head);
 }
 
 // ── Verdicts ─────────────────────────────────────────────────────────────────
@@ -192,11 +207,21 @@ export type ReconcileVerdict =
 export interface ReconcileOptions {
   now?: Date;
   staleAfterMs?: number;
+  /**
+   * `expired` needs the judged head to be at least this many seconds past
+   * validBefore (default 60): on top of a non-reorgable head, it keeps a
+   * block produced right at the boundary from deciding alone.
+   */
+  expiryMarginSeconds?: number;
 }
+
+/** Default margin past validBefore before `expired` (see `ReconcileOptions`). */
+export const DEFAULT_EXPIRY_MARGIN_SECONDS = 60;
 
 type RowForReconcile = Pick<
   ResourcePayment,
   | 'id'
+  | 'attemptId'
   | 'status'
   | 'network'
   | 'asset'
@@ -269,7 +294,9 @@ export async function examineRow(
     return { kind: 'manual', note: `status ${row.status} not handled` };
   }
 
-  const method = row.authorizationMethod ?? (row.authorizationNonce && EIP3009_NONCE.test(row.authorizationNonce) ? 'eip3009' : null);
+  // Never inferred from the nonce shape: a Permit2 row judged against the
+  // USDC contract would look "unused" and lapse while its transfer happened.
+  const method = row.authorizationMethod;
   if (method !== 'eip3009') {
     return {
       kind: 'manual',
@@ -345,18 +372,19 @@ export async function examineRow(
     };
   }
 
-  if (head.timestamp >= validBefore) {
+  const margin = BigInt(options.expiryMarginSeconds ?? DEFAULT_EXPIRY_MARGIN_SECONDS);
+  if (head.timestamp >= validBefore + margin) {
     return {
       kind: 'expired',
       reason: 'lapsed-unused',
       atBlock: head.number,
-      note: `authorization unused at block ${head.number} (timestamp ${head.timestamp} ≥ validBefore ${validBefore}): it can never move money (was ${row.status})`,
+      note: `authorization unused at block ${head.number} (timestamp ${head.timestamp} ≥ validBefore ${validBefore} + ${margin} s): it can never move money (was ${row.status})`,
     };
   }
   return {
     kind: 'wait',
     until: row.authorizationValidBefore,
-    note: `authorization unused so far but still valid until ${row.authorizationValidBefore.toISOString()}: the amount stays held`,
+    note: `authorization unused at block ${head.number}; judged expired only once a non-reorgable head is ${margin} s past validBefore ${row.authorizationValidBefore.toISOString()}: the amount stays held`,
   };
 }
 
@@ -377,16 +405,18 @@ function transition(row: RowForReconcile, verdict: ReconcileVerdict, now: Date):
     case 'confirmed':
       return {
         status: 'settled',
+        attemptId: null,
         settlementTxHash: verdict.txHash,
         chainVerifiedAt: now,
         reconciledAt: now,
         reconcileNote: verdict.note,
       };
     case 'expired':
-      return { status: 'expired', reconciledAt: now, reconcileNote: verdict.note };
+      return { status: 'expired', attemptId: null, reconciledAt: now, reconcileNote: verdict.note };
     case 'release-unsigned':
       return {
         status: 'failed_before_signing',
+        attemptId: null,
         reconciledAt: now,
         reconcileNote: verdict.note,
         error: `Abandoned ${row.status} reservation released by reconciliation (nothing was signed and sent)`,
@@ -441,6 +471,7 @@ export async function reconcileResourcePayments(
           verdict = await examineRow(row, reader ?? NO_READER, {
             now,
             ...(options.staleAfterMs !== undefined ? { staleAfterMs: options.staleAfterMs } : {}),
+            ...(options.expiryMarginSeconds !== undefined ? { expiryMarginSeconds: options.expiryMarginSeconds } : {}),
           });
         }
       } catch (error) {

@@ -3,7 +3,8 @@
  *
  *   npm run x402:ops -- status    [--agent <id>] [--job <id>] [--json]
  *   npm run x402:ops -- reconcile [--agent <id>] [--job <id>] [--apply]
- *                                 [--confirmations N] [--stale-minutes M] [--rpc <url>] [--json]
+ *                                 [--head finalized|safe | --confirmations N [--local-chain]]
+ *                                 [--expiry-margin-seconds S] [--stale-minutes M] [--rpc <url>] [--json]
  *
  * `status` is read-only: authorized limits, committed / proven / reported /
  * open spend per job, delivery evidence, block reasons and the action each
@@ -16,12 +17,16 @@
  * `services/payments/resource-payment-reconciliation.ts`). Evidence comes
  * from ONE RPC per chain — `--rpc`, else the chain's primary RPC
  * (`RPC_URL_<chainId>` when set) — never the provider fallback.
- * `--confirmations` defaults to 12; pass 0 only on a local chain or fork.
+ * Verdicts are judged at the `finalized` block by default (`--head safe`, or
+ * `--confirmations N` for `latest − N`); `--confirmations 0` is refused unless
+ * `--local-chain` says the RPC is a local chain or fork. `expired` also needs
+ * that head to be `--expiry-margin-seconds` (default 60) past validBefore.
  *
  * Runs with the backend's own env (DATABASE_URL, RPC_URL_<chainId>).
  */
 import type { PrismaClient } from '@prisma/client';
 import {
+  type HeadSelector,
   chainIdOfNetwork,
   readerForRpcUrl,
   reconcilableWhere,
@@ -37,7 +42,8 @@ export interface OpsArgs {
   jobId?: string;
   apply: boolean;
   json: boolean;
-  confirmations: number;
+  head: HeadSelector;
+  expiryMarginSeconds?: number;
   staleMinutes?: number;
   rpc?: string;
 }
@@ -49,16 +55,35 @@ export function parseOpsArgs(argv: string[]): OpsArgs | string {
     const i = argv.indexOf(flag);
     return i >= 0 ? argv[i + 1] : undefined;
   };
-  const confirmations = value('--confirmations') !== undefined ? Number(value('--confirmations')) : 12;
-  if (!Number.isInteger(confirmations) || confirmations < 0) return '--confirmations must be a non-negative integer';
+  let head: HeadSelector = { tag: 'finalized' };
+  const headTag = value('--head');
+  const confirmationsRaw = value('--confirmations');
+  if (headTag !== undefined && confirmationsRaw !== undefined) return 'use either --head or --confirmations';
+  if (headTag !== undefined) {
+    if (headTag !== 'finalized' && headTag !== 'safe') return '--head must be finalized or safe';
+    head = { tag: headTag };
+  }
+  if (confirmationsRaw !== undefined) {
+    const confirmations = Number(confirmationsRaw);
+    if (!Number.isInteger(confirmations) || confirmations < 0) return '--confirmations must be a non-negative integer';
+    if (confirmations === 0 && !argv.includes('--local-chain')) {
+      return '--confirmations 0 judges at an unsafe head: only with --local-chain (a local chain or fork)';
+    }
+    head = { confirmations };
+  }
+  const margin = value('--expiry-margin-seconds');
+  if (margin !== undefined && !(Number.isInteger(Number(margin)) && Number(margin) >= 0)) {
+    return '--expiry-margin-seconds must be a non-negative integer';
+  }
   const stale = value('--stale-minutes');
   if (stale !== undefined && !(Number(stale) > 0)) return '--stale-minutes must be positive';
   const args: OpsArgs = {
     command,
     apply: argv.includes('--apply'),
     json: argv.includes('--json'),
-    confirmations,
+    head,
   };
+  if (margin !== undefined) args.expiryMarginSeconds = Number(margin);
   const agentId = value('--agent');
   const jobId = value('--job');
   const rpc = value('--rpc');
@@ -94,7 +119,7 @@ export interface OpsDeps {
   /** RPC URL for a chain (defaults to the backend's primary RPC). */
   rpcFor: (chainId: number) => string;
   print: (line: string) => void;
-  readerFor?: (rpcUrl: string, confirmations: number) => ChainEvidenceReader;
+  readerFor?: (rpcUrl: string, head: HeadSelector) => ChainEvidenceReader;
 }
 
 export async function runOps(args: OpsArgs, deps: OpsDeps): Promise<number> {
@@ -124,8 +149,9 @@ export async function runOps(args: OpsArgs, deps: OpsDeps): Promise<number> {
     const chainId = chainIdOfNetwork(network);
     if (chainId === null || readers.has(chainId)) continue;
     const url = args.rpc ?? deps.rpcFor(chainId);
-    if (!args.json) deps.print(`Chain ${chainId}: evidence from ${hostOf(url)} at latest − ${args.confirmations} blocks`);
-    readers.set(chainId, makeReader(url, args.confirmations));
+    const at = 'tag' in args.head ? `the ${args.head.tag} block` : `latest − ${args.head.confirmations} blocks`;
+    if (!args.json) deps.print(`Chain ${chainId}: evidence from ${hostOf(url)} at ${at}`);
+    readers.set(chainId, makeReader(url, args.head));
   }
   const results = await reconcileResourcePayments(deps.db, {
     readers,
@@ -133,6 +159,7 @@ export async function runOps(args: OpsArgs, deps: OpsDeps): Promise<number> {
     ...(args.agentId ? { agentId: args.agentId } : {}),
     ...(args.jobId ? { jobId: args.jobId } : {}),
     ...(staleAfterMs !== undefined ? { staleAfterMs } : {}),
+    ...(args.expiryMarginSeconds !== undefined ? { expiryMarginSeconds: args.expiryMarginSeconds } : {}),
   });
   deps.print(
     args.json

@@ -233,10 +233,18 @@ describe('pay-resource ledger on Postgres (P6)', () => {
     ).rejects.toMatchObject({ code: 'OUTSTANDING_AUTHORIZATION' });
     expect(wallet.signatures).toBe(signed);
 
-    // Once validBefore has passed it stops counting and the id is retried on the same row.
+    // Once validBefore has passed on our clock it STILL counts (2026-11-15): only
+    // reconciliation on-chain releases it; the same id waits, nothing is signed.
     await db.resourcePayment.update({ where: { id: row!.id }, data: { authorizationValidBefore: new Date(Date.now() - 1000) } });
     const free = await svc.payForResource({ jobId: job.id, agentId: provider.id, url: `${f.base}/free`, method: 'GET' });
-    expect(free.remainingBudget.remaining).toBe('1000000');
+    expect(free.remainingBudget.remaining).toBe('600000');
+    await expect(
+      svc.payForResource({ jobId: job.id, agentId: provider.id, url: f.url, method: 'GET', paymentId }),
+    ).rejects.toMatchObject({ code: 'AWAITING_RECONCILIATION' });
+    expect(wallet.signatures).toBe(signed);
+    // Proven dead by reconciliation (`expired`): released, and the id is retried on the same row.
+    await db.resourcePayment.update({ where: { id: row!.id }, data: { status: 'expired' } });
+    expect((await svc.payForResource({ jobId: job.id, agentId: provider.id, url: `${f.base}/free`, method: 'GET' })).remainingBudget.remaining).toBe('1000000');
     await expect(
       svc.payForResource({ jobId: job.id, agentId: provider.id, url: f.url, method: 'GET', paymentId }),
     ).rejects.toMatchObject({ code: 'PAYMENT_REFUSED' });

@@ -36,6 +36,7 @@ function row(overrides: Partial<ResourcePayment> = {}): ResourcePayment {
     receiptVerified: null,
     settlementTxHash: null,
     responseStatus: null,
+    attemptId: null,
     payer: PAYER,
     authorizationMethod: 'eip3009',
     chainVerifiedAt: null,
@@ -79,11 +80,15 @@ describe('examineRow — x402 reconciliation verdicts', () => {
     }
   });
 
-  it('unused at a block whose timestamp is ≥ validBefore → expired (lapsed-unused)', async () => {
+  it('unused at a judged head ≥ validBefore + margin → expired (lapsed-unused); inside the margin → wait', async () => {
     const chain = fakeChain();
     const r = row();
-    chain.at(sec(r.authorizationValidBefore!));
+    chain.at(sec(r.authorizationValidBefore!) + 59);
+    expect((await examineRow(r, chain, { now: NOW })).kind).toBe('wait');
+    chain.at(sec(r.authorizationValidBefore!) + 60);
     expect(await examineRow(r, chain, { now: NOW })).toMatchObject({ kind: 'expired', reason: 'lapsed-unused' });
+    chain.at(sec(r.authorizationValidBefore!));
+    expect(await examineRow(r, chain, { now: NOW, expiryMarginSeconds: 0 })).toMatchObject({ kind: 'expired' });
   });
 
   it('our clock past validBefore is NOT evidence: a chain head still before it → wait', async () => {
@@ -144,11 +149,11 @@ describe('examineRow — x402 reconciliation verdicts', () => {
     expect(chain.reads).toEqual([]);
   });
 
-  it('a legacy row without authorizationMethod but with a 32-byte nonce is read as EIP-3009', async () => {
+  it('no authorizationMethod → manual even with a 32-byte nonce (never inferred: a Permit2 row would wrongly lapse)', async () => {
     const chain = fakeChain();
     const r = row({ authorizationMethod: null });
-    chain.use(r);
-    expect((await examineRow(r, chain, { now: NOW })).kind).toBe('confirmed');
+    expect((await examineRow(r, chain, { now: NOW })).kind).toBe('manual');
+    expect(chain.reads).toEqual([]);
   });
 
   it('chainIdOfNetwork parses CAIP-2 eip155 only', () => {

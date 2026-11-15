@@ -93,8 +93,16 @@ async function setup(amount = '1', options: FixtureOptions = {}, policy: Record<
   open.push(server.close);
   let paidRequests = 0;
   const transport = loopbackOnly(server.base);
-  const counting: typeof fetch = (input, init) => {
-    if (isPaidRequest(input)) paidRequests++;
+  const hooks: { beforePaid: (() => Promise<'drop' | void>) | null } = { beforePaid: null };
+  const counting: typeof fetch = async (input, init) => {
+    if (isPaidRequest(input)) {
+      paidRequests++;
+      if (hooks.beforePaid) {
+        const hook = hooks.beforePaid;
+        hooks.beforePaid = null;
+        if ((await hook()) === 'drop') throw new Error('socket hang up');
+      }
+    }
     return transport(input, init);
   };
   const svc = new ResourcePaymentService({
@@ -114,6 +122,7 @@ async function setup(amount = '1', options: FixtureOptions = {}, policy: Record<
     chain,
     readers,
     pay,
+    hooks,
     paidRequests: () => paidRequests,
     reconcile: (apply = true, staleAfterMs?: number) =>
       reconcileResourcePayments(db, { readers, apply, jobId: job.id, ...(staleAfterMs !== undefined ? { staleAfterMs } : {}) }),
@@ -193,7 +202,7 @@ describe('x402 reconciliation on Postgres', () => {
     t.chain.at(sec(unknown.authorizationValidBefore!) - 1);
     expect((await t.reconcile())[0]!.verdict.kind).toBe('wait');
 
-    t.chain.at(sec(unknown.authorizationValidBefore!));
+    t.chain.at(sec(unknown.authorizationValidBefore!) + 60);
     const [result] = await t.reconcile();
     expect(result).toMatchObject({ applied: true, verdict: { kind: 'expired', reason: 'lapsed-unused' } });
     expect((await onlyRow(t.job.id)).status).toBe('expired');
@@ -283,29 +292,89 @@ describe('x402 reconciliation on Postgres', () => {
     expect((await onlyRow(t.job.id)).status).toBe('settled');
   });
 
-  it('a refusal that lapsed (no longer counted) but did settle on-chain is brought back as settled and flagged over-committed when it exceeds the budget', async () => {
+  it('a refusal stays counted after validBefore passes on our clock (the budget is not spent twice); the chain then decides', async () => {
     const t = await setup('0.5', { facilitator: 'reject-verify' });
-    await expect(t.pay(`refA_${tag}_0123456789`)).rejects.toMatchObject({ code: 'PAYMENT_REFUSED' });
+    const paymentId = `refA_${tag}_0123456789`;
+    await expect(t.pay(paymentId)).rejects.toMatchObject({ code: 'PAYMENT_REFUSED' });
     const refused = await onlyRow(t.job.id);
     expect(refused.status).toBe('refused');
-    // Time passes: the refusal stops counting on our clock.
+    // Time passes on our clock: before 2026-11-15 this released the budget.
     await db.resourcePayment.update({ where: { id: refused.id }, data: { authorizationValidBefore: new Date(Date.now() - 1000) } });
-    expect(await counted(t.job.id)).toBe(0n);
-    // Meanwhile the budget was used by another payment to another payee.
+    expect(await counted(t.job.id)).toBe(400_000n);
     t.fixtureOptions.facilitator = 'accept';
-    await db.resourcePayment.create({
-      data: {
-        jobId: t.job.id, agentId: t.provider.id, paymentId: `other_${tag}_0123456789`, url: 'https://other.example/x', method: 'GET',
-        network: 'eip155:84532', asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', amount: '400000', payTo: '0x4444444444444444444444444444444444444444',
-        status: 'settled', chainVerifiedAt: new Date(),
-      },
-    });
+    const before = wallet.signatures;
+    // Same id: waits for reconciliation (its nonce must stay on the row).
+    await expect(t.pay(paymentId)).rejects.toMatchObject({ code: 'AWAITING_RECONCILIATION' });
+    // Another purchase does not fit the 0.5 budget while the refusal counts.
+    await expect(t.pay(`refB_${tag}_0123456789`)).rejects.toMatchObject({ code: 'BUDGET_EXCEEDED' });
+    expect(wallet.signatures).toBe(before);
+
+    // The server had settled after all: proven, still counted once, never over-committed.
     t.chain.use(refused);
     const results = await t.reconcile();
     expect(results.find((r) => r.row.id === refused.id)).toMatchObject({ applied: true, verdict: { kind: 'confirmed' } });
-    expect(await counted(t.job.id)).toBe(800_000n);
+    expect(await counted(t.job.id)).toBe(400_000n);
     const [agent] = await buildSpendReport(db, { jobId: t.job.id });
-    expect(agent!.jobs[0]).toMatchObject({ overCommitted: true, committedUsdc: '0.8', provenUsdc: '0.8', budgetUsdc: '0.5' });
+    expect(agent!.jobs[0]).toMatchObject({ overCommitted: false, committedUsdc: '0.4', provenUsdc: '0.4', budgetUsdc: '0.5' });
+  });
+
+  it('ABA: a slow attempt whose row was released AND taken over by a retry cannot send or overwrite (owner token)', async () => {
+    const t = await setup('1');
+    const paymentId = `aba_${tag}_0123456789`;
+    let retry: Awaited<ReturnType<typeof t.pay>> | undefined;
+    // While attempt A is signing: reconciliation releases its row, then retry B pays in full on the same row.
+    onSign = async () => {
+      onSign = null;
+      await reconcileResourcePayments(db, { readers: t.readers, apply: true, jobId: t.job.id, staleAfterMs: 0 });
+      retry = await t.pay(paymentId);
+    };
+    const error = await t.pay(paymentId).catch((e: unknown) => e);
+    expect((error as ResourcePaymentError).code).toBe('LEDGER_ERROR');
+    expect(retry?.payment?.status).toBe('settled');
+    // A signed but never sent; only B's request reached the server, B's outcome is intact.
+    expect(t.paidRequests()).toBe(1);
+    expect(t.server.counts.settle).toBe(1);
+    const row = await onlyRow(t.job.id);
+    expect(row.status).toBe('settled');
+    expect(row.attemptId).toBe(retry!.payment!.attemptId);
+    expect(await counted(t.job.id)).toBe(400_000n);
+  });
+
+  it('a late outcome write after reconciliation proved the payment is skipped: proven stays proven and counted', async () => {
+    const t = await setup('1');
+    // The paid request is in flight; reconciliation proves it on-chain; then the response is lost.
+    t.hooks.beforePaid = async () => {
+      const pending = await onlyRow(t.job.id);
+      expect(pending.status).toBe('pending');
+      t.chain.use(pending);
+      await reconcileResourcePayments(db, { readers: t.readers, apply: true, jobId: t.job.id, staleAfterMs: 0 });
+      return 'drop';
+    };
+    await expect(t.pay(`late_${tag}_0123456789`)).rejects.toMatchObject({ code: 'PAYMENT_OUTCOME_UNKNOWN' });
+    const row = await onlyRow(t.job.id);
+    expect(row.status).toBe('settled');
+    expect(row.chainVerifiedAt).toBeInstanceOf(Date);
+    expect(row.attemptId).toBeNull();
+    expect(await counted(t.job.id)).toBe(400_000n);
+  });
+
+  it('a retry that takes over an expired row clears the previous attempt\'s evidence', async () => {
+    const t = await setup('1', { stall: 'paid' });
+    const paymentId = `clear_${tag}_0123456789`;
+    await expect(t.pay(paymentId)).rejects.toMatchObject({ code: 'PAYMENT_OUTCOME_UNKNOWN' });
+    const first = await onlyRow(t.job.id);
+    await db.resourcePayment.update({ where: { id: first.id }, data: { resourceSha256: 'f'.repeat(64), resourceBytes: 9 } });
+    t.chain.at(sec(first.authorizationValidBefore!) + 60);
+    await t.reconcile();
+    expect((await onlyRow(t.job.id)).status).toBe('expired');
+    // The retry takes the row over and pays: nothing of the previous attempt survives.
+    delete t.fixtureOptions.stall;
+    await t.pay(paymentId);
+    const row = await onlyRow(t.job.id);
+    expect(row).toMatchObject({ status: 'settled', reconcileNote: null, reconciledAt: null, chainVerifiedAt: null });
+    expect(row.resourceSha256).not.toBe('f'.repeat(64));
+    expect(row.authorizationNonce).not.toBe(first.authorizationNonce);
+    expect(row.attemptId).not.toBe(first.attemptId);
   });
 
   it('the operator report separates money from delivery and names the action', async () => {

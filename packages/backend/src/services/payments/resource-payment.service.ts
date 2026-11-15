@@ -141,6 +141,7 @@ export type ResourcePaymentErrorCode =
   | 'PAYMENT_IN_PROGRESS'
   | 'PAYMENT_ID_CONFLICT'
   | 'OUTSTANDING_AUTHORIZATION'
+  | 'AWAITING_RECONCILIATION'
   | 'PAYMENT_REFUSED'
   | 'PAYMENT_FAILED'
   | 'PAYMENT_OUTCOME_UNKNOWN'
@@ -178,6 +179,7 @@ const UNRECORDED_CODES: ReadonlySet<ResourcePaymentErrorCode> = new Set([
   'PAYMENT_IN_PROGRESS',
   'PAYMENT_ID_CONFLICT',
   'OUTSTANDING_AUTHORIZATION',
+  'AWAITING_RECONCILIATION',
   'JOB_NOT_ACTIVE',
   'JOB_NOT_FOUND',
   'POLICY_PAUSED',
@@ -538,8 +540,10 @@ export class ResourcePaymentService {
       // re-signing is exactly how a server that answers "refused" and
       // settles anyway would drain the wallet. Nothing is fetched.
       if (isLiveRefusal(existing, now)) throw this.outstandingAuthorization(existing, paymentId);
-      // failed_before_signing, or a refusal whose authorization expired: a
-      // fresh attempt on the same row.
+      // A refusal whose window passed on our clock: still counted, and its
+      // nonce must stay on the row until reconciliation judges it.
+      if (existing.status === 'refused') throw this.awaitingReconciliation(existing, paymentId);
+      // failed_before_signing, or expired (proven dead): a fresh attempt on the same row.
     }
 
     const spent = await this.spent(job.id, now);
@@ -651,8 +655,7 @@ export class ResourcePaymentService {
     if (result.status < 400) {
       // 2xx without a settlement report: the server accepted the paid request
       // but told us nothing about the money. Treat as unknown-until-reconciled.
-      const unknown = await this.db.resourcePayment.update({
-        where: { id: row.id },
+      const unknown = await this.ownedUpdate(row, {
         data: {
           status: 'unknown',
           responseStatus: result.status,
@@ -671,8 +674,7 @@ export class ResourcePaymentService {
 
     // 4xx/5xx after signing with no settlement report: refused — but the
     // server holds the authorization, so it keeps counting until it expires.
-    const refused = await this.db.resourcePayment.update({
-      where: { id: row.id },
+    const refused = await this.ownedUpdate(row, {
       data: {
         ...this.refusedData(row, attempt, payment.authorization, {
           responseStatus: result.status,
@@ -742,8 +744,7 @@ export class ResourcePaymentService {
       );
     }
 
-    const refused = await this.db.resourcePayment.update({
-      where: { id: row.id },
+    const refused = await this.ownedUpdate(row, {
       data: this.refusedData(
         row,
         attempt,
@@ -788,8 +789,7 @@ export class ResourcePaymentService {
     delivery: DeliveryEvidence | Record<string, never> = {},
   ): Promise<ResourcePayment> {
     const receiptUnverified = payment.receipt !== undefined && payment.receiptVerified === false;
-    const settled = await this.db.resourcePayment.update({
-      where: { id: row.id },
+    const settled = await this.ownedUpdate(row, {
       data: {
         ...delivery,
         status: 'settled',
@@ -836,7 +836,7 @@ export class ResourcePaymentService {
       if (UNRECORDED_CODES.has(error.code)) return error;
       // LEDGER_ERROR from `markPending`: signed, but the payload never left.
       if (attempt.row) {
-        await this.safeUpdate(attempt.row.id, { status: 'failed_before_signing', error: clip(error.message) });
+        await this.safeUpdate(attempt.row, { status: 'failed_before_signing', error: clip(error.message) });
       }
       return error;
     }
@@ -881,7 +881,7 @@ export class ResourcePaymentService {
         // 402 unparseable or oversized, library refused to create the
         // payment, or the plain request failed / timed out: nothing was signed.
         let row: ResourcePayment | null = attempt.row ?? null;
-        if (row) row = await this.safeUpdate(row.id, { status: 'failed_before_signing', error: clip(error.message) });
+        if (row) row = await this.safeUpdate(row, { status: 'failed_before_signing', error: clip(error.message) });
         return new ResourcePaymentError('PAYMENT_FAILED', 502, error.message, {
           paymentId,
           stage: details['stage'],
@@ -905,7 +905,7 @@ export class ResourcePaymentService {
         const reason = typeof details['reason'] === 'string' ? details['reason'] : error.message;
         if (row) {
           row = await this.safeUpdate(
-            row.id,
+            row,
             this.refusedData(row, attempt, authorization, { responseStatus: details['status'], error: reason }),
           );
           if (row) this.logRefusedAfterSigning(ctx, row, `HTTP ${details['status']}: ${clip(reason, 200)}`);
@@ -927,11 +927,11 @@ export class ResourcePaymentService {
 
       // Transport failure or timeout after the signed payload left: unknown.
       if (row) {
-        row = await this.safeUpdate(row.id, {
+        row = await this.safeUpdate(row, {
           status: 'unknown',
           ...(authorization
             ? {
-                payer: row.payer ?? ctx.payer,
+                payer: ctx.payer,
                 authorizationMethod: authorization.method,
                 authorizationNonce: authorization.nonce,
                 authorizationValidBefore: unixSecondsToDate(authorization.validBefore) ?? row.authorizationValidBefore,
@@ -958,7 +958,7 @@ export class ResourcePaymentService {
     logger.warn({ jobId: ctx.jobId, paymentId, err: error }, 'Resource payment attempt failed');
     if (attempt.row) {
       const next = attempt.row.status === 'pending' ? 'unknown' : 'failed_before_signing';
-      const row = await this.safeUpdate(attempt.row.id, {
+      const row = await this.safeUpdate(attempt.row, {
         status: next,
         error: clip(error instanceof Error ? error.message : String(error)),
       });
@@ -1012,9 +1012,9 @@ export class ResourcePaymentService {
             throw this.paymentIdConflict(current, ctx.paymentId);
           }
           if (!isRetryable(current, now)) {
-            throw isLiveRefusal(current, now)
-              ? this.outstandingAuthorization(current, ctx.paymentId)
-              : this.inProgress(ctx.paymentId, current.status);
+            if (isLiveRefusal(current, now)) throw this.outstandingAuthorization(current, ctx.paymentId);
+            if (current.status === 'refused') throw this.awaitingReconciliation(current, ctx.paymentId);
+            throw this.inProgress(ctx.paymentId, current.status);
           }
         }
 
@@ -1073,8 +1073,16 @@ export class ResourcePaymentService {
           amount: selected.amount,
           payTo: selected.payTo,
           reservedAt: now,
+          attemptId: randomUUID(),
           authorizationNonce: null,
           authorizationValidBefore: null,
+          payer: null,
+          authorizationMethod: null,
+          chainVerifiedAt: null,
+          reconciledAt: null,
+          reconcileNote: null,
+          resourceSha256: null,
+          resourceBytes: null,
           receiptVerified: null,
           settlementTxHash: null,
           responseStatus: null,
@@ -1116,7 +1124,7 @@ export class ResourcePaymentService {
     let claimed: number;
     try {
       ({ count: claimed } = await this.db.resourcePayment.updateMany({
-        where: { id: row.id, status: 'reserved' },
+        where: { id: row.id, status: 'reserved', attemptId: row.attemptId },
         data: {
           status: 'pending',
           payer,
@@ -1165,7 +1173,7 @@ export class ResourcePaymentService {
     authorization: AuthorizationInfo | undefined,
     fields: { responseStatus: unknown; error: string },
     clipOptions: SanitizeOptions = {},
-  ): Prisma.ResourcePaymentUpdateInput {
+  ): Prisma.ResourcePaymentUpdateManyMutationInput {
     const windowSeconds = attempt.selected?.maxTimeoutSeconds || MAX_AUTHORIZATION_WINDOW_SECONDS;
     const validBefore =
       unixSecondsToDate(authorization?.validBefore) ??
@@ -1243,11 +1251,38 @@ export class ResourcePaymentService {
     }
   }
 
-  private async safeUpdate(id: string, data: Prisma.ResourcePaymentUpdateInput): Promise<ResourcePayment | null> {
+  /**
+   * Writes an attempt's outcome only while that attempt still owns the row
+   * (same `attemptId`): after reconciliation released or judged it (it
+   * clears `attemptId`) or a retry took it over (new `attemptId`), a late
+   * write is skipped and the current row is returned. Throws on DB errors.
+   */
+  private async ownedUpdate(
+    row: Pick<ResourcePayment, 'id' | 'attemptId'>,
+    args: { data: Prisma.ResourcePaymentUpdateManyMutationInput },
+  ): Promise<ResourcePayment> {
+    const { count } = await this.db.resourcePayment.updateMany({
+      where: { id: row.id, attemptId: row.attemptId },
+      data: args.data,
+    });
+    const current = await this.db.resourcePayment.findUniqueOrThrow({ where: { id: row.id } });
+    if (count !== 1) {
+      logger.error(
+        { resourcePaymentId: row.id, attemptId: row.attemptId, status: current.status, data: args.data },
+        'Resource payment write skipped: this attempt no longer owns the row (released, judged by reconciliation, or taken over by a retry)',
+      );
+    }
+    return current;
+  }
+
+  private async safeUpdate(
+    row: Pick<ResourcePayment, 'id' | 'attemptId'>,
+    data: Prisma.ResourcePaymentUpdateManyMutationInput,
+  ): Promise<ResourcePayment | null> {
     try {
-      return await this.db.resourcePayment.update({ where: { id }, data });
+      return await this.ownedUpdate(row, { data });
     } catch (error) {
-      logger.error({ resourcePaymentId: id, data, err: error }, 'Could not update the resource payment ledger row');
+      logger.error({ resourcePaymentId: row.id, data, err: error }, 'Could not update the resource payment ledger row');
       return null;
     }
   }
@@ -1321,7 +1356,17 @@ export class ResourcePaymentService {
     const until = refusalLiveUntil(row);
     return (
       `The server still holds the signed authorization and could settle it until ${until?.toISOString() ?? 'it expires'}: ` +
-      `the amount stays counted against the job budget until then, and no new payment to ${row.payTo} is signed on this job before it expires.`
+      `the amount stays counted against the job budget until reconciliation proves whether it moved, and no new payment to ${row.payTo} is signed on this job before it expires.`
+    );
+  }
+
+  private awaitingReconciliation(row: ResourcePayment, paymentId: string): ResourcePaymentError {
+    return new ResourcePaymentError(
+      'AWAITING_RECONCILIATION',
+      409,
+      `Payment ${paymentId} was refused by the resource server after signing; it stays counted until an operator reconciles it on-chain ` +
+        '(`x402:ops reconcile`: settled if the transfer happened, expired otherwise). Nothing was fetched or signed.',
+      { paymentId, payment: row },
     );
   }
 
