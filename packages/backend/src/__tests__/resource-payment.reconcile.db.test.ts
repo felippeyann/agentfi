@@ -24,7 +24,7 @@ vi.mock('../api/middleware/logger.js', () => ({
 }));
 vi.mock('../services/wallet/index.js', () => ({ getWalletService: () => ({}) }));
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import type { TypedDataDefinition } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
@@ -93,9 +93,10 @@ async function setup(amount = '1', options: FixtureOptions = {}, policy: Record<
   open.push(server.close);
   let paidRequests = 0;
   const transport = loopbackOnly(server.base);
-  const hooks: { beforePaid: (() => Promise<'drop' | void>) | null } = { beforePaid: null };
+  const hooks: { beforePaid: (() => Promise<'drop' | void>) | null; paidBody: Uint8Array | null } = { beforePaid: null, paidBody: null };
   const counting: typeof fetch = async (input, init) => {
-    if (isPaidRequest(input)) {
+    const paid = isPaidRequest(input);
+    if (paid) {
       paidRequests++;
       if (hooks.beforePaid) {
         const hook = hooks.beforePaid;
@@ -103,7 +104,11 @@ async function setup(amount = '1', options: FixtureOptions = {}, policy: Record<
         if ((await hook()) === 'drop') throw new Error('socket hang up');
       }
     }
-    return transport(input, init);
+    const response = await transport(input, init);
+    if (!paid || !hooks.paidBody) return response;
+    // Same status and headers (PAYMENT-RESPONSE included), other body bytes.
+    await response.arrayBuffer();
+    return new Response(Buffer.from(hooks.paidBody), { status: response.status, headers: response.headers });
   };
   const svc = new ResourcePaymentService({
     db,
@@ -407,6 +412,30 @@ describe('x402 reconciliation on Postgres', () => {
     expect((await resolveManually(db, { ...base, note: 'again', apply: true })).ok).toBe(false);
     [agent] = await buildSpendReport(db, { jobId: t.job.id });
     expect(agent!.jobs[0]!.payments[0]!.action).toBeNull();
+  });
+
+  it('delivery evidence is the digest of the BYTES received (a BOM survives), not of the decoded text', async () => {
+    const t = await setup('1');
+    const bytes = new Uint8Array([0xef, 0xbb, 0xbf, 0x61]);
+    t.hooks.paidBody = bytes;
+    await t.pay(`bom_${tag}_0123456789`);
+    const row = await onlyRow(t.job.id);
+    expect(row).toMatchObject({ status: 'settled', resourceBytes: 4, resourceTruncated: false });
+    expect(row.resourceSha256).toBe(createHash('sha256').update(bytes).digest('hex'));
+  });
+
+  it('a paid body above the read limit is recorded as partial delivery, and the report asks for action even once proven', async () => {
+    const t = await setup('1');
+    t.hooks.paidBody = new Uint8Array(70 * 1024).fill(0x61);
+    await t.pay(`big_${tag}_0123456789`);
+    const row = await onlyRow(t.job.id);
+    expect(row).toMatchObject({ status: 'settled', resourceBytes: 64 * 1024, resourceTruncated: true });
+    t.chain.use(row);
+    await t.reconcile();
+    const [agent] = await buildSpendReport(db, { jobId: t.job.id });
+    const line = agent!.jobs[0]!.payments[0]!;
+    expect(line).toMatchObject({ money: 'proven', delivery: 'partial' });
+    expect(line.action).toContain('only the first 65536 bytes');
   });
 
   it('the operator report separates money from delivery and names the action', async () => {

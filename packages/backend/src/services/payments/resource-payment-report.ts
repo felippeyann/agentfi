@@ -22,7 +22,7 @@ import { DEFAULT_STALE_AFTER_MS } from './resource-payment-reconciliation.js';
 import { ResourcePaymentService } from './resource-payment.service.js';
 
 export type MoneyState = 'proven' | 'reported' | 'possibly-moved' | 'held' | 'not-moved';
-export type DeliveryState = 'delivered' | 'not-delivered' | 'no-response';
+export type DeliveryState = 'delivered' | 'partial' | 'not-delivered' | 'no-response';
 
 export interface PaymentLine {
   paymentId: string;
@@ -103,7 +103,8 @@ function moneyState(row: ResourcePayment, now: Date): MoneyState {
 
 function deliveryState(row: ResourcePayment): DeliveryState {
   if (row.responseStatus === null) return 'no-response';
-  return row.responseStatus >= 200 && row.responseStatus < 300 ? 'delivered' : 'not-delivered';
+  if (row.responseStatus < 200 || row.responseStatus >= 300) return 'not-delivered';
+  return row.resourceTruncated ? 'partial' : 'delivered';
 }
 
 /** The operator action for a row; null when it concludes (or concluded) on its own. */
@@ -132,6 +133,9 @@ function actionFor(row: ResourcePayment, now: Date, staleAfterMs: number): strin
     }
     case 'settled':
       if (!row.chainVerifiedAt) return 'settlement only reported by the server: run `x402:ops reconcile --apply` to prove it on-chain';
+      if (deliveryState(row) === 'partial') {
+        return `paid (proven) but only the first ${row.resourceBytes ?? '?'} bytes of the resource arrived (read limit; transfer aborted): take it up with the seller ${row.payTo} or fetch it again`;
+      }
       if (deliveryState(row) !== 'delivered') {
         return `paid (proven) but the resource was not delivered (${row.responseStatus === null ? 'no paid response arrived' : `HTTP ${row.responseStatus}`}): take it up with the seller ${row.payTo}`;
       }
@@ -307,7 +311,7 @@ export function renderSpendReport(report: AgentSpend[]): string {
             `${p.responseStatus !== null ? ` (HTTP ${p.responseStatus})` : ''}${p.counted ? '' : '  [not counted]'}`,
         );
         out.push(`        ${p.url} → ${p.payTo}${p.txHash ? `  tx ${p.txHash}` : ''}`);
-        if (p.resourceSha256) out.push(`        resource sha256 ${p.resourceSha256} (${p.resourceBytes} bytes)`);
+        if (p.resourceSha256) out.push(`        resource sha256 ${p.resourceSha256} (${p.resourceBytes} bytes received${p.delivery === 'partial' ? ', TRUNCATED' : ''})`);
         if (p.reason) out.push(`        reason: ${p.reason}`);
         if (p.reconcileNote) out.push(`        reconciled: ${p.reconcileNote}`);
         if (p.action) out.push(`        ACTION: ${p.action}`);
