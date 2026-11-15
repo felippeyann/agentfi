@@ -45,6 +45,10 @@
  *      on a CONFIRMED / REVERTED / FAILED transaction older than
  *      VOLUME_SWEEP_STALE_SEC (default 600 s) are settled as their first
  *      observer would have (committed, released, or held).
+ *   6. x402 automatic reconciliation (2026-11-15, `resource-payment-auto-reconcile.ts`)
+ *      — unknown / pending / refused / reported x402 payments proven, expired or
+ *      released on chain evidence only; transient RPC failures back off and
+ *      escalate; never signs, sends or re-fetches.
  *   5. `recoverStrandedQueuedTransactions` (A6b) — QUEUED rows untouched for
  *      TX_STRANDED_STALE_SEC (default 600 s) whose BullMQ job is not live: a
  *      crash between the row and its enqueue (route, operator approval, A2A
@@ -178,6 +182,8 @@ interface RecoverySummary {
   strandedQueued?: StrandedSweepSummary | null;
   /** A6b: A2A payments FAILED after a broadcast attempt with no recorded hash — not refunded. */
   uncertain?: number;
+  /** x402 automatic reconciliation (null when the pass failed or is disabled). */
+  x402Reconcile?: import('../services/payments/resource-payment-auto-reconcile.runtime.js').X402AutoReconcileSummary | null;
 }
 
 /** One recovery tick: re-poll SUBMITTED rows, the PAYMENT_PENDING scan, then the escrow reconciliation. */
@@ -245,6 +251,17 @@ export async function runPaymentRecoveryTick(): Promise<RecoverySummary> {
   } catch (err) {
     summary.strandedQueued = null;
     logger.error({ err: (err as Error)?.message ?? String(err) }, 'Payment recovery: stranded QUEUED sweep failed');
+  }
+
+  // x402: prove or release unknown / pending / refused / reported payments on-chain
+  // (resource-payment-auto-reconcile.ts). Imported lazily so suites that mock
+  // this queue's other dependencies do not load the x402 libraries.
+  try {
+    const { runX402AutoReconcilePass } = await import('../services/payments/resource-payment-auto-reconcile.runtime.js');
+    summary.x402Reconcile = await runX402AutoReconcilePass();
+  } catch (err) {
+    summary.x402Reconcile = null;
+    logger.error({ err: (err as Error)?.message ?? String(err) }, 'Payment recovery: x402 auto-reconciliation failed');
   }
   return summary;
 }

@@ -18,6 +18,10 @@ interface AuthorizationOnChain {
 export interface FakeChain extends ChainEvidenceReader {
   head_: ChainHead;
   chainId_: number;
+  /** Two fakes with different `fork_` disagree on every block hash (a fork / another network). */
+  fork_: string;
+  /** When set, only authorizationState reads fail (head still answers): a partial failure. */
+  failState_: string | null;
   reads: string[];
   /** The authorization was executed in a tx with the given transfers (default: payer → payTo of amount). */
   use(row: { payer: string | null; authorizationNonce: string | null; payTo: string; amount: string }, transfers?: TokenTransfer[]): Hex;
@@ -40,6 +44,8 @@ export function fakeChain(chainId = 84532): FakeChain {
   const chain: FakeChain = {
     head_: { number: 1_000n, timestamp: BigInt(Math.floor(Date.now() / 1000)) },
     chainId_: chainId,
+    fork_: 'b',
+    failState_: null,
     reads: [],
     async chainId() {
       guard();
@@ -52,6 +58,7 @@ export function fakeChain(chainId = 84532): FakeChain {
     },
     async authorizationUsed(_token: Address, authorizer: Address, nonce: Hex) {
       guard();
+      if (chain.failState_) throw new Error(chain.failState_);
       chain.reads.push(`authorizationState:${nonce}`);
       return state.has(key(authorizer, nonce));
     },
@@ -69,6 +76,11 @@ export function fakeChain(chainId = 84532): FakeChain {
     async blockAtOrAfter() {
       guard();
       return 0n;
+    },
+    async blockHash(n) {
+      guard();
+      chain.reads.push(`blockHash:${n}`);
+      return `0x${(chain.fork_ + n.toString(16)).padStart(64, '0')}` as Hex;
     },
     use(row, transfers) {
       if (!row.payer || !row.authorizationNonce) throw new Error('row has no payer / nonce');

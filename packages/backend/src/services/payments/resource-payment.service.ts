@@ -1108,6 +1108,9 @@ export class ResourcePaymentService {
             data,
           });
           if (claimed.count !== 1) throw this.inProgress(ctx.paymentId);
+          // A new attempt on the same row: the automatic reconciliation of the
+          // previous attempt (backoff, alert, stop) must not carry over.
+          await tx.resourcePaymentReconcileState.deleteMany({ where: { resourcePaymentId: current.id } });
           return tx.resourcePayment.findUniqueOrThrow({ where: { id: current.id } });
         }
         return tx.resourcePayment.create({

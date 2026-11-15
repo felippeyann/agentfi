@@ -100,6 +100,8 @@ export interface ChainEvidenceReader {
   transfersInTx(token: Address, txHash: Hex): Promise<TokenTransfer[]>;
   /** Lowest block number ≤ `head.number` whose timestamp is ≥ `timestamp` (or `head.number`). */
   blockAtOrAfter(timestamp: bigint, head: ChainHead): Promise<bigint>;
+  /** Hash of block `n` — two sources agree on a chain only if they agree on it. */
+  blockHash(n: bigint): Promise<Hex>;
 }
 
 /** Max blocks per `eth_getLogs` call (public RPCs cap the range). */
@@ -182,6 +184,11 @@ export function viemEvidenceReader(client: PublicClient, head: HeadSelector = { 
         value: log.args.value,
       }));
     },
+    async blockHash(n) {
+      const block = await client.getBlock({ blockNumber: n });
+      if (!block.hash) throw new Error(`block ${n} has no hash`);
+      return block.hash;
+    },
     async blockAtOrAfter(timestamp, head) {
       if (head.timestamp < timestamp) return head.number;
       // Bracket backwards from the head with growing steps, so only recent
@@ -223,7 +230,12 @@ export type ReconcileVerdict =
   | { kind: 'wait'; until: Date; note: string }
   | { kind: 'in-flight'; note: string }
   | { kind: 'mismatch'; txHash: Hex; note: string }
-  | { kind: 'manual'; note: string }
+  /**
+   * Cannot judge. `transient`: the evidence source failed (RPC down, wrong
+   * chain answered, log not found yet) — retried with backoff, NEVER read as
+   * absence of payment. Otherwise structural (Permit2, legacy row): operator.
+   */
+  | { kind: 'manual'; note: string; transient?: true; sourceDown?: true }
   | { kind: 'nothing'; note: string };
 
 export interface ReconcileOptions {
@@ -390,6 +402,7 @@ export async function examineRow(
     }
     return {
       kind: 'manual',
+      transient: true,
       note: `authorizationState is used but no AuthorizationUsed / AuthorizationCanceled log found from block ${fromBlock}: check by hand`,
     };
   }
@@ -448,7 +461,16 @@ function transition(row: RowForReconcile, verdict: ReconcileVerdict, now: Date):
   }
 }
 
+export interface ExpiryConfirmation {
+  ok: boolean;
+  /** Not ok because a source failed (retry) rather than because sources disagree (stop). */
+  transient?: boolean;
+  note: string;
+}
+
 export interface ReconcilePassOptions extends ReconcileOptions {
+  /** Called before an `expired` transition is written; `ok: false` turns it into a manual verdict. */
+  confirmExpiry?: (row: ResourcePayment, verdict: Extract<ReconcileVerdict, { kind: 'expired' }>) => Promise<ExpiryConfirmation>;
   /** Restrict to rows of these jobs / agents. */
   jobId?: string;
   agentId?: string;
@@ -474,47 +496,82 @@ export async function reconcileResourcePayments(
   const rows = await db.resourcePayment.findMany({ where, orderBy: { reservedAt: 'asc' } });
   const verifiedChains = new Map<number, boolean>();
   const results: ReconcileResult[] = [];
-
-  for (const row of rows) {
-    const now = options.now ?? new Date();
-    let verdict: ReconcileVerdict;
-    const chainId = chainIdOfNetwork(row.network);
-    const reader = chainId === null ? undefined : options.readers.get(chainId);
-    if (row.status !== 'reserved' && !reader) {
-      verdict = { kind: 'manual', note: `no RPC configured for ${row.network}` };
-    } else {
-      try {
-        if (reader && chainId !== null && !verifiedChains.has(chainId)) {
-          verifiedChains.set(chainId, (await reader.chainId()) === chainId);
-        }
-        if (reader && chainId !== null && verifiedChains.get(chainId) === false) {
-          verdict = { kind: 'manual', note: `the RPC for ${row.network} answers a different chain id: refusing to judge` };
-        } else {
-          verdict = await examineRow(row, reader ?? NO_READER, {
-            now,
-            ...(options.staleAfterMs !== undefined ? { staleAfterMs: options.staleAfterMs } : {}),
-            ...(options.expiryMarginSeconds !== undefined ? { expiryMarginSeconds: options.expiryMarginSeconds } : {}),
-          });
-        }
-      } catch (error) {
-        verdict = { kind: 'manual', note: `chain read failed: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}` };
-      }
-    }
-
-    const data = transition(row, verdict, now);
-    let applied = false;
-    let raced = false;
-    if (options.apply && data) {
-      const { count } = await db.resourcePayment.updateMany({
-        where: { id: row.id, status: row.status, updatedAt: row.updatedAt },
-        data,
-      });
-      applied = count === 1;
-      raced = count !== 1;
-    }
-    results.push({ row, verdict, applied, ...(raced ? { raced } : {}) });
-  }
+  for (const row of rows) results.push(await reconcileOneRow(db, row, options, verifiedChains));
   return results;
+}
+
+/**
+ * Judges one row and, with `apply`, writes its transition — conditional on
+ * the row's id, status and updatedAt, so concurrent passes (two workers, a
+ * worker and the CLI) write each transition at most once. Never throws for a
+ * chain failure: that is a `transient` manual verdict, never a proof.
+ */
+export async function reconcileOneRow(
+  db: Pick<PrismaClient, 'resourcePayment'>,
+  row: ResourcePayment,
+  options: Omit<ReconcilePassOptions, 'jobId' | 'agentId'>,
+  verifiedChains: Map<number, boolean> = new Map(),
+): Promise<ReconcileResult> {
+  const now = options.now ?? new Date();
+  let verdict: ReconcileVerdict;
+  const chainId = chainIdOfNetwork(row.network);
+  const reader = chainId === null ? undefined : options.readers.get(chainId);
+  if (row.status !== 'reserved' && !reader) {
+    verdict = { kind: 'manual', note: `no RPC configured for ${row.network}` };
+  } else {
+    try {
+      if (reader && chainId !== null && !verifiedChains.has(chainId)) {
+        verifiedChains.set(chainId, (await reader.chainId()) === chainId);
+      }
+      if (reader && chainId !== null && verifiedChains.get(chainId) === false) {
+        verdict = { kind: 'manual', transient: true, sourceDown: true, note: `the RPC for ${row.network} answers a different chain id: refusing to judge` };
+      } else {
+        verdict = await examineRow(row, reader ?? NO_READER, {
+          now,
+          ...(options.staleAfterMs !== undefined ? { staleAfterMs: options.staleAfterMs } : {}),
+          ...(options.expiryMarginSeconds !== undefined ? { expiryMarginSeconds: options.expiryMarginSeconds } : {}),
+        });
+      }
+    } catch (error) {
+      // A failed read proves nothing: the row keeps its status and stays counted.
+      verifiedChains.delete(chainId ?? -1);
+      verdict = {
+        kind: 'manual',
+        transient: true,
+        sourceDown: true,
+        note: `evidence source unavailable (chain read failed): ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`,
+      };
+    }
+  }
+
+  // An `expired` verdict releases budget with no transfer to point at: when the
+  // caller supplies a confirmation step (the unattended worker does), it must
+  // agree before anything is written.
+  if (verdict.kind === 'expired' && options.confirmExpiry) {
+    try {
+      const check = await options.confirmExpiry(row, verdict);
+      if (!check.ok) verdict = { kind: 'manual', ...(check.transient ? { transient: true as const } : {}), note: check.note };
+    } catch (error) {
+      verdict = {
+        kind: 'manual',
+        transient: true,
+        note: `second evidence source unavailable: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`,
+      };
+    }
+  }
+
+  const data = transition(row, verdict, now);
+  let applied = false;
+  let raced = false;
+  if (options.apply && data) {
+    const { count } = await db.resourcePayment.updateMany({
+      where: { id: row.id, status: row.status, updatedAt: row.updatedAt },
+      data,
+    });
+    applied = count === 1;
+    raced = count !== 1;
+  }
+  return { row, verdict, applied, ...(raced ? { raced } : {}) };
 }
 
 /** Placeholder for `reserved` rows, which never need the chain. */
@@ -525,6 +582,7 @@ const NO_READER: ChainEvidenceReader = {
   findAuthorizationEvent: () => Promise.reject(new Error('no reader')),
   transfersInTx: () => Promise.reject(new Error('no reader')),
   blockAtOrAfter: () => Promise.reject(new Error('no reader')),
+  blockHash: () => Promise.reject(new Error('no reader')),
 };
 
 // ── Operator resolution (no chain proof available) ──────────────────────────
@@ -553,7 +611,7 @@ const MANUALLY_RESOLVABLE: ReadonlySet<ResourcePaymentStatus> = new Set(['unknow
  * write is conditional on the row not having changed. Dry-run unless `apply`.
  */
 export async function resolveManually(
-  db: Pick<PrismaClient, 'resourcePayment'>,
+  db: Pick<PrismaClient, 'resourcePayment'> & Partial<Pick<PrismaClient, 'resourcePaymentReconcileState'>>,
   input: ManualResolution,
 ): Promise<{ ok: boolean; message: string; row?: ResourcePayment }> {
   const operator = input.operator.trim();
@@ -583,5 +641,7 @@ export async function resolveManually(
     },
   });
   if (count !== 1) return { ok: false, message: 'the row changed meanwhile; nothing written — rerun', row };
+  // The operator decided: the automatic schedule of this row starts over.
+  await db.resourcePaymentReconcileState?.deleteMany({ where: { resourcePaymentId: row.id } });
   return { ok: true, message: `written: ${reconcileNote}`, row: (await db.resourcePayment.findUnique({ where: { id: row.id } }))! };
 }

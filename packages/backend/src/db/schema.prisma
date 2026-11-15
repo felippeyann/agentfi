@@ -606,11 +606,40 @@ model ResourcePayment {
   error              String?
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
+  /// Automatic reconciliation schedule (migration 0029); absent until the worker first looks.
+  reconcileState     ResourcePaymentReconcileState?
 
   @@unique([jobId, paymentId])
   @@index([jobId])
   @@index([status])
   @@index([agentId, reservedAt])
+}
+
+/// Automatic reconciliation schedule of one ResourcePayment (migration 0029).
+/// Kept OUT of the payment row on purpose: writing here never bumps
+/// ResourcePayment.updatedAt, which the conditional transitions and the
+/// pending-staleness rule depend on. Holds no money state: deleting a row
+/// only makes the worker look again.
+model ResourcePaymentReconcileState {
+  resourcePaymentId String          @id
+  resourcePayment   ResourcePayment @relation(fields: [resourcePaymentId], references: [id], onDelete: Cascade)
+  /// Consecutive transient failures (evidence source unavailable). Reset by any judgement.
+  attempts          Int             @default(0)
+  /// Not looked at again before this time (backoff, or validBefore + margin for a live authorization).
+  nextAttemptAt     DateTime        @default(now())
+  lastVerdict       String?
+  lastNote          String?
+  /// When the operator was alerted (first time automation needed help); transient alerts keep retrying.
+  escalatedAt       DateTime?
+  escalationReason  String?
+  /// True when automation gave up on this row (structural case, mismatch, unconfirmed expiry): only an operator re-arms it.
+  stopped           Boolean         @default(false)
+  /// Per-row lease so two workers do not judge the same row at once (correctness does not depend on it).
+  leaseOwner        String?
+  leaseUntil        DateTime?
+  updatedAt         DateTime        @updatedAt
+
+  @@index([nextAttemptAt])
 }
 
 enum ResourcePaymentStatus {
