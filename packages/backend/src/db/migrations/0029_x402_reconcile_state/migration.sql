@@ -13,6 +13,7 @@ CREATE TABLE "ResourcePaymentReconcileState" (
     "lastNote" TEXT,
     "escalatedAt" TIMESTAMP(3),
     "escalationReason" TEXT,
+    "stopped" BOOLEAN NOT NULL DEFAULT false,
     "leaseOwner" TEXT,
     "leaseUntil" TIMESTAMP(3),
     "updatedAt" TIMESTAMP(3) NOT NULL,

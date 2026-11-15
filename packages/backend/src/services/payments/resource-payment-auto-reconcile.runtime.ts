@@ -32,11 +32,15 @@ export async function runX402AutoReconcilePass(): Promise<X402AutoReconcileSumma
   const outcomes = await runAutoReconcileCycle({
     db,
     rpcFor: (chainId) => getPrimaryRpcUrl(chainId),
+    // Independent node used only to confirm `expired` (a release without a transfer to point at).
+    secondRpcFor: (chainId) => process.env[`X402_RECONCILE_SECOND_RPC_URL_${chainId}`]?.trim() || undefined,
     config,
     onEscalate: (o: AutoReconcileOutcome) =>
       logger.error(
         { jobId: o.jobId, paymentId: o.paymentId, resourcePaymentId: o.resourcePaymentId, status: o.statusBefore, note: o.note },
-        'x402 auto-reconciliation ESCALATED to the operator: the payment stays counted; run `x402:ops status`, then `x402:ops reconcile --apply` or `x402:ops resolve`',
+        o.stopped
+          ? 'x402 auto-reconciliation STOPPED for a payment (operator needed): it stays counted; run `x402:ops status`, then `x402:ops reconcile --apply` or `x402:ops resolve`'
+          : 'x402 auto-reconciliation ALERT: evidence still unavailable after repeated attempts; the payment stays counted and retries continue — check the RPC (`x402:ops status`)',
       ),
   });
   const summary: X402AutoReconcileSummary = {

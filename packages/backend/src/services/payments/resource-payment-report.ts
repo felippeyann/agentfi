@@ -122,25 +122,64 @@ function moneyOpen(row: ResourcePayment): boolean {
 function automaticFor(row: ReportRow, now: Date): string | null {
   if (!moneyOpen(row)) return null;
   const state = row.reconcileState;
-  if (state?.escalatedAt) return `STOPPED at ${state.escalatedAt.toISOString()}: ${state.escalationReason ?? 'escalated'}`;
+  if (state?.stopped) return `STOPPED at ${state.escalatedAt?.toISOString() ?? '?'}: ${state.escalationReason ?? 'operator needed'}`;
+  if (state?.escalatedAt) {
+    return `ALERT since ${state.escalatedAt.toISOString()} (${state.escalationReason ?? 'repeated failures'}); retrying, next look ${state.nextAttemptAt.toISOString()}`;
+  }
   if (!state) return 'queued for the next automatic reconciliation';
   const when = state.nextAttemptAt.getTime() <= now.getTime() ? 'on the next tick' : `at ${state.nextAttemptAt.toISOString()}`;
   const failures = state.attempts > 0 ? `evidence source unavailable ${state.attempts}× (state kept, still counted); ` : '';
   return `${failures}next automatic look ${when} (last: ${state.lastVerdict ?? 'none'})`;
 }
 
-function actionFor(row: ReportRow, now: Date, staleAfterMs: number): string | null {
+/** The manual action for open money, used when the automation is off or not running. */
+function manualActionFor(row: ReportRow, now: Date, staleAfterMs: number): string | null {
+  const age = now.getTime() - row.updatedAt.getTime();
+  switch (row.status) {
+    case 'reserved':
+      return now.getTime() - row.reservedAt.getTime() >= staleAfterMs
+        ? 'abandoned reservation (nothing was sent): run `x402:ops reconcile --apply` to release it'
+        : null;
+    case 'pending':
+      return age >= staleAfterMs
+        ? 'attempt interrupted after sending: run `x402:ops reconcile --apply` (reads the authorization on-chain); do not retry with a new paymentId'
+        : null;
+    case 'unknown':
+      return 'outcome unknown: run `x402:ops reconcile --apply` (proves the transfer or waits for validBefore); do not retry with a new paymentId';
+    case 'refused':
+      return 'refused after signing; stays counted: run `x402:ops reconcile --apply` (settled if it moved, expired → released otherwise)';
+    case 'settled':
+      return row.chainVerifiedAt ? null : 'settlement only reported by the server: run `x402:ops reconcile --apply` to prove it on-chain';
+    default:
+      return null;
+  }
+}
+
+/** How long a due row may wait before the report says the automation is not running. */
+const AUTOMATION_SILENT_AFTER_MS = 10 * 60 * 1000;
+
+function actionFor(row: ReportRow, now: Date, staleAfterMs: number, automationEnabled: boolean): string | null {
   const age = now.getTime() - row.updatedAt.getTime();
   const state = row.reconcileState;
-  if (moneyOpen(row) && state?.escalatedAt) {
+  if (moneyOpen(row) && state?.stopped) {
     return `automatic reconciliation stopped (${state.escalationReason ?? 'escalated'}): check the chain / the seller, then \`x402:ops reconcile --apply\` (re-arms it) or \`x402:ops resolve\`; it stays counted until then`;
   }
   const chainJudgeable = row.authorizationMethod === 'eip3009' && row.payer !== null && row.authorizationNonce !== null;
   if ((row.status === 'unknown' || row.status === 'refused' || (row.status === 'pending' && age >= staleAfterMs)) && !chainJudgeable) {
     return `reconciliation cannot judge this row (${row.authorizationMethod ?? 'no method'}${row.payer ? '' : ', no payer recorded'}): check the chain / the seller, then \`x402:ops resolve --as expired|settled --operator … --note …\`; it stays counted until then`;
   }
-  // Open money that the automation will judge needs no operator action (see `automatic`).
-  if (moneyOpen(row)) return null;
+  if (moneyOpen(row)) {
+    if (!automationEnabled) return `automatic reconciliation is disabled (X402_RECONCILE_ENABLED=false): ${manualActionFor(row, now, staleAfterMs) ?? 'nothing to do yet'}`;
+    // Due for a while with no visit: the worker is not running (not deployed, crashing, migration missing).
+    const dueSince = state ? state.nextAttemptAt.getTime() : Math.max(row.updatedAt.getTime(), row.reservedAt.getTime());
+    const visitedSince = state ? state.updatedAt.getTime() : 0;
+    if (now.getTime() - dueSince > AUTOMATION_SILENT_AFTER_MS && visitedSince < dueSince) {
+      const manual = manualActionFor(row, now, staleAfterMs);
+      if (manual) return `automatic reconciliation has not looked at this row since ${new Date(dueSince).toISOString()} (is the worker running?): ${manual}`;
+    }
+    // Otherwise the automation will judge it (see `automatic`); an alert is shown there.
+    return null;
+  }
   switch (row.status) {
     case 'settled':
       if (deliveryState(row) === 'partial') {
@@ -165,6 +204,8 @@ export interface SpendReportFilter {
   jobId?: string;
   now?: Date;
   staleAfterMs?: number;
+  /** Is the automatic reconciliation enabled (default: X402_RECONCILE_ENABLED !== "false")? */
+  automationEnabled?: boolean;
 }
 
 /** Builds the operator view for every agent that has x402 rows (or the filtered one). */
@@ -174,6 +215,7 @@ export async function buildSpendReport(
 ): Promise<AgentSpend[]> {
   const now = filter.now ?? new Date();
   const staleAfterMs = filter.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
+  const automationEnabled = filter.automationEnabled ?? process.env["X402_RECONCILE_ENABLED"] !== "false";
   const rows = await db.resourcePayment.findMany({
     where: {
       ...(filter.agentId ? { agentId: filter.agentId } : {}),
@@ -234,7 +276,7 @@ export async function buildSpendReport(
       const proven = sumBaseUnits(jobRows.filter((r) => r.status === 'settled' && r.chainVerifiedAt));
       const reported = sumBaseUnits(jobRows.filter((r) => r.status === 'settled' && !r.chainVerifiedAt));
       const payments = jobRows.map((row): PaymentLine => {
-        const action = actionFor(row, now, staleAfterMs);
+        const action = actionFor(row, now, staleAfterMs, automationEnabled);
         if (action) pendingActions++;
         return {
           paymentId: row.paymentId,

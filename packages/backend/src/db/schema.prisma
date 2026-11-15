@@ -629,9 +629,11 @@ model ResourcePaymentReconcileState {
   nextAttemptAt     DateTime        @default(now())
   lastVerdict       String?
   lastNote          String?
-  /// Set when automation gives up (structural case, mismatch, or too many transient failures): operator needed.
+  /// When the operator was alerted (first time automation needed help); transient alerts keep retrying.
   escalatedAt       DateTime?
   escalationReason  String?
+  /// True when automation gave up on this row (structural case, mismatch, unconfirmed expiry): only an operator re-arms it.
+  stopped           Boolean         @default(false)
   /// Per-row lease so two workers do not judge the same row at once (correctness does not depend on it).
   leaseOwner        String?
   leaseUntil        DateTime?

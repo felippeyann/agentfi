@@ -179,6 +179,8 @@ const { mockDb, ledger } = vi.hoisted(() => {
     agentPolicy: { findUnique: vi.fn(async () => null) },
     dailyVolume: { findUnique: vi.fn(async () => null) },
     resourcePayment,
+    // Automatic-reconciliation schedule: reset on a row takeover (reserve), nothing else here.
+    resourcePaymentReconcileState: { deleteMany: vi.fn(async () => ({ count: 0 })) },
     // Row locks: the Job lock reads the job status, the Agent lock is ignored.
     $queryRaw: vi.fn(async () => [{ status: 'ACCEPTED' }]),
     $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(mockDb)),
