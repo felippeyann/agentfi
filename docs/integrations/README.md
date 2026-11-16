@@ -48,6 +48,6 @@ retried with a new id. When you wrap it, keep that sentence (the adapters do) an
   `interface-compatible, not tested` means the interface should fit, nothing more.
 * **Not a model evaluation.** Stub-model runs check the wiring (filtering, calls, replay), not how
   any real model behaves with real money. No paid LLM API was used for any `tested` row.
-* **Not production readiness.** Alpha. The x402 path is proven on a local Anvil fork of Base
+* **Not production readiness.** Alpha. The x402 path is demonstrated on a local Anvil fork of Base
   Sepolia, not on a public network, and not with real funds. There is no hosted AgentFi API.
 * **Not a stable API.** Names and shapes may change before a release; pin versions.

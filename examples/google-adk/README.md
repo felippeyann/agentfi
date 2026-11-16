@@ -4,7 +4,7 @@ A payer agent built with [Google ADK](https://adk.dev/tools-custom/mcp-tools/) (
 that talks to AgentFi through the MCP server **built from this checkout**, restricted to the
 **payer-safe tool subset** with `tool_filter`.
 
-| | Pinned (2026-11-16) |
+| | Pinned, as run on 2026-11-16 |
 |---|---|
 | `google-adk[mcp]` | **2.14.1** (PyPI latest that day; the `[mcp]` extra provides `McpToolset`) |
 | `mcp` (pulled in) | 2.3.0 |
@@ -63,8 +63,7 @@ export GOOGLE_API_KEY=...        # yours; costs tokens
 python examples/google-adk/agent.py --mode real --prompt "Buy <url> for job <id>"
 ```
 
-Point `AGENTFI_API_URL` / `AGENTFI_API_KEY` at an API you run (see the
-[alpha quickstart](../../docs/alpha/quickstart.md)), with the **provider** agent's key. Never put keys
+Point `AGENTFI_API_URL` / `AGENTFI_API_KEY` at an API you run, with the **provider** agent's key. A real-backend run is not reproducible outside the alpha demo today. Everything marked tested ran against the STUB. See [docs/alpha/quickstart.md](../../docs/alpha/quickstart.md) for the limits. Never put keys
 in the source. `McpToolset(require_confirmation=True)` makes a human confirm each tool call (needs a
 UI that handles confirmations; left commented out in `agent.py`).
 

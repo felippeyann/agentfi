@@ -4,7 +4,7 @@ Builds real `DynamicStructuredTool`s from [`@agent_fi/adapters`](../../packages/
 and invokes them against the **STUB** API ([`../_stub-api`](../_stub-api/stub-api.mjs): nothing
 paid). No LLM, no key.
 
-| | Pinned (2026-11-16) |
+| | Pinned, as run on 2026-11-16 |
 |---|---|
 | `@langchain/core` | 1.4.1 |
 | Node | 24.14.1 (engines: >= 20) |

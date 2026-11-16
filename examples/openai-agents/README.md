@@ -4,7 +4,7 @@ A payer agent built with the [OpenAI Agents SDK](https://openai.github.io/openai
 that talks to AgentFi through the MCP server **built from this checkout**, restricted to the
 **payer-safe tool subset**.
 
-| | Pinned (2026-11-16) |
+| | Pinned, as run on 2026-11-16 |
 |---|---|
 | `openai-agents` | **0.24.0** (PyPI latest that day) |
 | `mcp` (pulled in) | 2.3.0 |
@@ -59,8 +59,7 @@ export OPENAI_API_KEY=...        # yours; costs tokens
 python examples/openai-agents/agent.py --mode real --prompt "Buy <url> for job <id>"
 ```
 
-Point `AGENTFI_API_URL` / `AGENTFI_API_KEY` at an API you run (see the
-[alpha quickstart](../../docs/alpha/quickstart.md)), with the **provider** agent's key. Never put keys
+Point `AGENTFI_API_URL` / `AGENTFI_API_KEY` at an API you run, with the **provider** agent's key. A real-backend run is not reproducible outside the alpha demo today. Everything marked tested ran against the STUB. See [docs/alpha/quickstart.md](../../docs/alpha/quickstart.md) for the limits. Never put keys
 in the source. Consider `require_approval={"always": {"tool_names": ["pay_for_resource"]}}` on the
 MCP server object and handle approvals in your app, so a human confirms each spend.
 

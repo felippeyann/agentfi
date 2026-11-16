@@ -6,11 +6,11 @@ Thin TypeScript adapters that translate an LLM tool call into one AgentFi HTTP c
 ```bash
 npm install                                  # at the repo root
 npm run build -w packages/adapters           # emits packages/adapters/dist
-npm test -w packages/adapters                # 23 unit tests, no network, no LLM
+npm test -w packages/adapters                # 28 unit tests, no network, no LLM
 ```
 
 > Prefer the **MCP server** (`packages/mcp-server`, built from the checkout) or the plain
-> **HTTP API** when your framework supports either: they are the maintained, tested
+> **HTTP API** when your framework supports either: they are the primary
 > interfaces. See [`docs/integrations/`](../../docs/integrations/README.md) and the
 > [compatibility matrix](../../docs/integrations/compatibility.md). These adapters exist for
 > code that calls a model with OpenAI-style `tools` or builds LangChain tools by hand.
@@ -39,7 +39,7 @@ const config = {
 
 There is **no hosted AgentFi API** to default to. The old default
 `https://agentfi-backend.fly.dev` was decommissioned (2026-05-17) and has been removed.
-Run the API yourself: [Dev Quickstart](../../docs/dev-quickstart.md).
+You must run the API yourself. A real-backend run is not reproducible outside the alpha demo today. Everything marked tested ran against the STUB. See [docs/alpha/quickstart.md](../../docs/alpha/quickstart.md) for the limits.
 
 ## OpenAI function calling
 

@@ -16,12 +16,12 @@ every other integration in [`docs/integrations/`](../../docs/integrations/README
 | Request and response **shapes** | Real: taken from [`docs/api/openapi.yaml`](../../docs/api/openapi.yaml) (`PayResourceRequest`, `PayResourceResponse`, `ResourcePaymentError`), cross-checked with the backend's route test (`resource-payment.routes.test.ts`) and the fork demo (`x402-spend.demo.ts`). |
 | The clients (`ts/src`, `python/agentfi_pay.py`) | Real code you can copy. |
 | The API in `run-stub-demo.mjs` | **STUB** ([`../_stub-api/stub-api.mjs`](../_stub-api/stub-api.mjs)). It replays real-shaped answers chosen by the URL path. It has **no budget, no policy, no ledger, no wallet and no chain**. Nothing is signed or paid. |
-| Run against the real backend | **Not done by this example.** To do it, start the API as in the [alpha quickstart](../../docs/alpha/quickstart.md) (the local fork demo), create two agents and an ACCEPTED job, and point `AGENTFI_API_URL` / `AGENTFI_API_KEY` at it. |
+| Run against the real backend | **Not done by this example.** A real-backend run is not reproducible outside the alpha demo today. Everything marked tested ran against the STUB. See [docs/alpha/quickstart.md](../../docs/alpha/quickstart.md) for the limits. |
 
 ## Prerequisites for a real run
 
 * An AgentFi API you run (there is no hosted one): base URL in `AGENTFI_API_URL`
-  (default `http://localhost:3000`, the dev stack).
+  (default `http://localhost:3000`).
 * The **provider** agent's API key in `AGENTFI_API_KEY`. The key is the identity: only the
   job's provider can pay (`403 NOT_PROVIDER` for anyone else). Never use the operator secret
   here and never put a key in the source.
@@ -98,7 +98,7 @@ There is **no `GET` endpoint for payments** in the API today. You read state fro
 * **payment is not delivery**: `payment.status` is the money; `resource.status` and
   `resource.truncated` are what arrived. The byte count and SHA-256 of the body are recorded by the
   backend but are **not** in the HTTP answer: the operator sees them (`delivery: delivered /
-  partial / not-delivered / unknown`) with `npm run x402:ops -- status --job <id>`;
+  partial / not-delivered / unknown`) with `cd packages/backend && npm run x402:ops -- status --job <id>`;
 * re-asking with the **same** `paymentId`: for `pending`, `settled` and `unknown` rows the backend
   returns the recorded row with `replayed: true` and never pays again.
 
@@ -106,7 +106,7 @@ There is **no `GET` endpoint for payments** in the API today. You read state fro
 
 `cd ts && npm test` (node:test) and `cd python && python -m unittest test_agentfi_pay` reproduce a 200 with a cut body, invalid JSON, a missing `payment`, and settled-with-seller-error.
 
-## Pinned versions
+## Pinned versions (as run on 2026-11-16)
 
 TypeScript `typescript@6.0.3`, `@types/node@20.19.0` (build only; runtime is plain Node >= 20).
 Python: standard library only.
