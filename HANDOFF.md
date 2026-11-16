@@ -8,6 +8,8 @@
 
 ---
 
+> **Since 2026-11-16 (developer alpha).** The front door of the project is x402 spend control for agents that buy services: the [README](README.md) has the current positioning and the verified status table, and the [alpha roadmap](docs/project/roadmap-alpha.md) says what is now, next and only possible. The pending-work list below is the October plan's and may predate the alpha; for the alpha relaunch the orchestration notes and the roadmap are the source.
+
 ## Table of Contents
 
 1. [Snapshot](#1-snapshot)
@@ -316,7 +318,7 @@ npm run release:v1:check
 npm view @agent_fi/mcp-server version
 ```
 
-**Security issue?** [SECURITY.md](SECURITY.md) — email maintainers, 48h SLA.
+**Security issue?** [SECURITY.md](SECURITY.md) — private advisory form, best effort (no email address, no SLA).
 
 **Production incident?** Operator-specific (self-hosted). Your hosting provider's dashboard + [docs/operations/release-runbook.md](docs/operations/release-runbook.md).
 

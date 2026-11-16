@@ -1,8 +1,8 @@
 # Contributing to AgentFi
 
-Thanks for your interest in contributing. AgentFi is open-source infrastructure for AI agents to participate in DeFi — contributions that push that mission forward are welcome.
+Thanks for your interest in contributing. AgentFi is a developer alpha: an open-source, self-hosted API/MCP layer for agents that buy services (x402 spend control, payment and delivery records, reconciliation). Contributions that make that first flow easier to run, safer or better documented are the most useful right now.
 
-> **Before contributing, read [VISION.md](VISION.md).** It explains the project's purpose, principles, and long-term direction. Every contribution should align with that vision.
+> **Before contributing, read the [README](README.md) (current scope) and the [alpha roadmap](docs/project/roadmap-alpha.md).** Every contribution should align with both. [VISION.md](VISION.md) is the long-term background, kept as history.
 
 ---
 
@@ -10,7 +10,9 @@ Thanks for your interest in contributing. AgentFi is open-source infrastructure 
 
 Good contributions include:
 
-- **New DeFi actions** — additional protocols (Balancer, Morpho, Compound, etc.)
+- **Alpha feedback and integration reports** — try the [quickstart](docs/alpha/quickstart.md) and tell us where it broke ([feedback guide](docs/feedback.md))
+- **Integration examples** — a framework example is only listed once it was run on a fixed version (see the [compatibility matrix](docs/integrations/compatibility.md))
+- **New DeFi actions** (experimental area) — additional protocols (Balancer, Morpho, etc.)
 - **New chain support** — RPC config, contract addresses, decimal handling
 - **MCP tool improvements** — better descriptions, input validation, error messages
 - **Adapter packages** — tool definitions for new LLM frameworks
@@ -58,10 +60,10 @@ You do **not** need Turnkey, Alchemy, or Tenderly credentials to run unit tests.
 ```
 packages/
   backend/       Fastify API — transaction pipeline, policy, billing, queues
-  mcp-server/    MCP server — the 10 DeFi tools agents call
+  mcp-server/    MCP server — the tools agents call (35 in source; includes pay_for_resource)
   admin/         Next.js operator dashboard
-  contracts/     Solidity — AgentPolicyModule + AgentExecutor
-  adapters/      Tool definitions for OpenAI, Anthropic, LangChain, ElizaOS
+  contracts/     Solidity — AgentPolicyModule, AgentExecutor, AgentJobEscrow, ReputationHook
+  adapters/      Legacy DeFi-only tool definitions (OpenAI, Anthropic, LangChain, ElizaOS); not published
 ```
 
 The backend is the source of truth. The MCP server is a thin adapter over the backend's REST API. Changes to DeFi behavior go in the backend; changes to how tools are presented to agents go in the MCP server.
@@ -70,9 +72,9 @@ The backend is the source of truth. The MCP server is a thin adapter over the ba
 
 ## Making a change
 
-1. **Fork** the repo and create a branch from `develop`:
+1. **Fork** the repo and create a branch from `main`:
    ```bash
-   git checkout -b feat/your-feature develop
+   git checkout -b feat/your-feature main
    ```
 
 2. **Write tests** alongside your change. The test suite uses [Vitest](https://vitest.dev). Unit tests live next to source files (`*.test.ts`). E2E tests are in `packages/backend/src/__tests__/e2e/`.
@@ -85,7 +87,7 @@ The backend is the source of truth. The MCP server is a thin adapter over the ba
    ```
    Every layer (unit, real Postgres, MCP, admin, Anvil E2E, fork rehearsals, the dev smoke), the test environment, the order that matters locally and the known Windows quirks are in [docs/operations/local-validation.md](docs/operations/local-validation.md).
 
-4. **Open a PR** against `develop`, not `main`. Fill in the PR template.
+4. **Open a PR** against `main`. Fill in the PR template.
 
 ---
 
@@ -99,19 +101,17 @@ The backend is the source of truth. The MCP server is a thin adapter over the ba
 
 ---
 
-## Reporting bugs
+## Reporting bugs and giving feedback
 
-Open a GitHub issue with:
-- The route or tool that failed
-- Request body (redact any keys)
-- The error returned
-- Chain ID and transaction type if relevant
+Use the [issue forms](https://github.com/felippeyann/agentfi/issues/new/choose): *Bug report*, *Alpha feedback*, *Integration request* or *Feature request* (blank issues are off). For a bug include the route or tool that failed, the error returned and the mode and chain, with any key redacted.
+
+**Never paste prompts, API keys, private keys, seeds, customer data or logs with secrets.** There is no telemetry; what we ask and never collect is in [docs/feedback.md](docs/feedback.md).
 
 ---
 
 ## Security issues
 
-Do **not** open a public issue for security vulnerabilities. Email the maintainers directly. Include a description of the issue and steps to reproduce. We'll respond within 48 hours.
+Do **not** open a public issue for security vulnerabilities. Use the [private vulnerability reporting form](https://github.com/felippeyann/agentfi/security/advisories/new) (see [SECURITY.md](SECURITY.md)). Include a description of the issue and steps to reproduce. We aim to acknowledge within 48 hours.
 
 ---
 

@@ -7,6 +7,8 @@
 
 ---
 
+> **Since 2026-11-16 (developer alpha).** The front door of the project is x402 spend control for agents that buy services: the [README](README.md) has the current positioning and the verified status table, and the [alpha roadmap](docs/project/roadmap-alpha.md) says what is now, next and only possible. §1 below keeps the long-term framing; for the alpha, read the README first. Note: the status in the header line is as of its date; the 2026-11-15 x402 deliveries (job-scoped payments, reconciliation, automatic reconciliation) are described in [x402 payments](docs/architecture/x402-payments.md) and the [x402 testnet proof package](docs/operations/x402-testnet-proof.md).
+
 ## 1. Purpose
 
 AgentFi is the **economic infrastructure for non-human intelligence**. Open-source (Apache 2.0), self-hosted by design.

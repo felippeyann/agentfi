@@ -1,0 +1,46 @@
+name: Integration request
+description: Ask for AgentFi to work with a framework, SDK, client or service.
+title: "[INTEGRATION] "
+labels: ["integration-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the compatibility matrix first: `docs/integrations/compatibility.md`.
+
+        **Do not paste prompts, API keys, private keys, seeds, customer data or logs with secrets.** An integration request is a signal about what to test next, not a promise that it will be built.
+  - type: input
+    id: target
+    attributes:
+      label: What should AgentFi work with?
+      description: Framework, SDK, MCP client or service, and the exact version you use.
+      placeholder: "e.g. OpenAI Agents SDK, Google ADK (with version)"
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: How would it connect?
+      options:
+        - "MCP (stdio)"
+        - "MCP (SSE / HTTP)"
+        - "HTTP / OpenAPI"
+        - "Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: usecase
+    attributes:
+      label: What would your agent buy, and what rule do you need enforced?
+      description: In general terms. No customer data.
+    validations:
+      required: true
+  - type: textarea
+    id: auth
+    attributes:
+      label: Constraints on authentication, identity or hosting
+      description: For example how the agent authenticates to tools, or where the code must run.
+  - type: input
+    id: env
+    attributes:
+      label: Environment (OS and Node or Python version)

@@ -3,6 +3,8 @@
 *This document is meant to be read by humans and agents alike.*
 *It is a living file. Any agent or human collaborating on this project is invited to extend it.*
 
+> **Since 2026-11-16 (developer alpha).** The front door of the project is x402 spend control for agents that buy services: the [README](README.md) has the current positioning and the verified status table, and the [alpha roadmap](docs/project/roadmap-alpha.md) says what is now, next and only possible. This document keeps its long-term and historical framing; where it differs from the README on what works today, the README and [STATE.md](STATE.md) win.
+
 ---
 
 ## What this is

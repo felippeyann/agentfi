@@ -1,0 +1,69 @@
+name: Alpha feedback
+description: You tried the developer alpha. Tell us what happened, including when it did not work.
+title: "[ALPHA] "
+labels: ["alpha-feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying the alpha. This issue is public.
+
+        **Do not paste prompts, API keys, private keys, seeds, customer data or logs with secrets.** Redact before pasting. There is no telemetry; this form is the only feedback we get. Vulnerabilities go to the [private advisory form](https://github.com/felippeyann/agentfi/security/advisories/new), not here.
+  - type: dropdown
+    id: install
+    attributes:
+      label: Did you try to install it?
+      options:
+        - "Yes, it installed"
+        - "Yes, it failed (say where below)"
+        - "No"
+    validations:
+      required: true
+  - type: dropdown
+    id: first_flow
+    attributes:
+      label: Did you complete the first flow (rules, x402 purchase, budget, payment and delivery records, reconciliation)?
+      options:
+        - "Yes"
+        - "Partial"
+        - "No"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Which mode did you run?
+      options:
+        - "Simulation"
+        - "Local fork"
+        - "Other (say which below)"
+    validations:
+      required: true
+  - type: textarea
+    id: stuck
+    attributes:
+      label: Where did you get stuck?
+      description: The step, the command and the message (redacted). If the install failed, say where.
+    validations:
+      required: true
+  - type: dropdown
+    id: again
+    attributes:
+      label: Would you use it again? (voluntary)
+      options:
+        - "Yes"
+        - "Maybe"
+        - "No"
+        - "Prefer not to say"
+  - type: input
+    id: env
+    attributes:
+      label: Environment (OS and Node version)
+      placeholder: "Windows 11, Node 22.x"
+    validations:
+      required: true
+  - type: textarea
+    id: other
+    attributes:
+      label: Anything else
+      description: What you were trying to build, in general terms. No customer data.

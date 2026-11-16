@@ -1,10 +1,18 @@
 # AgentFi Documentation Hub
 
-Welcome to the AgentFi documentation. This hub is designed for both human operators and AI agents to understand, deploy, and interact with the AgentFi economic layer.
+Welcome to the AgentFi documentation. AgentFi is a **developer alpha**: a self-hosted API/MCP layer that lets agents buy services through x402 under budget and policy rules, records payment and delivery separately and reconciles uncertain payments. This hub is for human operators and AI agents; the [README](../README.md) has the short version.
 
 ## 📂 Navigation
 
-### 🌟 Start here (required reading, in order)
+### 🚀 Alpha: try it (start here)
+- **[Alpha quickstart](alpha/quickstart.md)** — the first flow, with every run labelled SIMULATION / LOCAL FORK / PUBLIC TESTNET.
+- **[Compatibility matrix](integrations/compatibility.md)** — what was tested per framework, version and transport.
+- **[x402 payments](architecture/x402-payments.md)** — job-scoped budget, policy, the payment state machine, reconciliation.
+- **[x402 public-testnet proof package](operations/x402-testnet-proof.md)** — prepared, **not executed**; everything x402 so far ran on a local Anvil fork.
+- **[Alpha roadmap](project/roadmap-alpha.md)** — now / next / possible, and the non-goals.
+- **[Feedback guide](feedback.md)** — what we ask and what we never collect; issue forms live in the repository's issue chooser.
+
+### 🌟 Background (required reading before changing the project, in order)
 - **[VISION](../VISION.md)** — *why* the project exists. Every technical decision derives from here.
 - **[STATE](../STATE.md)** — *what* the project is today: purpose, stack, capabilities, phase progress.
 - **[Execution Plan (Q4 2026)](project/execution-plan-2026-10.md)** — *live* task tracker for the reactivation: workstreams, gates, calendar, open questions.
@@ -49,7 +57,10 @@ Welcome to the AgentFi documentation. This hub is designed for both human operat
 
 ### 📦 Meta
 - **[Documentation Standards](STANDARDS.md)** — conventions all docs in this tree follow.
-- **[Roadmap](project/roadmap.md)** — forward-looking development plan.
+- **[Alpha roadmap](project/roadmap-alpha.md)** — now / next / possible, with non-goals.
+- **[Roadmap (earlier phases)](project/roadmap.md)** — forward-looking development plan of the October plan.
+- **[Project history and postmortem](project/history.md)** — the May 2026 postmortem and the October reactivation banner, moved from the README.
+- **[Feedback guide](feedback.md)** — issue forms, labels and triage.
 - **[Changelog](../CHANGELOG.md)** — release history.
 - **[Contributing](../CONTRIBUTING.md)** — how to propose changes.
 - **[Security](../SECURITY.md)** — vulnerability disclosure.

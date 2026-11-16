@@ -51,7 +51,7 @@ docker compose -f docker-compose.dev.yml up -d postgres redis
 npm run alpha:demo
 ```
 
-`<TAG>` must be a commit that **contains `alpha:demo`** (this page and the script arrive with PR #205: any older commit does not have them). It is a placeholder until a tag is cut. Until then use: `<SHA-after-merge>` *(the integrator fills in the merge commit of PR #205 here)*.
+`<TAG>` must be a commit that **contains `alpha:demo`** (this page and the script arrive with PR #205: any older commit does not have them). It is a placeholder until a tag is cut. Until then use: `32b3593` (the merge of PR #205, the first commit on `main` with `alpha:demo`; any later commit on `main` also works).
 
 - `npm run alpha:demo` first checks the prerequisites and says what is missing (Node, dependencies, `anvil`, Postgres, Redis, free ports, the RPC) and how to fix it; it starts nothing until all pass. `npm run alpha:demo -- --check` only checks.
 - It then generates the Prisma client and runs the demo (`npm run demo:x402:fork` in `packages/backend`), which creates the database if needed, applies the migrations, and runs scenarios A-E. **Expect about 2.5 minutes.** It exits `0` only if every invariant held; the first broken invariant stops it with `INVARIANT BROKEN`.
