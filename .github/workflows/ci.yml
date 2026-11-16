@@ -20,6 +20,7 @@ jobs:
       - run: npx prisma generate --schema=packages/backend/src/db/schema.prisma
       - run: npm run typecheck --workspaces --if-present
       - run: npm run lint --workspaces --if-present
+      - run: npm run alpha:test
 
   openapi-spec:
     name: OpenAPI Spec

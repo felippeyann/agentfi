@@ -17,6 +17,8 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "smoke:dev": "node scripts/smoke-dev.mjs",
+    "alpha:demo": "node scripts/alpha/demo.mjs",
+    "alpha:test": "node --test scripts/alpha/guard.test.mjs",
     "demo:claude-mcp": "node scripts/demo-claude-mcp.mjs",
     "preflight": "tsx scripts/preflight.ts",
     "abi": "node scripts/gen-abi.mjs",

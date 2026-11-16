@@ -389,10 +389,21 @@ export async function runAutoReconcileCycle(deps: AutoReconcileDeps): Promise<Au
             now,
             staleAfterMs: config.staleAfterMs,
             expiryMarginSeconds: config.expiryMarginSeconds,
-            confirmExpiry: (r, v) =>
-              primary
-                ? confirmWithSecondSource(r, v, primary, chainId !== null ? secondReaders.get(chainId) : undefined, config)
-                : Promise.resolve({ ok: false, transient: true, note: 'no primary reader' }),
+            confirmExpiry: async (r, v) => {
+              // `expired` is the one release with no transfer to point at. A worker whose lease was taken (or whose
+              // state an operator reset) while it was reading the chain does not release on its stale view: the
+              // current owner judges the row itself. This is defence in depth: the load-bearing guard is the
+              // conditional write on id + status + updatedAt in reconcileOneRow. Checked before the second-source
+              // reads (skip the RPCs) and again after them (they are the slow part).
+              const lost = { ok: false, transient: true, note: 'lease lost to another worker while reading the chain: not releasing budget on a stale view' };
+              const owns = async () =>
+                (await deps.db.resourcePaymentReconcileState.findUnique({ where: { resourcePaymentId: r.id } }))?.leaseOwner === owner;
+              if (!(await owns())) return lost;
+              if (!primary) return { ok: false, transient: true, note: 'no primary reader' };
+              const confirmation = await confirmWithSecondSource(r, v, primary, chainId !== null ? secondReaders.get(chainId) : undefined, config);
+              if (confirmation.ok && !(await owns())) return lost;
+              return confirmation;
+            },
           },
           verifiedChains,
         );
@@ -408,7 +419,19 @@ export async function runAutoReconcileCycle(deps: AutoReconcileDeps): Promise<Au
         downChains.set(chainId, `evidence source for chain ${chainId} failed earlier in this cycle (${result.verdict.note.slice(0, 120)})`);
       }
     }
-    const next = schedule(result, attemptsBefore, now, config);
+    let next = schedule(result, attemptsBefore, now, config);
+    // A verdict that wrote nothing may be stale: another writer (a live attempt, the CLI, another worker) can have
+    // taken the row out of the reconcilable set meanwhile. Then there is nothing to alert about or to stop, and any
+    // earlier alert / stop on it is obsolete.
+    let leftSet = false;
+    if (!result.applied) {
+      try {
+        leftSet = (await deps.db.resourcePayment.findFirst({ where: { AND: [{ id: row.id }, reconcilableWhere()] }, select: { id: true } })) === null;
+      } catch {
+        leftSet = false; // cannot tell: treat the row as still in the set (the conservative reading), do not abort the cycle
+      }
+    }
+    if (leftSet) next = { ...next, alert: null, stop: false, clearAlert: true };
     const alreadyAlerted = row.reconcileState?.escalatedAt !== null && row.reconcileState?.escalatedAt !== undefined;
     const wasStopped = row.reconcileState?.stopped === true;
     // A stop is always announced (with its own reason), even after an earlier
@@ -428,22 +451,31 @@ export async function runAutoReconcileCycle(deps: AutoReconcileDeps): Promise<Au
       stopped: next.stop,
       note: result.verdict.note,
     };
-    await deps.db.resourcePaymentReconcileState.updateMany({
+    // The write is conditional on still OWNING the lease. When this worker's lease expired while it was
+    // reading the chain and another worker took the row, count is 0: its diagnostics are the other's to
+    // write, and an alert computed from this stale view must not fire (the row may already be proven).
+    // A raced verdict (the row moved under us) is stale by definition: only the lease is released.
+    const { count: owned } = await deps.db.resourcePaymentReconcileState.updateMany({
       where: { resourcePaymentId: row.id, leaseOwner: owner },
-      data: {
-        attempts: next.attempts,
-        lastVerdict: outcome.verdict,
-        lastNote: result.verdict.note.slice(0, 1000),
-        leaseOwner: null,
-        leaseUntil: null,
-        // A row that left the reconcilable set is never selected again; keep the schedule as history.
-        nextAttemptAt: next.nextAttemptAt ?? now,
-        stopped: next.stop,
-        ...(alertNow ? { escalatedAt: now, escalationReason: next.alert } : {}),
-        ...(next.clearAlert ? { escalatedAt: null, escalationReason: null } : {}),
-      },
+      data: leftSet
+        ? { leaseOwner: null, leaseUntil: null, nextAttemptAt: now, stopped: false, escalatedAt: null, escalationReason: null }
+        : result.raced
+        ? { leaseOwner: null, leaseUntil: null, nextAttemptAt: now }
+        : {
+            attempts: next.attempts,
+            lastVerdict: outcome.verdict,
+            lastNote: result.verdict.note.slice(0, 1000),
+            leaseOwner: null,
+            leaseUntil: null,
+            // A row that left the reconcilable set is never selected again; keep the schedule as history.
+            nextAttemptAt: next.nextAttemptAt ?? now,
+            stopped: next.stop,
+            ...(alertNow ? { escalatedAt: now, escalationReason: next.alert } : {}),
+            ...(next.clearAlert ? { escalatedAt: null, escalationReason: null } : {}),
+          },
     });
-    if (alertNow) deps.onEscalate?.(outcome);
+    if (owned !== 1) outcome.escalated = false;
+    if (alertNow && owned === 1 && !result.raced) deps.onEscalate?.(outcome);
     outcomes.push(outcome);
   }
   return outcomes;
