@@ -1,0 +1,2 @@
+# Pinned 2026-11-16 (PyPI latest on that day). `mcp` is pulled in by openai-agents (it requires mcp>=1.19,<3).
+openai-agents==0.24.0

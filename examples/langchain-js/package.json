@@ -1,0 +1,14 @@
+{
+  "name": "@agent_fi/example-langchain-js",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Builds real LangChain JS tools from @agent_fi/adapters and invokes them against the stub API (no LLM)",
+  "scripts": {
+    "check": "node check.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@langchain/core": "1.4.1"
+  }
+}
