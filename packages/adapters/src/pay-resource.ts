@@ -72,6 +72,14 @@ const GUIDANCE: Record<string, string> = {
   PAYMENT_ID_CONFLICT: 'This payment_id was already used for a different URL or method. Do not reuse it for another purchase.',
 };
 
+const UNREADABLE_GUIDANCE =
+  'The answer arrived but its body could not be read or parsed, so the payment state is UNKNOWN: it may have settled. Do NOT start a new purchase and do NOT use a new payment_id. Call again with the SAME payment_id only to read the recorded state, and report the uncertainty to the user.';
+const NO_PAYMENT_FIELD_GUIDANCE =
+  'The answer has no "payment" field (only an explicit null means the resource was free), so the state is uncertain. Do NOT use a new payment_id; report it to the user.';
+const NOT_DELIVERED_GUIDANCE =
+  'Payment and delivery differ: the payment is settled (the money is spent) but the seller answered with an HTTP error, so the resource was NOT delivered. Do NOT pay again with a new payment_id; report it to the user.';
+const PARTIAL_GUIDANCE =
+  'Paid, but the body was cut at the 64 KiB read limit (resource.truncated): partial delivery. Fetching it again would be a NEW purchase; report it to the user.';
 const REPLAY_GUIDANCE =
   'Replay: this is the recorded state of an earlier payment with the same payment_id. Nothing was paid again and `resource` is null: the content was not re-fetched.';
 const UNKNOWN_STATE_GUIDANCE =
@@ -105,7 +113,7 @@ export async function payForResource(client: AgentFiClient, args: PayResourceArg
     paymentId,
   };
 
-  let res: { status: number; body: Record<string, unknown> };
+  let res: { status: number; body: Record<string, unknown>; unreadable: boolean };
   try {
     res = await client.raw('POST', `/v1/jobs/${encodeURIComponent(jobId)}/pay-resource`, request);
   } catch (err) {
@@ -122,10 +130,18 @@ export async function payForResource(client: AgentFiClient, args: PayResourceArg
   const body = res.body;
   const code = typeof body['code'] === 'string' ? (body['code'] as string) : undefined;
   const payment = body['payment'] as { status?: string } | null | undefined;
+  const resource = body['resource'] as { status?: unknown; truncated?: unknown } | null | undefined;
   let guidance: string | undefined = code ? GUIDANCE[code] : undefined;
+  if (res.unreadable) guidance = UNREADABLE_GUIDANCE;
+  else if (!guidance && res.status === 200 && body['replayed'] !== true && !('payment' in body)) guidance = NO_PAYMENT_FIELD_GUIDANCE;
+  if (!guidance && payment?.status === 'settled' && body['replayed'] !== true) {
+    const rs = resource?.status;
+    if (typeof rs !== 'number' || rs < 200 || rs >= 300) guidance = NOT_DELIVERED_GUIDANCE;
+    else if (resource?.truncated === true) guidance = PARTIAL_GUIDANCE;
+  }
   if (!guidance && res.status >= 500) guidance = UNKNOWN_TRANSPORT_GUIDANCE;
   if (!guidance && body['replayed'] === true) guidance = REPLAY_GUIDANCE;
   if (!guidance && payment?.status === 'unknown') guidance = UNKNOWN_STATE_GUIDANCE;
 
-  return { httpStatus: res.status, paymentId, ...body, ...(guidance ? { guidance } : {}) };
+  return { httpStatus: res.status, paymentId, ...body, ...(res.unreadable ? { code: 'RESPONSE_UNREADABLE' } : {}), ...(guidance ? { guidance } : {}) };
 }

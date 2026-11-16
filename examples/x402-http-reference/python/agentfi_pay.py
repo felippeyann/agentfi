@@ -17,6 +17,7 @@ CLI:
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import sys
@@ -56,7 +57,7 @@ def pay_resource(
     payment_id: Optional[str] = None,
     timeout: float = 60.0,
 ) -> PayResult:
-    """Outcomes: settled, settled_partial_delivery, replayed, free_resource, budget_exceeded,
+    """Outcomes: settled, settled_not_delivered, settled_partial_delivery, replayed, free_resource, budget_exceeded,
     policy_violation, payment_in_progress, outstanding_authorization, refused_after_signing,
     outcome_unknown, no_answer, error."""
     payment_id = payment_id or str(uuid.uuid4())
@@ -72,21 +73,44 @@ def pay_resource(
         method="POST",
         headers={"content-type": "application/json", "x-api-key": api_key},
     )
+    status: Optional[int] = None
+    raw = b""
+    unreadable = False
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            status, raw = resp.status, resp.read()
+            status = resp.status
+            try:
+                raw = resp.read()
+            except (http.client.HTTPException, OSError):  # IncompleteRead, timeout or reset mid-body
+                unreadable = True
     except urllib.error.HTTPError as e:  # 4xx / 5xx still carry the JSON body
-        status, raw = e.code, e.read()
-    except (urllib.error.URLError, TimeoutError, OSError):
+        status = e.code
+        try:
+            raw = e.read()
+        except (http.client.HTTPException, OSError):
+            unreadable = True
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError):
         return PayResult(
             "no_answer", None, payment_id, None, False,
             "No answer (timeout or network). Unknown whether a payment was signed. Re-ask with the "
             "SAME payment_id (the backend replays the recorded state, never pays twice); never use a new one.",
         )
-    try:
-        data = json.loads(raw or b"{}")
-    except ValueError:
-        data = {}
+    data: dict = {}
+    if not unreadable:
+        try:
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                raise ValueError("not an object")
+            data = parsed
+        except ValueError:
+            unreadable = True
+    if unreadable:
+        # The headers arrived, so the backend acted. A body that cannot be read or parsed is NOT an
+        # empty answer: the payment may have settled.
+        return PayResult(
+            "outcome_unknown", status, payment_id, None, False,
+            f"The answer (HTTP {status}) arrived but its body could not be read or parsed, so the payment state is unknown: it may have settled. {UNKNOWN_ADVICE}",
+        )
 
     def result(outcome: str, new_id: bool, advice: str) -> PayResult:
         return PayResult(outcome, status, payment_id, data, new_id, advice)
@@ -98,14 +122,21 @@ def pay_resource(
             if (payment or {}).get("status") == "unknown":
                 return result("outcome_unknown", False, UNKNOWN_ADVICE)
             return result("replayed", False, "Recorded state of the earlier payment with this payment_id; nothing was paid again and the content was not re-fetched (resource is null).")
+        if "payment" not in data:
+            return result("outcome_unknown", False, f'The 200 answer has no "payment" field (only an explicit null means free). Treat it as uncertain: {UNKNOWN_ADVICE}')
         if payment is None:
             return result("free_resource", True, "The resource did not ask for payment; nothing was spent.")
         if payment.get("status") == "unknown":
             return result("outcome_unknown", False, UNKNOWN_ADVICE)
         if payment.get("status") == "settled":
-            if (data.get("resource") or {}).get("truncated") is True:
+            # Payment and delivery are judged separately.
+            resource = data.get("resource") or {}
+            rs = resource.get("status")
+            if not isinstance(rs, int) or rs < 200 or rs >= 300:
+                return result("settled_not_delivered", False, f"Paid (settled), but the seller answered {rs if rs is not None else 'nothing usable'}: the resource was NOT delivered. The money is spent: do not pay again with a new payment_id. Take it up with the seller or the operator.")
+            if resource.get("truncated") is True:
                 return result("settled_partial_delivery", False, "Paid, but the body was cut at the 64 KiB read limit. Fetching it again would be a NEW purchase: take it up with the seller or the operator.")
-            return result("settled", False, "Paid and delivered. Keep the payment_id for your records.")
+            return result("settled", False, "Paid and delivered (resource 2xx, not truncated). Keep the payment_id for your records.")
         return result("outcome_unknown", False, f"Unexpected payment.status {payment.get('status')!r}. Treat it as uncertain: {UNKNOWN_ADVICE}")
 
     if code == "BUDGET_EXCEEDED":
@@ -154,7 +185,7 @@ def main(argv: list[str]) -> int:
     if argv and argv[0] == "--scenarios":
         job_id, stub = argv[1], argv[2].rstrip("/")
         pid = lambda n: f"py-example-{n}-0000000001"  # noqa: E731  fixed ids make the demo repeatable
-        for name in ["settled", "partial", "free", "budget", "policy", "in-progress", "outstanding", "refused", "unknown"]:
+        for name in ["settled", "partial", "delivery-failed", "free", "budget", "policy", "in-progress", "outstanding", "refused", "unknown"]:
             show(f"/{name}", pay_resource(base, key, job_id, f"{stub}/{name}", payment_id=pid(name)))
         show("/unknown again, SAME payment_id (replay: the recorded state, nothing paid twice)",
              pay_resource(base, key, job_id, f"{stub}/unknown", payment_id=pid("unknown")))

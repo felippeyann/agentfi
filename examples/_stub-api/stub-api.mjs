@@ -13,6 +13,7 @@
  *
  *   /settled      200  payment.status = settled, resource delivered
  *   /partial      200  settled, resource.truncated = true (64 KiB read cap)
+ *   /delivery-failed 200 settled but resource.status 502 (paid, NOT delivered)
  *   /free         200  payment = null (the resource never asked for payment)
  *   /budget       402  BUDGET_EXCEEDED          (refused before signing)
  *   /policy       403  POLICY_VIOLATION         (refused before signing)
@@ -153,17 +154,19 @@ export function startStub({ port = 0 } = {}) {
             return refuse(502, { error: 'Payment outcome unknown', code: 'PAYMENT_OUTCOME_UNKNOWN', payment: ledgerRow(jobId, paymentId, body.url, 'unknown', price), timedOut: true, authorization: { method: 'eip3009', nonce: '0x' + 'ab'.repeat(32), validBefore: new Date(Date.now() + 10 * 60_000).toISOString() } });
           }
           case '/partial':
+          case '/delivery-failed':
           case '/settled': {
             paidRequests[path] = (paidRequests[path] ?? 0) + 1;
             byPaymentId.set(key, { path, status: 'settled' });
             spent += price;
             const truncated = path === '/partial';
+            const deliveryFailed = path === '/delivery-failed'; // seller took the money, answered HTTP 502
             return send(res, 200, {
               payment: ledgerRow(jobId, paymentId, body.url, 'settled', price, { receiptVerified: true }),
               remainingBudget: budget(spent),
               resource: {
-                status: 200, headers: { 'content-type': truncated ? 'text/plain' : 'application/json' },
-                body: truncated ? 'x'.repeat(256) + ' ...[stub: real cap is 64 KiB]' : { report: 'stub report', rows: 3 },
+                status: deliveryFailed ? 502 : 200, headers: { 'content-type': truncated ? 'text/plain' : 'application/json' },
+                body: truncated ? 'x'.repeat(256) + ' ...[stub: real cap is 64 KiB]' : deliveryFailed ? { error: 'seller error' } : { report: 'stub report', rows: 3 },
                 ...(truncated ? { truncated: true } : {}),
               },
             });

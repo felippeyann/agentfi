@@ -51,7 +51,7 @@ export class AgentFiClient {
   }
 
   /** One request, no retry. Resolves with status and parsed body for ANY status; rejects only on transport failure/timeout. */
-  async raw(method: string, path: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
+  async raw(method: string, path: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown>; unreadable: boolean }> {
     const init: RequestInit = {
       method,
       headers: { 'Content-Type': 'application/json', 'x-api-key': this.apiKey },
@@ -59,8 +59,15 @@ export class AgentFiClient {
     };
     if (body !== undefined) init.body = JSON.stringify(body);
     const res = await fetch(`${this.apiUrl}${path}`, init);
-    const parsed = (await res.json().catch(() => ({ error: res.statusText }))) as Record<string, unknown>;
-    return { status: res.status, body: parsed };
+    // Headers arrived. If the body cannot be read or parsed (cut connection, timeout mid-body, invalid
+    // JSON) say so: callers must not treat that as an empty answer.
+    try {
+      const parsed: unknown = await res.json();
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+      return { status: res.status, body: parsed as Record<string, unknown>, unreadable: false };
+    } catch {
+      return { status: res.status, body: { error: res.statusText }, unreadable: true };
+    }
   }
 
   async call<T>(method: string, path: string, body?: unknown): Promise<T> {

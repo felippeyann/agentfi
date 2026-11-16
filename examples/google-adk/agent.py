@@ -82,7 +82,7 @@ class ScriptedPayerModel(BaseLlm):
         for r in responses:
             body = _result_json(r.response)
             summary.append(body.get("code") or (body.get("payment") or {}).get("status") or "?")
-        text = f"[stub model] purchases done. Outcomes in order: {summary}. I did not retry with a new payment_id."
+        text = f"[stub model] purchases done. Payment states / codes in order (money only; delivery is separate): {summary}. I did not retry with a new payment_id."
         yield LlmResponse(content=types.Content(role="model", parts=[types.Part(text=text)]))
 
 

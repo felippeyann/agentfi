@@ -42,6 +42,7 @@ counts paid requests). Recorded output (Windows 11, Node 24.14.1, Python 3.14.3,
 ```
 == /settled          outcome: settled                    (HTTP 200)
 == /partial          outcome: settled_partial_delivery   (HTTP 200)
+== /delivery-failed  outcome: settled_not_delivered      (HTTP 200)
 == /free             outcome: free_resource              (HTTP 200)
 == /budget           outcome: budget_exceeded            (HTTP 402)
 == /policy           outcome: policy_violation           (HTTP 403)
@@ -73,16 +74,17 @@ generates a UUID and prints it: keep it).
 
 | Outcome | HTTP | What happened | What to do |
 |---|---|---|---|
-| `settled` | 200 | `payment.status: settled`, `resource` delivered | Done. Keep the `paymentId`. |
+| `settled` | 200 | `payment.status: settled` **and** `resource.status` 2xx, not truncated | Paid and delivered. Keep the `paymentId`. |
+| `settled_not_delivered` | 200 | settled, but the seller answered an HTTP error (`resource.status` >= 400) | The money is spent and the content was **not** delivered. Do **not** pay again with a new id; take it up with the seller/operator. |
 | `settled_partial_delivery` | 200 | settled, but `resource.truncated: true` (body cut at 64 KiB) | You paid; you did not get everything. Fetching again is a **new purchase**: ask the seller/operator. |
 | `replayed` | 200 | `replayed: true`: recorded state of an earlier call with this `paymentId`; `resource` is `null` | Nothing was paid again and the content was **not** re-fetched. |
-| `free_resource` | 200 | `payment: null`: the resource never asked for payment | Nothing spent. |
+| `free_resource` | 200 | an **explicit** `payment: null`: the resource never asked for payment | Nothing spent. (A 200 with no `payment` field at all is treated as uncertain.) |
 | `budget_exceeded` | 402 `BUDGET_EXCEEDED` | price above the remaining job budget or your `maxAmount`; `price`, `remaining`, `cap` in base units | Nothing signed. A new `paymentId` is fine for a different purchase; do not try to raise the budget from the payer. |
 | `policy_violation` | 403 `POLICY_VIOLATION` | `rule`: `maxValuePerTxUsd`, `maxDailyVolume`, `allowedTokens` or `allowedRecipients` | Nothing signed. Only the operator can change the policy. |
 | `payment_in_progress` | 409 `PAYMENT_IN_PROGRESS` | same `paymentId` is being processed | Wait, re-ask with the **same** id. |
 | `outstanding_authorization` | 409 `OUTSTANDING_AUTHORIZATION` | an earlier refused payment to the same payee still has a live authorization (`validBefore`) | Nothing signed now. Re-ask after `validBefore`. |
 | `refused_after_signing` | 402 `PAYMENT_REFUSED` | the seller answered the signed payment without settling; the authorization stays live until `countedUntil` and the amount stays counted | Re-ask with the same id after `countedUntil`. |
-| `outcome_unknown` | 502 `PAYMENT_OUTCOME_UNKNOWN` (or 200 with `payment.status: unknown`) | a signed authorization left the process and no answer came back: **the money may have moved** | **Do not retry with a new id.** The worker reconciles it; the amount stays reserved. Check status. |
+| `outcome_unknown` | 502 `PAYMENT_OUTCOME_UNKNOWN`, 200 with `payment.status: unknown`, or **any answer whose body cannot be read/parsed** (connection cut mid-body, invalid JSON) | a signed authorization left the process and no answer came back: **the money may have moved** | **Do not retry with a new id.** The worker reconciles it; the amount stays reserved. Check status. |
 | `no_answer` | none | your client timed out: unknown whether the backend acted | Re-ask with the **same** `paymentId` only. |
 | `error` | other | `JOB_NOT_ACTIVE`, `NOT_PROVIDER`, `INVALID_URL`, `PAYMENT_FAILED`, ... | See the OpenAPI. A 5xx is uncertain: same id only. |
 
@@ -99,6 +101,10 @@ There is **no `GET` endpoint for payments** in the API today. You read state fro
   partial / not-delivered / unknown`) with `npm run x402:ops -- status --job <id>`;
 * re-asking with the **same** `paymentId`: for `pending`, `settled` and `unknown` rows the backend
   returns the recorded row with `replayed: true` and never pays again.
+
+## Tests
+
+`cd ts && npm test` (node:test) and `cd python && python -m unittest test_agentfi_pay` reproduce a 200 with a cut body, invalid JSON, a missing `payment`, and settled-with-seller-error.
 
 ## Pinned versions
 

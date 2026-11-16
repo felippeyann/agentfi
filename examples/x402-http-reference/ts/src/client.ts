@@ -29,16 +29,17 @@ export interface PayOptions {
 }
 
 export type Outcome =
-  | 'settled' // 200, payment.status settled, resource delivered whole
+  | 'settled' // 200, payment.status settled, resource 2xx and whole: paid AND delivered
+  | 'settled_not_delivered' // 200, settled, but the seller answered HTTP >= 400 (or a non-2xx): paid, NOT delivered
   | 'settled_partial_delivery' // 200, settled, resource.truncated: paid, but only the first 64 KiB arrived
   | 'replayed' // 200, replayed: recorded state of an earlier call, nothing paid again, resource null
-  | 'free_resource' // 200, payment null: the resource never asked for payment
+  | 'free_resource' // 200 with an explicit payment: null: the resource never asked for payment
   | 'budget_exceeded' // 402 BUDGET_EXCEEDED, nothing signed
   | 'policy_violation' // 403 POLICY_VIOLATION, nothing signed
   | 'payment_in_progress' // 409 PAYMENT_IN_PROGRESS
   | 'outstanding_authorization' // 409 OUTSTANDING_AUTHORIZATION, nothing signed now
   | 'refused_after_signing' // 402 PAYMENT_REFUSED
-  | 'outcome_unknown' // 502 PAYMENT_OUTCOME_UNKNOWN (or 200 with payment.status unknown)
+  | 'outcome_unknown' // 502 PAYMENT_OUTCOME_UNKNOWN, 200 with payment.status unknown, or an answer whose body could not be read/parsed
   | 'no_answer' // timeout / network failure: unknown whether the backend acted
   | 'error'; // any other documented refusal (JOB_NOT_ACTIVE, NOT_PROVIDER, INVALID_URL, ...)
 
@@ -69,6 +70,7 @@ export async function payResource(opts: PayOptions): Promise<PayResult> {
 
   let status: number;
   let body: Record<string, any>;
+  let unreadable = false;
   try {
     const res = await fetch(`${opts.baseUrl.replace(/\/+$/, '')}/v1/jobs/${encodeURIComponent(opts.jobId)}/pay-resource`, {
       method: 'POST',
@@ -77,7 +79,16 @@ export async function payResource(opts: PayOptions): Promise<PayResult> {
       signal: AbortSignal.timeout(opts.timeoutMs ?? 60_000),
     });
     status = res.status;
-    body = (await res.json().catch(() => ({}))) as Record<string, any>;
+    // The headers arrived, so the backend acted. A body that cannot be read (connection cut, timeout
+    // mid-body, invalid JSON) is NOT an empty answer: the payment may have settled.
+    try {
+      const parsed = await res.json();
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+      body = parsed as Record<string, any>;
+    } catch {
+      body = {};
+      unreadable = true;
+    }
   } catch {
     return {
       outcome: 'no_answer', httpStatus: null, paymentId, body: null, newPaymentIdAllowed: false,
@@ -85,6 +96,12 @@ export async function payResource(opts: PayOptions): Promise<PayResult> {
     };
   }
 
+  if (unreadable) {
+    return {
+      outcome: 'outcome_unknown', httpStatus: status, paymentId, body: null, newPaymentIdAllowed: false,
+      advice: `The answer (HTTP ${status}) arrived but its body could not be read or parsed, so the payment state is unknown: it may have settled. ${UNKNOWN_ADVICE}`,
+    };
+  }
   const code = body['code'] as string | undefined;
   const result = (outcome: Outcome, newPaymentIdAllowed: boolean, advice: string): PayResult =>
     ({ outcome, httpStatus: status, paymentId, body, newPaymentIdAllowed, advice });
@@ -96,12 +113,19 @@ export async function payResource(opts: PayOptions): Promise<PayResult> {
         ? result('outcome_unknown', false, UNKNOWN_ADVICE)
         : result('replayed', false, 'Recorded state of the earlier payment with this paymentId; nothing was paid again and the content was not re-fetched (resource is null).');
     }
-    if (payment === null || payment === undefined) return result('free_resource', true, 'The resource did not ask for payment; nothing was spent.');
+    if (payment === undefined) return result('outcome_unknown', false, `The 200 answer has no "payment" field (only an explicit null means free). Treat it as uncertain: ${UNKNOWN_ADVICE}`);
+    if (payment === null) return result('free_resource', true, 'The resource did not ask for payment; nothing was spent.');
     if (payment.status === 'unknown') return result('outcome_unknown', false, UNKNOWN_ADVICE);
     if (payment.status === 'settled') {
-      return body['resource']?.truncated === true
+      // Payment and delivery are judged separately.
+      const resource = body['resource'];
+      const rs = resource?.status;
+      if (typeof rs !== 'number' || rs < 200 || rs >= 300) {
+        return result('settled_not_delivered', false, `Paid (settled), but the seller answered ${rs ?? 'nothing usable'}: the resource was NOT delivered. The money is spent: do not pay again with a new paymentId. Take it up with the seller or the operator.`);
+      }
+      return resource.truncated === true
         ? result('settled_partial_delivery', false, 'Paid, but the body was cut at the 64 KiB read limit. Fetching it again would be a NEW purchase: take it up with the seller or the operator.')
-        : result('settled', false, 'Paid and delivered. Keep the paymentId for your records.');
+        : result('settled', false, 'Paid and delivered (resource 2xx, not truncated). Keep the paymentId for your records.');
     }
     return result('outcome_unknown', false, `Unexpected payment.status "${payment.status}". Treat it as uncertain: ${UNKNOWN_ADVICE}`);
   }

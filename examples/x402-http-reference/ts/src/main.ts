@@ -41,7 +41,7 @@ if (args[0] === '--scenarios') {
   const jobId = args[1]!;
   const base = args[2]!.replace(/\/+$/, '');
   const idFor = (name: string) => `ts-example-${name}-0000000001`; // fixed ids make the demo repeatable
-  for (const name of ['settled', 'partial', 'free', 'budget', 'policy', 'in-progress', 'outstanding', 'refused', 'unknown']) {
+  for (const name of ['settled', 'partial', 'delivery-failed', 'free', 'budget', 'policy', 'in-progress', 'outstanding', 'refused', 'unknown']) {
     show(`/${name}`, await payResource({ baseUrl, apiKey, jobId, url: `${base}/${name}`, paymentId: idFor(name) }));
   }
   // The right answer to an uncertain outcome: ask again with the SAME id.

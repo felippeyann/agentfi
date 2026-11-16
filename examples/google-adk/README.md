@@ -47,7 +47,7 @@ Recorded output (Windows 11, Python 3.14.3, google-adk 2.14.1, 2026-11-16):
 [tool result] code=PAYMENT_OUTCOME_UNKNOWN payment.status=unknown replayed=None
 [tool call] pay_for_resource {... "payment_id": "adk-stub-unknown-0000001"}        <- same id: replay
 [tool result] code=None payment.status=unknown replayed=True
-[final] [stub model] purchases done. Outcomes in order: ['settled', 'PAYMENT_OUTCOME_UNKNOWN', 'unknown']. ...
+[final] [stub model] purchases done. Payment states / codes in order (money only; delivery is separate): ['settled', 'PAYMENT_OUTCOME_UNKNOWN', 'unknown']. ...
 stub counters: {"paidRequests":{"/settled":1,"/unknown":1}}                         <- the replay paid nothing
 ```
 

@@ -88,7 +88,7 @@ def build_stub_model():
                 summary.append(body.get("code") or (body.get("payment") or {}).get("status") or "?")
             msg = ResponseOutputMessage(
                 id="msg_stub", role="assistant", status="completed", type="message",
-                content=[ResponseOutputText(type="output_text", annotations=[], text=f"[stub model] purchases done. Outcomes in order: {summary}. I did not retry with a new payment_id.")],
+                content=[ResponseOutputText(type="output_text", annotations=[], text=f"[stub model] purchases done. Payment states / codes in order (money only; delivery is separate): {summary}. I did not retry with a new payment_id.")],
             )
             return ModelResponse(output=[msg], usage=Usage(), response_id=None)
 

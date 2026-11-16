@@ -6,7 +6,8 @@
   "description": "Minimal TypeScript client for POST /v1/jobs/{id}/pay-resource (fetch only)",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "test": "npm run build && node --test test/client.test.mjs"
   },
   "engines": { "node": ">=20" },
   "devDependencies": {
