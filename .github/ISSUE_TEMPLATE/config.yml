@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/felippeyann/agentfi/security/advisories/new
+    about: Do not open a public issue for vulnerabilities. Use GitHub private vulnerability reporting.
+  - name: Alpha quickstart and documentation
+    url: https://github.com/felippeyann/agentfi/blob/main/docs/README.md
+    about: Start with the alpha quickstart. Check the docs hub before opening an issue.
+  - name: What we ask, and what we never collect
+    url: https://github.com/felippeyann/agentfi/blob/main/docs/feedback.md
+    about: Feedback guide - no telemetry, no prompts, no secrets, no customer data.

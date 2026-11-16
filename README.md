@@ -1,133 +1,103 @@
 # AgentFi
 
-[![Status: Reactivated (exploratory)](https://img.shields.io/badge/status-reactivated%20(exploratory)-orange.svg)](#-reactivated-exploratory--2026-10-06)
+[![Status: developer alpha](https://img.shields.io/badge/status-developer%20alpha-orange.svg)](#status-and-limits)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![npm version](https://img.shields.io/npm/v/@agent_fi/mcp-server.svg)](https://www.npmjs.com/package/@agent_fi/mcp-server)
 
-> ## 🔁 Reactivated (exploratory) — 2026-10-06
->
-> AgentFi was archived on 2026-05-17 after ~50 days of development
-> without finding a user (the postmortem is kept below for honesty).
-> It is being reactivated in **exploratory mode**: a 90-day validation
-> with explicit go/no-go gates, not a relaunch.
->
-> **What changed.** Between May and October 2026 the market converged on
-> the thesis: x402 became a Linux Foundation standard backed by Visa,
-> Mastercard, Stripe, Google and AWS; AWS, Cloudflare and Circle shipped
-> agent payment rails; ERC-8004 (agent identity/reputation) is on
-> mainnet and ERC-8183 (agent-to-agent job escrow) is a draft standard.
-> Generic agent wallets with spending limits are now a commodity.
->
-> **New direction.** AgentFi is repositioning as a **trust layer** for
-> agents that hire agents: ERC-8183-compatible escrow, ERC-8004
-> reputation anchored in settled payments, and an MCP server so
-> Claude/Codex agents can execute, all on top of third-party wallets
-> and rails (Coinbase CDP, MetaMask, x402, MPP). Not another wallet.
->
-> Plan and status: [`docs/project/execution-plan-2026-10.md`](docs/project/execution-plan-2026-10.md) ·
-> Review that led here: [`docs/project/reactivation-2026-10.md`](docs/project/reactivation-2026-10.md) ·
-> Market evidence: [`docs/project/market-signals-2026-10.md`](docs/project/market-signals-2026-10.md)
->
-> <details>
-> <summary>Original postmortem (2026-05-17)</summary>
->
-> **Honest postmortem.** AgentFi reached technical MVP early (agent
-> registration → on-chain transaction with operator fee collection
-> worked) and then accumulated breadth (4 chains, 31 MCP tools, A2A
-> jobs, escrow v3, revenue sharing) without ever finding a user. Over
-> ~50 days the surface area grew while real adoption stayed at zero.
->
-> **Why archived.** The thesis (AI agents executing autonomous DeFi
-> operations) remains directionally correct, but the market is ~2-3
-> years early — confidence in LLM-driven financial autonomy is the
-> bottleneck, not tooling. When the market opens, well-capitalized
-> incumbents (Coinbase Agent Kit, Safe modules, Anthropic-native
-> primitives) will move in. No defensible moat for a solo OSS
-> protocol in that window.
->
-> Live infrastructure (Fly.io backend, Upstash Redis) was decommissioned
-> on archive. The maintainer's smart contracts on Base Mainnet remain
-> deployed.
-> </details>
+**Spend controls and an audit trail for AI agents that buy paid APIs and services.** AgentFi is a self-hosted, headless API and [MCP](packages/mcp-server/README.md) layer: your agent pays an [x402](https://www.x402.org) (HTTP 402) resource under rules you set, the budget is enforced before anything is signed, payment and delivery are recorded separately, and payments whose outcome is uncertain are reconciled against the chain.
 
----
+> **Developer alpha.** It runs locally, on your machine. There is no hosted service, nothing is deployed on a public network, and everything x402 was demonstrated on a **local Anvil fork of Base Sepolia**, not on a public testnet and never on mainnet. Do not point it at funds you care about.
 
-**The economic layer for non-human intelligence.**
+## Who it is for
 
-AgentFi provides crypto transaction infrastructure for AI agents on Ethereum and EVM-compatible networks. It allows agents to execute DeFi transactions (swaps, yield farming, transfers) without handling private keys or managing gas, all within a secure on-chain policy framework.
+- **Software and automation companies whose agents buy services** and answer for the spend.
+- **The integrator developer**, who calls an HTTP/OpenAPI endpoint or an MCP tool from any agent framework.
+- **The budget owner**, who needs limits, an audit trail and a clear list of exceptions.
 
-> **Start here:**
-> - **[VISION.md](VISION.md)** — *why* this project exists, where it's going, and the principles behind every technical decision.
-> - **[STATE.md](STATE.md)** — *what* the project is today: purpose, full stack, capabilities, phase progress.
-> - **[HANDOFF.md](HANDOFF.md)** — live pending tasks, credentials inventory, new-machine setup.
+## The problem
 
----
+An agent that can pay can also overspend, pay twice after a timeout, or pay for something it never received. Payment rails give you a wallet; they do not give you a budget, a record that separates "money moved" from "the work arrived", or an answer for "did that timed-out payment go through?".
 
-## 📚 Documentation
+## The first flow
 
-All project documentation is organized in our **[Documentation Hub](docs/README.md)**.
+1. **Configure the rules.** Agent policy (per-payment cap in USD, daily volume, allowed tokens and recipients, pause) and a job whose reward is the budget.
+2. **The agent buys through x402.** The provider of an accepted job pays a `402` resource with `POST /v1/jobs/{id}/pay-resource` (MCP: `pay_for_resource`).
+3. **The budget is respected.** The price is checked against the policy and the remaining budget (job reward minus counted payments) *before* a signature exists. Over budget is refused, not paid.
+4. **Payment and delivery are tracked separately.** A payment row (`reserved`, `pending`, `settled`, `unknown`, `refused`) is independent of what the resource returned and of the job's own status.
+5. **Uncertain operations are reconciled.** A payment whose answer was lost stays counted against the budget and is never retried blindly. The worker reads the USDC contract and settles or releases the row only on proof.
 
-### Quick Links
-- **[Vision](VISION.md)** (required reading): Why this project exists and where it's going.
-- **[Dev Quickstart](docs/dev-quickstart.md)**: Zero-credential local stack — `docker compose up` and you're running in 3 minutes.
-- **[Operator Setup](docs/operations/setup-checklist.md)**: Get a real instance of AgentFi running.
-- **[Graphify Code Graph](docs/graphify.md)**: Queryable codebase map for agent-assisted development.
-- **[Agent Quickstart](docs/agents/quickstart.md)**: Connect your agent in < 5 minutes.
-- **[System Architecture](docs/architecture/overview.md)**: Understand the 4-layer stack.
+> **Scope of the budget.** The budget is per **job**, and the buyer is the *provider* of an `ACCEPTED` job. There are no budgets per client or per task beyond that, and no standalone "agent buys X" endpoint. Reconciliation proves whether a payment happened; it does not recover content and never re-fetches a paid resource.
 
----
+## Minimal example
 
-## 🚀 Key Features
+```bash
+curl -X POST "$AGENTFI_API_URL/v1/jobs/$JOB_ID/pay-resource" \
+  -H "x-api-key: $PROVIDER_AGENT_KEY" -H "content-type: application/json" \
+  -d '{ "url": "https://seller.example/quote", "method": "GET", "maxAmount": "0.50" }'
+```
 
-- **Turnkey wallets** — keys are created and used inside Turnkey's secure enclaves; the AgentFi process never holds them (the in-memory local provider is for development only).
-- **On-chain policy module** — `AgentPolicyModule` holds per-agent limits, whitelists and the kill switch. It checks transactions routed through `AgentExecutor`, for agents whose policy is synced on-chain. No module or executor from this build is deployed on a public network yet. Agents run as plain wallets (EOA). Safe mode does not work yet ([plan D19](docs/project/execution-plan-2026-10.md)): it is refused in production and staging, and elsewhere it only warns and agents fall back to their EOA.
-- **Model Context Protocol** — [`@agent_fi/mcp-server`](packages/mcp-server/README.md): 35 tools in the source on `main` (DeFi execution, GMX perpetuals, A2A jobs with on-chain escrow, x402 payments, trust, and P&L); the published npm 0.5.0 has 31 of them until 0.6.0 ships (plan X3).
-- **DeFi coverage** — Uniswap V3 + Curve StableSwap (swaps); Aave V3, Compound V3, and any ERC-4626 vault (yield).
-- **Agent-to-Agent economy** — job queue and paid jobs escrowed on-chain in USDC by `AgentJobEscrow` (ERC-8183), settled by the operator's evaluator, with ERC-8004 feedback written by `ReputationHook` in the settlement transaction; not deployed on a public network yet (Base Sepolia is task C4, runbook in [`docs/project/testnet-log.md`](docs/project/testnet-log.md)). Jobs on chains without the escrow keep the older DB-level escrow. Internal reputation scoring from real metrics with time-decay.
-- **Agent P&L dashboard** — per-agent breakeven detection, including real gas costs (v2).
-- **Persistent identity** — optional ENS subdomains (`alice-abc123.agentfi.eth`) wired into agent registration.
-- **OpenAPI 3.0.3 spec** at [`docs/api/openapi.yaml`](docs/api/openapi.yaml) — machine-readable contract for SDK generation.
-- **Cross-chain** — Ethereum, Base, Arbitrum, Polygon, plus Base Sepolia for the testnet. No current-ABI contracts are deployed anywhere yet; the maintainer's Base Mainnet pair is legacy (see [STATE.md §3](STATE.md#3-supported-networks)).
-- **Protocol fees** — a platform fee (30 bps by default) taken from the USDC budget when an escrowed job completes, and a basis-point fee collected atomically by `AgentExecutor` on the ETH value of routed DeFi transactions.
+Field names below follow [`docs/api/openapi.yaml`](docs/api/openapi.yaml) (`PayResourceResponse`, `ResourcePayment`, `ResourcePaymentError`), trimmed for reading.
 
----
+**Settled** (`200`): the resource was fetched and the payment recorded.
 
-## 🛠️ Getting Started
+```json
+{ "payment": { "paymentId": "…", "status": "settled", "amount": "400000", "settlementTxHash": "0x…" },
+  "remainingBudget": { "symbol": "USDC", "remaining": "600000", "remainingFormatted": "0.6" },
+  "resource": { "status": 200, "body": { "…": "…" }, "truncated": false } }
+```
 
-### For Operators
-1. Follow the **[Operator Setup Checklist](docs/operations/setup-checklist.md)** to fill third-party accounts and local `.env`.
-2. Deploy the **[Smart Contracts](docs/operations/contract-deployment.md)** to your target chain. Do not point a backend at the maintainer's Base addresses in [STATE.md](STATE.md#3-supported-networks): that pair is legacy (old `Action` ABI, every routed transaction reverts), and an escrow + hook you did not deploy names someone else's operator, fee wallet and trusted evaluator.
-3. Deploy the backend via **[Self-Hosted Production Guide](docs/operations/production-deploy.md)** — provider-agnostic, with Railway as the reference and Fly.io / Render / Docker documented as alternatives.
+**Unknown** (`502`, code `PAYMENT_OUTCOME_UNKNOWN`): no answer after signing, money may have moved. It is not retried; the nonce and window are returned for reconciliation and the amount stays counted.
 
-### For Developers
-1. Start with the **[Dev Quickstart](docs/dev-quickstart.md)** — `docker compose up` → stack running in 3 minutes, zero external accounts.
-2. Run the **[A2A Collaboration Example](examples/a2a-collab/README.md)** — two-agent end-to-end flow in one file.
-3. Run the **[Claude Desktop MCP Demo](docs/demos/claude-desktop-mcp.md)** — two MCP identities, discovery, A2A job, trust, and P&L.
-4. Run the **[ERC-8183 escrow example](examples/escrow-erc8183/README.md)** on the local Base Sepolia fork harness — USDC escrow, settlement and ERC-8004 feedback end to end.
-5. Review the **[Architecture Overview](docs/architecture/overview.md)**.
-6. Use the **[MCP Server](packages/mcp-server/README.md)** to integrate your agents.
+```json
+{ "code": "PAYMENT_OUTCOME_UNKNOWN", "paymentId": "…",
+  "authorization": { "method": "eip3009", "nonce": "0x…", "validAfter": "…", "validBefore": "…" } }
+```
 
----
+**Partial delivery**: the paid response was cut at the 64 KiB read limit, `resource.truncated: true`. The payment is still `settled`; delivery is a separate fact. (A server that reports no settlement comes back `200` with `payment.status: "unknown"` and a `warning`.)
 
-## 🛡️ Security
+Refusals before signing (`402 BUDGET_EXCEEDED`, `403 POLICY_VIOLATION`, `400 INVALID_URL`, ...) sign nothing and spend nothing. Full state machine: [x402 payments](docs/architecture/x402-payments.md).
 
-AgentFi is built for security-first autonomy. 
-- **Simulations**: Every transaction is simulated before submission — via Tenderly when configured, otherwise an `eth_call`/`estimateGas` dry-run against the chain RPC. A mock simulation is never used in production.
-- **Guardrails**: On-chain policies prevent agents from exceeding predefined limits.
-- **Kill Switch**: Operators can pause any agent's transaction ability instantly.
+## Quickstart
 
-Found a vulnerability? See **[SECURITY.md](SECURITY.md)** for our disclosure policy.
+Start at **[docs/alpha/quickstart.md](docs/alpha/quickstart.md)**. Every run is labelled with one of three modes so a demo is never mistaken for a public transaction:
 
----
+| Mode | What it is |
+|---|---|
+| **SIMULATION** | No chain and no funds. Shows the flow and the rules. |
+| **LOCAL FORK** | A local Anvil fork of Base Sepolia with test USDC (`npm run demo:x402:fork` in `packages/backend`). The mode all current x402 evidence comes from. |
+| **PUBLIC TESTNET** | Real Base Sepolia. **Not done yet.** A separate, gated milestone; the prepared package is [x402 testnet proof](docs/operations/x402-testnet-proof.md) (not executed). |
 
-## 🤝 Community
+**Install = checkout.** There is no package release for the x402 features yet: use a git checkout (or tag) of this repository. The npm package `@agent_fi/mcp-server` is at **0.5.0** (31 tools, published 2026-05-15) and does **not** include `pay_for_resource`; `main` has 35 tools. A 0.6.0 release is planned ([roadmap](docs/project/roadmap-alpha.md)). Until it ships, do not `npm i` for x402.
 
-- **[Code of Conduct](CODE_OF_CONDUCT.md)**: Our community standards.
-- **[Contributing](CONTRIBUTING.md)**: How to contribute to AgentFi.
-- **[Changelog](CHANGELOG.md)**: Release history and notable changes.
+## Compatibility
 
----
+HTTP/OpenAPI and MCP first; framework examples are tracked in the **[compatibility matrix](docs/integrations/compatibility.md)**, which says per framework and version what is tested and what is not. `packages/adapters` is legacy (DeFi-only, not published).
 
-## 📄 License
+## What works today
 
-AgentFi is open-source and licensed under the **[Apache 2.0 License](LICENSE)**.
+| Status | What |
+|---|---|
+| **Works locally** (tests and local-fork demo; not a public network) | x402 `exact` buyer with a job budget · agent policy caps (per payment, daily volume, token and recipient allowlists, pause) · payment ledger with idempotent retries · automatic reconciliation of unknown payments (worker) · outbound target policy (no private hosts, no redirects) · MCP tools in source, incl. `pay_for_resource` · OpenAPI contract |
+| **Experimental** | ERC-8183 job escrow and ERC-8004 reputation (local fork only) · A2A jobs · DeFi tools (swaps, Aave, Compound, ERC-4626, Curve) and GMX · ENS names · admin dashboard |
+| **Not available** | Safe mode (does not work; refused in production and staging) · AgentFi contracts on any public network (the maintainer's Base mainnet pair is legacy: do not use it) · hosted service · mainnet use · `upto` / auth-capture payments · multi-tenant SaaS |
+
+## Status and limits
+
+- Self-hosted by design; the maintainer runs no instance.
+- Agent wallets: keys held by Turnkey when `WALLET_PROVIDER=turnkey`; the in-memory local provider is for development only and is refused in production and staging. The escrow evaluator's key is a raw key held by the backend.
+- Alpha: APIs and tool shapes can change. Not audited. No production funds.
+- Only USDC on a supported chain, `exact` scheme, EVM.
+- Details and history: [STATE.md](STATE.md) · [alpha roadmap](docs/project/roadmap-alpha.md) · [Project history & postmortem](docs/project/history.md).
+
+## Feedback and security
+
+- **Tried it? Tell us where it broke or worked:** open an [alpha feedback or integration request](https://github.com/felippeyann/agentfi/issues/new/choose) ([what we ask and never collect](docs/feedback.md)). No telemetry; do not paste prompts, keys, seeds or customer data.
+- **Vulnerabilities:** [report privately](https://github.com/felippeyann/agentfi/security/advisories/new), never in a public issue. See [SECURITY.md](SECURITY.md).
+- [Contributing](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md) · [Changelog](CHANGELOG.md).
+
+## Documentation
+
+[Documentation hub](docs/README.md) (alpha quickstart first) · [Dev quickstart](docs/dev-quickstart.md) · [Architecture](docs/architecture/overview.md) · [x402 payments](docs/architecture/x402-payments.md) · [API reference](docs/api-reference.md) · [MCP server](packages/mcp-server/README.md) · [VISION](VISION.md) · [HANDOFF](HANDOFF.md)
+
+## License
+
+Apache 2.0, see [LICENSE](LICENSE).

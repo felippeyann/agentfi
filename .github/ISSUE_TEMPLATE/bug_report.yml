@@ -1,0 +1,76 @@
+name: Bug report
+description: Report a bug to help us improve AgentFi
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not paste prompts, API keys, private keys, seeds, customer data or logs with secrets.** Security vulnerabilities go to the [private advisory form](https://github.com/felippeyann/agentfi/security/advisories/new), not here.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened. Include error messages or screenshots (redacted).
+    validations:
+      required: true
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - backend
+        - admin
+        - mcp-server
+        - contracts
+        - docs
+        - other
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+  - type: input
+    id: os
+    attributes:
+      label: OS
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode (if applicable)
+      options:
+        - Simulation
+        - Local fork
+        - Other / not applicable
+  - type: input
+    id: chain
+    attributes:
+      label: Chain / network (if applicable)
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Any other context about the problem (related transactions, agent IDs, etc.).
