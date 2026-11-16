@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (2026-11-16, developer-alpha relaunch: GitHub entry and feedback; documentation only, no code, no migration, no version bump)
+
+- **README rewritten for the developer alpha.** The front page now says what the project is for (spend control and an audit trail for agents that buy services through x402), the five-step first flow, a minimal `pay-resource` example, the three run modes (SIMULATION / LOCAL FORK / PUBLIC TESTNET), a works / experimental / not-available table and the limits. The reactivation banner, the May postmortem and the previous DeFi-first feature list moved verbatim to [`docs/project/history.md`](docs/project/history.md). Removed or corrected: "economic layer for non-human intelligence" and the DeFi-first feature list on the front page; the npm badge (npm 0.5.0 has no x402).
+- **Feedback channel.** Issue forms (`alpha-feedback`, `integration-request`, `bug_report`, `feature_request`) replace the two Markdown templates; blank issues are off and the chooser links the private security advisory form. Guide: [`docs/feedback.md`](docs/feedback.md). `CONTRIBUTING.md` now points PRs at `main` (not the stale `develop`) and no longer says to email maintainers (no such address exists); `SECURITY.md` gains an alpha scope note.
+- **Roadmap.** [`docs/project/roadmap-alpha.md`](docs/project/roadmap-alpha.md): now / next / possible expansion (not a commitment) and non-goals; `docs/README.md` leads with the alpha quickstart.
+- **Install commands corrected.** `production-deploy.md` no longer shows `--backend` / `--api-key` flags the MCP server does not have; `claude-instructions.md` no longer names the wrong npm scope or an unpublished `pip` package.
+- **Prepared, not applied or published:** repository About / topics / labels ([`github-metadata-alpha.md`](docs/operations/github-metadata-alpha.md)) and the `@agent_fi/mcp-server` 0.6.0 release package with its draft changelog ([`mcp-0.6.0-release-package.md`](docs/operations/mcp-0.6.0-release-package.md)).
+- `scripts/check-md-links.mjs`: relative-link and anchor checker for the entry docs.
+
 ### Changed (P3-6 / P3-9, 2026-10-24: evaluator alerts and the recovery CLI; no migration, no contract change)
 
 - **New alert kind `evaluator-replaced-by-recovery`, with `severity: info` (P3-6).** When the worker's receipt wait sees its evaluator transaction replaced in its nonce by the recovery script's own speed-up or cancel — a ledger row with origin `SCRIPT`, an incident, kind `SPEED_UP` / `CANCEL`, the same nonce, chain and key — it raises this informational notice naming the incident and the operator, instead of `evaluator-replaced`. Any other replacement (no ledger row, another origin, no incident, another nonce / chain / key, an unreadable ledger) stays the `evaluator-replaced` incident alert, unchanged. The settlement path is the same in both cases: nothing is recorded from the replacement's receipt, the chain decides (C3h D2).

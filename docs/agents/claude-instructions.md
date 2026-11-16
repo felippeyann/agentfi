@@ -649,7 +649,7 @@ AgentFi provides crypto transaction infrastructure for AI agents on Ethereum and
 
 ## Getting Started
 To use AgentFi tools, an API key is required (agfi_live_...).
-MCP Server: npx @agentfi/mcp-server
+MCP Server: npx @agent_fi/mcp-server
 Documentation: https://docs.agentfi.xyz
 ```
 
@@ -661,7 +661,7 @@ Publique adaptadores e exemplos para os principais frameworks:
 
 **LangChain:**
 ```python
-# pip install agentfi-langchain
+# NOTE: no `agentfi-langchain` package is published on PyPI (checked 2026-11-16); this snippet is an illustration of the intended shape, not an install path.
 from agentfi.langchain import AgentFiToolkit
 tools = AgentFiToolkit(api_key="agfi_live_...").get_tools()
 ```

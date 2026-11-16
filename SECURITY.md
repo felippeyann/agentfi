@@ -6,6 +6,8 @@
 |---------|--------------------|
 | 0.x     | :white_check_mark: |
 
+> **Scope note (alpha).** AgentFi is a developer alpha: self-hosted, not audited, with no hosted service and no production funds. Reports are welcome all the same; please say which mode you ran (simulation, local fork, other).
+
 ## Reporting a Vulnerability
 
 **Do NOT open a public GitHub issue for security vulnerabilities.**

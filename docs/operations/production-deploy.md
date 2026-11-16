@@ -293,9 +293,9 @@ Add to your Claude/LLM config:
 }
 ```
 
-Alternatively, install the published npm package and run it as a local stdio server:
+Alternatively, run the npm package as a local stdio server. It takes no command-line flags; configuration is by environment variable. Note that npm `0.5.0` (31 tools) has no x402 tools; for `pay_for_resource` run the built package from a checkout (see the [0.6.0 release package](mcp-0.6.0-release-package.md#6-alternative-reproducible-path-by-checkout-or-tag-works-today)):
 ```bash
-npx -y @agent_fi/mcp-server --backend https://api.yourdomain.com --api-key agfi_live_...
+AGENTFI_API_URL=https://api.yourdomain.com AGENTFI_API_KEY=agfi_live_... npx -y @agent_fi/mcp-server
 ```
 
 ---
