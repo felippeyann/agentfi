@@ -1,0 +1,17 @@
+{
+  "name": "@agent_fi/example-x402-http-ts",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Minimal TypeScript client for POST /v1/jobs/{id}/pay-resource (fetch only)",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "test": "npm run build && node --test test/client.test.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "devDependencies": {
+    "@types/node": "20.19.0",
+    "typescript": "6.0.3"
+  }
+}
