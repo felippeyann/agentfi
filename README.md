@@ -70,7 +70,7 @@ Start at **[docs/alpha/quickstart.md](docs/alpha/quickstart.md)**. Every run is 
 
 ## Compatibility
 
-HTTP/OpenAPI and MCP first; framework examples are tracked in the **[compatibility matrix](docs/integrations/compatibility.md)**, which says per framework and version what is tested and what is not. `packages/adapters` holds thin tool adapters (not published to npm); see the matrix for what was tested. Legacy DeFi tools are off by default.
+HTTP/OpenAPI and MCP first; framework examples are tracked in the **[compatibility matrix](docs/integrations/compatibility.md)**, which says per framework and version what is tested and what is not. `packages/adapters` holds thin tool adapters (not published to npm); see the matrix for what was tested. In the adapters the legacy DeFi tools are opt-in; the MCP server and the backend, however, expose the experimental DeFi/transaction tools and routes unconditionally, so give a paying agent only the payer-safe tool subset (see the matrix).
 
 ## What works today
 
