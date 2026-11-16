@@ -10,12 +10,12 @@
 // inline code and external (http/https/mailto) links.
 //
 // Targets owned by other in-flight PRs are reported as "pending", not as
-// failures. Remove them from PENDING once those PRs are merged.
+// failures. (PENDING is empty: the quickstart and the matrix are on main.)
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, resolve, relative } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
-const PENDING = new Set(['docs/alpha/quickstart.md', 'docs/integrations/compatibility.md']);
+const PENDING = new Set([]);
 const DEFAULT_FILES = [
   'README.md',
   'docs/README.md',
