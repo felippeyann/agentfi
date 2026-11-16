@@ -444,6 +444,120 @@ describe('x402 automatic reconciliation on Postgres', () => {
     expect(line.action).toMatch(/new purchase/);
   });
 
+  // ── Lease expiry while a worker is still reading the chain (2026-11-16) ────────────────────────────
+  // Worker A claims a row, then its RPC stalls past `leaseMs`. Worker B claims the SAME row and
+  // judges it. These tests hold A inside `head()` (a gate), let B run, then release A.
+  describe('a lease that expires while its owner is still reading the chain', () => {
+    function gated(chain: ReturnType<typeof fakeChain>, after: 'read' | 'fail') {
+      let release!: () => void;
+      let entered!: () => void;
+      const open = new Promise<void>((r) => (release = r));
+      const inside = new Promise<void>((r) => (entered = r));
+      const reader: ChainEvidenceReader = {
+        ...chain,
+        async head() {
+          entered();
+          await open;
+          if (after === 'fail') throw new Error('request timed out after 120s');
+          return chain.head();
+        },
+      };
+      return { reader, release, inside };
+    }
+    const cycleOf = (t: Awaited<ReturnType<typeof setup>>, owner: string, reader: ChainEvidenceReader, at: Date, config: AutoReconcileConfig, alerts?: string[]) =>
+      runAutoReconcileCycle({
+        db, rpcFor: () => 'unused', readerFor: () => reader, config, now: () => at, owner, jobId: t.job.id,
+        ...(alerts ? { onEscalate: (o) => alerts.push(o.verdict) } : {}),
+      });
+
+    async function lostResponse(label: string) {
+      const t = await setup('2', { stall: 'paid' });
+      await expect(t.pay(`${label}_${tag}_0123456789`)).rejects.toMatchObject({ code: 'PAYMENT_OUTCOME_UNKNOWN' });
+      const [unknown] = await rows(t.job.id);
+      return { t, unknown: unknown! };
+    }
+
+    it('L1. the stale worker resumes with a CONFLICTING verdict (would release): nothing is written, the winner\'s state is intact', async () => {
+      const { t, unknown } = await lostResponse('l1');
+      // A's (stale, single-source) view says the authorization lapsed unused → it would release the budget.
+      const staleChain = fakeChain();
+      staleChain.at(sec(unknown.authorizationValidBefore!) + 3600);
+      const slow = gated(staleChain, 'read');
+      const t0 = t.clock.now;
+      const aConfig = { ...CONFIG, singleSourceExpiry: true };
+      const a = cycleOf(t, 'A', slow.reader, t0, aConfig);
+      await slow.inside; // A holds the lease and is inside the RPC
+      expect((await rows(t.job.id))[0]!.reconcileState).toMatchObject({ leaseOwner: 'A' });
+
+      // The lease (60 s) expires; B claims the same row and PROVES the transfer.
+      const later = new Date(t0.getTime() + CONFIG.leaseMs + 1000);
+      const tx = t.chain.use(unknown);
+      const [b] = await cycleOf(t, 'B', t.chain, later, CONFIG);
+      expect(b).toMatchObject({ verdict: 'confirmed', applied: true });
+      const settled = (await rows(t.job.id))[0]!;
+      expect(settled).toMatchObject({ status: 'settled', settlementTxHash: tx });
+      expect(settled.reconcileState).toMatchObject({ lastVerdict: 'confirmed', leaseOwner: null });
+
+      slow.release();
+      const [aOutcome] = await a;
+      expect(aOutcome).toMatchObject({ verdict: 'expired', applied: false, raced: true, escalated: false });
+      const after = (await rows(t.job.id))[0]!;
+      expect(after).toMatchObject({ status: 'settled', settlementTxHash: tx, reconciledAt: settled.reconciledAt, reconcileNote: settled.reconcileNote });
+      expect(after.reconcileState).toMatchObject({ lastVerdict: 'confirmed', attempts: 0, leaseOwner: null, stopped: false });
+      expect(await counted(t.job.id)).toBe(400_000n); // counted once, never released
+    });
+
+    it('L2. the stale worker fails AFTER the winner proved the payment: no alert, no state written over the winner', async () => {
+      const { t, unknown } = await lostResponse('l2');
+      const slow = gated(t.chain, 'fail');
+      const t0 = t.clock.now;
+      const alerts: string[] = [];
+      const oneStrike = { ...CONFIG, maxAttempts: 1 }; // one transient failure alerts the operator
+      const a = cycleOf(t, 'A', slow.reader, t0, oneStrike, alerts);
+      await slow.inside;
+      t.chain.use(unknown);
+      const [b] = await cycleOf(t, 'B', t.chain, new Date(t0.getTime() + CONFIG.leaseMs + 1000), CONFIG);
+      expect(b).toMatchObject({ verdict: 'confirmed', applied: true });
+      slow.release();
+      const [aOutcome] = await a;
+      expect(aOutcome).toMatchObject({ transient: true, applied: false, escalated: false });
+      expect(alerts).toEqual([]); // an alert about a row already proven would be false
+      expect((await rows(t.job.id))[0]).toMatchObject({
+        status: 'settled',
+        reconcileState: { lastVerdict: 'confirmed', attempts: 0, leaseOwner: null, escalatedAt: null, stopped: false },
+      });
+    });
+
+    it('L3. both are inside the RPC; the first released writes the transition once, the other finds the row moved and writes nothing over it', async () => {
+      const { t, unknown } = await lostResponse('l3');
+      const tx = t.chain.use(unknown);
+      // B's (stale, single-source) view says lapsed-unused: it would release the budget.
+      const lapsed = fakeChain();
+      lapsed.at(sec(unknown.authorizationValidBefore!) + 3600);
+      const gateA = gated(t.chain, 'read');
+      const gateB = gated(lapsed, 'read');
+      const t0 = t.clock.now;
+      const a = cycleOf(t, 'A', gateA.reader, t0, CONFIG);
+      await gateA.inside;
+      const b = cycleOf(t, 'B', gateB.reader, new Date(t0.getTime() + CONFIG.leaseMs + 1000), { ...CONFIG, singleSourceExpiry: true });
+      await gateB.inside; // B claimed the expired lease and is inside the RPC too
+      expect((await rows(t.job.id))[0]!.reconcileState).toMatchObject({ leaseOwner: 'B' });
+
+      gateA.release();
+      const [aOutcome] = await a; // A no longer owns the lease: its transition is still the only judged-by-proof write
+      expect(aOutcome).toMatchObject({ verdict: 'confirmed', applied: true });
+      gateB.release();
+      const [bOutcome] = await b;
+      expect(bOutcome).toMatchObject({ verdict: 'expired', applied: false, raced: true });
+      const final = (await rows(t.job.id))[0]!;
+      expect(final).toMatchObject({ status: 'settled', settlementTxHash: tx });
+      // B's stale "expired" judgement is not recorded over a settled row; the lease is free.
+      expect(final.reconcileState).toMatchObject({ leaseOwner: null, leaseUntil: null, stopped: false, escalatedAt: null });
+      expect(final.reconcileState!.lastVerdict).not.toBe('expired');
+      expect(await counted(t.job.id)).toBe(400_000n);
+    });
+  });
+
   it('env config: latest-0 only on a local chain outside production; bad values fall back with a warning', () => {
     expect(autoReconcileConfigFromEnv({ X402_RECONCILE_HEAD: 'latest-0' }).config.head).toEqual({ tag: 'finalized' });
     expect(

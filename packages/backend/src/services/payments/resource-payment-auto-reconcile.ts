@@ -428,22 +428,29 @@ export async function runAutoReconcileCycle(deps: AutoReconcileDeps): Promise<Au
       stopped: next.stop,
       note: result.verdict.note,
     };
-    await deps.db.resourcePaymentReconcileState.updateMany({
+    // The write is conditional on still OWNING the lease. When this worker's lease expired while it was
+    // reading the chain and another worker took the row, count is 0: its diagnostics are the other's to
+    // write, and an alert computed from this stale view must not fire (the row may already be proven).
+    // A raced verdict (the row moved under us) is stale by definition: only the lease is released.
+    const { count: owned } = await deps.db.resourcePaymentReconcileState.updateMany({
       where: { resourcePaymentId: row.id, leaseOwner: owner },
-      data: {
-        attempts: next.attempts,
-        lastVerdict: outcome.verdict,
-        lastNote: result.verdict.note.slice(0, 1000),
-        leaseOwner: null,
-        leaseUntil: null,
-        // A row that left the reconcilable set is never selected again; keep the schedule as history.
-        nextAttemptAt: next.nextAttemptAt ?? now,
-        stopped: next.stop,
-        ...(alertNow ? { escalatedAt: now, escalationReason: next.alert } : {}),
-        ...(next.clearAlert ? { escalatedAt: null, escalationReason: null } : {}),
-      },
+      data: result.raced
+        ? { leaseOwner: null, leaseUntil: null, nextAttemptAt: now }
+        : {
+            attempts: next.attempts,
+            lastVerdict: outcome.verdict,
+            lastNote: result.verdict.note.slice(0, 1000),
+            leaseOwner: null,
+            leaseUntil: null,
+            // A row that left the reconcilable set is never selected again; keep the schedule as history.
+            nextAttemptAt: next.nextAttemptAt ?? now,
+            stopped: next.stop,
+            ...(alertNow ? { escalatedAt: now, escalationReason: next.alert } : {}),
+            ...(next.clearAlert ? { escalatedAt: null, escalationReason: null } : {}),
+          },
     });
-    if (alertNow) deps.onEscalate?.(outcome);
+    if (owned !== 1) outcome.escalated = false;
+    if (alertNow && owned === 1 && !result.raced) deps.onEscalate?.(outcome);
     outcomes.push(outcome);
   }
   return outcomes;
