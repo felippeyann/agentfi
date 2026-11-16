@@ -78,7 +78,7 @@ The operator sets the buyer's rules; the agent cannot raise them; a purchase abo
   ✓ the agent raising its own per-payment limit → 403
   job …: budget 5.00 USDC · agent wallet 0x…: 5.00 USDC on the fork
   ✓ a 0.60 purchase (limit 0.50) → 403 POLICY_VIOLATION rule maxValuePerTxUsd; 0 paid requests reached the seller
-  ✓ a 0.30 purchase on a job with 0.20 left → 402 BUDGET_EXCEEDED (price 300000, remaining 200000 base units); 0 paid requests reached the seller
+  ✓ a 0.30 purchase on a job with 0.20 left → 402 BUDGET_EXCEEDED (price 0.3 USDC, remaining 0.2 USDC); ledger row failed_before_signing, no authorization nonce; the seller saw 1 unpaid probe and 0 paid requests
 ```
 
 ### Section B — an allowed purchase, and partial delivery
@@ -259,4 +259,4 @@ If a run is interrupted, a stray `anvil` may keep port 8547: find it (`netstat -
 
 ## 9. Verified run
 
-The commands of section 2 were followed literally, from a fresh `git clone`, on **2026-11-16**: commit `5ed0cc9`, Windows 11 (Git Bash), Node 24.14.1, anvil 1.7.1, Postgres 16 and Redis 7 in Docker, forking `sepolia.base.org`. The demo exited `0` after about 2.5 minutes with 23 invariants checked. Two deviations, both because that machine already ran other work on the default resources: the `docker compose … up -d postgres redis` step was skipped (Postgres and Redis were already up on 5432/6379), and `X402_DEMO_DATABASE_URL`, `X402_DEMO_REDIS_URL`, `X402_DEMO_ANVIL_PORT` and `X402_DEMO_BACKEND_PORT` pointed at a private database, Redis DB and ports (section 6). The default database, Redis DB and ports were not exercised beyond `npm run alpha:demo -- --check`. Not run: Linux, macOS, Node 22.
+The commands of section 2 were followed literally, from a fresh `git clone`, on **2026-11-16**: commit `5ed0cc9`, Windows 11 (Git Bash), Node 24.14.1, anvil 1.7.1, Postgres 16 and Redis 7 in Docker, forking `sepolia.base.org`. The demo exited `0` after about 2.5 minutes with 23 invariants checked. After the review fixes (destructive-target guards, stronger budget-block assertion) the demo was run once more end to end from the PR branch with private targets and `npm run alpha:demo -- --yes`: exit `0`, 23 invariants again. Two deviations, both because that machine already ran other work on the default resources: the `docker compose … up -d postgres redis` step was skipped (Postgres and Redis were already up on 5432/6379), and `X402_DEMO_DATABASE_URL`, `X402_DEMO_REDIS_URL`, `X402_DEMO_ANVIL_PORT` and `X402_DEMO_BACKEND_PORT` pointed at a private database, Redis DB and ports (section 6). The default database, Redis DB and ports were not exercised beyond `npm run alpha:demo -- --check`. Not run: Linux, macOS, Node 22.
