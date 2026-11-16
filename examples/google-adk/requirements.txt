@@ -1,0 +1,2 @@
+# Pinned 2026-11-16 (PyPI latest on that day). The [mcp] extra installs `mcp` (2.3.0 on that day) for McpToolset.
+google-adk[mcp]==2.14.1

@@ -150,7 +150,7 @@ export function startStub({ port = 0 } = {}) {
             paidRequests[path] = (paidRequests[path] ?? 0) + 1;
             byPaymentId.set(key, { path, status: 'unknown' });
             spent += price;
-            return refuse(502, { error: 'Payment outcome unknown', code: 'PAYMENT_OUTCOME_UNKNOWN', payment: ledgerRow(jobId, paymentId, body.url, 'unknown', price), authorization: { nonce: '0x' + 'ab'.repeat(32), validBefore: new Date(Date.now() + 10 * 60_000).toISOString() } });
+            return refuse(502, { error: 'Payment outcome unknown', code: 'PAYMENT_OUTCOME_UNKNOWN', payment: ledgerRow(jobId, paymentId, body.url, 'unknown', price), timedOut: true, authorization: { method: 'eip3009', nonce: '0x' + 'ab'.repeat(32), validBefore: new Date(Date.now() + 10 * 60_000).toISOString() } });
           }
           case '/partial':
           case '/settled': {
