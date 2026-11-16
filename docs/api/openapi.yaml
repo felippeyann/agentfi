@@ -1499,7 +1499,10 @@ paths:
             `paymentId`, different URL or method) or
             `OUTSTANDING_AUTHORIZATION` (a payment to the same `payTo` on this
             job was refused after signing and its authorization is live until
-            `validBefore`; nothing was signed — retry after that).
+            `validBefore`; nothing was signed — retry after that) or
+            `AWAITING_RECONCILIATION` (the same, for a refused payment that a
+            reconciliation has not yet resolved: nothing was fetched or signed;
+            it stays counted until reconciled).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ResourcePaymentError' }
@@ -3592,8 +3595,12 @@ components:
         after signing; money may have moved, never retried automatically) |
         `refused` (server answered 4xx/5xx/3xx after signing without reporting
         a settlement; counted until `authorizationValidBefore`);
-        `failed_before_signing` for refusals before any signature.
-      enum: [reserved, pending, settled, unknown, refused, failed_before_signing]
+        `expired`: a reconciliation proved on-chain that the authorization can no
+        longer settle and no transfer happened (budget released; the row may be
+        retried); `failed_before_signing` for refusals before any signature.
+        `unknown` and `refused` rows are reconciled automatically by the worker
+        from on-chain evidence; an RPC failure is never read as absence of payment.
+      enum: [reserved, pending, settled, unknown, refused, expired, failed_before_signing]
 
     ResourcePayment:
       type: object
@@ -3736,6 +3743,7 @@ components:
                 - PAYMENT_IN_PROGRESS
                 - PAYMENT_ID_CONFLICT
                 - OUTSTANDING_AUTHORIZATION
+                - AWAITING_RECONCILIATION
                 - PAYMENT_REFUSED
                 - PAYMENT_FAILED
                 - PAYMENT_OUTCOME_UNKNOWN

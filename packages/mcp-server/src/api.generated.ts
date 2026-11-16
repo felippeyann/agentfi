@@ -2498,7 +2498,10 @@ export interface paths {
                  *     `paymentId`, different URL or method) or
                  *     `OUTSTANDING_AUTHORIZATION` (a payment to the same `payTo` on this
                  *     job was refused after signing and its authorization is live until
-                 *     `validBefore`; nothing was signed — retry after that).
+                 *     `validBefore`; nothing was signed — retry after that) or
+                 *     `AWAITING_RECONCILIATION` (the same, for a refused payment that a
+                 *     reconciliation has not yet resolved: nothing was fetched or signed;
+                 *     it stays counted until reconciled).
                  */
                 409: {
                     headers: {
@@ -4825,10 +4828,14 @@ export interface components {
          *     after signing; money may have moved, never retried automatically) |
          *     `refused` (server answered 4xx/5xx/3xx after signing without reporting
          *     a settlement; counted until `authorizationValidBefore`);
-         *     `failed_before_signing` for refusals before any signature.
+         *     `expired`: a reconciliation proved on-chain that the authorization can no
+         *     longer settle and no transfer happened (budget released; the row may be
+         *     retried); `failed_before_signing` for refusals before any signature.
+         *     `unknown` and `refused` rows are reconciled automatically by the worker
+         *     from on-chain evidence; an RPC failure is never read as absence of payment.
          * @enum {string}
          */
-        ResourcePaymentStatus: "reserved" | "pending" | "settled" | "unknown" | "refused" | "failed_before_signing";
+        ResourcePaymentStatus: "reserved" | "pending" | "settled" | "unknown" | "refused" | "expired" | "failed_before_signing";
         /** @description One attempt to pay a 402 resource from a job budget. Never carries the signed authorization. */
         ResourcePayment: {
             id?: string;
@@ -4931,7 +4938,7 @@ export interface components {
         };
         ResourcePaymentError: components["schemas"]["Error"] & {
             /** @enum {string} */
-            code: "VALIDATION_FAILED" | "INVALID_URL" | "REDIRECT_REFUSED" | "INVALID_BUDGET" | "UNSUPPORTED_BUDGET_TOKEN" | "UNSUPPORTED_ASSET" | "BUDGET_EXCEEDED" | "NOT_PROVIDER" | "AGENT_INACTIVE" | "POLICY_PAUSED" | "POLICY_VIOLATION" | "JOB_NOT_FOUND" | "JOB_NOT_ACTIVE" | "PAYMENT_IN_PROGRESS" | "PAYMENT_ID_CONFLICT" | "OUTSTANDING_AUTHORIZATION" | "PAYMENT_REFUSED" | "PAYMENT_FAILED" | "PAYMENT_OUTCOME_UNKNOWN" | "LEDGER_ERROR";
+            code: "VALIDATION_FAILED" | "INVALID_URL" | "REDIRECT_REFUSED" | "INVALID_BUDGET" | "UNSUPPORTED_BUDGET_TOKEN" | "UNSUPPORTED_ASSET" | "BUDGET_EXCEEDED" | "NOT_PROVIDER" | "AGENT_INACTIVE" | "POLICY_PAUSED" | "POLICY_VIOLATION" | "JOB_NOT_FOUND" | "JOB_NOT_ACTIVE" | "PAYMENT_IN_PROGRESS" | "PAYMENT_ID_CONFLICT" | "OUTSTANDING_AUTHORIZATION" | "AWAITING_RECONCILIATION" | "PAYMENT_REFUSED" | "PAYMENT_FAILED" | "PAYMENT_OUTCOME_UNKNOWN" | "LEDGER_ERROR";
             paymentId?: string;
             /** @description Offered price in base units (`BUDGET_EXCEEDED`, `POLICY_VIOLATION`); `null` when the budget was exhausted before fetching. */
             price?: string | null;
