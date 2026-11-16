@@ -1,11 +1,18 @@
 /**
- * AgentFi Eliza Plugin
+ * AgentFi Eliza Plugin  --  LEGACY, not part of the alpha path.
  *
- * Integrates AgentFi tools into the ElizaOS agent framework (a16z).
+ * Pre-alpha DeFi plugin for the ElizaOS action shape of the time (duck-typed,
+ * no ElizaOS dependency, NOT tested against any ElizaOS version). Known state:
+ *  - CHECK_WALLET calls GET /v1/wallet/balance (exists);
+ *  - SWAP_TOKENS is a stub: it parses an amount and replies, it does not swap;
+ *  - CHECK_DEFI_RATES queries the Aave subgraph on the hosted The Graph
+ *    service directly (not an AgentFi endpoint; that hosted service was retired);
+ *  - there is no x402 / pay_for_resource action. For a payer agent on Eliza,
+ *    use the AgentFi MCP server or the HTTP API (docs/integrations/).
  *
- * Usage in eliza config:
- *   import { agentFiPlugin } from '@agentfi/adapters/eliza';
- *   const agent = new Agent({ plugins: [agentFiPlugin({ apiKey: 'agfi_live_...' })] });
+ * Usage (package name: @agent_fi/adapters, not on npm yet; build from the repo):
+ *   import { agentFiPlugin } from '@agent_fi/adapters/eliza';
+ *   const agent = new Agent({ plugins: [agentFiPlugin({ apiKey: process.env.AGENTFI_API_KEY!, apiUrl: process.env.AGENTFI_API_URL })] });
  */
 
 import { AgentFiClient, type AgentFiConfig } from './client.js';
@@ -37,7 +44,7 @@ export function agentFiPlugin(config: AgentFiConfig): ElizaPlugin {
 
   return {
     name: 'agentfi',
-    description: 'DeFi transaction tools — swap tokens, transfer assets, deposit to Aave',
+    description: 'LEGACY AgentFi DeFi plugin (wallet balance; swap is a stub). Not part of the alpha x402 path.',
     actions: [
       {
         name: 'CHECK_WALLET',

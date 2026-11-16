@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "license": "Apache-2.0",
   "repository": { "type": "git", "url": "https://github.com/felippeyann/agentfi.git", "directory": "packages/adapters" },
-  "description": "AgentFi adapters for LangChain, LlamaIndex, and Eliza agent frameworks",
+  "description": "Thin AgentFi adapters (OpenAI function calling, LangChain duck-typed tools): pay_for_resource for the x402 alpha path; legacy DeFi tools opt-in",
   "type": "module",
   "exports": {
     "./langchain": "./dist/langchain.js",
@@ -12,9 +12,10 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run"
   },
-  "keywords": ["agentfi", "langchain", "eliza", "ai-agents", "defi", "mcp"],
+  "keywords": ["agentfi", "langchain", "eliza", "ai-agents", "x402", "mcp"],
   "peerDependencies": {
     "@langchain/core": ">=0.2.0",
     "openai": ">=4.0.0"
@@ -25,6 +26,7 @@
   },
   "devDependencies": {
     "typescript": "^6.0.3",
-    "@types/node": "^20.11.0"
+    "@types/node": "^20.11.0",
+    "vitest": "^1.6.1"
   }
 }
