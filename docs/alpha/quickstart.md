@@ -1,6 +1,6 @@
 # AgentFi alpha — local quickstart
 
-**What you will see in about 10 minutes:** an agent buys paid resources over x402 under rules you set; a purchase that breaks the rules is stopped **before anything is signed**; a purchase whose answer was lost is proven from the chain **without being paid twice**; a payment that never settled is released **only on proof**. Payment (money) and delivery (content) are tracked separately.
+**What you will see (the demo itself took about 2.5 minutes here; `npm ci` takes several more):** an agent buys paid resources over x402 under rules you set; a purchase that breaks the rules is stopped **before anything is signed**; a purchase whose answer was lost is proven from the chain **without being paid twice**; a payment that never settled is released **only on proof**. Payment (money) and delivery (content) are tracked separately.
 
 **You need no credentials, no funds and no accounts.** Nothing in this guide signs with a real key, spends real money or sends a transaction to a public network.
 
@@ -23,13 +23,20 @@ Every command in this guide is labelled with one of three modes. They are not in
 | npm | Comes with Node. | `npm -v` |
 | Git | Any recent version. | `git --version` |
 | Postgres 16 and Redis 7 | Easiest with Docker (`docker compose`, below). Or any local Postgres/Redis you can reach. | `docker --version` |
-| Foundry `anvil` | Verified with **1.7.1**. CI installs the Foundry nightly. Anvil 1.8+ adds an L1 fee on chain 84532 that this demo does not depend on (it checks USDC balances, not gas), but it was not run with 1.8 here. | `anvil --version` |
+| Foundry `anvil` | **Only 1.7.1 was verified; newer versions are untested.** CI installs the Foundry nightly, and Anvil 1.8+ adds an L1 fee on chain 84532 (see commit `713882b`); this demo checks USDC balances, not gas, but it was not run with 1.8. Install 1.7.1 with `foundryup --install 1.7.1` (the flag is from `foundryup --help`; that exact install was not run here). | `anvil --version` |
 | Network egress | HTTPS to a **public read-only RPC** of Base Sepolia (default `https://sepolia.base.org`). The fork reads state from it; nothing is written to it. | `npm run alpha:demo -- --check` |
 | Free ports | 8547 (Anvil), 3157 (API), 5432 (Postgres), 6379 (Redis). | the same check |
 
 Install Foundry (provides `anvil`) from <https://book.getfoundry.sh/getting-started/installation>. The demo finds `anvil` on `PATH` or in `~/.foundry/bin`.
 
-**Side effects of the demo on your machine** (read before running): it **resets** (truncates all tables of) the Postgres database `agentfi_e2e_x402` (it refuses the dev database named `agentfi`) and **flushes** Redis logical database 14. If either holds something you care about, point the demo elsewhere with `X402_DEMO_DATABASE_URL` / `X402_DEMO_REDIS_URL` (section 6). It starts and stops its own Anvil, API and worker processes.
+**The demo WIPES data. Read this before running.** By default it **truncates every table** of the Postgres database `agentfi_e2e_x402` and **flushes** (`FLUSHDB`) Redis logical database 14, then starts and stops its own Anvil, API and worker processes. **Other local work that shares those defaults would be wiped** (another checkout or agent running the same demo, a database you named the same). To avoid that, point the demo at private targets (a database and a Redis DB number only you use) with `X402_DEMO_DATABASE_URL` and `X402_DEMO_REDIS_URL` (section 6). Guards, enforced twice (by `npm run alpha:demo` and again by the harness, so running `npm run demo:x402:fork` directly is covered too):
+
+- both targets must be on a **loopback host** (`localhost`, `127.0.0.1`, `::1`) unless you set `X402_DEMO_ALLOW_REMOTE=1`;
+- the database name must contain **`e2e`, `demo` or `test`**, and is never `agentfi` (the dev database);
+- the Redis logical DB is never 0 (the dev stack's);
+- `npm run alpha:demo` prints a banner with the exact Postgres host/database and Redis host/DB it will wipe, **before** it starts; if either target is not the documented default it asks you to confirm: type `wipe` at the prompt, or pass `--yes` (`npm run alpha:demo -- --yes`). Without a terminal and without `--yes` it refuses. The direct harness run prints the same scope line but does not ask.
+
+`npm run alpha:test` runs the self-test of these guards (remote host, non-test database name and Redis DB 0 are refused).
 
 ## 2. Run the demo — LOCAL FORK
 
@@ -38,11 +45,13 @@ From a clean clone. `<TAG>` is the release tag of the alpha; **until a tag exist
 ```bash
 git clone https://github.com/felippeyann/agentfi.git
 cd agentfi
-git checkout <TAG>            # a tag, or the commit SHA until a tag exists
+git checkout <TAG>            # a tag, or the commit SHA until a tag exists (see the note below)
 npm ci
 docker compose -f docker-compose.dev.yml up -d postgres redis
 npm run alpha:demo
 ```
+
+`<TAG>` must be a commit that **contains `alpha:demo`** (this page and the script arrive with PR #205: any older commit does not have them). It is a placeholder until a tag is cut. Until then use: `<SHA-after-merge>` *(the integrator fills in the merge commit of PR #205 here)*.
 
 - `npm run alpha:demo` first checks the prerequisites and says what is missing (Node, dependencies, `anvil`, Postgres, Redis, free ports, the RPC) and how to fix it; it starts nothing until all pass. `npm run alpha:demo -- --check` only checks.
 - It then generates the Prisma client and runs the demo (`npm run demo:x402:fork` in `packages/backend`), which creates the database if needed, applies the migrations, and runs scenarios A-E. **Expect about 2.5 minutes.** It exits `0` only if every invariant held; the first broken invariant stops it with `INVARIANT BROKEN`.
@@ -152,6 +161,8 @@ The refused 0.60 purchase and the expired one are **not counted**: the budget th
 
 There is **no standalone purchase endpoint**: an agent buys *inside a job*. `POST /v1/jobs/{id}/pay-resource` is paid by the job's **provider** agent, on an **ACCEPTED** job, from the job reward (the budget), subject to the provider's policy.
 
+**Security: this API listens on all interfaces (`0.0.0.0`), and the secrets below are public demo values.** Run it only on a trusted network, or replace `API_SECRET` and `ADMIN_SECRET` with fresh values (`openssl rand -hex 32`, and use the same value in the `K=` line). The demo backend (port 3157) also listens on all interfaces while the demo runs, with its own public demo secrets.
+
 Run an API locally to follow steps 1-4 (LOCAL FORK-style environment without a chain; no wallet funds are involved). In `packages/backend`, with Postgres and Redis up and the migrations applied (`npx prisma migrate deploy` with `DATABASE_URL` set):
 
 ```bash
@@ -196,6 +207,8 @@ What steps 1-4 return on a real API (verified): `201` agents with `id`, `apiKey`
 
 **Can `docker-compose.dev.yml` reach the x402 flow?** No. The zero-credential dev stack (`docs/dev-quickstart.md`) runs agents, policy, jobs and the MCP server, but (1) it does not set `SYNTHETIC_TEST_PRICES_USD`, so a USDC job on Base Sepolia is refused; (2) it does not set `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS`, so it cannot reach a seller on your machine; (3) its agents' local wallets hold no USDC and it has no chain behind them; (4) it sets no RPC for the reconciliation worker. The demo supplies all four. (This was established by running the same steps on an API with the dev stack's environment, not by starting the compose stack itself.)
 
+**A real-backend run of the HTTP / MCP examples is not reproducible outside the alpha demo today** (the seller and the wallet funding live in the demo harness). Anything marked tested in the compatibility matrix ran against the **stub**, not a real backend.
+
 Reading the results by hand: `npm run x402:ops -- status` (in `packages/backend`, with the same environment as the API, including `DATABASE_URL`) prints the operator report shown in section 3.
 
 ## 5. Glossary
@@ -220,8 +233,10 @@ Reading the results by hand: `npm run x402:ops -- status` (in `packages/backend`
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `X402_DEMO_DATABASE_URL` | `postgresql://agentfi:agentfi@localhost:5432/agentfi_e2e_x402` | Reset by the demo. Created on first run. The name `agentfi` is refused. |
-| `X402_DEMO_REDIS_URL` | `redis://localhost:6379/14` | Logical DB **flushed** by the demo. DB 0 is refused. |
+| `X402_DEMO_DATABASE_URL` | `postgresql://agentfi:agentfi@localhost:5432/agentfi_e2e_x402` | **Truncated** by the demo. Created on first run. Loopback host only; the name must contain `e2e`, `demo` or `test`; `agentfi` is refused. |
+| `X402_DEMO_REDIS_URL` | `redis://localhost:6379/14` | Logical DB **flushed** by the demo. Loopback host only; DB 0 is refused. Pick a number nothing else uses. |
+| `X402_DEMO_ALLOW_REMOTE` | unset | `1` lifts the loopback-host rule. Only if you mean to wipe a remote Postgres/Redis. |
+| `--yes` (to `npm run alpha:demo`) | | Confirms a wipe of non-default targets without a prompt (needed without a terminal). |
 | `E2E_ANVIL_FORK_URL` | `https://sepolia.base.org` | Read-only Base Sepolia RPC to fork. |
 | `E2E_ANVIL_FORK_BLOCK_NUMBER` | latest | Pin a block (a pruned public node serves only recent blocks). |
 | `X402_DEMO_ANVIL_PORT` / `X402_DEMO_BACKEND_PORT` | `8547` / `3157` | Local ports. |
@@ -230,6 +245,8 @@ Reading the results by hand: `npm run x402:ops -- status` (in `packages/backend`
 If a run is interrupted, a stray `anvil` may keep port 8547: find it (`netstat -ano` on Windows, `lsof -i :8547` elsewhere) and stop only that process.
 
 ## 7. Tests that back the same behaviour — SIMULATION
+
+**Use a dedicated throwaway database** (for example `agentfi_<you>_test`, which you create) and a **non-zero Redis logical DB**: the Postgres suites **empty whatever `DATABASE_URL` points to**. Never point them at the dev stack's `agentfi` database or Redis DB 0.
 
 `cd packages/backend && npm test` runs the unit and Postgres suites against a fake chain, including `resource-payment.auto-reconcile.db.test.ts` (recovery, restarts, two workers, an expired worker lease while another worker takes the row). They need the CI environment (`DATABASE_URL`, `REDIS_URL`, secrets set to dummy values; see `docs/operations/local-validation.md`). They prove the logic; only the demo exercises the real USDC contract.
 

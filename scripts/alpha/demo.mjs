@@ -21,14 +21,18 @@ import { existsSync } from 'node:fs';
 import net from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_DATABASE_URL, DEFAULT_REDIS_URL, destructiveProblems, isDefaultTarget, scopeBanner } from './guard.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BACKEND = join(ROOT, 'packages', 'backend');
 const checkOnly = process.argv.includes('--check');
+const assumeYes = process.argv.includes('--yes');
+const allowRemote = process.env.X402_DEMO_ALLOW_REMOTE === '1';
 
-const DATABASE_URL = process.env.X402_DEMO_DATABASE_URL?.trim() || 'postgresql://agentfi:agentfi@localhost:5432/agentfi_e2e_x402';
-const REDIS_URL = process.env.X402_DEMO_REDIS_URL?.trim() || 'redis://localhost:6379/14';
+const DATABASE_URL = process.env.X402_DEMO_DATABASE_URL?.trim() || DEFAULT_DATABASE_URL;
+const REDIS_URL = process.env.X402_DEMO_REDIS_URL?.trim() || DEFAULT_REDIS_URL;
 const FORK_URL = process.env.E2E_ANVIL_FORK_URL?.trim() || 'https://sepolia.base.org';
 const ANVIL_PORT = Number(process.env.X402_DEMO_ANVIL_PORT || 8547);
 const BACKEND_PORT = Number(process.env.X402_DEMO_BACKEND_PORT || 3157);
@@ -92,20 +96,23 @@ for (const candidate of anvilCandidates) {
 if (anvilVersion) ok(anvilVersion);
 else fail('Foundry `anvil` not found (not on PATH, not in ~/.foundry/bin)', 'install Foundry: https://book.getfoundry.sh/getting-started/installation (`foundryup`); the demo was verified with anvil 1.7.1');
 
+// What will be wiped: loopback host, test-looking database name, Redis DB != 0 (the harness enforces the same, again).
+for (const problem of destructiveProblems({ databaseUrl: DATABASE_URL, redisUrl: REDIS_URL, allowRemote })) {
+  fail(problem, 'point X402_DEMO_DATABASE_URL / X402_DEMO_REDIS_URL at a private local target (quickstart section 6)');
+}
+
 // Postgres + Redis (reachability only: the demo creates/migrates/resets its own database)
 try {
   const pg = hostPort(DATABASE_URL, 5432);
   if (!pg.name) throw new Error('no database name');
-  if (pg.name === 'agentfi') fail('X402_DEMO_DATABASE_URL points at the dev database "agentfi", which the demo refuses to reset', 'use a dedicated database name, e.g. agentfi_e2e_x402 (the default)');
-  else if (await reachable(pg.host, pg.port)) ok(`Postgres reachable at ${pg.host}:${pg.port} (database "${pg.name}" will be RESET by the demo)`);
+  if (await reachable(pg.host, pg.port)) ok(`Postgres reachable at ${pg.host}:${pg.port} (database "${pg.name}" will be RESET by the demo)`);
   else fail(`Postgres not reachable at ${pg.host}:${pg.port}`, 'start one: `docker compose -f docker-compose.dev.yml up -d postgres redis` (user/password agentfi/agentfi), or set X402_DEMO_DATABASE_URL');
 } catch (error) {
   fail(`X402_DEMO_DATABASE_URL is not a valid postgres URL (${error.message})`, 'e.g. postgresql://agentfi:agentfi@localhost:5432/agentfi_e2e_x402');
 }
 try {
   const redis = hostPort(REDIS_URL, 6379);
-  if (!redis.name || redis.name === '0') fail('X402_DEMO_REDIS_URL uses Redis DB 0, which the demo refuses to flush', 'use another logical DB, e.g. redis://localhost:6379/14 (the default)');
-  else if (await reachable(redis.host, redis.port)) ok(`Redis reachable at ${redis.host}:${redis.port} (logical DB ${redis.name} will be FLUSHED by the demo)`);
+  if (await reachable(redis.host, redis.port)) ok(`Redis reachable at ${redis.host}:${redis.port} (logical DB ${redis.name} will be FLUSHED by the demo)`);
   else fail(`Redis not reachable at ${redis.host}:${redis.port}`, 'start one: `docker compose -f docker-compose.dev.yml up -d postgres redis`, or set X402_DEMO_REDIS_URL');
 } catch (error) {
   fail(`X402_DEMO_REDIS_URL is not a valid redis URL (${error.message})`, 'e.g. redis://localhost:6379/14');
@@ -145,7 +152,25 @@ if (failures.length > 0) {
   if (!checkOnly) await run();
 }
 
+async function confirmed() {
+  console.log(`\n${scopeBanner(DATABASE_URL, REDIS_URL)}\n`);
+  if (isDefaultTarget(DATABASE_URL, REDIS_URL)) return true; // the documented defaults: no extra question
+  if (assumeYes) return true;
+  if (!process.stdin.isTTY) {
+    console.log('The targets are not the documented defaults and this is not an interactive terminal: refusing. Re-run with --yes to confirm the wipe above.');
+    return false;
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await rl.question('These are not the documented defaults. Type "wipe" to continue: ');
+  rl.close();
+  return answer.trim() === 'wipe';
+}
+
 async function run() {
+  if (!(await confirmed())) {
+    process.exitCode = 4;
+    return;
+  }
   // Make the Prisma client explicit and idempotent (a fresh clone has none until generated).
   console.log('\nGenerating the Prisma client (idempotent)...');
   const generate = spawnSync('npx prisma generate --schema=packages/backend/src/db/schema.prisma', { cwd: ROOT, shell: true, stdio: 'inherit' });

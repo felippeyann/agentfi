@@ -44,6 +44,7 @@ import {
 import { privateKeyToAccount } from 'viem/accounts';
 import { baseSepolia } from 'viem/chains';
 import { execAsync, FORGE_BIN, runMigrations, startAnvil } from './global-setup.js';
+import { destructivePostgresProblem, destructiveRedisProblem } from './destructive-guard.js';
 import { AGENT_JOB_ESCROW_ABI } from '../../abi/AgentJobEscrow.abi.js';
 import { REPUTATION_HOOK_ABI } from '../../abi/ReputationHook.abi.js';
 
@@ -267,6 +268,8 @@ export async function resetTestDatabase(databaseUrl: string): Promise<void> {
         '(default postgresql://agentfi:agentfi@localhost:5432/agentfi_e2e_escrow)',
     );
   }
+  const unsafe = destructivePostgresProblem(databaseUrl);
+  if (unsafe) throw new Error(`[e2e:escrow-fork] refusing to reset ${databaseUrl.replace(/:[^:@/]*@/, ':***@')}: ${unsafe}`);
   await runMigrations(databaseUrl);
   const { PrismaClient } = await import('@prisma/client');
   const db = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
@@ -297,6 +300,8 @@ export async function flushTestRedis(redisUrl: string): Promise<void> {
         'use a dedicated logical DB, e.g. redis://localhost:6379/13',
     );
   }
+  const unsafe = destructiveRedisProblem(redisUrl);
+  if (unsafe) throw new Error(`[e2e:escrow-fork] refusing to flush ${redisUrl}: ${unsafe}`);
   const { Redis } = await import('ioredis');
   const redis = new Redis(redisUrl, { maxRetriesPerRequest: 1, lazyConnect: true });
   try {

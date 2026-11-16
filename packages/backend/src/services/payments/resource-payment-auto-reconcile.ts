@@ -389,10 +389,18 @@ export async function runAutoReconcileCycle(deps: AutoReconcileDeps): Promise<Au
             now,
             staleAfterMs: config.staleAfterMs,
             expiryMarginSeconds: config.expiryMarginSeconds,
-            confirmExpiry: (r, v) =>
-              primary
+            confirmExpiry: async (r, v) => {
+              // `expired` is the one release with no transfer to point at. A worker whose lease was taken (or whose
+              // state an operator reset) while it was reading the chain does not release on its stale view: the
+              // current owner judges the row itself.
+              const state = await deps.db.resourcePaymentReconcileState.findUnique({ where: { resourcePaymentId: r.id } });
+              if (state?.leaseOwner !== owner) {
+                return { ok: false, transient: true, note: 'lease lost to another worker while reading the chain: not releasing budget on a stale view' };
+              }
+              return primary
                 ? confirmWithSecondSource(r, v, primary, chainId !== null ? secondReaders.get(chainId) : undefined, config)
-                : Promise.resolve({ ok: false, transient: true, note: 'no primary reader' }),
+                : { ok: false, transient: true, note: 'no primary reader' };
+            },
           },
           verifiedChains,
         );
@@ -408,7 +416,14 @@ export async function runAutoReconcileCycle(deps: AutoReconcileDeps): Promise<Au
         downChains.set(chainId, `evidence source for chain ${chainId} failed earlier in this cycle (${result.verdict.note.slice(0, 120)})`);
       }
     }
-    const next = schedule(result, attemptsBefore, now, config);
+    let next = schedule(result, attemptsBefore, now, config);
+    // A verdict that wrote nothing may be stale: another writer (a live attempt, the CLI, another worker) can have
+    // taken the row out of the reconcilable set meanwhile. Then there is nothing to alert about or to stop, and any
+    // earlier alert / stop on it is obsolete.
+    const leftSet =
+      !result.applied &&
+      (await deps.db.resourcePayment.findFirst({ where: { AND: [{ id: row.id }, reconcilableWhere()] }, select: { id: true } })) === null;
+    if (leftSet) next = { ...next, alert: null, stop: false, clearAlert: true };
     const alreadyAlerted = row.reconcileState?.escalatedAt !== null && row.reconcileState?.escalatedAt !== undefined;
     const wasStopped = row.reconcileState?.stopped === true;
     // A stop is always announced (with its own reason), even after an earlier
@@ -434,7 +449,9 @@ export async function runAutoReconcileCycle(deps: AutoReconcileDeps): Promise<Au
     // A raced verdict (the row moved under us) is stale by definition: only the lease is released.
     const { count: owned } = await deps.db.resourcePaymentReconcileState.updateMany({
       where: { resourcePaymentId: row.id, leaseOwner: owner },
-      data: result.raced
+      data: leftSet
+        ? { leaseOwner: null, leaseUntil: null, nextAttemptAt: now, stopped: false, escalatedAt: null, escalationReason: null }
+        : result.raced
         ? { leaseOwner: null, leaseUntil: null, nextAttemptAt: now }
         : {
             attempts: next.attempts,

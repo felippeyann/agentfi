@@ -132,6 +132,14 @@ async function main(): Promise<void> {
   if (sourceChain !== 84532) throw new Error(`E2E_ANVIL_FORK_URL answers chain ${sourceChain}; need Base Sepolia (84532)`);
   await assertPortFree(ANVIL_PORT, 'Anvil (X402_DEMO_ANVIL_PORT)');
   await assertPortFree(BACKEND_PORT, 'backend (X402_DEMO_BACKEND_PORT)');
+  // The scope of what is about to be wiped, before anything is (the harness refuses non-loopback hosts,
+  // non-test database names and Redis DB 0 on its own, even when this script is run directly).
+  const pgUrl = new URL(DATABASE_URL);
+  const redisUrl = new URL(REDIS_URL);
+  console.log(
+    `DESTRUCTIVE: this run WIPES Postgres ${pgUrl.hostname}:${pgUrl.port || 5432} database "${pgUrl.pathname.replace(/^\//, '')}" (all tables TRUNCATED) ` +
+      `and Redis ${redisUrl.hostname}:${redisUrl.port || 6379} logical DB ${redisUrl.pathname.replace(/^\//, '') || '0'} (FLUSHDB).\n`,
+  );
   await resetTestDatabase(DATABASE_URL);
   await flushTestRedis(REDIS_URL);
 
@@ -258,9 +266,19 @@ async function main(): Promise<void> {
     const overBudget = await call<Record<string, unknown>>(backend.url, `/v1/jobs/${smallJob.body.id}/pay-resource`, {
       method: 'POST', apiKey: agent.apiKey, body: { url: `${shop.base}/report`, method: 'GET', paymentId: 'demo-overbudget-0000-abcdef' },
     });
+    // Refused before anything was signed: the ledger row says so, it holds no authorization, and the seller
+    // saw only the unpaid 402 probe.
+    const overRow = await db.resourcePayment.findUnique({
+      where: { jobId_paymentId: { jobId: smallJob.body.id, paymentId: 'demo-overbudget-0000-abcdef' } },
+    });
     check(
-      overBudget.status === 402 && overBudget.body['code'] === 'BUDGET_EXCEEDED' && shop.paid('/report') === 0,
-      `a 0.30 purchase on a job with 0.20 left → ${overBudget.status} ${String(overBudget.body['code'])} (price ${String(overBudget.body['price'])}, remaining ${String(overBudget.body['remaining'])} base units); 0 paid requests reached the seller`,
+      overBudget.status === 402 &&
+        overBudget.body['code'] === 'BUDGET_EXCEEDED' &&
+        overRow?.status === 'failed_before_signing' &&
+        overRow.authorizationNonce === null &&
+        shop.paid('/report') === 0 &&
+        shop.counts.plain['/report'] === 1,
+      `a 0.30 purchase on a job with 0.20 left → ${overBudget.status} ${String(overBudget.body['code'])} (price ${String(overBudget.body['priceFormatted'])} USDC, remaining ${String(overBudget.body['remainingFormatted'])} USDC); ledger row ${overRow?.status}, no authorization nonce; the seller saw 1 unpaid probe and 0 paid requests`,
     );
     say();
 
