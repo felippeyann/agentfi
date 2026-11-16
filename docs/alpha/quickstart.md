@@ -51,7 +51,7 @@ npm run alpha:demo
 
 ## 3. What the demo shows
 
-The demo runs **one buyer agent** (the *provider* of a job) with the rules below, against a seller and the real USDC contract on the local fork. Lines starting with `✓` are checked invariants. The excerpts are from a real run (the machine and run are listed in section 8); transaction hashes and ids differ on every run.
+The demo runs **one buyer agent** (the *provider* of a job) with the rules below, against a seller and the real USDC contract on the local fork. Lines starting with `✓` are checked invariants. The excerpts are from a real run (section 9); transaction hashes and ids differ on every run.
 
 | What you asked to see | Demo section | Result |
 |---|---|---|
@@ -61,7 +61,7 @@ The demo runs **one buyer agent** (the *provider* of a job) with the rules below
 
 ### Section A — the rules, and a purchase that breaks them (block before signing)
 
-The operator sets the buyer's rules; the agent cannot raise them; a purchase above a rule is refused before a signature exists.
+The operator sets the buyer's rules; the agent cannot raise them; a purchase above a rule is refused before a signature exists. Two different budgets apply: the **policy** (per-payment and daily limits, who may be paid) and the **job's own reward** (what is left of it). The demo breaks each in turn.
 
 ```text
 ## A. Operator sets the budget
@@ -69,7 +69,7 @@ The operator sets the buyer's rules; the agent cannot raise them; a purchase abo
   ✓ the agent raising its own per-payment limit → 403
   job …: budget 5.00 USDC · agent wallet 0x…: 5.00 USDC on the fork
   ✓ a 0.60 purchase (limit 0.50) → 403 POLICY_VIOLATION rule maxValuePerTxUsd; 0 paid requests reached the seller
-@@A2@@
+  ✓ a 0.30 purchase on a job with 0.20 left → 402 BUDGET_EXCEEDED (price 300000, remaining 200000 base units); 0 paid requests reached the seller
 ```
 
 ### Section B — an allowed purchase, and partial delivery
@@ -77,7 +77,7 @@ The operator sets the buyer's rules; the agent cannot raise them; a purchase abo
 ```text
 ## B. Purchases proven automatically by the worker (no operator command)
   ✓ allowed purchase → 200 settled (reported by the seller)
-  ✓ a 96 KiB resource → 200, body cut at the 64 KiB read limit
+  ✓ a 70 KiB resource → 200, body cut at the 64 KiB read limit
   ✓ the worker proved both on-chain (chainVerifiedAt set) on its own
   ✓ partial delivery recorded: 65536 bytes received, resourceTruncated=true, sha256 …
 ```
@@ -140,10 +140,11 @@ The demo then compares the **chain** with the **ledger** and prints the operator
         - demo-allowed-… settled                 0.3 USDC  money:proven     delivery:delivered (HTTP 200)
         - demo-partial-… settled                 0.3 USDC  money:proven     delivery:partial (HTTP 200)
         - demo-dropped-… settled                 0.3 USDC  money:proven     delivery:unknown
+        - … three more lost-response purchases, each settled and proven …
         - demo-held-…    expired                 0.3 USDC  money:not-moved  delivery:unknown  [not counted]
 ```
 
-The refused 0.60 purchase and the expired one are **not counted**: the budget they held was released, with a reason. The five paid purchases moved 1.80 USDC on the fork, every one proven by a chain transfer.
+The refused 0.60 purchase and the expired one are **not counted**: the budget they held was released, with a reason. The six paid purchases (three more lost-response ones are omitted above) moved 1.80 USDC on the fork, every one proven by a chain transfer.
 
 ## 4. Part 2 — the same flow by hand (REST)
 
@@ -195,7 +196,7 @@ What steps 1-4 return on a real API (verified): `201` agents with `id`, `apiKey`
 
 **Can `docker-compose.dev.yml` reach the x402 flow?** No. The zero-credential dev stack (`docs/dev-quickstart.md`) runs agents, policy, jobs and the MCP server, but (1) it does not set `SYNTHETIC_TEST_PRICES_USD`, so a USDC job on Base Sepolia is refused; (2) it does not set `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS`, so it cannot reach a seller on your machine; (3) its agents' local wallets hold no USDC and it has no chain behind them; (4) it sets no RPC for the reconciliation worker. The demo supplies all four. (This was established by running the same steps on an API with the dev stack's environment, not by starting the compose stack itself.)
 
-Reading the results by hand: `npm run x402:ops -- status` (in `packages/backend`, with the same `DATABASE_URL`) prints the operator report shown in section 3.
+Reading the results by hand: `npm run x402:ops -- status` (in `packages/backend`, with the same environment as the API, including `DATABASE_URL`) prints the operator report shown in section 3.
 
 ## 5. Glossary
 
@@ -239,4 +240,6 @@ If a run is interrupted, a stray `anvil` may keep port 8547: find it (`netstat -
 - The Postgres/Redis, ports and transcripts above are local; nothing is exposed to a network.
 - Reconciliation here uses a "latest" head on a local chain (`X402_RECONCILE_LOCAL_CHAIN=true`). On a real network the default is the **finalized** head and a second provider is required to release budget.
 
-Verified run: see the PR that introduced this page for the date, commit, OS and Node/anvil versions of the literal clean-clone run.
+## 9. Verified run
+
+The commands of section 2 were followed literally, from a fresh `git clone`, on **2026-11-16**: commit `5ed0cc9`, Windows 11 (Git Bash), Node 24.14.1, anvil 1.7.1, Postgres 16 and Redis 7 in Docker, forking `sepolia.base.org`. The demo exited `0` after about 2.5 minutes with 23 invariants checked. Two deviations, both because that machine already ran other work on the default resources: the `docker compose … up -d postgres redis` step was skipped (Postgres and Redis were already up on 5432/6379), and `X402_DEMO_DATABASE_URL`, `X402_DEMO_REDIS_URL`, `X402_DEMO_ANVIL_PORT` and `X402_DEMO_BACKEND_PORT` pointed at a private database, Redis DB and ports (section 6). The default database, Redis DB and ports were not exercised beyond `npm run alpha:demo -- --check`. Not run: Linux, macOS, Node 22.
