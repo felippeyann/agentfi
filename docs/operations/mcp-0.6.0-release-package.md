@@ -37,7 +37,7 @@ Derived from `git log mcp-server-v0.5.0..HEAD -- packages/mcp-server` (73 commit
 - Token map: Polygon USDT, Arbitrum WBTC and other mistyped third-party addresses corrected.
 
 ### Notes
-- Still not available through this package: Safe mode, a hosted service, anything on a public network.
+- Still not available through this package: Safe mode, a hosted service, contracts deployed for this version on a public network.
 - npm 0.5.0 users: the tool set above is new; update the client config and re-list tools.
 ```
 

@@ -2,7 +2,7 @@
 
 Thanks for your interest in contributing. AgentFi is a developer alpha: an open-source, self-hosted API/MCP layer for agents that buy services (x402 spend control, payment and delivery records, reconciliation). Contributions that make that first flow easier to run, safer or better documented are the most useful right now.
 
-> **Before contributing, read the [README](README.md) (current scope) and [VISION.md](VISION.md) (long-term direction and principles).** Every contribution should align with both.
+> **Before contributing, read the [README](README.md) (current scope) and the [alpha roadmap](docs/project/roadmap-alpha.md).** Every contribution should align with both. [VISION.md](VISION.md) is the long-term background, kept as history.
 
 ---
 

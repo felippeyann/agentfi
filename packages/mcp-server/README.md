@@ -1,10 +1,10 @@
 # @agent_fi/mcp-server
 
-MCP server that gives AI agents 35 tools for executing on-chain transactions and participating in the Agent-to-Agent economy across Ethereum, Base, Arbitrum, and Polygon.
+MCP server with 35 tools (source on `main`). The x402 purchase tool is `pay_for_resource`; the tool set also includes experimental DeFi and agent-to-agent tools. Developer alpha: demonstrated only on a local fork.
 
 > **Source vs npm.** This README describes the source on `main` (35 tools). The version on npm, `@agent_fi/mcp-server@0.5.0` (2026-05-15), has 31: `get_job`, `check_outbox`, `contest_job` and `pay_for_resource` arrive with 0.6.0 (plan task X3). `npx -y @agent_fi/mcp-server` runs 0.5.0; run from a checkout (`npm run dev` in `packages/mcp-server`) for all 35.
 
-Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) standard. Works with Claude, GPT, and any MCP-compatible client.
+Built on the [Model Context Protocol](https://modelcontextprotocol.io) (MCP) standard. Speaks MCP over stdio and SSE; see the [compatibility matrix](../../docs/integrations/compatibility.md) for what was actually tested.
 
 ## Tools (35 in source; 31 in npm 0.5.0)
 

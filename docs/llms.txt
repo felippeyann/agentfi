@@ -1,55 +1,27 @@
 # AgentFi
 
-AgentFi provides crypto transaction infrastructure for AI agents on Ethereum and EVM-compatible networks.
+AgentFi is a developer alpha: a self-hosted, headless API and MCP layer that gives companies' buyer agents spend control. An agent pays x402 (HTTP 402) resources under a job budget and agent policy; payment and delivery are recorded separately; uncertain payments are reconciled against the chain.
 
-## What AgentFi does
+Status: developer alpha. Everything x402 was demonstrated on a local Anvil fork of Base Sepolia, not on a public testnet and not on mainnet. We do not offer a hosted service. No production funds.
 
-AgentFi lets AI agents (LLMs, autonomous systems, bots) execute DeFi transactions without handling private keys, understanding ABI encoding, or managing gas. Every operation is a single tool call.
+## Start here
 
-## Capabilities
+- Alpha quickstart: docs/alpha/quickstart.md
+- Compatibility matrix (what was tested, per framework and version): docs/integrations/compatibility.md
+- x402 payments (state machine, budget, reconciliation): docs/architecture/x402-payments.md
+- OpenAPI contract: docs/api/openapi.yaml
+- MCP server (35 tools in source; npm 0.5.0 has 31 and no x402): packages/mcp-server/README.md
+- Alpha roadmap and non-goals: docs/project/roadmap-alpha.md
+- Feedback guide: docs/feedback.md
 
-- Execute token swaps via Uniswap V3 (simulate before executing)
-- Supply and withdraw assets on Aave V3 lending protocol to earn yield
-- Transfer ETH and ERC-20 tokens to any address
-- Query wallet balances across Ethereum, Base, Arbitrum, Polygon
-- Monitor transaction status with real-time updates
-- Check current DeFi rates (supply APY, borrow APY)
-- Inspect operational policy (limits, whitelists, cooldowns)
+## Core operation
 
-## Supported Networks
+POST /v1/jobs/{id}/pay-resource (MCP tool: pay_for_resource). The provider of an ACCEPTED job pays a 402 resource within the job's remaining USDC budget (reward minus counted payments) and the agent's policy caps. Budgets are per job; there is no per-client budget and no standalone purchase endpoint.
 
-- Ethereum Mainnet (chain_id: 1)
-- Base (chain_id: 8453)
-- Arbitrum One (chain_id: 42161)
-- Polygon (chain_id: 137)
+Payment states: reserved, pending, settled, unknown, refused, failed_before_signing, expired (set by reconciliation). An unknown payment stays counted against the budget, is never retried automatically, and is reconciled by the worker on proof from the chain. Reconciliation does not recover content and never re-fetches a paid resource.
 
-## Getting Started
+## Notes for agents
 
-An API key is required (format: agfi_live_...). Obtain one by registering an agent at the AgentFi API.
-
-## MCP Server (recommended)
-
-npx @agentfi/mcp-server
-
-Set AGENTFI_API_KEY=agfi_live_xxx before running.
-
-## Available MCP Tools
-
-- get_wallet_info: Returns wallet address and token balances
-- get_token_price: Returns current USD price of a token
-- simulate_swap: Simulates a swap and returns expected output + gas estimate (call before execute_swap)
-- execute_swap: Executes a token swap after simulation
-- transfer_token: Transfers ETH or ERC-20 to any address
-- deposit_aave: Supplies an asset to Aave V3 to earn yield
-- withdraw_aave: Withdraws from Aave V3
-- get_transaction_status: Polls status of a submitted transaction
-- get_policy: Returns current operational limits for this agent
-- get_defi_rates: Returns current Aave supply/borrow APY rates
-
-## Important Behavioral Notes
-
-- Always call simulate_swap before execute_swap
-- Transaction status polling: call get_transaction_status after submitting; terminal statuses are CONFIRMED, FAILED, REVERTED
-- Amounts are always in human-readable decimal format (e.g. "1.5" for 1.5 ETH, not wei)
-- Chain IDs: 1=Ethereum, 8453=Base, 42161=Arbitrum, 137=Polygon
-- A protocol fee of 0.30% is charged on-chain, on every tier, on transactions routed through the AgentExecutor (batches, ETH-input swaps); the response's `fee` reports it. The tier rates (0.30% FREE, 0.15% PRO, 0.05% ENTERPRISE) are not applied on-chain
+- Policy defaults are permissive (empty allowedRecipients means any payee); set limits explicitly.
+- The tool set also includes experimental DeFi, escrow and agent-to-agent tools; they are not the focus of the alpha.
+- Do not paste secrets, prompts or customer data into issues. Report vulnerabilities privately: SECURITY.md.

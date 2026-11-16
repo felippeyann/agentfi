@@ -18,10 +18,10 @@ Developer alpha: self-hosted API/MCP spend controls for AI agents that buy servi
 ## 3. Topics (<= 20)
 
 ```text
-x402 ai-agents mcp model-context-protocol agentic-payments usdc base budget-controls spend-controls reconciliation agent-wallets typescript self-hosted
+x402 ai-agents mcp model-context-protocol agentic-payments usdc base budget-controls spend-controls reconciliation typescript self-hosted
 ```
 
-13 topics. Left out on purpose: `defi`, `trading`, `mainnet`, `hosted`, anything implying a live service.
+12 topics. Left out on purpose: `defi`, `trading`, `mainnet`, `hosted`, anything implying a live service.
 
 ## 4. Commands (owner runs; each changes public metadata)
 
@@ -33,7 +33,7 @@ gh repo edit felippeyann/agentfi \
   --homepage "" \
   --add-topic x402 --add-topic ai-agents --add-topic mcp --add-topic model-context-protocol \
   --add-topic agentic-payments --add-topic usdc --add-topic base --add-topic budget-controls \
-  --add-topic spend-controls --add-topic reconciliation --add-topic agent-wallets \
+  --add-topic spend-controls --add-topic reconciliation \
   --add-topic typescript --add-topic self-hosted
 ```
 
@@ -50,7 +50,7 @@ gh api -X PATCH repos/felippeyann/agentfi -f description="Developer alpha: self-
 gh api -X PUT repos/felippeyann/agentfi/topics -H "Accept: application/vnd.github+json" \
   -f "names[]=x402" -f "names[]=ai-agents" -f "names[]=mcp" -f "names[]=model-context-protocol" \
   -f "names[]=agentic-payments" -f "names[]=usdc" -f "names[]=base" -f "names[]=budget-controls" \
-  -f "names[]=spend-controls" -f "names[]=reconciliation" -f "names[]=agent-wallets" \
+  -f "names[]=spend-controls" -f "names[]=reconciliation" \
   -f "names[]=typescript" -f "names[]=self-hosted"
 ```
 

@@ -318,7 +318,7 @@ npm run release:v1:check
 npm view @agent_fi/mcp-server version
 ```
 
-**Security issue?** [SECURITY.md](SECURITY.md) — email maintainers, 48h SLA.
+**Security issue?** [SECURITY.md](SECURITY.md) — private advisory form, best effort (no email address, no SLA).
 
 **Production incident?** Operator-specific (self-hosted). Your hosting provider's dashboard + [docs/operations/release-runbook.md](docs/operations/release-runbook.md).
 

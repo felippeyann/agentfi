@@ -3,15 +3,15 @@
 [![Status: developer alpha](https://img.shields.io/badge/status-developer%20alpha-orange.svg)](#status-and-limits)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-**Spend controls and an audit trail for AI agents that buy paid APIs and services.** AgentFi is a self-hosted, headless API and [MCP](packages/mcp-server/README.md) layer: your agent pays an [x402](https://www.x402.org) (HTTP 402) resource under rules you set, the budget is enforced before anything is signed, payment and delivery are recorded separately, and payments whose outcome is uncertain are reconciled against the chain.
+**Spend controls and a payment ledger for AI agents that buy paid APIs and services.** AgentFi is a self-hosted, headless API and [MCP](packages/mcp-server/README.md) layer: your agent pays an [x402](https://www.x402.org) (HTTP 402) resource under rules you set, the budget is enforced before anything is signed, payment and delivery are recorded separately, and payments whose outcome is uncertain are reconciled against the chain.
 
-> **Developer alpha.** It runs locally, on your machine. There is no hosted service, nothing is deployed on a public network, and everything x402 was demonstrated on a **local Anvil fork of Base Sepolia**, not on a public testnet and never on mainnet. Do not point it at funds you care about.
+> **Developer alpha.** It runs locally, on your machine. We do not offer a hosted service. This alpha deploys and uses no contracts on a public network (legacy contracts from earlier versions exist on Base mainnet; do not use them), and everything x402 was demonstrated on a **local Anvil fork of Base Sepolia**, not on a public testnet and not on mainnet. Do not point it at funds you care about.
 
 ## Who it is for
 
 - **Software and automation companies whose agents buy services** and answer for the spend.
 - **The integrator developer**, who calls an HTTP/OpenAPI endpoint or an MCP tool from any agent framework.
-- **The budget owner**, who needs limits, an audit trail and a clear list of exceptions.
+- **The budget owner**, who needs limits, a payment ledger and a clear list of exceptions.
 
 ## The problem
 
@@ -22,7 +22,7 @@ An agent that can pay can also overspend, pay twice after a timeout, or pay for 
 1. **Configure the rules.** Agent policy (per-payment cap in USD, daily volume, allowed tokens and recipients, pause) and a job whose reward is the budget.
 2. **The agent buys through x402.** The provider of an accepted job pays a `402` resource with `POST /v1/jobs/{id}/pay-resource` (MCP: `pay_for_resource`).
 3. **The budget is respected.** The price is checked against the policy and the remaining budget (job reward minus counted payments) *before* a signature exists. Over budget is refused, not paid.
-4. **Payment and delivery are tracked separately.** A payment row (`reserved`, `pending`, `settled`, `unknown`, `refused`) is independent of what the resource returned and of the job's own status.
+4. **Payment and delivery are tracked separately.** A payment row (`reserved`, `pending`, `settled`, `unknown`, `refused`, `failed_before_signing`; the reconciliation worker may also set `expired`) is independent of what the resource returned and of the job's own status.
 5. **Uncertain operations are reconciled.** A payment whose answer was lost stays counted against the budget and is never retried blindly. The worker reads the USDC contract and settles or releases the row only on proof.
 
 > **Scope of the budget.** The budget is per **job**, and the buyer is the *provider* of an `ACCEPTED` job. There are no budgets per client or per task beyond that, and no standalone "agent buys X" endpoint. Reconciliation proves whether a payment happened; it does not recover content and never re-fetches a paid resource.
@@ -70,7 +70,7 @@ Start at **[docs/alpha/quickstart.md](docs/alpha/quickstart.md)**. Every run is 
 
 ## Compatibility
 
-HTTP/OpenAPI and MCP first; framework examples are tracked in the **[compatibility matrix](docs/integrations/compatibility.md)**, which says per framework and version what is tested and what is not. `packages/adapters` is legacy (DeFi-only, not published).
+HTTP/OpenAPI and MCP first; framework examples are tracked in the **[compatibility matrix](docs/integrations/compatibility.md)**, which says per framework and version what is tested and what is not. `packages/adapters` holds thin tool adapters (not published to npm); see the matrix for what was tested. Legacy DeFi tools are off by default.
 
 ## What works today
 
@@ -82,7 +82,8 @@ HTTP/OpenAPI and MCP first; framework examples are tracked in the **[compatibili
 
 ## Status and limits
 
-- Self-hosted by design; the maintainer runs no instance.
+- Self-hosted by design; we do not offer a hosted service.
+- **Defaults are permissive, set your own limits.** A new agent's policy has `maxValuePerTxUsd=1.0` and `maxDailyVolumeUsd=10000`; empty `allowedRecipients` (and token / contract lists) means any payee. Set `allowedRecipients` and the caps yourself before running anything that matters (see [`openapi.yaml`](docs/api/openapi.yaml)).
 - Agent wallets: keys held by Turnkey when `WALLET_PROVIDER=turnkey`; the in-memory local provider is for development only and is refused in production and staging. The escrow evaluator's key is a raw key held by the backend.
 - Alpha: APIs and tool shapes can change. Not audited. No production funds.
 - Only USDC on a supported chain, `exact` scheme, EVM.
@@ -96,7 +97,7 @@ HTTP/OpenAPI and MCP first; framework examples are tracked in the **[compatibili
 
 ## Documentation
 
-[Documentation hub](docs/README.md) (alpha quickstart first) · [Dev quickstart](docs/dev-quickstart.md) · [Architecture](docs/architecture/overview.md) · [x402 payments](docs/architecture/x402-payments.md) · [API reference](docs/api-reference.md) · [MCP server](packages/mcp-server/README.md) · [VISION](VISION.md) · [HANDOFF](HANDOFF.md)
+[Documentation hub](docs/README.md) (alpha quickstart first) · [Dev quickstart](docs/dev-quickstart.md) · [Architecture](docs/architecture/overview.md) · [x402 payments](docs/architecture/x402-payments.md) · [API reference](docs/api-reference.md) · [MCP server](packages/mcp-server/README.md)
 
 ## License
 

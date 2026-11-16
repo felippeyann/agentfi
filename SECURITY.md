@@ -6,13 +6,13 @@
 |---------|--------------------|
 | 0.x     | :white_check_mark: |
 
-> **Scope note (alpha).** AgentFi is a developer alpha: self-hosted, not audited, with no hosted service and no production funds. Reports are welcome all the same; please say which mode you ran (simulation, local fork, other).
+> **Scope note (alpha).** AgentFi is a developer alpha: self-hosted, not audited, we do not offer a hosted service, and it is not meant for production funds. Reports are welcome all the same; please say which mode you ran (simulation, local fork, other).
 
 ## Reporting a Vulnerability
 
 **Do NOT open a public GitHub issue for security vulnerabilities.**
 
-Instead, use GitHub's [private vulnerability reporting form](https://github.com/felippeyann/agentfi/security/advisories/new). Sign in to GitHub and select **Report a vulnerability** in the repository's Security tab. Reports are shared privately with the maintainers, not posted as public issues. We aim to acknowledge reports within **48 hours** and provide a fix or mitigation plan within **7 days**.
+Instead, use GitHub's [private vulnerability reporting form](https://github.com/felippeyann/agentfi/security/advisories/new). Sign in to GitHub and select **Report a vulnerability** in the repository's Security tab. Reports are shared privately with the maintainers, not posted as public issues. This is a solo-maintained alpha: best effort. We aim to acknowledge reports within 7 days. No fix timeline is promised.
 
 ### What to include
 
@@ -25,7 +25,7 @@ Instead, use GitHub's [private vulnerability reporting form](https://github.com/
 ### Process
 
 1. You report the vulnerability privately.
-2. We acknowledge receipt within 48 hours.
+2. We aim to acknowledge receipt within 7 days.
 3. We investigate and develop a fix.
 4. We release the fix and credit you (unless you prefer anonymity).
 5. We publish a security advisory after the fix is deployed.
