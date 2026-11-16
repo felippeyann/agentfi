@@ -32,7 +32,7 @@ Install Foundry (provides `anvil`) from <https://book.getfoundry.sh/getting-star
 **The demo WIPES data. Read this before running.** By default it **truncates every table** of the Postgres database `agentfi_e2e_x402` and **flushes** (`FLUSHDB`) Redis logical database 14, then starts and stops its own Anvil, API and worker processes. **Other local work that shares those defaults would be wiped** (another checkout or agent running the same demo, a database you named the same). To avoid that, point the demo at private targets (a database and a Redis DB number only you use) with `X402_DEMO_DATABASE_URL` and `X402_DEMO_REDIS_URL` (section 6). Guards, enforced twice (by `npm run alpha:demo` and again by the harness, so running `npm run demo:x402:fork` directly is covered too):
 
 - both targets must be on a **loopback host** (`localhost`, `127.0.0.1`, `::1`) unless you set `X402_DEMO_ALLOW_REMOTE=1`;
-- the database name must contain **`e2e`, `demo` or `test`**, and is never `agentfi` (the dev database);
+- the database name must contain **`e2e`, `demo` or `test` as a whole word between underscores** (`agentfi_e2e_x402`, `agentfi_you_test`: yes; `latest`, `contest`, `demo2`: no), and is never `agentfi`, `agentfi_c5` or `agentfi_alpha`; the Postgres URL may carry only the parameters `schema`, `connection_limit`, `sslmode`, `pool_timeout`, `connect_timeout` (`host`, `hostaddr`, `service`, `options` could redirect the connection and are refused);
 - the Redis logical DB is never 0 (the dev stack's);
 - `npm run alpha:demo` prints a banner with the exact Postgres host/database and Redis host/DB it will wipe, **before** it starts; if either target is not the documented default it asks you to confirm: type `wipe` at the prompt, or pass `--yes` (`npm run alpha:demo -- --yes`). Without a terminal and without `--yes` it refuses. The direct harness run prints the same scope line but does not ask.
 
@@ -233,7 +233,7 @@ Reading the results by hand: `npm run x402:ops -- status` (in `packages/backend`
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `X402_DEMO_DATABASE_URL` | `postgresql://agentfi:agentfi@localhost:5432/agentfi_e2e_x402` | **Truncated** by the demo. Created on first run. Loopback host only; the name must contain `e2e`, `demo` or `test`; `agentfi` is refused. |
+| `X402_DEMO_DATABASE_URL` | `postgresql://agentfi:agentfi@localhost:5432/agentfi_e2e_x402` | **Truncated** by the demo. Created on first run. Loopback host only; the name must contain `e2e`, `demo` or `test` as a whole underscore-separated word; `agentfi`, `agentfi_c5`, `agentfi_alpha` are refused; only the URL parameters listed in section 2 are allowed. |
 | `X402_DEMO_REDIS_URL` | `redis://localhost:6379/14` | Logical DB **flushed** by the demo. Loopback host only; DB 0 is refused. Pick a number nothing else uses. |
 | `X402_DEMO_ALLOW_REMOTE` | unset | `1` lifts the loopback-host rule. Only if you mean to wipe a remote Postgres/Redis. |
 | `--yes` (to `npm run alpha:demo`) | | Confirms a wipe of non-default targets without a prompt (needed without a terminal). |

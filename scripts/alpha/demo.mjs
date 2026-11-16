@@ -23,7 +23,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_DATABASE_URL, DEFAULT_REDIS_URL, destructiveProblems, isDefaultTarget, scopeBanner } from './guard.mjs';
+import { DEFAULT_DATABASE_URL, DEFAULT_REDIS_URL, bareHost, destructiveProblems, isDefaultTarget, scopeBanner } from './guard.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BACKEND = join(ROOT, 'packages', 'backend');
@@ -68,7 +68,7 @@ async function portFree(port) {
 }
 function hostPort(url, fallbackPort) {
   const u = new URL(url);
-  return { host: u.hostname, port: Number(u.port || fallbackPort), name: u.pathname.replace(/^\//, '') };
+  return { host: bareHost(u.hostname), port: Number(u.port || fallbackPort), name: u.pathname.replace(/^\//, '') };
 }
 
 console.log('AgentFi alpha demo - mode: LOCAL FORK (no credentials, funds or accounts; nothing is sent to a public network)\n');

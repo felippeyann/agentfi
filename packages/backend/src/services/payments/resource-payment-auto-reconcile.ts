@@ -392,14 +392,17 @@ export async function runAutoReconcileCycle(deps: AutoReconcileDeps): Promise<Au
             confirmExpiry: async (r, v) => {
               // `expired` is the one release with no transfer to point at. A worker whose lease was taken (or whose
               // state an operator reset) while it was reading the chain does not release on its stale view: the
-              // current owner judges the row itself.
-              const state = await deps.db.resourcePaymentReconcileState.findUnique({ where: { resourcePaymentId: r.id } });
-              if (state?.leaseOwner !== owner) {
-                return { ok: false, transient: true, note: 'lease lost to another worker while reading the chain: not releasing budget on a stale view' };
-              }
-              return primary
-                ? confirmWithSecondSource(r, v, primary, chainId !== null ? secondReaders.get(chainId) : undefined, config)
-                : { ok: false, transient: true, note: 'no primary reader' };
+              // current owner judges the row itself. This is defence in depth: the load-bearing guard is the
+              // conditional write on id + status + updatedAt in reconcileOneRow. Checked before the second-source
+              // reads (skip the RPCs) and again after them (they are the slow part).
+              const lost = { ok: false, transient: true, note: 'lease lost to another worker while reading the chain: not releasing budget on a stale view' };
+              const owns = async () =>
+                (await deps.db.resourcePaymentReconcileState.findUnique({ where: { resourcePaymentId: r.id } }))?.leaseOwner === owner;
+              if (!(await owns())) return lost;
+              if (!primary) return { ok: false, transient: true, note: 'no primary reader' };
+              const confirmation = await confirmWithSecondSource(r, v, primary, chainId !== null ? secondReaders.get(chainId) : undefined, config);
+              if (confirmation.ok && !(await owns())) return lost;
+              return confirmation;
             },
           },
           verifiedChains,
@@ -420,9 +423,14 @@ export async function runAutoReconcileCycle(deps: AutoReconcileDeps): Promise<Au
     // A verdict that wrote nothing may be stale: another writer (a live attempt, the CLI, another worker) can have
     // taken the row out of the reconcilable set meanwhile. Then there is nothing to alert about or to stop, and any
     // earlier alert / stop on it is obsolete.
-    const leftSet =
-      !result.applied &&
-      (await deps.db.resourcePayment.findFirst({ where: { AND: [{ id: row.id }, reconcilableWhere()] }, select: { id: true } })) === null;
+    let leftSet = false;
+    if (!result.applied) {
+      try {
+        leftSet = (await deps.db.resourcePayment.findFirst({ where: { AND: [{ id: row.id }, reconcilableWhere()] }, select: { id: true } })) === null;
+      } catch {
+        leftSet = false; // cannot tell: treat the row as still in the set (the conservative reading), do not abort the cycle
+      }
+    }
     if (leftSet) next = { ...next, alert: null, stop: false, clearAlert: true };
     const alreadyAlerted = row.reconcileState?.escalatedAt !== null && row.reconcileState?.escalatedAt !== undefined;
     const wasStopped = row.reconcileState?.stopped === true;

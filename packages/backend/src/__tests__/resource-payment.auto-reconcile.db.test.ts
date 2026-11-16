@@ -599,6 +599,27 @@ describe('x402 automatic reconciliation on Postgres', () => {
       expect((await rows(t.job.id))[0]!.reconcileState).toMatchObject({ leaseOwner: null, escalatedAt: null, stopped: false });
     });
 
+    it('L6. a would-release `expired` verdict RACES the row (changed by another writer, still open): the conditional write returns raced, nothing is released or alerted', async () => {
+      const { t, unknown } = await lostResponse('l6');
+      const stale = fakeChain();
+      stale.at(sec(unknown.authorizationValidBefore!) + 3600); // unused and past validBefore: would release
+      const slow = gated(stale, 'read');
+      const alerts: string[] = [];
+      const a = cycleOf(t, 'A', slow.reader, t.clock.now, { ...CONFIG, singleSourceExpiry: true, maxAttempts: 1 }, alerts);
+      await slow.inside;
+      // A still owns its lease; another writer touches the row (status unchanged, updatedAt moves): the row stays open.
+      await db.resourcePayment.update({ where: { id: unknown.id }, data: { error: 'touched by another writer' } });
+      slow.release();
+      const [aOutcome] = await a;
+      expect(aOutcome).toMatchObject({ verdict: 'expired', applied: false, raced: true, escalated: false, stopped: false });
+      expect(alerts).toEqual([]);
+      const [row] = await rows(t.job.id);
+      expect(row).toMatchObject({ status: 'unknown' }); // nothing released
+      expect(row!.reconcileState).toMatchObject({ leaseOwner: null, escalatedAt: null, stopped: false });
+      expect(row!.reconcileState!.lastVerdict).toBeNull(); // a raced verdict records no diagnostics
+      expect(await counted(t.job.id)).toBe(400_000n);
+    });
+
     it('L5. a row proven by another writer loses its stale escalation: no ALERT / STOPPED is left on it', async () => {
       const { t, unknown } = await lostResponse('l5');
       const t0 = t.clock.now;
