@@ -3,6 +3,8 @@
 [![Status: developer alpha](https://img.shields.io/badge/status-developer%20alpha-orange.svg)](#status-and-limits)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
+Website: [agentfi.cc](https://agentfi.cc) · [Run the local demo](docs/alpha/quickstart.md) · [Send feedback](docs/feedback.md)
+
 **Spend controls and a payment ledger for AI agents that buy paid APIs and services.** AgentFi is a self-hosted, headless API and [MCP](packages/mcp-server/README.md) layer: your agent pays an [x402](https://www.x402.org) (HTTP 402) resource under rules you set, the budget is enforced before anything is signed, payment and delivery are recorded separately, and payments whose outcome is uncertain are reconciled against the chain.
 
 > **Developer alpha.** It runs locally, on your machine. We do not offer a hosted service. This alpha deploys and uses no contracts on a public network (legacy contracts from earlier versions exist on Base mainnet; do not use them), and everything x402 was demonstrated on a **local Anvil fork of Base Sepolia**, not on a public testnet and not on mainnet. Do not point it at funds you care about.
