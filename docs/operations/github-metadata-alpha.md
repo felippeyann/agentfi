@@ -6,8 +6,8 @@
 |---|---|
 | Landing | **Live** at `https://www.agentfi.cc` (`agentfi.cc` 307 to `www`): developer alpha, no MPC / Safe / tool-count claims. The checks of section 2 pass |
 | Labels (step 1) | **Applied**: `alpha-feedback`, `integration-request`, `first-flow-completed`, `first-flow-blocked`, `needs-repro` exist |
-| About, topics (step 2) and Website (step 4) | **Not applied: need a repository admin.** The maintainer account used for this round has push/triage only (`gh repo edit` returns 404). Website target: `https://agentfi.cc`; description and topics as in sections 1 and 3 |
-| Conduct contact (step 3) | **Open**: no monitored destination confirmed (section 6) |
+| About, topics (step 2) and Website (step 4) | **Applied 2026-11-18 by the owner's account**: description of section 1, the 12 topics of section 3, Website `https://agentfi.cc` (read back with `gh api repos/felippeyann/agentfi --jq '{description, homepage, topics}'`) |
+| Conduct contact (step 3) | **Option A, provisional**: `contact.agentfi@gmail.com` (owner, 2026-11-18), until the project has its own domain mailbox. `CODE_OF_CONDUCT.md` names it |
 
 The text below is the checklist as prepared on 2026-11-16.
 

@@ -44,9 +44,11 @@ an individual is officially representing the community in public spaces.
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement.
 
-A monitored contact for conduct reports is being set up and will be
-published here. The address this file used to list (`conduct@agentfi.io`)
-is not monitored, so do not use it.
+Report conduct concerns by email to contact.agentfi@gmail.com. This is a
+provisional address, monitored by the maintainer until the project has its
+own domain mailbox. Please do not use any other address for this purpose
+(the old `conduct@agentfi.io` does not exist). Reports are handled
+confidentially.
 
 All complaints will be reviewed and investigated promptly and fairly.
 
