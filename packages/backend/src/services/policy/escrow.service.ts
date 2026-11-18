@@ -71,7 +71,7 @@ interface ReservationResult {
    * `USD_CAP_NOT_CONFIGURED` / `POLICY_VIOLATION` (rule `maxOutflowPerTxUsd`)
    * when the reward, paid later as an ordinary outflow, cannot pass the cap (403).
    */
-  code?: 'PRICE_UNAVAILABLE' | 'USD_CAP_NOT_CONFIGURED' | 'POLICY_VIOLATION';
+  code?: 'PRICE_UNAVAILABLE' | 'USD_CAP_NOT_CONFIGURED' | 'POLICY_VIOLATION' | 'POLICY_PAUSED';
   rule?: string;
   limit?: string;
   /** USD added to the requester's DailyVolume ("0" when no daily limit applied). Stored as `Job.reservedValueUsd`. */
@@ -176,11 +176,29 @@ export async function reserveJobEscrow(params: {
     };
   }
 
-  // 2. The policy's daily limit (0 / unparsable = none, as everywhere).
+  // 2. The policy. A paused or expired policy refuses the job, as on the
+  // escrow path (`evaluateUsdcSpend`) and in validateTransaction. It used to
+  // read as "no daily limit" (`policy.active ? limit : 0`): an agent could
+  // pause itself (a tightening), post paid jobs that each reserved $0 of
+  // DailyVolume, and once the operator resumed it, the legacy A2A payments
+  // (judged with `dailyVolumeAccounted: true`, i.e. not against the limit
+  // again) paid every reward above maxDailyVolumeUsd.
   const policy = await db.agentPolicy.findUnique({
     where: { agentId: params.requesterId },
   });
-  const dailyLimitUsd = policy && policy.active ? parsePolicyDecimal(policy.maxDailyVolumeUsd) ?? 0 : 0;
+  if (policy && !policy.active) {
+    return { success: false, code: 'POLICY_PAUSED', rule: 'policyPaused', reason: 'Agent policy is paused (kill switch active)' };
+  }
+  if (policy?.expiresAt && policy.expiresAt < new Date()) {
+    return {
+      success: false,
+      code: 'POLICY_PAUSED',
+      rule: 'policyExpired',
+      reason: `Agent policy expired at ${policy.expiresAt.toISOString()}. Update the policy to continue.`,
+    };
+  }
+  // The daily limit applies whenever a policy row exists (0 / unparsable = none, as everywhere).
+  const dailyLimitUsd = policy ? parsePolicyDecimal(policy.maxDailyVolumeUsd) ?? 0 : 0;
 
   // 3. Price the reward (Q9 rules: trusted prices only).
   const pricing = await priceReward(params.reward);

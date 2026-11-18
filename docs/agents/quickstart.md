@@ -57,6 +57,15 @@ curl -X POST http://localhost:3000/v1/agents \
   -d '{"name": "my-agent", "chainIds": [1, 8453]}'
 ```
 
+Every registration creates the agent's policy row. Without `policy` it is the
+server default: `maxValuePerTxEth` 1.0, `maxValuePerTxUsd` 1.0, `maxDailyVolumeUsd`
+10000, cooldown 60 s, empty whitelists and `maxOutflowPerTxUsd` **not configured**,
+so every ordinary outflow (transfer, swap input, deposit, GMX collateral, batch,
+legacy A2A payment, paid legacy job) is refused with `USD_CAP_NOT_CONFIGURED`
+until the operator sets it — in the body (`"policy": {"maxOutflowPerTxUsd": "100"}`)
+or later with `PATCH /v1/agents/<id>/policy` and the operator secret. The agent's
+own key can only tighten it ([payer authorization](../architecture/payer-authorization.md)).
+
 Without the operator secret, an agent can self-register with
 `POST /v1/public/agents` (same body): it is rate-limited per IP
 (`PUBLIC_REGISTRATION_RATE_LIMIT_PER_HOUR`, default 5), always FREE tier and

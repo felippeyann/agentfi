@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security (2026-11-18, payer authorization audit, PR #208)
+
+- **Policy PATCH is atomic and tighten-only for the agent key, first policy included.** The verdict and the write run under the Agent and policy row locks (`503 POLICY_BUSY` + `Retry-After` when they cannot be had in time), so a racing PATCH can no longer overtake the operator's kill switch or a concurrent tightening. An agent without a policy row is judged against the registration defaults. `POST /v1/agents` without `policy` now creates the default policy row (`maxOutflowPerTxUsd` not configured: ordinary outflows refused until the operator sets it). A paid job naming its own requester as provider is `400 JOB_PROVIDER_IS_REQUESTER` on every chain. A paused or expired requester policy refuses a legacy paid job (`403 POLICY_PAUSED`), and the daily limit is applied to a paused policy too (it read as "no daily limit"). Route matrix: [`docs/architecture/payer-authorization.md`](docs/architecture/payer-authorization.md).
+- **Stricter policy validation (behaviour change for every caller, operator included).** `allowedContracts` and `allowedTokens` entries must be `0x` addresses and `cooldownSeconds` an integer from 0 to 31536000, on `POST /v1/agents` and `PATCH /v1/agents/:id/policy`; anything else is `400`. A PATCH that echoes back a list containing a stored legacy non-address entry (e.g. a token symbol) now fails: send the list without it.
+
 ### Changed (2026-11-18, MCP 0.6.0 distribution preparation; packaging only, no tool change, no version bump, nothing published)
 
 - **`@agent_fi/mcp-server` ships an explicit file list.** `package.json` gains `"files": ["dist", "README.md", "LICENSE"]` (a package-level copy of the Apache-2.0 `LICENSE`) and a `prepack` script that deletes `dist` and rebuilds it with `tsc -p tsconfig.build.json`. Before, `npm pack` listed 102 files (208.6 kB: `src/` with the tests and the 216 kB `api.generated.ts`, `nixpacks.toml`, `tsconfig*.json`, `vitest.config.ts`); now 71 files, 116.8 kB. The tarball was installed in an empty directory and started by `node`, `npx agentfi-mcp` and the Windows `.cmd` shim against the stub API: 35 tools over stdio, including `pay_for_resource`. npm `latest` is still 0.5.0 (31 tools, no x402).

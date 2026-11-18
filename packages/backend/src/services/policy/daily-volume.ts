@@ -199,10 +199,15 @@ export async function createTransactionWithVolume(
 
       const policy = await tx.agentPolicy.findUnique({
         where: { agentId: params.agentId },
-        select: { active: true, maxDailyVolumeUsd: true },
+        select: { maxDailyVolumeUsd: true },
       });
       // Same reading as validateTransaction: 0 / unparsable = no daily limit.
-      const limit = policy?.active ? parsePolicyDecimal(policy.maxDailyVolumeUsd) ?? 0 : 0;
+      // The limit applies whether or not the policy is active: a policy paused
+      // between validateTransaction (which refuses a paused policy, unlocked)
+      // and this point used to read as "no daily limit", so the row was
+      // reserved unchecked (the pre-submit guard still stops its broadcast
+      // while paused, but a resume would then send it over the limit).
+      const limit = policy ? parsePolicyDecimal(policy.maxDailyVolumeUsd) ?? 0 : 0;
 
       if (unpriced && limit > 0) {
         throw new ReservationRefusal(

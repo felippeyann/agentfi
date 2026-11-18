@@ -86,6 +86,13 @@ async function registerAgent(name) {
       name,
       chainIds: [REWARD_CHAIN_ID],
       tier: 'FREE',
+      // Every registration gets a policy row (#208): without `policy` it is the
+      // server default, where maxOutflowPerTxUsd is not configured and every
+      // ordinary outflow — a paid legacy job's reward included — is refused
+      // (USD_CAP_NOT_CONFIGURED). Demo agents get an explicit operator policy.
+      // The reward is paid as an ordinary outflow (legacy A2A payment): cap it
+      // in USD, a finite daily limit, no cooldown.
+      policy: { maxOutflowPerTxUsd: '100', maxDailyVolumeUsd: '1000', cooldownSeconds: 0 },
     }),
   });
 }

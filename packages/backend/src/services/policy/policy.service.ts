@@ -37,6 +37,29 @@ export type OperatorResumeOutcome =
   /** The agent has no policy row (no restrictions apply). */
   | 'no_policy';
 
+/** Bounds of the policy PATCH transaction (as the reservations, `daily-volume.ts`). */
+export const POLICY_PATCH_TX_OPTIONS = { maxWait: 5_000, timeout: 10_000, lockTimeoutMs: 4_000 } as const;
+
+/** The policy row could not be locked in time (another write holds it); nothing was written. */
+export class PolicyBusyError extends Error {
+  constructor() {
+    super('The policy is being changed by another request; retry shortly');
+    this.name = 'PolicyBusyError';
+  }
+}
+
+/**
+ * The locks were not had in time: Prisma's interactive-transaction expiry
+ * (P2028: could not start / timed out / already closed) or Postgres
+ * `lock_timeout` (SQLSTATE 55P03, surfaced by a raw query as P2010).
+ */
+function isTransactionTimeout(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const e = err as { code?: unknown; meta?: { code?: unknown }; message?: unknown };
+  if (e.code === 'P2028') return true;
+  return e.meta?.code === '55P03' || (typeof e.message === 'string' && /55P03|lock timeout/i.test(e.message));
+}
+
 export class PolicyService {
   public onChain: OnChainPolicyService;
 
@@ -237,24 +260,73 @@ export class PolicyService {
   }
 
   /**
-   * Upserts the agent's policy. Omitted fields keep their current value (or the
-   * schema default when the row is created). Authority checks (who may loosen
-   * what) live in `policy-authority.ts` and the route handler — this is a raw write.
+   * Authority-checked policy write, atomic with the check.
+   *
+   * `PATCH /v1/agents/:id/policy` used to read the policy, classify the patch
+   * against that read (tighten / loosen) and write it in three separate
+   * statements. Two agent requests racing could therefore both pass against
+   * the same stale read (the second one widening what the first had just
+   * tightened), and a patch classified as neutral against `active: true`
+   * could land AFTER the operator's kill switch and switch the policy back on.
+   *
+   * Here the Agent row and then the policy row are locked (`FOR NO KEY
+   * UPDATE`, as in daily-volume.ts: a Job insert naming this agent is not
+   * blocked; the lock order of the reservations, Agent first) for the whole
+   * read -> `decide` -> write. The kill switch (`updateMany` on the policy row) and a
+   * concurrent PATCH wait for the commit, so `decide` always judges the value
+   * that is actually overwritten.
+   *
+   * `decide` returns `null` to allow the write, or any object to refuse it
+   * (returned as `rejected`, nothing written). `agentExists` is false only
+   * when no Agent row has this id (nothing is written).
+   *
+   * An explicit `active` write supersedes the admin pause's bookkeeping
+   * (`pausedByOperatorAt` is cleared): whatever the flag is from here on was
+   * not set by the pause, so a later admin resume must not undo it. See
+   * pauseByOperator / resumeByOperator.
+   *
+   * The transaction is bounded (`POLICY_PATCH_TX_OPTIONS`; the lock wait by
+   * Postgres `lock_timeout`, which unlike the Prisma timeout interrupts a
+   * blocked statement — it applies PER statement, and there are two lock
+   * statements, so the worst case is 2 x 4 s, inside the 10 s timeout): when the locks cannot be had in time it throws
+   * `PolicyBusyError` (nothing written) and the route answers 503 +
+   * Retry-After instead of an opaque 500.
    */
-  async setPolicy(
+  async patchPolicyAtomically<R extends object>(
     agentId: string,
-    policy: Partial<Omit<AgentPolicy, 'id' | 'agentId' | 'updatedAt'>>,
-  ): Promise<AgentPolicy> {
-    // An explicit `active` write supersedes the admin pause's bookkeeping:
-    // whatever the flag is from here on was not set by the pause, so a later
-    // admin resume must not undo it. See pauseByOperator / resumeByOperator.
-    const data =
-      policy.active === undefined ? policy : { ...policy, pausedByOperatorAt: null };
-    return this.db.agentPolicy.upsert({
-      where: { agentId },
-      create: { agentId, ...data },
-      update: data,
-    });
+    patch: Partial<Omit<AgentPolicy, 'id' | 'agentId' | 'updatedAt'>>,
+    decide: (current: AgentPolicy | null) => R | null,
+    options: { maxWait: number; timeout: number; lockTimeoutMs: number } = POLICY_PATCH_TX_OPTIONS,
+  ): Promise<
+    | { agentExists: false }
+    | { agentExists: true; rejected: R; policy?: undefined }
+    | { agentExists: true; rejected?: undefined; policy: AgentPolicy }
+  > {
+    return this.db
+      .$transaction(async (tx) => {
+      // An integer from our own options, never caller input (SET takes no bind parameter).
+      await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = ${Math.max(1, Math.trunc(options.lockTimeoutMs))}`);
+      const agents = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "Agent" WHERE "id" = ${agentId} FOR NO KEY UPDATE`;
+      if (agents.length === 0) return { agentExists: false as const };
+      await tx.$queryRaw`SELECT "id" FROM "AgentPolicy" WHERE "agentId" = ${agentId} FOR NO KEY UPDATE`;
+
+      const current = await tx.agentPolicy.findUnique({ where: { agentId } });
+      const rejected = decide(current);
+      if (rejected) return { agentExists: true as const, rejected };
+
+      const data = patch.active === undefined ? patch : { ...patch, pausedByOperatorAt: null };
+      const policy = await tx.agentPolicy.upsert({
+        where: { agentId },
+        create: { agentId, ...data },
+        update: data,
+      });
+      return { agentExists: true as const, policy };
+      }, { maxWait: options.maxWait, timeout: options.timeout })
+      .catch((err: unknown) => {
+        if (isTransactionTimeout(err)) throw new PolicyBusyError();
+        throw err;
+      });
   }
 
   async getPolicy(agentId: string): Promise<AgentPolicy | null> {

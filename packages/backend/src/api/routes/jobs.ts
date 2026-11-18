@@ -143,6 +143,23 @@ export async function jobRoutes(fastify: FastifyInstance) {
     const rewardToken = body.reward?.token ?? '';
     const useErc8183 = Boolean(body.reward?.amount) && isErc8183Enabled(rewardChainId);
 
+    // A paid job's reward is the CEILING `POST /v1/jobs/:id/pay-resource` puts
+    // on what the provider may pay for x402 resources (the provider pays from
+    // its own wallet, under its own policy; the reward is not the source of the
+    // funds). A caller naming ITSELF as provider would set that ceiling for
+    // itself. Defence in depth: off the escrow chains the reservation below
+    // already judges the requester's policy (reserveJobEscrow → judgeOutflowCap:
+    // a requester whose maxOutflowPerTxUsd is not configured — the default — is
+    // refused), so this only matters for a requester with a configured outflow
+    // cap or without a policy row. The escrow path refuses it with its own
+    // code; everywhere else it is refused here.
+    if (!useErc8183 && Boolean(body.reward?.amount) && provider.id === request.agentId) {
+      return reply.code(400).send({
+        error: 'JOB_PROVIDER_IS_REQUESTER',
+        message: 'A paid job cannot name its requester as the provider: the reward is the budget the provider may spend, set by someone else',
+      });
+    }
+
     let requester: { id: string; walletId: string; safeAddress: string } | null = null;
     let escrowToken: string | null = null;
     if (useErc8183) {
@@ -275,7 +292,8 @@ export async function jobRoutes(fastify: FastifyInstance) {
         }
         // §5-6: the reward, paid later as an ordinary outflow, cannot pass
         // maxOutflowPerTxUsd (not configured, or above it): 403, no job.
-        if (reservation.code === 'USD_CAP_NOT_CONFIGURED' || reservation.code === 'POLICY_VIOLATION') {
+        // A paused / expired requester policy is 403 POLICY_PAUSED, as on the escrow path.
+        if (reservation.code === 'USD_CAP_NOT_CONFIGURED' || reservation.code === 'POLICY_VIOLATION' || reservation.code === 'POLICY_PAUSED') {
           return reply.code(403).send({
             error: reservation.reason,
             code: reservation.code,

@@ -380,6 +380,13 @@ curl -X POST https://api.yourdomain.com/v1/agents \
 
 Save the returned `apiKey`; it is shown once.
 
+Without `policy` the agent gets the default policy row, in which
+`maxOutflowPerTxUsd` is not configured: transfers, swaps, deposits and paid
+legacy jobs are refused with `USD_CAP_NOT_CONFIGURED` until you set it (add
+`"policy": {"maxOutflowPerTxUsd": "<USD>"}` to the body, or `PATCH
+/v1/agents/<id>/policy` with the operator secret). See
+[payer authorization](../architecture/payer-authorization.md).
+
 ---
 
 ## Go-Live Checklist

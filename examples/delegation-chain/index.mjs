@@ -66,7 +66,17 @@ async function registerAgent(name) {
   return api('/v1/agents', {
     method: 'POST',
     headers: { 'x-api-key': OPERATOR_SECRET },
-    body: JSON.stringify({ name, chainIds: [1], tier: 'FREE' }),
+    body: JSON.stringify({
+      name,
+      chainIds: [1],
+      tier: 'FREE',
+      // Every registration gets a policy row (#208): without `policy` it is the
+      // server default, where maxOutflowPerTxUsd is not configured and every
+      // ordinary outflow — a paid legacy job's reward included — is refused
+      // (USD_CAP_NOT_CONFIGURED). Demo agents get an explicit operator policy.
+      // Free jobs need none of it; this one lets the "add a reward" step work.
+      policy: { maxOutflowPerTxUsd: '25', cooldownSeconds: 0 },
+    }),
   });
 }
 
