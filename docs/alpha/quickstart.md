@@ -1,6 +1,6 @@
 # AgentFi alpha — local quickstart
 
-**What you will see (the demo itself took about 2.5 minutes here; `npm ci` takes several more):** an agent buys paid resources over x402 under rules you set; a purchase that breaks the rules is stopped **before anything is signed**; a purchase whose answer was lost is proven from the chain **without being paid twice**; a payment that never settled is released **only on proof**. Payment (money) and delivery (content) are tracked separately.
+**What you will see (measured: the demo takes 2.5 minutes on Windows and 3.6 on a Linux container; `npm ci` took about 6 minutes on Windows and 4m53 on Linux; the Linux rehearsal needed about 21 minutes to the first result, installing the prerequisites included):** an agent buys paid resources over x402 under rules you set; a purchase that breaks the rules is stopped **before anything is signed**; a purchase whose answer was lost is proven from the chain **without being paid twice**; a payment that never settled is released **only on proof**. Payment (money) and delivery (content) are tracked separately.
 
 **You need no credentials, no funds and no accounts.** Nothing in this guide signs with a real key, spends real money or sends a transaction to a public network.
 
@@ -18,7 +18,7 @@ Every command in this guide is labelled with one of three modes. They are not in
 
 | Need | Version / detail | How to check |
 |---|---|---|
-| OS | Verified on **Windows 11 (Git Bash)**. Linux and macOS are expected to work (the code is portable; CI runs on Linux for its other suites) but **this demo was not run there**. | |
+| OS | Verified on **Windows 11 (Git Bash)**. Run once on **Debian 12 (container, as root), Node 22.23.2, Postgres 16.16, Redis 7.0.15, anvil 1.7.1, on 2026-11-18, by an agent rehearsal of a new integrator** (demo exit 0, 23 invariants; this is an internal rehearsal, not feedback from an outside user). macOS was not run. | |
 | Node.js | **22** (what CI uses). `package.json` allows `>=20`. Verified here on 24.14.1. | `node -v` |
 | npm | Comes with Node. | `npm -v` |
 | Git | Any recent version. | `git --version` |
@@ -27,7 +27,9 @@ Every command in this guide is labelled with one of three modes. They are not in
 | Network egress | HTTPS to a **public read-only RPC** of Base Sepolia (default `https://sepolia.base.org`). The fork reads state from it; nothing is written to it. | `npm run alpha:demo -- --check` |
 | Free ports | 8547 (Anvil), 3157 (API), 5432 (Postgres), 6379 (Redis). | the same check |
 
-Install Foundry (provides `anvil`) from <https://book.getfoundry.sh/getting-started/installation>. The demo finds `anvil` on `PATH` or in `~/.foundry/bin`.
+Install Foundry (provides `anvil`) from <https://book.getfoundry.sh/getting-started/installation>. The demo finds `anvil` on `PATH` or in `~/.foundry/bin`. After the installer, `foundryup` is usually **not** on `PATH` yet: run `export PATH="$HOME/.foundry/bin:$PATH"` and then `foundryup --install 1.7.1` (or `~/.foundry/bin/foundryup --install 1.7.1`; the Linux rehearsal used exactly this).
+
+**Postgres and Redis without Docker** (what the Linux rehearsal did; not run on Windows). Only Postgres **16** was tested (on Debian 12 it comes from the PGDG apt repository, not the default one); 15 was not tried. The demo creates and resets its own database, so the role needs `CREATEDB` (or superuser): `CREATE ROLE agentfi LOGIN PASSWORD 'agentfi' CREATEDB;`. Start Redis bound to loopback only (`redis-server --bind 127.0.0.1`).
 
 **The demo WIPES data. Read this before running.** By default it **truncates every table** of the Postgres database `agentfi_e2e_x402` and **flushes** (`FLUSHDB`) Redis logical database 14, then starts and stops its own Anvil, API and worker processes. **Other local work that shares those defaults would be wiped** (another checkout or agent running the same demo, a database you named the same). To avoid that, point the demo at private targets (a database and a Redis DB number only you use) with `X402_DEMO_DATABASE_URL` and `X402_DEMO_REDIS_URL` (section 6). Guards, enforced twice (by `npm run alpha:demo` and again by the harness, so running `npm run demo:x402:fork` directly is covered too):
 
@@ -56,7 +58,8 @@ npm run alpha:demo
 - `npm run alpha:demo` first checks the prerequisites and says what is missing (Node, dependencies, `anvil`, Postgres, Redis, free ports, the RPC) and how to fix it; it starts nothing until all pass. `npm run alpha:demo -- --check` only checks.
 - It then generates the Prisma client and runs the demo (`npm run demo:x402:fork` in `packages/backend`), which creates the database if needed, applies the migrations, and runs scenarios A-E. **Expect about 2.5 minutes.** It exits `0` only if every invariant held; the first broken invariant stops it with `INVARIANT BROKEN`.
 - A transcript is written to `<your temp dir>/agentfi-alpha-demo-transcript.txt` (override with `X402_DEMO_TRANSCRIPT`).
-- Stop Postgres and Redis afterwards with `docker compose -f docker-compose.dev.yml down`.
+- Stop Postgres and Redis afterwards with `docker compose -f docker-compose.dev.yml down` (only if you started them that way; with your own Postgres and Redis there is nothing to stop here: the demo leaves its test database in place, and the next run wipes it).
+- A successful run ends with `All N invariants held.` (N is counted, 23 today); a failure stops at the first broken invariant and exits 1.
 
 ## 3. What the demo shows
 
@@ -207,9 +210,20 @@ What steps 1-4 return on a real API (verified): `201` agents with `id`, `apiKey`
 
 **Can `docker-compose.dev.yml` reach the x402 flow?** No. The zero-credential dev stack (`docs/dev-quickstart.md`) runs agents, policy, jobs and the MCP server, but (1) it does not set `SYNTHETIC_TEST_PRICES_USD`, so a USDC job on Base Sepolia is refused; (2) it does not set `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS`, so it cannot reach a seller on your machine; (3) its agents' local wallets hold no USDC and it has no chain behind them; (4) it sets no RPC for the reconciliation worker. The demo supplies all four. (This was established by running the same steps on an API with the dev stack's environment, not by starting the compose stack itself.)
 
-**A real-backend run of the HTTP / MCP examples is not reproducible outside the alpha demo today** (the seller and the wallet funding live in the demo harness). Anything marked tested in the compatibility matrix ran against the **stub**, not a real backend.
+**The seller and the wallet funding live in the demo harness, so the purchase step only runs against it.** Section 10 runs a real agent framework against exactly that backend (`npm run alpha:framework`). Every compatibility-matrix row not marked as run against the real local backend ran against the **stub**.
 
-Reading the results by hand: `npm run x402:ops -- status` (in `packages/backend`, with the same environment as the API, including `DATABASE_URL`) prints the operator report shown in section 3.
+Reading the results by hand: `npm run x402:ops -- status` prints the operator report shown in section 3. **It needs more than `DATABASE_URL`**: the CLI loads the backend configuration, and without `NODE_ENV` it refuses to start inside a container (`FATAL: NODE_ENV is not set ...`). The minimal environment (checked by running it; `<...>` are yours; the secrets can be any 32+ characters because the CLI only reads the database):
+
+```bash
+cd packages/backend
+NODE_ENV=development WALLET_PROVIDER=local \
+DATABASE_URL=<the demo database> REDIS_URL=<the demo redis> \
+ALCHEMY_API_KEY=x OPERATOR_FEE_WALLET=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 \
+API_SECRET=<32+ characters> ADMIN_SECRET=<32+ characters> \
+npm run x402:ops -- status --agent <agent id>        # or --job <job id>
+```
+
+**Which database holds the demo's data:** the one in `X402_DEMO_DATABASE_URL` (default `postgresql://agentfi:agentfi@localhost:5432/agentfi_e2e_x402`), and it is wiped at the start of the next run. The demo prints this command, with your values filled in, at the end of its output. The agent id is printed in the `Operator view` of the transcript; `npm run alpha:serve` (section 10) writes a ready-to-source `operator.env`.
 
 ## 5. Glossary
 
@@ -227,6 +241,7 @@ Reading the results by hand: `npm run x402:ops -- status` (in `packages/backend`
 - **Counted** means "holds budget": reserved, pending, settled, unknown, and refused while its authorization could still be used.
 - **What automatic reconciliation does.** The worker looks at every payment that is not proven or terminal, reads the USDC contract, and moves a payment **only on chain proof**: used with a matching transfer → proven; unused past its validity (confirmed by a second source) or cancelled → expired. If the evidence source is down it backs off and retries; after several failures it **alerts the operator once** and keeps retrying. It **never signs, sends, retries or re-fetches** a paid resource.
 - **What still needs a human.** Payments the chain cannot judge (a different authorization scheme, rows without the needed evidence, evidence sources that disagree) are **stopped and escalated**. Run `npm run x402:ops -- status` (in `packages/backend`): it lists each payment with an `automatic` line (next look, `ALERT`, `STOPPED`) and an `ACTION` only where a person is needed, and `x402:ops resolve` records a human decision with who and why (an attestation, never shown as proof).
+- **Two things in the operator output look like errors and are not.** A line `reason: … fetch failed` on a row that ends up `money:proven` is the seller-side failure the buyer saw at the time (a lost response); the chain later proved the money moved, so the row is settled and the reason is only history. A `WARN: SYNTHETIC_TEST_PRICES_USD is set` line is expected: a testnet asset has no price oracle, so the demo gives USDC a synthetic price of 1 USD for the policy limits.
 - **Reconciliation proves payment; it does not recover content.** A proven payment with delivery `partial` or `unknown` means the money moved but the content did not fully arrive. Take it up with the seller. **A paid resource is never refetched** by AgentFi: fetching it again would be a new purchase.
 
 ## 6. Configuration and cleanup
@@ -259,4 +274,112 @@ If a run is interrupted, a stray `anvil` may keep port 8547: find it (`netstat -
 
 ## 9. Verified run
 
-The commands of section 2 were followed literally, from a fresh `git clone`, on **2026-11-16**: commit `5ed0cc9`, Windows 11 (Git Bash), Node 24.14.1, anvil 1.7.1, Postgres 16 and Redis 7 in Docker, forking `sepolia.base.org`. The demo exited `0` after about 2.5 minutes with 23 invariants checked. After the review fixes (destructive-target guards, stronger budget-block assertion) the demo was run once more end to end from the PR branch with private targets and `npm run alpha:demo -- --yes`: exit `0`, 23 invariants again. Two deviations, both because that machine already ran other work on the default resources: the `docker compose … up -d postgres redis` step was skipped (Postgres and Redis were already up on 5432/6379), and `X402_DEMO_DATABASE_URL`, `X402_DEMO_REDIS_URL`, `X402_DEMO_ANVIL_PORT` and `X402_DEMO_BACKEND_PORT` pointed at a private database, Redis DB and ports (section 6). The default database, Redis DB and ports were not exercised beyond `npm run alpha:demo -- --check`. Not run: Linux, macOS, Node 22.
+The commands of section 2 were followed literally, from a fresh `git clone`, on **2026-11-16**: commit `5ed0cc9`, Windows 11 (Git Bash), Node 24.14.1, anvil 1.7.1, Postgres 16 and Redis 7 in Docker, forking `sepolia.base.org`. The demo exited `0` after about 2.5 minutes with 23 invariants checked. After the review fixes (destructive-target guards, stronger budget-block assertion) the demo was run once more end to end from the PR branch with private targets and `npm run alpha:demo -- --yes`: exit `0`, 23 invariants again. Two deviations, both because that machine already ran other work on the default resources: the `docker compose … up -d postgres redis` step was skipped (Postgres and Redis were already up on 5432/6379), and `X402_DEMO_DATABASE_URL`, `X402_DEMO_REDIS_URL`, `X402_DEMO_ANVIL_PORT` and `X402_DEMO_BACKEND_PORT` pointed at a private database, Redis DB and ports (section 6). The default database, Redis DB and ports were not exercised beyond `npm run alpha:demo -- --check`. Not run on that machine: macOS. Linux (Debian 12 container, Node 22.23.2, Postgres 16.16, Redis 7.0.15, anvil 1.7.1) was run once on 2026-11-18 by an agent rehearsal that followed this page as a new integrator: demo exit 0, 23 invariants, about 21 minutes to the first result (`npm ci` 4m53, demo 3m34).
+
+## 10. Run it through an agent framework — LOCAL FORK, scripted model
+
+Sections 2-3 drive the backend with a test script. This section drives **the same backend** with a real agent framework: the **OpenAI Agents SDK** (Python) calls the **AgentFi MCP server** (stdio, built from this checkout), which calls the real local API; the API signs a real EIP-3009 authorization with the buyer agent's wallet and the seller's real `@x402/evm` exact facilitator settles it on the local Anvil fork.
+
+**What is real and what is not.** Real: the framework, the MCP stdio transport and server, the API and worker, the signature, the `@x402/evm` facilitator, the USDC contract code on a **local fork** of Base Sepolia. **Not real:** the model is a **scripted stand-in** (a fixed list of tool calls: no LLM ran, no key, no cost; never read this as "a model decided to buy"); the seller is **ours**; the chain is a **local fork, not a public testnet**; the API accepts a seller on `127.0.0.1` only because the harness starts it with `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS=true` (a non-production switch for local sellers; never set it on a shared API). The agent is restricted to the payer-safe tools `get_my_agent_profile`, `get_policy`, `get_job`, `pay_for_resource`, and the example asserts it.
+
+**Prerequisites** (on top of section 1): Python **3.10 or newer** (the `Requires-Python` of both pinned packages; 3.14.3 was run) and the example's pinned packages (`openai-agents==0.24.0`, `mcp==2.3.0`) in a virtual environment. On Debian/Ubuntu `python3 -m venv` needs the `python3-venv` package. The same destructive-target rules as the demo apply: private targets and `--yes` (section 6).
+
+```bash
+# repository root, after npm ci (section 2), with Postgres, Redis and anvil as in section 1
+
+# Linux / macOS (NOT run: only Windows was run for this section)
+python3 -m venv .venv
+.venv/bin/pip install -r examples/openai-agents/requirements.txt
+export ALPHA_PYTHON=.venv/bin/python
+
+# Windows, Git Bash (what was run)
+python -m venv .venv                 # what was run; the py launcher (py -m venv .venv) also works if installed
+.venv/Scripts/pip install -r examples/openai-agents/requirements.txt
+export ALPHA_PYTHON=.venv/Scripts/python.exe
+
+# both: private targets (WIPED / FLUSHED), then the run
+export X402_DEMO_DATABASE_URL=postgresql://agentfi:agentfi@localhost:5432/agentfi_<you>_demo
+export X402_DEMO_REDIS_URL=redis://localhost:6379/11
+npm run alpha:framework -- --yes
+```
+
+`npm run alpha:framework` checks the prerequisites (the demo's checks plus the Python import, printing the versions it found), prints the destructive-target banner, builds the MCP server, starts the backend (`demo:x402:serve`: Anvil fork, API, worker, seller, an operator policy of at most 0.50 USD per payment and 3.00 per day to the seller only, a 5.00 USDC job and a 0.20 USDC job, the buyer wallet funded with 5.00 USDC **on the fork**), runs the framework twice, reads the ledger, the chain and the seller, checks every invariant, and stops everything (also on Ctrl+C). It exits 0 only if all held; the first broken invariant makes it exit 1. Allow about 4 minutes on top of the build. The transcript is written to `<tmp>/agentfi-alpha-framework-transcript.txt` (`X402_FRAMEWORK_TRANSCRIPT`).
+
+**Running the pieces yourself.** `npm run alpha:serve -- --out-dir <dir> --yes` starts the backend with the same checks, banner and `--yes` rule (a relative `<dir>` is resolved against the directory you run npm in), prints `SERVE READY` and keeps running until Ctrl+C or until `<dir>/stop` exists. It writes two files:
+
+- `<dir>/agent.env`, exactly: `AGENTFI_API_URL`, `AGENTFI_API_KEY` (the buyer agent's own key), `AGENTFI_JOB_ID` (the 5.00 job), `AGENTFI_SMALL_JOB_ID` (the 0.20 job), `SELLER_URL`. No operator secret and no chain RPC (the Anvil RPC can rewrite balances and storage, so it is not the agent's).
+- `<dir>/operator.env`: the demo's operator secrets, the backend configuration `x402:ops` needs, `ANVIL_RPC_URL`, `AGENTFI_AGENT_ID` and a read-only evidence endpoint (`CONTROL_URL`). First line `# OPERATOR secrets (demo only) - never give this file to an agent`; mode 0600 on Linux/macOS (Windows does not apply POSIX modes). Never give it to an agent.
+
+Then, in a second terminal: `.venv/Scripts/python.exe examples/openai-agents/agent.py --mode stub --backend env-file --env-file <dir>/agent.env --scenario allowed` (or `--scenario blocked`; `.venv/bin/python` on Linux/macOS), and read the ledger with `set -a; . <dir>/operator.env; set +a; cd packages/backend && npm run x402:ops -- status --job $AGENTFI_JOB_ID`. Every value in both files is written without shell metacharacters (the backend refuses to write one that has any), so sourcing them is safe.
+
+### What you see: an allowed purchase
+
+Verbatim from the recorded run (section "Verified run" below; ids, addresses and hashes differ on every run). The versions the run found, and the framework's trace:
+
+```text
+  ok    python 3.14.3 | openai-agents 0.24.0 | mcp 2.3.0 | openai 3.54.0 | AgentFi MCP server (packages/mcp-server from this checkout) 0.5.0 | node 24.14.1 | win32
+    [tools exposed to the agent] ['get_policy', 'get_my_agent_profile', 'get_job', 'pay_for_resource']
+    [tool call] pay_for_resource {"job_id": "cmwlqj3xt0009ewefphrxang1", "url": "http://127.0.0.1:63871/report", "payment_id": "fw-allowed-112df35f56-0000001"}
+```
+
+The tool result is the full ledger row plus the job's budget (condensed from the transcript: the payment's `status` is `"settled"`, `amount` `"300000"`, a non-null `authorizationNonce` and `settlementTxHash`, `responseStatus` 200, and):
+
+```text
+        "remainingBudget": {
+          ...
+          "total": "5000000",
+          "spent": "300000",
+          "remaining": "4700000",
+          "remainingFormatted": "4.7"
+        },
+```
+
+The operator's view, the Anvil Transfer log and the seller's counters (verbatim):
+
+```text
+      Job cmwlqj3xt0009ewefphrxang1 [ACCEPTED] budget 5 · committed 0.3 (proven 0.3, reported 0, open 0) · remaining 4.7
+        - fw-allowed-112df35f56-0000001 settled                    0.3 USDC  money:proven  delivery:delivered (HTTP 200)
+            http://127.0.0.1:63871/report → 0x9e9B22E97Ae3C5234e0504AD208ceeBf20B51B9d  tx 0x4787c11ca9ee09fe50256c82034a16f89e5486185187febe04d9df6e088b537f
+            reconciled: transfer proven on-chain in 0x4787c11ca9ee09fe50256c82034a16f89e5486185187febe04d9df6e088b537f, block 60305585 (was settled)
+  Anvil Transfer logs (agent -> seller): [{"tx":"0x4787c11ca9ee09fe50256c82034a16f89e5486185187febe04d9df6e088b537f","from":"0x759cE075827CC9c8301653fDDf369244546fA513","to":"0x9e9B22E97Ae3C5234e0504AD208ceeBf20B51B9d","value":"300000","block":"60305585"}]
+  seller request counters: {"plain":{"/report":1},"paid":{"/report":1}}
+  paymentId fw-allowed-112df35f56-0000001 -> tx 0x4787c11ca9ee09fe50256c82034a16f89e5486185187febe04d9df6e088b537f
+  ✓ agent wallet 5.00 USDC -> 4.70 USDC (-0.30)
+```
+
+**How to read the ledger line, three separate facts.** *Money*: `settled` is the seller's word; `money:proven` means the worker found a USDC Transfer for exactly this payment on-chain (in the tool result the row still has `chainVerifiedAt: null`: the worker proves it a few seconds later, with no operator command). *Delivery*: `delivered (HTTP 200)` is what arrived (with its SHA-256); it says nothing about whether the money moved, and the other way round. *Budget*: `committed 0.3 … remaining 4.7` is what the job's 5.00 reward still allows; a payment counts against it from the moment it is reserved.
+
+### What you see: blocked purchases (before anything is signed)
+
+The scripted model then tries two purchases the rules forbid: `/report` (0.30 USDC) on the job that has 0.20 left, and `/report-premium` (0.60 USDC; the policy allows 0.50 per payment) on the big job. Verbatim:
+
+```text
+    [tool call] pay_for_resource {"job_id": "cmwlqj3z4000bewef4nbensbe", "url": "http://127.0.0.1:63871/report", "payment_id": "fw-overbudget-ec6d978dc8-00001"}
+    [tool call] pay_for_resource {"job_id": "cmwlqj3xt0009ewefphrxang1", "url": "http://127.0.0.1:63871/report-premium", "payment_id": "fw-overpolicy-ec6d978dc8-00001"}
+  ✓ over-budget tool result: paid=false HTTP 402 BUDGET_EXCEEDED (price 0.3, remaining 0.2)
+  ✓ over-policy tool result: paid=false HTTP 403 POLICY_VIOLATION (rule maxValuePerTxUsd)
+```
+
+```text
+        - fw-overpolicy-ec6d978dc8-00001 failed_before_signing      0.6 USDC  money:not-moved  delivery:unknown  [not counted]
+            reason: Payment of 0.6 USDC exceeds the policy's per-transaction limit of 0.50 USD (maxValuePerTxUsd)
+        - fw-overbudget-ec6d978dc8-00001 failed_before_signing      0.3 USDC  money:not-moved  delivery:unknown  [not counted]
+            reason: Cheapest acceptable option on [internal-url] costs 0.3 USDC, above the cap of $0.2
+  agent wallet 4.70 USDC after (before this run: 4.70); seller counters {"plain":{"/report":2,"/report-premium":1},"paid":{"/report":1}}
+  ✓ over-budget: ledger row failed_before_signing for 0.30 USDC, authorization nonce null, no settlement tx, no paid response
+  ✓ over-policy: ledger row failed_before_signing for 0.60 USDC, authorization nonce null, no settlement tx, no paid response
+  ✓ no USDC transfer from the agent wallet to the seller; the agent wallet balance is unchanged at 4.70 USDC
+  ✓ zero paid requests reached the seller during the blocked run
+```
+
+(The two `failed_before_signing` rows are verbatim lines from two different `x402:ops status --job` blocks in the transcript, shown together here.)
+
+**How the operator recognises a block:** the row says `failed_before_signing` with `money:not-moved` and `[not counted]`, and a `reason:` line names the rule. Both kinds of block leave a ledger row (a policy block does too), both with a **null authorization nonce**: no signature ever existed. Outside the backend, nothing moved either: no new Transfer from the agent wallet to the seller, the wallet unchanged at 4.70 USDC, and the seller counted only unpaid 402 probes during the blocked run (its one paid request is the allowed purchase).
+
+**Verified run.** The excerpts above are from the run recorded at commit `a4edf4a` of the PR branch (later commits change documentation only), on 2026-11-18, Windows 11 (Git Bash), Node 24.14.1, Python 3.14.3, openai-agents 0.24.0, mcp 2.3.0, anvil 1.7.1, Postgres 16 and Redis 7 in Docker, private database, Redis DB and ports: exit 0, `OK: 28 invariants held.` Earlier on the same day the section was also followed literally from a fresh `git clone` of the branch (commit `4b02c24`): exit 0, 28 invariants. Along the way two attempts failed and were fixed before those runs: a wrong assertion of ours, and a worker setting the harness lacked (how soon the worker re-reads a settled-but-unproven payment: 5 minutes by default, 10 seconds in the harness).
+
+**Limits.** A local fork, not the public testnet; a scripted model, not an LLM; a seller we control; this section ran only on Windows 11 with the versions above (Linux ran the section 2 demo, not this section; the `.venv/bin` commands and the POSIX process-group shutdown were not run). A second framework (Google ADK) is not wired to the real backend: its example still runs against the stub only. The compatibility matrix says the same, row by row.
+
+## 11. Feedback
+
+Issues and integration reports go to the repository's GitHub issue forms, which **need a GitHub account**. Do not post keys, wallet secrets or logs that contain them.

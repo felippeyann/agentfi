@@ -30,7 +30,7 @@ that any model behaves well. Tracing is disabled in stub mode (it would call the
 npm install && npm run build -w packages/mcp-server
 node examples/_stub-api/stub-api.mjs --port 3000 &          # the STUB API (key: agfi_stub_not_a_secret)
 
-python -m venv .venv && . .venv/bin/activate                 # Windows: .venv\Scripts\activate
+python -m venv .venv && . .venv/bin/activate                 # Windows (Git Bash): . .venv/Scripts/activate
 pip install -r examples/openai-agents/requirements.txt
 AGENTFI_API_URL=http://localhost:3000 AGENTFI_API_KEY=agfi_stub_not_a_secret \
   python examples/openai-agents/agent.py --mode stub
@@ -52,6 +52,15 @@ stub counters: {"paidRequests":{"/settled":1,"/unknown":1}}                     
 server started with `MCP_TRANSPORT=sse` (the SDK marks SSE as deprecated for new servers;
 AgentFi's standalone server implements stdio and SSE, **not** streamable HTTP).
 
+## Against the real local backend (scripted model; run 2026-11-18)
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r examples/openai-agents/requirements.txt   # Windows (Git Bash, what was run): python -m venv .venv && .venv/Scripts/pip ...
+ALPHA_PYTHON=.venv/bin/python X402_DEMO_DATABASE_URL=<private test db> X402_DEMO_REDIS_URL=<private redis db> npm run alpha:framework -- --yes      # Windows: ALPHA_PYTHON=.venv/Scripts/python.exe
+```
+
+`--backend env-file --env-file <agent.env> --scenario allowed|blocked` reads the API URL, the buyer agent's key, job ids and seller URL that `npm run alpha:serve` writes; the driver `npm run alpha:framework` starts the backend, runs both scenarios and checks ledger, chain and seller. Real: this SDK, the MCP stdio server, the API, worker, EIP-3009 signature, `@x402/evm` facilitator, USDC on a local Anvil fork. Not real: the model (scripted), the seller (ours), the chain (a fork). It WIPES the database and Redis DB you point it at. Details and expected output: [docs/alpha/quickstart.md](../../docs/alpha/quickstart.md) section 10.
+
 ## Real mode (yours to run, not run by us)
 
 ```bash
@@ -59,7 +68,7 @@ export OPENAI_API_KEY=...        # yours; costs tokens
 python examples/openai-agents/agent.py --mode real --prompt "Buy <url> for job <id>"
 ```
 
-Point `AGENTFI_API_URL` / `AGENTFI_API_KEY` at an API you run, with the **provider** agent's key. A real-backend run is not reproducible outside the alpha demo today. Everything marked tested ran against the STUB. See [docs/alpha/quickstart.md](../../docs/alpha/quickstart.md) for the limits. Never put keys
+Point `AGENTFI_API_URL` / `AGENTFI_API_KEY` at an API you run, with the **provider** agent's key. The scripted model against the REAL LOCAL BACKEND of the fork demo is the section above. See [docs/alpha/quickstart.md](../../docs/alpha/quickstart.md) for the limits. Never put keys
 in the source. Consider `require_approval={"always": {"tool_names": ["pay_for_resource"]}}` on the
 MCP server object and handle approvals in your app, so a human confirms each spend.
 
