@@ -253,7 +253,7 @@ In parallel, the daily reputation cron will fold this outcome into the agent's s
 ## 8. What does _not_ exist (on purpose)
 
 - **Canonical hosted production** — would violate the "commons, fork it" principle. No hosted instance exists at all (the staging was decommissioned on 2026-05-17).
-- **Product marketing surface** — AgentFi is infrastructure, not a product. The only public page is a static site (`www.agentfi.cc`) from a separate private repository (HANDOFF §7). A version that points to the code, docs and validation status is prepared locally but not published (plan X8). Until it is, the live site still carries the older MPC / Safe claims. Stripe integration is there only so self-hosting operators can charge subscriptions of their _own_ if they want.
+- **Product marketing surface** — AgentFi is infrastructure, not a product. The only public page is a static site (`www.agentfi.cc`) from a separate private repository (HANDOFF §7). Since 2026-11-18 it shows the developer alpha (the same flow and limits as the README, with "Run the local demo" pointing to the quickstart); the older MPC / Safe claims are gone (plan X8). Stripe integration is there only so self-hosting operators can charge subscriptions of their _own_ if they want.
 - **Closed-source features** — zero paywalls on core functionality.
 - **Centralized custody** — the maintainer runs no instance and holds no agent keys; each operator's own Turnkey organisation holds its agents' keys.
 - **Legal personhood wrapper** — explicitly called out in VISION.md as a non-technical problem. Liability sits with the human operator for V1.

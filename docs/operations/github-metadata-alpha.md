@@ -1,4 +1,15 @@
-# GitHub repository metadata for the alpha (PREPARED, NOT APPLIED)
+# GitHub repository metadata for the alpha
+
+## Status on 2026-11-18 (owner authorised updating the public surfaces)
+
+| Item | State |
+|---|---|
+| Landing | **Live** at `https://www.agentfi.cc` (`agentfi.cc` 307 to `www`): developer alpha, no MPC / Safe / tool-count claims. The checks of section 2 pass |
+| Labels (step 1) | **Applied**: `alpha-feedback`, `integration-request`, `first-flow-completed`, `first-flow-blocked`, `needs-repro` exist |
+| About, topics (step 2) and Website (step 4) | **Not applied: need a repository admin.** The maintainer account used for this round has push/triage only (`gh repo edit` returns 404). Website target: `https://agentfi.cc`; description and topics as in sections 1 and 3 |
+| Conduct contact (step 3) | **Open**: no monitored destination confirmed (section 6) |
+
+The text below is the checklist as prepared on 2026-11-16.
 
 Prepared 2026-11-16, verified read-only again 2026-11-18. Changing the public repository's About box, topics, labels and the conduct contact is a **publication gate for the owner**. Nothing here was run against GitHub.
 
