@@ -21,6 +21,7 @@
  */
 import { judgeOutflowCap } from './outflow-cap.js';
 import { policyDecimalToMicro, formatMicroUsd } from './usdc-spend-policy.js';
+import { parsePolicyDecimal } from './policy-numbers.js';
 
 /** The Agent fields read here (a Prisma `Agent` row satisfies it). */
 export interface PayerProfileAgent {
@@ -58,6 +59,7 @@ export interface PayerFinding {
     | 'NO_DAILY_LIMIT'
     | 'OUTFLOWS_OPEN'
     | 'CONTRACT_CALLS_OPEN'
+    | 'AGENT_CAN_LIST_CONTRACTS'
     | 'ANY_USDC_TOKEN';
   text: string;
 }
@@ -179,6 +181,13 @@ export function describePayerProfile(agent: PayerProfileAgent, policy: PayerProf
       capUsd: null,
       text: 'REFUSED (maxOutflowPerTxUsd not configured): transfers, swaps, deposits, GMX collateral, batches with value or ERC-20 transfers, A2A payments',
     };
+  } else if (policyDecimalToMicro(policy.maxOutflowPerTxUsd) === 0n) {
+    // A cap of 0 refuses every priced outflow, exactly like NULL (a zero-priced call passes both).
+    ordinaryOutflows = {
+      verdict: 'refused',
+      capUsd: '0',
+      text: 'REFUSED (maxOutflowPerTxUsd is 0): transfers, swaps, deposits, GMX collateral, batches with value or ERC-20 transfers, A2A payments',
+    };
   } else {
     const capMicro = policyDecimalToMicro(policy.maxOutflowPerTxUsd);
     const capUsd = capMicro === null ? null : formatMicroUsd(capMicro);
@@ -196,7 +205,8 @@ export function describePayerProfile(agent: PayerProfileAgent, policy: PayerProf
     });
   }
 
-  const dailyLimited = policy.active && dailyUsd !== null;
+  // The batch route's own predicate (api/routes/transactions.ts): a float read of the daily limit, > 0, on an active policy.
+  const dailyLimited = policy.active && (parsePolicyDecimal(policy.maxDailyVolumeUsd) ?? 0) > 0;
   const batchOtherCalls: PayerProfile['batchOtherCalls'] = dailyLimited
     ? {
         verdict: 'refused-unless-listed',
@@ -215,6 +225,14 @@ export function describePayerProfile(agent: PayerProfileAgent, policy: PayerProf
         `allowedContracts lists ${policy.allowedContracts.length} contract(s): a batch may call them with any calldata the backend cannot count ` +
         '(an ERC-20 approve included), and such a call is not an outflow for maxOutflowPerTxUsd. A payer that only buys x402 resources keeps it empty.',
     });
+  } else if (dailyLimited) {
+    findings.push({
+      level: 'NOTE',
+      code: 'AGENT_CAN_LIST_CONTRACTS',
+      text:
+        'allowedContracts is empty, and the server counts filling an empty list as a tightening: the agent key can set it to contracts of its choosing, ' +
+        'which would reopen batch calls to them (CONTRACT_CALLS_OPEN). This report is a snapshot of the row: re-run it.',
+    });
   }
 
   return {
@@ -227,7 +245,9 @@ export function describePayerProfile(agent: PayerProfileAgent, policy: PayerProf
     x402: { perPaymentUsd, dailyUsd, recipients, tokens, refusedNowBecause },
     ordinaryOutflows,
     batchOtherCalls,
-    policyChanges: 'tighten only with the agent key (any widening is 403, nothing written); the operator secret may widen',
+    policyChanges:
+      'the agent key may only make changes the server counts as tightening (lower caps, a subset of a non-empty list, pause); raising a cap, ' +
+      'clearing a list or adding to a non-empty list is 403 with nothing written. Filling an EMPTY list counts as tightening. The operator secret may change anything',
     findings,
     referencePayer: !findings.some((f) => f.level !== 'NOTE'),
   };
@@ -246,7 +266,7 @@ export function renderPayerProfile(p: PayerProfile): string {
     ...(p.x402.refusedNowBecause ? [`    right now:   every payment REFUSED (${p.x402.refusedNowBecause})`] : []),
     `  other outflows (transfers, swaps, deposits, batches, A2A): ${p.ordinaryOutflows.text}`,
     `  batch approve / other calldata: ${p.batchOtherCalls.text}`,
-    '  withdrawals back to this wallet: allowed (not an outflow)',
+    '  withdrawals back to this wallet: allowed (not an outflow), counted against the daily limit, under allowedTokens and the cooldown; they spend ETH on gas',
     `  policy changes: ${p.policyChanges}`,
     '  per job: a payment also fits the job\'s remaining budget (x402:ops status --job <id>); the wallet\'s USDC balance is the hard ceiling',
   ];
@@ -256,7 +276,7 @@ export function renderPayerProfile(p: PayerProfile): string {
   }
   lines.push(
     p.referencePayer
-      ? '  verdict: REFERENCE PAYER — x402 purchases to the listed recipients under both ceilings; transfers, swaps, deposits, batches and A2A payments are refused.'
+      ? '  verdict: REFERENCE PAYER — x402 purchases to the listed recipients under both ceilings; transfers, swaps, deposits, batches with value and A2A payments are refused (as of this read).'
       : `  verdict: NOT the reference payer (${p.findings.filter((f) => f.level !== 'NOTE').map((f) => f.code).join(', ')}).`,
   );
   return lines.join('\n');

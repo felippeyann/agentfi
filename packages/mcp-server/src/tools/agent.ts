@@ -202,7 +202,7 @@ export const agentTools = [
       'This tool can ONLY tighten: the backend rejects any change that loosens the policy with 403 ' +
       '(raising max_value_per_tx_eth, max_value_per_tx_usd or max_outflow_per_tx_usd, or setting max_outflow_per_tx_usd ' +
       'while it is not configured; adding an address that is not already whitelisted, or clearing a whitelist). ' +
-      'An EMPTY whitelist means unrestricted, so setting a list while yours is empty is a tightening. ' +
+      'An EMPTY allowed_recipients or allowed_tokens list means unrestricted, so setting one while it is empty is a tightening. ' +
       'If you have no policy row yet, your first change is judged against the registration defaults ' +
       '(max_value_per_tx_usd 1.0, max_value_per_tx_eth 1.0, outflows not configured): you can only set values at or below them. ' +
       'Loosening requires the operator credential (API_SECRET) — if you need higher limits or new whitelisted ' +

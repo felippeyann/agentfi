@@ -312,7 +312,7 @@ npm run alpha:framework -- --yes
 
 Then, in a second terminal: `.venv/Scripts/python.exe examples/openai-agents/agent.py --mode stub --backend env-file --env-file <dir>/agent.env --scenario allowed` (or `--scenario blocked`; `.venv/bin/python` on Linux/macOS), and read the ledger with `set -a; . <dir>/operator.env; set +a; cd packages/backend && npm run x402:ops -- status --job $AGENTFI_JOB_ID`. Every value in both files is written without shell metacharacters (the backend refuses to write one that has any), so sourcing them is safe.
 
-**Before you connect your own agent:** [payer-setup.md](payer-setup.md) says which credential the agent gets, the reference policy (the one this section's buyer uses), what the agent's key can still do besides buying (it is not an x402-only key), and how to check the permissions in force: `npm run x402:ops -- payer --agent <id>` (with `operator.env` sourced, from `packages/backend`).
+**Before you connect your own agent:** [payer-setup.md](payer-setup.md) says which credential the agent gets, the reference policy (this section's buyer is close to it: it leaves `allowedTokens` empty and the cooldown at 0), what the agent's key can still do besides buying (it is not an x402-only key), and how to check the permissions in force: `npm run x402:ops -- payer --agent <id>` (with `operator.env` sourced, from `packages/backend`).
 
 ### What you see: an allowed purchase
 
