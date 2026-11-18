@@ -69,14 +69,14 @@ async function main() {
   // Same prerequisite checks as the demo (Node, deps, anvil, Postgres, Redis, ports, RPC).
   const prereq = run('node', [join(ROOT, 'scripts', 'alpha', 'demo.mjs'), '--check'], { stdio: 'inherit', env: process.env });
   if (prereq.status !== 0) return 2;
-  const py = run(PYTHON, ['-c', 'import sys, agents, mcp; from importlib.metadata import version as v; print("python", sys.version.split()[0], "· openai-agents", v("openai-agents"), "· mcp", v("mcp"), "· openai", v("openai"))'], { timeout: CHILD_TIMEOUT_MS });
+  const py = run(PYTHON, ['-c', 'import sys, agents, mcp; from importlib.metadata import version as v; print("python", sys.version.split()[0], "| openai-agents", v("openai-agents"), "| mcp", v("mcp"), "| openai", v("openai"))'], { timeout: CHILD_TIMEOUT_MS });
   if (py.status !== 0) {
     say(`  FAIL  "${PYTHON}" cannot import the OpenAI Agents SDK (${(py.stderr || py.error?.message || '').trim().split('\n').pop()})`);
     say('        -> python3 -m venv .venv && .venv/bin/pip install -r examples/openai-agents/requirements.txt, then ALPHA_PYTHON=.venv/bin/python (Windows: py -m venv .venv, .venv/Scripts/pip, ALPHA_PYTHON=.venv/Scripts/python.exe)');
     return 2;
   }
   const mcpServerVersion = JSON.parse(readFileSync(join(ROOT, 'packages', 'mcp-server', 'package.json'), 'utf8')).version;
-  say(`  ok    ${py.stdout.trim()} · AgentFi MCP server (packages/mcp-server from this checkout) ${mcpServerVersion} · node ${process.versions.node} · ${process.platform}`);
+  say(`  ok    ${py.stdout.trim()} | AgentFi MCP server (packages/mcp-server from this checkout) ${mcpServerVersion} | node ${process.versions.node} | ${process.platform}`);
   if (checkOnly) return 0;
   if (!(await confirmWipe({ databaseUrl: DATABASE_URL, redisUrl: REDIS_URL, assumeYes }))) return 4;
 
