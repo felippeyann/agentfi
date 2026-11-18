@@ -120,6 +120,13 @@ export interface paths {
          * @description Provisions a Turnkey MPC wallet, optionally deploys a Safe smart
          *     wallet, and returns the plaintext API key **once**. The plaintext
          *     cannot be recovered later.
+         *
+         *     The agent's policy row is always created: the given `policy`, or — when
+         *     `policy` is omitted — the server defaults (`maxValuePerTxEth` 1.0,
+         *     `maxValuePerTxUsd` 1.0, `maxOutflowPerTxUsd` not configured: ordinary
+         *     outflows refused until the operator sets it, `maxDailyVolumeUsd` 10000,
+         *     empty whitelists, cooldown 60 s). Whitelist entries must be `0x`
+         *     addresses; `cooldownSeconds` is an integer from 0 to 31536000.
          */
         post: {
             parameters: {
@@ -684,8 +691,14 @@ export interface paths {
          *     - `active` goes `false → true`;
          *     - `expiresAt` is cleared (`null`) or moved later while one existed.
          *
-         *     When no policy exists yet, any patch that sets a limit counts as tightening
-         *     (`active: true` and `expiresAt: null` are neutral). A patch that creates the
+         *     When no policy row exists yet (an agent registered by the operator without
+         *     `policy` before every registration created the row): the OPERATOR may
+         *     create any first policy; the AGENT is judged against the registration
+         *     defaults (`maxValuePerTxEth` 1.0, `maxValuePerTxUsd` 1.0,
+         *     `maxOutflowPerTxUsd` not configured, `maxDailyVolumeUsd` 10000, cooldown
+         *     60 s, empty lists), so its first patch can only introduce values at or
+         *     below them — raising one, configuring `maxOutflowPerTxUsd`, a `"0"` daily
+         *     limit or a shorter cooldown is `403` like any other loosening. A patch that creates the
          *     policy row with a non-empty `allowedContracts` must also send
          *     `allowedRecipients` (`[]` = no recipient restriction), otherwise `400` —
          *     before Q8 that list also restricted payees, and an omission must not widen
@@ -700,9 +713,15 @@ export interface paths {
          *     decimal strings (`^\d+(\.\d+)?$`), the three USD limits with at most 6
          *     decimals (`^\d+(\.\d{1,6})?$`, micro-USD — what every USD check counts
          *     in); anything else — empty, whitespace, exponent, hex, words, a 7th USD
-         *     decimal — is `400` for every caller. `allowedRecipients`
-         *     entries must be `0x` addresses. An optional `reason` is written to the
-         *     audit log line and is not stored.
+         *     decimal — is `400` for every caller. `allowedContracts`,
+         *     `allowedRecipients` and `allowedTokens` entries must be `0x` addresses and
+         *     `cooldownSeconds` an integer from 0 to 31536000 (`400` otherwise). An
+         *     optional `reason` is written to the audit log line and is not stored.
+         *
+         *     The verdict and the write are one transaction under the agent's row
+         *     locks: a concurrent policy change or the operator's kill switch is never
+         *     overtaken. When the locks cannot be had in time the answer is `503`
+         *     `POLICY_BUSY` with `Retry-After` and nothing is written.
          */
         patch: {
             parameters: {
