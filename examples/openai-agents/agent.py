@@ -8,6 +8,16 @@ Two modes (see README.md):
   --mode real   a real model through the OpenAI API. Needs YOUR OPENAI_API_KEY and costs
                 tokens. NOT run or tested by the AgentFi maintainers.
 
+Two backends (independent of the mode):
+
+  --backend stub      (default) the AgentFi API is the STUB in examples/_stub-api.
+  --backend env-file  the REAL LOCAL BACKEND of the alpha fork demo, started by `npm run alpha:serve`
+                      (or `npm run alpha:framework`, which also runs this file and checks the result). Reads
+                      AGENTFI_API_URL / AGENTFI_API_KEY / job ids / seller URL from `--env-file` (the
+                      `agent.env` that serve writes). Scenarios: `allowed` (one 0.30 USDC purchase) and
+                      `blocked` (a purchase over the job's remaining budget, then one over the per-payment
+                      policy cap). The model is still the scripted stub: no LLM, no key.
+
 The agent sees only PAYER_SAFE_TOOLS (an allowlist: `create_static_tool_filter`). The MCP
 server registers 35 tools, including policy-changing, job-closing and generic fund-moving
 ones; none of them is exposed to this agent.
@@ -19,6 +29,7 @@ import asyncio
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 
 from agents import Agent, Runner, set_tracing_disabled
@@ -54,7 +65,32 @@ def _tool_result_json(out) -> dict:
     return body if isinstance(body, dict) else {}
 
 
-def build_stub_model():
+def load_env_file(path: str) -> dict:
+    """KEY=VALUE lines (the agent.env written by `npm run alpha:serve`). No quoting, no export."""
+    out = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            out[key.strip()] = value.strip()
+    return out
+
+
+def real_backend_plan(env: dict, scenario: str) -> list:
+    """(job_id, url, payment_id) steps against the real local backend. Fresh payment ids per run (a job's ids are unique)."""
+    run = uuid.uuid4().hex[:10]
+    seller = env["SELLER_URL"]
+    if scenario == "allowed":
+        return [(env["AGENTFI_JOB_ID"], seller + "/report", f"fw-allowed-{run}-0000001")]
+    if scenario == "blocked":
+        return [
+            (env["AGENTFI_SMALL_JOB_ID"], seller + "/report", f"fw-overbudget-{run}-00001"),   # 0.30 on a job with 0.20 left
+            (env["AGENTFI_JOB_ID"], seller + "/report-premium", f"fw-overpolicy-{run}-00001"),  # 0.60 > per-payment cap 0.50
+        ]
+    raise SystemExit(f"unknown scenario {scenario!r}: use allowed or blocked")
+
+
+def build_stub_model(plan=None):
     """A deterministic Model: scripted tool calls, then a final message. No network, no key."""
     from agents.models.interface import Model, ModelResponse
     from agents.usage import Usage
@@ -62,12 +98,13 @@ def build_stub_model():
 
     job = os.environ.get("AGENTFI_JOB_ID", "job_stub_1")
     seller = os.environ.get("STUB_SELLER_URL", "http://stub-seller.example")
-    # (path, payment_id). The third step is the RIGHT way to react to an uncertain outcome: same id.
-    plan = [
-        ("/settled", "oa-stub-settled-0000001"),
-        ("/unknown", "oa-stub-unknown-0000001"),
-        ("/unknown", "oa-stub-unknown-0000001"),
-    ]
+    if plan is None:
+        # (job, url, payment_id). The third step is the RIGHT way to react to an uncertain outcome: same id.
+        plan = [
+            (job, seller + "/settled", "oa-stub-settled-0000001"),
+            (job, seller + "/unknown", "oa-stub-unknown-0000001"),
+            (job, seller + "/unknown", "oa-stub-unknown-0000001"),
+        ]
 
     class ScriptedPayerModel(Model):
         async def get_response(self, system_instructions, input, model_settings, tools, output_schema, handoffs, tracing, **kwargs):
@@ -75,10 +112,10 @@ def build_stub_model():
             results = [i for i in items if (i.get("type") if isinstance(i, dict) else getattr(i, "type", None)) == "function_call_output"]
             step = len(results)
             if step < len(plan):
-                path, pid = plan[step]
+                step_job, url, pid = plan[step]
                 call = ResponseFunctionToolCall(
                     type="function_call", call_id=f"call_{step}", name="pay_for_resource",
-                    arguments=json.dumps({"job_id": job, "url": seller + path, "payment_id": pid}),
+                    arguments=json.dumps({"job_id": step_job, "url": url, "payment_id": pid}),
                 )
                 return ModelResponse(output=[call], usage=Usage(), response_id=None)
             summary = []
@@ -104,9 +141,30 @@ async def main() -> int:
     ap.add_argument("--transport", choices=["stdio", "sse"], default="stdio",
                     help="stdio spawns the MCP server from this checkout; sse connects to one you started with MCP_TRANSPORT=sse")
     ap.add_argument("--mcp-url", default="http://localhost:3002/mcp/sse")
+    ap.add_argument("--backend", choices=["stub", "env-file"], default="stub",
+                    help="stub: the STUB API; env-file: the real local backend started by `npm run alpha:serve` (needs --env-file)")
+    ap.add_argument("--env-file", help="agent.env written by `npm run alpha:serve` (only with --backend env-file)")
+    ap.add_argument("--scenario", choices=["allowed", "blocked"], default="allowed", help="only with --backend env-file")
+    ap.add_argument("--result-file", help="write the tool-call trace as JSON here (the alpha:framework driver reads it)")
     ap.add_argument("--prompt", default="Buy the report at http://stub-seller.example/settled for job job_stub_1.")
     args = ap.parse_args()
 
+    plan = None
+    if args.backend == "env-file":
+        if args.mode != "stub":
+            print("--backend env-file is only defined with the scripted model (--mode stub).", file=sys.stderr)
+            return 2
+        if not args.env_file:
+            print("--backend env-file needs --env-file <agent.env from `npm run alpha:serve`>.", file=sys.stderr)
+            return 2
+        env = load_env_file(args.env_file)
+        for key in ("AGENTFI_API_URL", "AGENTFI_API_KEY", "AGENTFI_JOB_ID", "AGENTFI_SMALL_JOB_ID", "SELLER_URL"):
+            if not env.get(key):
+                print(f"{args.env_file} has no {key}.", file=sys.stderr)
+                return 2
+        os.environ["AGENTFI_API_URL"] = env["AGENTFI_API_URL"]
+        os.environ["AGENTFI_API_KEY"] = env["AGENTFI_API_KEY"]
+        plan = real_backend_plan(env, args.scenario)
     api_key = os.environ.get("AGENTFI_API_KEY", "")
     if not api_key:
         print("Set AGENTFI_API_KEY (the PROVIDER agent's key; with the stub: agfi_stub_not_a_secret).", file=sys.stderr)
@@ -139,7 +197,7 @@ async def main() -> int:
         model = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
     else:
         set_tracing_disabled(True)  # tracing would try to reach the OpenAI backend
-        model = build_stub_model()
+        model = build_stub_model(plan)
 
     async with server:
         exposed = [t.name for t in await server.list_tools()]
@@ -147,15 +205,20 @@ async def main() -> int:
         assert sorted(exposed) == sorted(PAYER_SAFE_TOOLS), "the filter must leave exactly the payer-safe tools"
         agent = Agent(name="payer", instructions=INSTRUCTIONS, model=model, mcp_servers=[server])
         result = await Runner.run(agent, args.prompt)
+        trace = []
         for item in result.new_items:
             kind = type(item).__name__
             if kind == "ToolCallItem":
                 raw = item.raw_item
                 print(f"[tool call] {getattr(raw, 'name', '?')} {getattr(raw, 'arguments', '')}")
+                trace.append({"call": getattr(raw, "name", "?"), "arguments": getattr(raw, "arguments", "")})
             elif kind == "ToolCallOutputItem":
                 text = item.output if isinstance(item.output, str) else json.dumps(item.output)
                 print(f"[tool result] {text[:300].replace(chr(10), ' ')}")
+                trace.append({"result": _tool_result_json(item.output)})
         print(f"[final] {result.final_output}")
+        if args.result_file:
+            Path(args.result_file).write_text(json.dumps({"exposedTools": exposed, "trace": trace, "final": result.final_output}, indent=2), encoding="utf-8")
     return 0
 
 
