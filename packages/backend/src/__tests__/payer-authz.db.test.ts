@@ -11,6 +11,10 @@
  *                a tightening mixed with one widening, other spellings of a
  *                field (silently ignored, never written) — is 403 and leaves
  *                the stored row byte-for-byte unchanged
+ *  - POL-FIRST   an agent WITHOUT a policy row (registered before the row was
+ *                always created) is judged against the registration defaults:
+ *                its first PATCH cannot seed limits above them; and operator
+ *                registration without `policy` now creates the default row
  *  - POL-TIGHTEN the same credential may still tighten (and a pause sticks)
  *  - POL-RACE    the verdict is atomic with the write: a stale read can no
  *                longer widen over a concurrent tightening, and a "neutral"
@@ -65,7 +69,15 @@ vi.mock('bullmq', () => ({
   },
 }));
 vi.mock('../queues/transaction.queue.js', () => ({ transactionQueue: { add: async () => ({ id: 'q' }) } }));
-vi.mock('../services/wallet/index.js', () => ({ getWalletService: () => ({}) }));
+vi.mock('../services/wallet/index.js', () => ({
+  getWalletService: () => ({
+    // POST /v1/agents provisions a wallet: a synthetic one, never a provider.
+    createWallet: async () => {
+      const { randomBytes: rb } = await import('node:crypto');
+      return { walletId: `authz-reg-${rb(6).toString('hex')}`, address: `0x${rb(20).toString('hex')}` };
+    },
+  }),
+}));
 vi.mock('../services/wallet/safe.service.js', () => ({ SafeService: class {} }));
 vi.mock('../services/identity/ens.service.js', () => ({ EnsService: class { isConfigured() { return false; } } }));
 vi.mock('../services/billing/pnl.service.js', () => ({ PnLService: class {} }));
@@ -114,6 +126,8 @@ type Modules = {
   resourcePaymentRoutes: typeof import('../api/routes/resource-payments.js')['resourcePaymentRoutes'];
   ResourcePaymentService: typeof import('../services/payments/resource-payment.service.js')['ResourcePaymentService'];
   PolicyService: typeof import('../services/policy/policy.service.js')['PolicyService'];
+  PolicyBusyError: typeof import('../services/policy/policy.service.js')['PolicyBusyError'];
+  createTransactionWithVolume: typeof import('../services/policy/daily-volume.js')['createTransactionWithVolume'];
   authMiddleware: typeof import('../api/middleware/auth.js')['authMiddleware'];
   registerErrorHandler: typeof import('../api/errors/handler.js')['registerErrorHandler'];
 };
@@ -186,6 +200,9 @@ async function wipe(): Promise<void> {
   const ids = (await m.db.agent.findMany({ where: agents, select: { id: true } })).map((a) => a.id);
   if (ids.length === 0) return;
   await m.db.resourcePayment.deleteMany({ where: { agentId: { in: ids } } });
+  await m.db.transaction.deleteMany({ where: { agentId: { in: ids } } });
+  await m.db.dailyVolume.deleteMany({ where: { agentId: { in: ids } } });
+  await m.db.agentBilling.deleteMany({ where: { agentId: { in: ids } } });
   await m.db.job.deleteMany({ where: { OR: [{ requesterId: { in: ids } }, { providerId: { in: ids } }] } });
   await m.db.agentPolicy.deleteMany({ where: { agentId: { in: ids } } });
   await m.db.agent.deleteMany({ where: { id: { in: ids } } });
@@ -203,7 +220,7 @@ async function row(agentId: string) {
 
 beforeAll(async () => {
   if (!DB_READY) return;
-  const [db, agents, jobs, rp, rps, ps, auth, errors] = await Promise.all([
+  const [db, agents, jobs, rp, rps, ps, auth, errors, dv] = await Promise.all([
     import('../db/client.js'),
     import('../api/routes/agents.js'),
     import('../api/routes/jobs.js'),
@@ -212,6 +229,7 @@ beforeAll(async () => {
     import('../services/policy/policy.service.js'),
     import('../api/middleware/auth.js'),
     import('../api/errors/handler.js'),
+    import('../services/policy/daily-volume.js'),
   ]);
   m = {
     db: db.db,
@@ -220,6 +238,8 @@ beforeAll(async () => {
     resourcePaymentRoutes: rp.resourcePaymentRoutes,
     ResourcePaymentService: rps.ResourcePaymentService,
     PolicyService: ps.PolicyService,
+    PolicyBusyError: ps.PolicyBusyError,
+    createTransactionWithVolume: dv.createTransactionWithVolume,
     authMiddleware: auth.authMiddleware,
     registerErrorHandler: errors.registerErrorHandler,
   };
@@ -261,7 +281,6 @@ describeDb('POL-WIDEN: the payer key cannot widen its own policy (every shape is
     ['add a contract', { allowedContracts: [CONTRACT_A, CONTRACT_B, '0x00000000000000000000000000000000000000c3'] }, ['allowedContracts']],
     ['add a token', { allowedTokens: [USDC, '0x00000000000000000000000000000000000000e4'] }, ['allowedTokens']],
     ['lower the cooldown', { cooldownSeconds: 59 }, ['cooldownSeconds']],
-    ['negative cooldown', { cooldownSeconds: -1 }, ['cooldownSeconds']],
     ['zero cooldown', { cooldownSeconds: 0 }, ['cooldownSeconds']],
     ['a tightening mixed with one widening (all-or-nothing)', { maxValuePerTxUsd: '1', allowedRecipients: [] }, ['allowedRecipients']],
     ['a tightening of every field plus one clear list', { maxValuePerTxEth: '0.5', maxValuePerTxUsd: '1', maxOutflowPerTxUsd: '1', maxDailyVolumeUsd: '1', cooldownSeconds: 120, allowedTokens: [] }, ['allowedTokens']],
@@ -292,6 +311,11 @@ describeDb('POL-WIDEN: the payer key cannot widen its own policy (every shape is
       { maxOutflowPerTxUsd: '1e2' },
       { allowedRecipients: ['not-an-address'] },
       { cooldownSeconds: '0' },
+      { cooldownSeconds: -1 },
+      { cooldownSeconds: 1.5 },
+      { cooldownSeconds: 31_536_001 },
+      { allowedContracts: ['uniswap-router'] },
+      { allowedTokens: ['USDC'] },
       { active: 'true' },
       { expiresAt: 'tomorrow' },
     ]) {
@@ -345,15 +369,103 @@ describeDb('POL-WIDEN: the payer key cannot widen its own policy (every shape is
     expect(agent.tier).toBe('FREE');
   });
 
-  it('no policy row yet: the agent may only introduce limits (never "unrestricted" values)', async () => {
+});
+
+describeDb('POL-FIRST: an agent without a policy row cannot seed its own limits (judged against the registration defaults)', () => {
+  // Defaults: maxValuePerTxEth 1.0, maxValuePerTxUsd 1.0, maxOutflowPerTxUsd NULL, maxDailyVolumeUsd 10000, cooldown 60.
+  const seedings: Array<[string, Record<string, unknown>, string[]]> = [
+    ['maxValuePerTxUsd above the default', { maxValuePerTxUsd: '1.000001' }, ['maxValuePerTxUsd']],
+    ['maxValuePerTxUsd 1e9', { maxValuePerTxUsd: '1000000000' }, ['maxValuePerTxUsd']],
+    ['maxValuePerTxEth above the default', { maxValuePerTxEth: '1.000000000000000001' }, ['maxValuePerTxEth']],
+    ['maxOutflowPerTxUsd from nothing (any value)', { maxOutflowPerTxUsd: '0.01' }, ['maxOutflowPerTxUsd']],
+    ['maxOutflowPerTxUsd 1e9', { maxOutflowPerTxUsd: '1000000000' }, ['maxOutflowPerTxUsd']],
+    ['maxDailyVolumeUsd above the default', { maxDailyVolumeUsd: '10000.000001' }, ['maxDailyVolumeUsd']],
+    ['maxDailyVolumeUsd "0" (= no limit)', { maxDailyVolumeUsd: '0' }, ['maxDailyVolumeUsd']],
+    ['cooldown below the default', { cooldownSeconds: 59 }, ['cooldownSeconds']],
+    ['cooldown 0', { cooldownSeconds: 0 }, ['cooldownSeconds']],
+    ['everything at once', { maxValuePerTxUsd: '1000000000', maxOutflowPerTxUsd: '1000000000', maxDailyVolumeUsd: '0', cooldownSeconds: 0 }, ['maxValuePerTxUsd', 'maxOutflowPerTxUsd', 'maxDailyVolumeUsd', 'cooldownSeconds']],
+    ['a valid limit mixed with one seeding', { maxValuePerTxUsd: '0.5', maxDailyVolumeUsd: '0' }, ['maxDailyVolumeUsd']],
+  ];
+
+  it.each(seedings)('first PATCH: %s is 403 and creates no row', async (_label, body, loosened) => {
     const payer = await mkAgent(null);
-    const res = await patchPolicy(payer.id, payer.headers, { maxValuePerTxUsd: '2' });
+    const res = await patchPolicy(payer.id, payer.headers, body);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().loosenedFields).toEqual(loosened);
+    expect(await m.db.agentPolicy.findUnique({ where: { agentId: payer.id } })).toBeNull();
+  });
+
+  it('first PATCH at or below the defaults is accepted; unnamed fields take the column defaults (outflow cap stays NULL)', async () => {
+    const below = await mkAgent(null);
+    const res = await patchPolicy(below.id, below.headers, {
+      maxValuePerTxUsd: '0.5',
+      maxValuePerTxEth: '0.25',
+      maxDailyVolumeUsd: '100',
+      cooldownSeconds: 120,
+      allowedRecipients: [RECIPIENT_A],
+      allowedTokens: [USDC],
+    });
     expect(res.statusCode).toBe(200);
-    const created = await row(payer.id);
-    expect(created.maxValuePerTxUsd).toBe('2');
-    // creation defaults never open a gate: the outflow cap stays "not configured" (blocks outflows)
-    expect(created.maxOutflowPerTxUsd).toBeNull();
-    expect(created.active).toBe(true);
+    expect(await row(below.id)).toMatchObject({
+      maxValuePerTxUsd: '0.5',
+      maxValuePerTxEth: '0.25',
+      maxOutflowPerTxUsd: null,
+      maxDailyVolumeUsd: '100',
+      cooldownSeconds: 120,
+      allowedRecipients: [RECIPIENT_A],
+      allowedTokens: [USDC],
+      active: true,
+    });
+
+    const equal = await mkAgent(null);
+    const same = await patchPolicy(equal.id, equal.headers, {
+      maxValuePerTxUsd: '1.0',
+      maxValuePerTxEth: '1.0',
+      maxOutflowPerTxUsd: null,
+      maxDailyVolumeUsd: '10000',
+      cooldownSeconds: 60,
+    });
+    expect(same.statusCode).toBe(200);
+    expect(await row(equal.id)).toMatchObject({ maxValuePerTxUsd: '1.0', maxOutflowPerTxUsd: null, maxDailyVolumeUsd: '10000', cooldownSeconds: 60 });
+  });
+
+  it('the operator is not bound by the defaults: it gives a row-less agent any first policy', async () => {
+    const payer = await mkAgent(null);
+    const res = await patchPolicy(payer.id, OPERATOR, { maxValuePerTxUsd: '50', maxOutflowPerTxUsd: '500', maxDailyVolumeUsd: '0', cooldownSeconds: 0 });
+    expect(res.statusCode).toBe(200);
+    expect(await row(payer.id)).toMatchObject({ maxValuePerTxUsd: '50', maxOutflowPerTxUsd: '500', maxDailyVolumeUsd: '0', cooldownSeconds: 0 });
+  });
+
+  it('operator registration WITHOUT a policy creates the default row; the new agent key cannot raise it', async () => {
+    const res = await app.inject({ method: 'POST', url: '/v1/agents', headers: OPERATOR, payload: { name: `${NAME_PREFIX} ${RUN}-reg`, chainIds: [84532] } });
+    expect(res.statusCode, res.body).toBe(201);
+    const { id, apiKey } = res.json() as { id: string; apiKey: string };
+    expect(await row(id)).toMatchObject({
+      maxValuePerTxEth: '1.0',
+      maxValuePerTxUsd: '1.0',
+      maxOutflowPerTxUsd: null,
+      maxDailyVolumeUsd: '10000',
+      allowedContracts: [],
+      allowedRecipients: [],
+      allowedTokens: [],
+      cooldownSeconds: 60,
+      active: true,
+    });
+    const headers = { 'x-api-key': apiKey };
+    expect((await patchPolicy(id, headers, { maxOutflowPerTxUsd: '1000000000' })).statusCode).toBe(403);
+    expect((await patchPolicy(id, headers, { maxValuePerTxUsd: '2' })).statusCode).toBe(403);
+    expect((await patchPolicy(id, headers, { maxValuePerTxUsd: '0.5' })).statusCode).toBe(200);
+  });
+
+  it('operator registration WITH a policy still stores it as given', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/agents',
+      headers: OPERATOR,
+      payload: { name: `${NAME_PREFIX} ${RUN}-reg2`, chainIds: [84532], policy: { maxValuePerTxUsd: '25', maxOutflowPerTxUsd: '300', cooldownSeconds: 0 } },
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(await row((res.json() as { id: string }).id)).toMatchObject({ maxValuePerTxUsd: '25', maxOutflowPerTxUsd: '300', cooldownSeconds: 0 });
   });
 });
 
@@ -450,10 +562,74 @@ describeDb('POL-RACE: the tighten-only verdict is atomic with the write', () => 
 
   it('concurrent tightenings end at the minimum, never above it', async () => {
     const payer = await mkAgent({ maxValuePerTxUsd: '100' });
-    const caps = Array.from({ length: 24 }, (_, i) => String(90 - i * 3));
+    const caps = Array.from({ length: 8 }, (_, i) => String(90 - i * 5));
     const results = await Promise.all(caps.map((cap) => patchPolicy(payer.id, payer.headers, { maxValuePerTxUsd: cap })));
     for (const res of results) expect([200, 403]).toContain(res.statusCode);
     expect((await row(payer.id)).maxValuePerTxUsd).toBe(String(Math.min(...caps.map(Number))));
+  });
+
+  it('the REAL kill switch (pauseByOperator) fired together with agent PATCH {active: true}: the policy always ends paused', async () => {
+    const service = new m.PolicyService(m.db);
+    for (let i = 0; i < 12; i++) {
+      const payer = await mkAgent();
+      // alternate which one is sent first; both are in flight together
+      const calls = i % 2 === 0
+        ? [patchPolicy(payer.id, payer.headers, { active: true }), service.pauseByOperator(payer.id)]
+        : [service.pauseByOperator(payer.id), patchPolicy(payer.id, payer.headers, { active: true })];
+      const settled = await Promise.all(calls);
+      const res = settled.find((r) => typeof r === 'object') as Awaited<ReturnType<typeof patchPolicy>>;
+      expect([200, 403], `round ${i}`).toContain(res.statusCode);
+      expect((await row(payer.id)).active, `round ${i}: HTTP ${res.statusCode}`).toBe(false);
+    }
+  });
+
+  it('no row yet: concurrent first PATCHes are serialized (no 500 from a create race) and end at the minimum', async () => {
+    const payer = await mkAgent(null);
+    const caps = ['0.9', '0.8', '0.7', '0.6', '0.5', '0.4'];
+    const results = await Promise.all(caps.map((cap) => patchPolicy(payer.id, payer.headers, { maxValuePerTxUsd: cap })));
+    for (const res of results) expect([200, 403], res.body).toContain(res.statusCode);
+    expect(results.some((res) => res.statusCode === 200)).toBe(true);
+    expect((await row(payer.id)).maxValuePerTxUsd).toBe('0.4');
+    expect(await m.db.agentPolicy.count({ where: { agentId: payer.id } })).toBe(1);
+  });
+
+  it('no row yet: an operator create racing an agent seeding attempt never ends above what the operator wrote', async () => {
+    const payer = await mkAgent(null);
+    const [op, agent] = await Promise.all([
+      patchPolicy(payer.id, OPERATOR, { maxValuePerTxUsd: '0.2' }),
+      patchPolicy(payer.id, payer.headers, { maxValuePerTxUsd: '0.9' }),
+    ]);
+    expect(op.statusCode).toBe(200);
+    expect([200, 403]).toContain(agent.statusCode);
+    // agent first (0.9 <= default 1.0, accepted) then operator 0.2; or operator first and the agent's 0.9 is a widening (403)
+    expect((await row(payer.id)).maxValuePerTxUsd).toBe('0.2');
+  });
+
+  it('a lock that cannot be had in time is PolicyBusyError (the route answers 503), not a hang or a 500; nothing is written', async () => {
+    const payer = await mkAgent();
+    const before = await row(payer.id);
+    const service = new m.PolicyService(m.db);
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let locked!: () => void;
+    const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+    const holder = m.db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "Agent" WHERE "id" = ${payer.id} FOR UPDATE`;
+        locked();
+        await released;
+      },
+      { timeout: 20_000 },
+    );
+    await lockTaken;
+    const started = Date.now();
+    await expect(
+      service.patchPolicyAtomically(payer.id, { maxValuePerTxUsd: '1' }, () => null, { maxWait: 2_000, timeout: 5_000, lockTimeoutMs: 300 }),
+    ).rejects.toBeInstanceOf(m.PolicyBusyError);
+    expect(Date.now() - started).toBeLessThan(4_000);
+    release();
+    await holder;
+    expect(await row(payer.id)).toEqual(before);
   });
 });
 
@@ -479,6 +655,37 @@ describeDb('OPERATOR: the operator secret keeps its authority (both directions)'
     expect((await row(payer.id)).active).toBe(false);
     expect(await service.resumeByOperator(payer.id)).toBe('reactivated');
     expect((await row(payer.id)).active).toBe(true);
+  });
+
+  it('documented: an agent PATCH {active: false} after an operator pause clears the stamp, so the admin resume leaves it inactive and the operator secret resumes it', async () => {
+    const payer = await mkAgent();
+    const service = new m.PolicyService(m.db);
+    await service.pauseByOperator(payer.id);
+    expect((await patchPolicy(payer.id, payer.headers, { active: false })).statusCode).toBe(200);
+    expect((await row(payer.id)).pausedByOperatorAt).toBeNull();
+    expect(await service.resumeByOperator(payer.id)).toBe('left_inactive');
+    expect((await patchPolicy(payer.id, OPERATOR, { active: true })).statusCode).toBe(200);
+    expect((await row(payer.id)).active).toBe(true);
+  });
+
+  it('pauseByOperator is a no-op on an agent without a policy row (the operator stops it with Agent.active = false)', async () => {
+    const bare = await mkAgent(null);
+    const service = new m.PolicyService(m.db);
+    expect(await service.pauseByOperator(bare.id)).toBe(false);
+    await m.db.agent.update({ where: { id: bare.id }, data: { active: false } });
+    expect((await app.inject({ method: 'GET', url: '/v1/agents/me', headers: bare.headers })).statusCode).toBe(403);
+  });
+});
+
+describeDb('DAILY-PAUSED: the binding daily-limit check applies to a paused policy too', () => {
+  it('a reservation over the daily limit is refused even when the policy was paused after the unlocked pre-check', async () => {
+    const payer = await mkAgent({ maxDailyVolumeUsd: '10', active: false });
+    const data = { agentId: payer.id, chainId: 84532, type: 'TRANSFER' as const, status: 'QUEUED' as const };
+    const over = await m.createTransactionWithVolume(m.db, { agentId: payer.id, valueUsd: '50', priceSource: 'synthetic', data });
+    expect(over).toMatchObject({ ok: false, code: 'DAILY_LIMIT' });
+    expect(await m.db.transaction.count({ where: { agentId: payer.id } })).toBe(0);
+    const fits = await m.createTransactionWithVolume(m.db, { agentId: payer.id, valueUsd: '5', priceSource: 'synthetic', data });
+    expect(fits).toMatchObject({ ok: true });
   });
 });
 

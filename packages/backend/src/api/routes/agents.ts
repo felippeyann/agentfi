@@ -13,10 +13,12 @@ import {
 } from '../../services/identity/handshake.js';
 import { SafeService } from '../../services/wallet/safe.service.js';
 import { generateApiKey } from '../middleware/auth.js';
-import { PolicyService } from '../../services/policy/policy.service.js';
+import { PolicyBusyError, PolicyService } from '../../services/policy/policy.service.js';
 import {
+  DEFAULT_AGENT_POLICY,
   changedPolicyFields,
   classifyPolicyChange,
+  defaultPolicyBaseline,
   toPolicyPatch,
 } from '../../services/policy/policy-authority.js';
 import {
@@ -60,8 +62,17 @@ const registrationFileConfig = {
   mcpPublicUrl: env.MCP_PUBLIC_URL ?? null,
 };
 
-/** An EVM address (`allowedRecipients` entries, Q8). */
+/**
+ * An EVM address — every whitelist entry. `allowedRecipients` since Q8;
+ * `allowedContracts` / `allowedTokens` too: their enforcers `getAddress()` each
+ * entry (policy.service.ts), so a stored non-address made every later
+ * transaction of the agent fail with a 500 instead of a policy answer.
+ */
 const recipientAddress = z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 0x-prefixed 20-byte hex address');
+
+/** One year. A cooldown is a whole number of seconds; the column is a 32-bit integer. */
+const MAX_COOLDOWN_SECONDS = 31_536_000;
+const cooldownSeconds = z.number().int().min(0).max(MAX_COOLDOWN_SECONDS);
 
 /**
  * Q8: `allowedRecipients` must be explicit whenever `allowedContracts` is
@@ -83,15 +94,15 @@ const RECIPIENTS_REQUIRED_MESSAGE =
  */
 const initialPolicySchema = z
   .object({
-    maxValuePerTxEth: policyDecimal.default('1.0'),
+    maxValuePerTxEth: policyDecimal.default(DEFAULT_AGENT_POLICY.maxValuePerTxEth),
     maxValuePerTxUsd: policyUsdDecimal.optional(),
     // #185 review: `null` = "not configured", exactly like omitting it (the OpenAPI Policy is nullable).
     maxOutflowPerTxUsd: policyUsdDecimal.nullable().optional(),
-    maxDailyVolumeUsd: policyUsdDecimal.default('10000'),
-    allowedContracts: z.array(z.string()).default([]),
+    maxDailyVolumeUsd: policyUsdDecimal.default(DEFAULT_AGENT_POLICY.maxDailyVolumeUsd),
+    allowedContracts: z.array(recipientAddress).default([]),
     allowedRecipients: z.array(recipientAddress).optional(),
-    allowedTokens: z.array(z.string()).default([]),
-    cooldownSeconds: z.number().default(60),
+    allowedTokens: z.array(recipientAddress).default([]),
+    cooldownSeconds: cooldownSeconds.default(DEFAULT_AGENT_POLICY.cooldownSeconds),
   })
   .superRefine((policy, ctx) => {
     if (policy.allowedContracts.length > 0 && policy.allowedRecipients === undefined) {
@@ -239,10 +250,10 @@ const updatePolicySchema = z.object({
   /// §5-6: USD cap on ordinary outflows. `null` = not configured (blocks them). Setting a value from null is loosening.
   maxOutflowPerTxUsd: policyUsdDecimal.nullable().optional(),
   maxDailyVolumeUsd: policyUsdDecimal.optional(),
-  allowedContracts: z.array(z.string()).optional(),
+  allowedContracts: z.array(recipientAddress).optional(),
   allowedRecipients: z.array(recipientAddress).optional(),
-  allowedTokens: z.array(z.string()).optional(),
-  cooldownSeconds: z.number().optional(),
+  allowedTokens: z.array(recipientAddress).optional(),
+  cooldownSeconds: cooldownSeconds.optional(),
   active: z.boolean().optional(),
   /// ISO 8601 timestamp — sets a temporary policy that expires automatically (null clears expiry)
   expiresAt: z.string().datetime().nullish(),
@@ -260,7 +271,11 @@ export async function agentRoutes(fastify: FastifyInstance) {
   fastify.post('/v1/agents', async (request, reply) => {
     const parsed = createAgentSchema.safeParse(request.body);
     if (!parsed.success) return validationFailed(reply, parsed.error);
-    const result = await provisionAgent(parsed.data);
+    // Every registration path creates the policy row: without `policy` the
+    // operator gets the server defaults (as POST /v1/public/agents). No row
+    // means "no restrictions" to every enforcer — an agent registered without
+    // one used to be unbounded until somebody wrote a policy.
+    const result = await provisionAgent({ ...parsed.data, policy: parsed.data.policy ?? initialPolicySchema.parse({}) });
     return reply.code(201).send(result);
   });
 
@@ -476,7 +491,7 @@ export async function agentRoutes(fastify: FastifyInstance) {
     // cannot be overtaken by a stale "neutral" patch (see patchPolicyAtomically).
     let loosenedFields: ReturnType<typeof classifyPolicyChange>['loosenedFields'] = [];
     const audit = () => ({ agentId, caller, changedFields, loosenedFields, ...(reason ? { reason } : {}) });
-    const written = await policyService.patchPolicyAtomically(agentId, patch, (current) => {
+    const decide = (current: Parameters<typeof classifyPolicyChange>[0]) => {
       // Q8: a PATCH that CREATES the policy row follows the creation rule — a
       // non-empty allowedContracts needs an explicit allowedRecipients (see
       // RECIPIENTS_REQUIRED_MESSAGE). On an existing row an omitted field keeps
@@ -484,12 +499,25 @@ export async function agentRoutes(fastify: FastifyInstance) {
       if (!current && (patch.allowedContracts?.length ?? 0) > 0 && patch.allowedRecipients === undefined) {
         return { kind: 'creation-rule' as const };
       }
-      const verdict = classifyPolicyChange(current, patch);
+      // An AGENT without a policy row (registered before the row was always
+      // created) is judged against the registration defaults, not against
+      // "no restrictions": its first PATCH can only introduce values at or
+      // below them. The operator is judged against the real state (null).
+      const verdict = classifyPolicyChange(current ?? (request.isOperator ? null : defaultPolicyBaseline(agentId)), patch);
       loosenedFields = verdict.loosenedFields;
       // `reason` is audit-only: it goes on the log line and is never persisted.
       if (!request.isOperator && !verdict.tightens) return { kind: 'loosening' as const };
       return null;
-    });
+    };
+    let written: Awaited<ReturnType<typeof policyService.patchPolicyAtomically<NonNullable<ReturnType<typeof decide>>>>>;
+    try {
+      written = await policyService.patchPolicyAtomically(agentId, patch, decide);
+    } catch (err) {
+      if (!(err instanceof PolicyBusyError)) throw err;
+      // Another write holds the policy (or the agent's spend lock) for too long: nothing was written.
+      logger.warn(audit(), 'Policy change not applied: the policy row is locked by another request');
+      return reply.code(503).header('Retry-After', '2').send({ error: err.message, code: 'POLICY_BUSY', retryAfterSeconds: 2 });
+    }
 
     if (!written.agentExists) return reply.code(404).send({ error: 'Agent not found' });
     if (written.rejected) {

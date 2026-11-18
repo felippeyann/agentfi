@@ -135,19 +135,23 @@ describe('PolicyService.pauseByOperator / resumeByOperator', () => {
     });
   });
 
-  it('setPolicy clears the stamp on an explicit `active` write, and only then', async () => {
+  it('patchPolicyAtomically clears the stamp on an explicit `active` write, and only then', async () => {
     const db = makeMockDb();
     (db.agentPolicy.upsert as any).mockImplementation(async ({ update }: any) => basePolicy(update));
+    // The write runs in one transaction under the Agent / policy row locks.
+    (db as any).$transaction = async (fn: (tx: unknown) => unknown) => fn(db);
+    (db as any).$queryRaw = async () => [{ id: 'agent-1' }];
+    (db as any).$executeRawUnsafe = async () => 0;
     const svc = new PolicyService(db);
 
-    await svc.setPolicy('agent-1', { active: false });
+    await svc.patchPolicyAtomically('agent-1', { active: false }, () => null);
     expect((db.agentPolicy.upsert as any).mock.calls[0][0]).toEqual({
       where: { agentId: 'agent-1' },
       create: { agentId: 'agent-1', active: false, pausedByOperatorAt: null },
       update: { active: false, pausedByOperatorAt: null },
     });
 
-    await svc.setPolicy('agent-1', { maxValuePerTxEth: '0.5' });
+    await svc.patchPolicyAtomically('agent-1', { maxValuePerTxEth: '0.5' }, () => null);
     expect((db.agentPolicy.upsert as any).mock.calls[1][0]).toEqual({
       where: { agentId: 'agent-1' },
       create: { agentId: 'agent-1', maxValuePerTxEth: '0.5' },

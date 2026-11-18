@@ -189,6 +189,33 @@ describe('POST /v1/public/agents — forced defaults', () => {
 });
 
 describe('POST /v1/agents — operator path keeps accepting an explicit (valid) policy', () => {
+  it('WITHOUT a policy the operator path creates the default policy row too (it used to create none: an unrestricted agent)', async () => {
+    const app = await buildApp();
+
+    const res = await app.inject({ method: 'POST', url: '/v1/agents', payload: { name: 'operator-no-policy', tier: 'PRO' } });
+
+    expect(res.statusCode).toBe(201);
+    const { data } = mockDb.agent.create.mock.calls[0][0];
+    expect(data.tier).toBe('PRO');
+    expect(data.policy).toEqual({ create: DEFAULT_POLICY });
+    // maxOutflowPerTxUsd is not in the create: the column stays NULL (ordinary outflows blocked).
+    expect(data.policy.create).not.toHaveProperty('maxOutflowPerTxUsd');
+
+    await app.close();
+  });
+
+  it('whitelist entries that are not addresses and an out-of-range cooldown are 400 before provisioning', async () => {
+    const app = await buildApp();
+
+    for (const policy of [{ allowedTokens: ['USDC'] }, { allowedContracts: ['router'], allowedRecipients: [] }, { cooldownSeconds: -5 }, { cooldownSeconds: 0.5 }]) {
+      const res = await app.inject({ method: 'POST', url: '/v1/agents', payload: { name: 'bad-policy', policy } });
+      expect(res.statusCode, JSON.stringify(policy)).toBe(400);
+    }
+    expect(mockDb.agent.create).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
   it('stores the supplied policy as-is', async () => {
     const app = await buildApp();
 

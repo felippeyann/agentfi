@@ -46,6 +46,7 @@ const { mockDb } = vi.hoisted(() => {
     agentRowExists: true,
   };
   mockDb.$transaction = vi.fn(async (fn: (tx: unknown) => unknown) => fn(mockDb));
+  mockDb.$executeRawUnsafe = vi.fn(async () => 0);
   mockDb.$queryRaw = vi.fn(async (strings: TemplateStringsArray) =>
     strings.join('?').includes('"Agent" WHERE') ? (mockDb.agentRowExists ? [{ id: 'agent-1' }] : []) : [],
   );
@@ -222,11 +223,84 @@ describe('PATCH /v1/agents/:id/policy — agent caller', () => {
     const res = await app.inject({
       method: 'PATCH',
       url: '/v1/agents/agent-1/policy',
-      payload: { maxValuePerTxEth: '100', active: true },
+      payload: { maxValuePerTxEth: '0.5', active: true },
     });
 
     expect(res.statusCode).toBe(200);
     expect(mockDb.agentPolicy.upsert).toHaveBeenCalledTimes(1);
+
+    await app.close();
+  });
+
+  it('an agent without a policy row is judged against the registration defaults: a first PATCH above them is 403', async () => {
+    mockDb.agentPolicy.findUnique.mockResolvedValue(null);
+    const app = await buildApp({ agentId: 'agent-1' });
+
+    for (const [payload, field] of [
+      [{ maxValuePerTxEth: '100' }, 'maxValuePerTxEth'],
+      [{ maxValuePerTxUsd: '1000000000' }, 'maxValuePerTxUsd'],
+      [{ maxOutflowPerTxUsd: '0.01' }, 'maxOutflowPerTxUsd'],
+      [{ maxDailyVolumeUsd: '0' }, 'maxDailyVolumeUsd'],
+      [{ cooldownSeconds: 0 }, 'cooldownSeconds'],
+    ] as const) {
+      const res = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload });
+      expect(res.statusCode, JSON.stringify(payload)).toBe(403);
+      expect(res.json().loosenedFields).toEqual([field]);
+    }
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it('the operator is NOT judged against the defaults: it creates any first policy', async () => {
+    mockDb.agentPolicy.findUnique.mockResolvedValue(null);
+    const app = await buildApp({ isOperator: true });
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/agents/agent-1/policy',
+      payload: { maxValuePerTxUsd: '1000000', maxOutflowPerTxUsd: '5000', maxDailyVolumeUsd: '0', cooldownSeconds: 0 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(mockDb.agentPolicy.upsert).toHaveBeenCalledTimes(1);
+
+    await app.close();
+  });
+
+  it('a policy row that cannot be locked in time is 503 POLICY_BUSY with Retry-After (not an opaque 500); nothing written', async () => {
+    const app = await buildApp({ agentId: 'agent-1' });
+
+    for (const failure of [
+      Object.assign(new Error('Transaction API error: Transaction already closed'), { code: 'P2028' }),
+      Object.assign(new Error('Raw query failed. Code: `55P03`. Message: `canceling statement due to lock timeout`'), { code: 'P2010', meta: { code: '55P03' } }),
+    ]) {
+      mockDb.$transaction.mockRejectedValueOnce(failure);
+      const res = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload: { maxValuePerTxEth: '0.5' } });
+      expect(res.statusCode).toBe(503);
+      expect(res.headers['retry-after']).toBe('2');
+      expect(res.json()).toMatchObject({ code: 'POLICY_BUSY' });
+    }
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it('whitelist entries must be addresses and the cooldown a whole number of seconds in range (400 for every caller)', async () => {
+    const app = await buildApp({ isOperator: true });
+
+    for (const payload of [
+      { allowedContracts: ['uniswap'] },
+      { allowedTokens: ['USDC'] },
+      { allowedTokens: [''] },
+      { cooldownSeconds: -1 },
+      { cooldownSeconds: 1.5 },
+      { cooldownSeconds: 31_536_001 },
+    ]) {
+      const res = await app.inject({ method: 'PATCH', url: '/v1/agents/agent-1/policy', payload });
+      expect(res.statusCode, JSON.stringify(payload)).toBe(400);
+    }
+    expect(mockDb.agentPolicy.upsert).not.toHaveBeenCalled();
 
     await app.close();
   });

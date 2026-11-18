@@ -38,6 +38,49 @@ export type PolicyPatch = Partial<Pick<AgentPolicy, PolicyPatchField>>;
 /** Loosely-typed input (e.g. a parsed request body) where absent fields may be `undefined`. */
 export type PolicyPatchInput = { [K in PolicyPatchField]?: PolicyPatch[K] | undefined };
 
+/**
+ * The policy every registration path starts with (the `AgentPolicy` column
+ * defaults; `initialPolicySchema.parse({})` in `api/routes/agents.ts` is built
+ * from these values). Two uses:
+ *   - registration without an explicit `policy` creates exactly this row;
+ *   - an AGENT whose policy row does not exist yet (registered before the row
+ *     was always created) is judged against it: a missing row means "no
+ *     restrictions" to every enforcer, so judged against `null` its first
+ *     PATCH could seed any limit ("1000000000", daily "0", cooldown 0) and
+ *     still count as a tightening. Against this baseline it can only
+ *     introduce values at or below the defaults — and the row its PATCH
+ *     creates takes the column defaults for every field it does not name.
+ * `maxOutflowPerTxUsd: null` = not configured: ordinary outflows are refused
+ * until the operator sets it.
+ */
+export const DEFAULT_AGENT_POLICY = {
+  maxValuePerTxEth: '1.0',
+  maxValuePerTxUsd: '1.0',
+  maxOutflowPerTxUsd: null,
+  maxDailyVolumeUsd: '10000',
+  allowedContracts: [] as string[],
+  allowedRecipients: [] as string[],
+  allowedTokens: [] as string[],
+  cooldownSeconds: 60,
+  active: true,
+  expiresAt: null,
+} as const satisfies { [K in PolicyPatchField]: AgentPolicy[K] | readonly string[] };
+
+/** `DEFAULT_AGENT_POLICY` as the row an agent's first PATCH is judged against (see there). */
+export function defaultPolicyBaseline(agentId: string): AgentPolicy {
+  return {
+    id: '',
+    agentId,
+    ...DEFAULT_AGENT_POLICY,
+    allowedContracts: [],
+    allowedRecipients: [],
+    allowedTokens: [],
+    maxValueForAutoApprovalEth: '0.1',
+    pausedByOperatorAt: null,
+    updatedAt: new Date(0),
+  };
+}
+
 export interface PolicyChangeClassification {
   /** `true` when no field loosens — the patch only tightens or leaves the policy unchanged. */
   tightens: boolean;
