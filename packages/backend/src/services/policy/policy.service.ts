@@ -38,7 +38,7 @@ export type OperatorResumeOutcome =
   | 'no_policy';
 
 /** Bounds of the policy PATCH transaction (as the reservations, `daily-volume.ts`). */
-export const POLICY_PATCH_TX_OPTIONS = { maxWait: 5_000, timeout: 10_000, lockTimeoutMs: 8_000 } as const;
+export const POLICY_PATCH_TX_OPTIONS = { maxWait: 5_000, timeout: 10_000, lockTimeoutMs: 4_000 } as const;
 
 /** The policy row could not be locked in time (another write holds it); nothing was written. */
 export class PolicyBusyError extends Error {
@@ -287,7 +287,8 @@ export class PolicyService {
    *
    * The transaction is bounded (`POLICY_PATCH_TX_OPTIONS`; the lock wait by
    * Postgres `lock_timeout`, which unlike the Prisma timeout interrupts a
-   * blocked statement): when the locks cannot be had in time it throws
+   * blocked statement — it applies PER statement, and there are two lock
+   * statements, so the worst case is 2 x 4 s, inside the 10 s timeout): when the locks cannot be had in time it throws
    * `PolicyBusyError` (nothing written) and the route answers 503 +
    * Retry-After instead of an opaque 500.
    */

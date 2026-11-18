@@ -150,7 +150,8 @@ was still active) could land AFTER the operator's kill switch and switch the
 policy back on. `PolicyService.patchPolicyAtomically` now locks the Agent row
 then the policy row (`FOR NO KEY UPDATE`, the reservation lock order) for the
 whole read, verdict and write; the kill switch and a concurrent PATCH wait for
-the commit. The wait is bounded (Postgres `lock_timeout` 8 s, transaction 10 s):
+the commit. The wait is bounded (Postgres `lock_timeout` 4 s per lock statement, two lock
+statements, so at most about 8 s, inside the 10 s transaction timeout):
 when the locks cannot be had the route answers `503 POLICY_BUSY` +
 `Retry-After` and nothing is written. Tests: `A` POL-RACE (stale read, kill
 switch held in a transaction, the real `pauseByOperator` fired together with
@@ -179,14 +180,25 @@ It is not an agent-side widening (the agent cannot raise a value; it can only
 keep using, for one racing request, a value that was valid a moment before).
 Closing it means re-running the static checks inside
 `createTransactionWithVolume`; that function does not receive what they need
-(call target, recipient, token, native value, pricing: 13 call sites build
-them differently), so it is not a contained change and is left as a follow-up
+(call target, recipient, token, native value, pricing: 12 callers of
+`createWithVolumeReservation` build them differently, and one more
+`validateTransaction` site, the legacy A2A payment, reserves nothing itself), so it is not a contained change and is left as a follow-up
 (section 7), not attempted here.
 
-One thing on that path WAS fixed because it is self-contained: the binding
-daily check read a policy paused inside that window as "no daily limit"
-(`policy.active ? limit : 0`); it now applies the limit whether or not the
-policy is active (`A` DAILY-PAUSED).
+Two sites read a paused policy as "no daily limit" (`policy.active ? limit :
+0`); both are fixed because the change is self-contained:
+
+- `createTransactionWithVolume` (`daily-volume.ts`), the binding daily check of
+  the transactions path: it now applies the limit whether or not the policy is
+  active (`A` DAILY-PAUSED, first test).
+- `reserveJobEscrow` (`escrow.service.ts`), the legacy paid-job reservation.
+  There it was exploitable by the agent key: pause itself (a tightening), post N
+  paid jobs that each reserved $0 of DailyVolume, and after the operator's
+  resume the legacy A2A payments (judged with `dailyVolumeAccounted: true`, not
+  against the limit again) paid N rewards above `maxDailyVolumeUsd`. It now
+  refuses a paused or expired policy (`403 POLICY_PAUSED`, as `evaluateUsdcSpend`
+  on the escrow path) and applies the limit whenever a policy row exists (`A`
+  DAILY-PAUSED, `POST /v1/jobs` tests).
 
 Pause bookkeeping, documented behaviour (`A` OPERATOR "documented: ..."): any
 explicit `active` write clears `pausedByOperatorAt`. An agent PATCH
@@ -295,12 +307,16 @@ registered in `admin.ts` (the only file whose handlers it checks for the guard).
 
 - F1: re-run the static policy checks (caps, allowlists, cooldown) under the
   Agent lock on the legacy `/v1/transactions/*` path (section 3.2). Needs the
-  check inputs passed into `createTransactionWithVolume` from 13 call sites.
+  check inputs passed into `createTransactionWithVolume` from the 12
+  `createWithVolumeReservation` callers (and a decision for the legacy A2A
+  payment, which reserves nothing itself).
 - F2: decide whether pre-existing agents without a policy row get the default
   row (operator action or a reviewed migration); until then section 3.3.
-- F3: scripts and examples that register with `POST /v1/agents` and no `policy`
-  and then move funds now get the default row (outflows refused until
-  `maxOutflowPerTxUsd` is set): they must pass an explicit `policy`.
+- F3 (done in #208): the scripts and examples that registered with
+  `POST /v1/agents` and no `policy` now pass an explicit operator policy
+  (`scripts/e2e-issue-81.mjs`, `smoke-dev.mjs`, `demo-claude-mcp.mjs`,
+  `examples/a2a-collab`, `examples/delegation-chain`), and the registration docs
+  say the default row applies.
 - F4: the stdio MCP `update_policy` description (`packages/mcp-server/src/tools/agent.ts`)
   does not mention the first-policy rule (an agent without a policy row is judged
   against the registration defaults). Left to the MCP packaging front:

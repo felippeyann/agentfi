@@ -1898,6 +1898,11 @@ export interface paths {
                  *     `maxValuePerTxUsd`, `maxDailyVolume`, `cooldown`; Q8 renamed
                  *     `allowedContracts` / `maxValuePerTx`), `limit`,
                  *     `spentToday` (`maxDailyVolume`), `amount` and `payee`.
+                 *     On a chain without the escrow contract: `POLICY_PAUSED` (`rule`
+                 *     `policyPaused` / `policyExpired`: the requester's policy is paused
+                 *     or expired), `USD_CAP_NOT_CONFIGURED` or `POLICY_VIOLATION` (rule
+                 *     `maxOutflowPerTxUsd`: the reward, paid later as an ordinary
+                 *     outflow, cannot pass the cap).
                  */
                 403: {
                     headers: {

@@ -91,9 +91,8 @@ async function registerAgent(name) {
       // ordinary outflow — a paid legacy job's reward included — is refused
       // (USD_CAP_NOT_CONFIGURED). Demo agents get an explicit operator policy.
       // The reward is paid as an ordinary outflow (legacy A2A payment): cap it
-      // in USD, no daily limit and no cooldown, as the pre-#208 default (no
-      // policy row) behaved for this scenario.
-      policy: { maxOutflowPerTxUsd: '100', maxDailyVolumeUsd: '0', cooldownSeconds: 0 },
+      // in USD, a finite daily limit, no cooldown.
+      policy: { maxOutflowPerTxUsd: '100', maxDailyVolumeUsd: '1000', cooldownSeconds: 0 },
     }),
   });
 }

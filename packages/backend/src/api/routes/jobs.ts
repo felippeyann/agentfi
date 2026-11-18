@@ -292,7 +292,8 @@ export async function jobRoutes(fastify: FastifyInstance) {
         }
         // §5-6: the reward, paid later as an ordinary outflow, cannot pass
         // maxOutflowPerTxUsd (not configured, or above it): 403, no job.
-        if (reservation.code === 'USD_CAP_NOT_CONFIGURED' || reservation.code === 'POLICY_VIOLATION') {
+        // A paused / expired requester policy is 403 POLICY_PAUSED, as on the escrow path.
+        if (reservation.code === 'USD_CAP_NOT_CONFIGURED' || reservation.code === 'POLICY_VIOLATION' || reservation.code === 'POLICY_PAUSED') {
           return reply.code(403).send({
             error: reservation.reason,
             code: reservation.code,

@@ -50,6 +50,8 @@ vi.hoisted(() => {
   for (const [k, v] of required) {
     if (!process.env[k]) process.env[k] = v;
   }
+  // Base Sepolia USDC at 1 USD (a configured synthetic test price) so a legacy paid job is priced.
+  process.env['SYNTHETIC_TEST_PRICES_USD'] = '84532:0x036CbD53842c5426634e7929541eC2318f3dCF7e=1';
 });
 
 vi.mock('../api/middleware/logger.js', () => {
@@ -128,6 +130,7 @@ type Modules = {
   PolicyService: typeof import('../services/policy/policy.service.js')['PolicyService'];
   PolicyBusyError: typeof import('../services/policy/policy.service.js')['PolicyBusyError'];
   createTransactionWithVolume: typeof import('../services/policy/daily-volume.js')['createTransactionWithVolume'];
+  DEFAULT_AGENT_POLICY: typeof import('../services/policy/policy-authority.js')['DEFAULT_AGENT_POLICY'];
   authMiddleware: typeof import('../api/middleware/auth.js')['authMiddleware'];
   registerErrorHandler: typeof import('../api/errors/handler.js')['registerErrorHandler'];
 };
@@ -220,7 +223,7 @@ async function row(agentId: string) {
 
 beforeAll(async () => {
   if (!DB_READY) return;
-  const [db, agents, jobs, rp, rps, ps, auth, errors, dv] = await Promise.all([
+  const [db, agents, jobs, rp, rps, ps, auth, errors, dv, pa] = await Promise.all([
     import('../db/client.js'),
     import('../api/routes/agents.js'),
     import('../api/routes/jobs.js'),
@@ -230,6 +233,7 @@ beforeAll(async () => {
     import('../api/middleware/auth.js'),
     import('../api/errors/handler.js'),
     import('../services/policy/daily-volume.js'),
+    import('../services/policy/policy-authority.js'),
   ]);
   m = {
     db: db.db,
@@ -240,6 +244,7 @@ beforeAll(async () => {
     PolicyService: ps.PolicyService,
     PolicyBusyError: ps.PolicyBusyError,
     createTransactionWithVolume: dv.createTransactionWithVolume,
+    DEFAULT_AGENT_POLICY: pa.DEFAULT_AGENT_POLICY,
     authMiddleware: auth.authMiddleware,
     registerErrorHandler: errors.registerErrorHandler,
   };
@@ -440,6 +445,8 @@ describeDb('POL-FIRST: an agent without a policy row cannot seed its own limits 
     const res = await app.inject({ method: 'POST', url: '/v1/agents', headers: OPERATOR, payload: { name: `${NAME_PREFIX} ${RUN}-reg`, chainIds: [84532] } });
     expect(res.statusCode, res.body).toBe(201);
     const { id, apiKey } = res.json() as { id: string; apiKey: string };
+    // The baseline an agent without a row is judged against cannot drift from what registration stores.
+    expect(await row(id)).toMatchObject(m.DEFAULT_AGENT_POLICY);
     expect(await row(id)).toMatchObject({
       maxValuePerTxEth: '1.0',
       maxValuePerTxUsd: '1.0',
@@ -686,6 +693,45 @@ describeDb('DAILY-PAUSED: the binding daily-limit check applies to a paused poli
     expect(await m.db.transaction.count({ where: { agentId: payer.id } })).toBe(0);
     const fits = await m.createTransactionWithVolume(m.db, { agentId: payer.id, valueUsd: '5', priceSource: 'synthetic', data });
     expect(fits).toMatchObject({ ok: true });
+  });
+
+  const postPaidJob = (requester: Fixture, providerId: string, amount: string) =>
+    app.inject({
+      method: 'POST',
+      url: '/v1/jobs',
+      headers: requester.headers,
+      // 84532 is a chain WITHOUT the escrow contract in this suite (escrow runtime off): the legacy reservation.
+      payload: { providerId, payload: { t: 1 }, reward: { amount, token: 'USDC', chainId: 84532 } },
+    });
+  const dailyVolume = async (agentId: string) =>
+    (await m.db.dailyVolume.findMany({ where: { agentId } })).reduce((sum, row) => sum + Number(row.volumeUsd), 0);
+
+  it('POST /v1/jobs (legacy): a PAUSED requester cannot post paid jobs that reserve nothing (403 POLICY_PAUSED, no job, no volume)', async () => {
+    const requester = await mkAgent({ maxDailyVolumeUsd: '10', active: false });
+    const provider = await mkAgent();
+    for (let i = 0; i < 3; i++) {
+      const res = await postPaidJob(requester, provider.id, '4');
+      expect(res.statusCode, res.body).toBe(403);
+      expect(res.json()).toMatchObject({ code: 'POLICY_PAUSED' });
+    }
+    expect(await m.db.job.count({ where: { requesterId: requester.id } })).toBe(0);
+    expect(await dailyVolume(requester.id)).toBe(0);
+
+    // After the operator's resume the daily limit binds: 4 + 4 fit in 10, the third is refused.
+    expect((await patchPolicy(requester.id, OPERATOR, { active: true })).statusCode).toBe(200);
+    expect((await postPaidJob(requester, provider.id, '4')).statusCode).toBe(201);
+    expect((await postPaidJob(requester, provider.id, '4')).statusCode).toBe(201);
+    expect((await postPaidJob(requester, provider.id, '4')).statusCode).toBe(400);
+    expect(await dailyVolume(requester.id)).toBeCloseTo(8, 6);
+  });
+
+  it('POST /v1/jobs (legacy): an EXPIRED requester policy is 403 POLICY_PAUSED as well', async () => {
+    const requester = await mkAgent({ maxDailyVolumeUsd: '10', expiresAt: new Date(Date.now() - 60_000) });
+    const provider = await mkAgent();
+    const res = await postPaidJob(requester, provider.id, '4');
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json()).toMatchObject({ code: 'POLICY_PAUSED' });
+    expect(await m.db.job.count({ where: { requesterId: requester.id } })).toBe(0);
   });
 });
 
