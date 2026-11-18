@@ -91,7 +91,7 @@ HTTP/OpenAPI and MCP first; framework examples are tracked in the **[compatibili
 
 ## Feedback and security
 
-- **Tried it? Tell us where it broke or worked:** open an [alpha feedback or integration request](https://github.com/felippeyann/agentfi/issues/new/choose) ([what we ask and never collect](docs/feedback.md)). No telemetry; do not paste prompts, keys, seeds or customer data.
+- **Tried it? Tell us where it broke or worked:** open an [alpha feedback or integration request](https://github.com/felippeyann/agentfi/issues/new/choose) ([what we ask and never collect](docs/feedback.md)). No telemetry; do not paste prompts, keys, seeds or customer data. The issue forms need a (free) GitHub account; there is no account-free channel yet.
 - **Vulnerabilities:** [report privately](https://github.com/felippeyann/agentfi/security/advisories/new), never in a public issue. See [SECURITY.md](SECURITY.md).
 - [Contributing](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md) · [Changelog](CHANGELOG.md).
 
