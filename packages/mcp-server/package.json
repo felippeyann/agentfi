@@ -9,9 +9,15 @@
   "bin": {
     "agentfi-mcp": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.build.json",
+    "prepack": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "start": "node --import tsx/esm src/index.ts"
