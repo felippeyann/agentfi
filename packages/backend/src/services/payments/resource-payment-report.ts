@@ -39,6 +39,8 @@ export interface PaymentLine {
   resourceSha256: string | null;
   resourceBytes: number | null;
   txHash: string | null;
+  /** The EIP-3009 authorization nonce the agent signed; null when nothing was signed. */
+  authorizationNonce: string | null;
   reservedAt: string;
   /** Why the attempt was blocked or failed, when it was. */
   reason: string | null;
@@ -292,6 +294,7 @@ export async function buildSpendReport(
           resourceSha256: row.resourceSha256,
           resourceBytes: row.resourceBytes,
           txHash: row.settlementTxHash,
+          authorizationNonce: row.authorizationNonce,
           reservedAt: row.reservedAt.toISOString(),
           reason: reasonFor(row),
           action,
@@ -367,6 +370,10 @@ export function renderSpendReport(report: AgentSpend[]): string {
         out.push(`        ${p.url} → ${p.payTo}${p.txHash ? `  tx ${p.txHash}` : ''}`);
         if (p.resourceSha256) out.push(`        resource sha256 ${p.resourceSha256} (${p.resourceBytes} bytes received${p.delivery === 'partial' ? ', TRUNCATED' : ''})`);
         if (p.reason) out.push(`        reason: ${p.reason}`);
+        // The operator's proof that a block emitted nothing: no authorization was signed for this row.
+        if (p.status === 'failed_before_signing' && p.authorizationNonce === null) {
+          out.push('        signature: none (refused before signing: no payment authorization exists for this row)');
+        }
         if (p.reconcileNote) out.push(`        reconciled: ${p.reconcileNote}`);
         if (p.automatic) out.push(`        automatic: ${p.automatic}`);
         if (p.action) out.push(`        ACTION: ${p.action}`);
