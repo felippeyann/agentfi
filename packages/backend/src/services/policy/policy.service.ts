@@ -257,6 +257,55 @@ export class PolicyService {
     });
   }
 
+  /**
+   * Authority-checked policy write, atomic with the check.
+   *
+   * `PATCH /v1/agents/:id/policy` used to read the policy, classify the patch
+   * against that read (tighten / loosen) and write it in three separate
+   * statements. Two agent requests racing could therefore both pass against
+   * the same stale read (the second one widening what the first had just
+   * tightened), and a patch classified as neutral against `active: true`
+   * could land AFTER the operator's kill switch and switch the policy back on.
+   *
+   * Here the Agent row and then the policy row are locked (`FOR UPDATE`, the
+   * lock order of the reservations: Agent first) for the whole read ->
+   * `decide` -> write. The kill switch (`updateMany` on the policy row) and a
+   * concurrent PATCH wait for the commit, so `decide` always judges the value
+   * that is actually overwritten.
+   *
+   * `decide` returns `null` to allow the write, or any object to refuse it
+   * (returned as `rejected`, nothing written). `agentExists` is false only
+   * when no Agent row has this id (nothing is written).
+   */
+  async patchPolicyAtomically<R extends object>(
+    agentId: string,
+    patch: Partial<Omit<AgentPolicy, 'id' | 'agentId' | 'updatedAt'>>,
+    decide: (current: AgentPolicy | null) => R | null,
+  ): Promise<
+    | { agentExists: false }
+    | { agentExists: true; rejected: R; policy?: undefined }
+    | { agentExists: true; rejected?: undefined; policy: AgentPolicy }
+  > {
+    return this.db.$transaction(async (tx) => {
+      const agents = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "Agent" WHERE "id" = ${agentId} FOR UPDATE`;
+      if (agents.length === 0) return { agentExists: false as const };
+      await tx.$queryRaw`SELECT "id" FROM "AgentPolicy" WHERE "agentId" = ${agentId} FOR UPDATE`;
+
+      const current = await tx.agentPolicy.findUnique({ where: { agentId } });
+      const rejected = decide(current);
+      if (rejected) return { agentExists: true as const, rejected };
+
+      const data = patch.active === undefined ? patch : { ...patch, pausedByOperatorAt: null };
+      const policy = await tx.agentPolicy.upsert({
+        where: { agentId },
+        create: { agentId, ...data },
+        update: data,
+      });
+      return { agentExists: true as const, policy };
+    });
+  }
+
   async getPolicy(agentId: string): Promise<AgentPolicy | null> {
     return this.db.agentPolicy.findUnique({ where: { agentId } });
   }

@@ -471,42 +471,43 @@ export async function agentRoutes(fastify: FastifyInstance) {
     });
     const changedFields = changedPolicyFields(patch);
 
-    const current = await policyService.getPolicy(agentId);
+    // Read, classify and write under the Agent + policy row locks: the verdict
+    // is about the value this write overwrites, and the operator's kill switch
+    // cannot be overtaken by a stale "neutral" patch (see patchPolicyAtomically).
+    let loosenedFields: ReturnType<typeof classifyPolicyChange>['loosenedFields'] = [];
+    const audit = () => ({ agentId, caller, changedFields, loosenedFields, ...(reason ? { reason } : {}) });
+    const written = await policyService.patchPolicyAtomically(agentId, patch, (current) => {
+      // Q8: a PATCH that CREATES the policy row follows the creation rule — a
+      // non-empty allowedContracts needs an explicit allowedRecipients (see
+      // RECIPIENTS_REQUIRED_MESSAGE). On an existing row an omitted field keeps
+      // its current value, so nothing widens.
+      if (!current && (patch.allowedContracts?.length ?? 0) > 0 && patch.allowedRecipients === undefined) {
+        return { kind: 'creation-rule' as const };
+      }
+      const verdict = classifyPolicyChange(current, patch);
+      loosenedFields = verdict.loosenedFields;
+      // `reason` is audit-only: it goes on the log line and is never persisted.
+      if (!request.isOperator && !verdict.tightens) return { kind: 'loosening' as const };
+      return null;
+    });
 
-    // Q8: a PATCH that CREATES the policy row follows the creation rule — a
-    // non-empty allowedContracts needs an explicit allowedRecipients (see
-    // RECIPIENTS_REQUIRED_MESSAGE). On an existing row an omitted field keeps
-    // its current value, so nothing widens.
-    if (!current && (patch.allowedContracts?.length ?? 0) > 0 && patch.allowedRecipients === undefined) {
-      return reply.code(400).send({
-        error: 'Validation failed',
-        details: [{ code: 'custom', path: ['allowedRecipients'], message: RECIPIENTS_REQUIRED_MESSAGE }],
-      });
-    }
-
-    const { tightens, loosenedFields } = classifyPolicyChange(current, patch);
-
-    // `reason` is audit-only: it goes on the log line and is never persisted.
-    const audit = { agentId, caller, changedFields, loosenedFields, ...(reason ? { reason } : {}) };
-
-    if (!request.isOperator && !tightens) {
-      logger.warn(audit, 'Policy change rejected: agent attempted to loosen its own policy');
+    if (!written.agentExists) return reply.code(404).send({ error: 'Agent not found' });
+    if (written.rejected) {
+      if (written.rejected.kind === 'creation-rule') {
+        return reply.code(400).send({
+          error: 'Validation failed',
+          details: [{ code: 'custom', path: ['allowedRecipients'], message: RECIPIENTS_REQUIRED_MESSAGE }],
+        });
+      }
+      logger.warn(audit(), 'Policy change rejected: agent attempted to loosen its own policy');
       return reply.code(403).send({
         error:
           'Policy can only be tightened by the agent. Loosening requires the operator credential.',
         loosenedFields,
       });
     }
-
-    // An agent caller always exists (auth resolved it) and an existing policy
-    // row implies its agent exists; only the operator can target an unknown id.
-    if (request.isOperator && !current) {
-      const exists = await db.agent.findUnique({ where: { id: agentId }, select: { id: true } });
-      if (!exists) return reply.code(404).send({ error: 'Agent not found' });
-    }
-
-    const policy = await policyService.setPolicy(agentId, patch);
-    logger.info(audit, 'Policy updated');
+    const policy = written.policy;
+    logger.info(audit(), 'Policy updated');
 
     // S8: this route never changes the on-chain AgentPolicyModule and no
     // longer hands out calldata for it. The old answer told the caller to run

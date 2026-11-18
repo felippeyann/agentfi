@@ -143,6 +143,18 @@ export async function jobRoutes(fastify: FastifyInstance) {
     const rewardToken = body.reward?.token ?? '';
     const useErc8183 = Boolean(body.reward?.amount) && isErc8183Enabled(rewardChainId);
 
+    // A paid job's reward is the budget `POST /v1/jobs/:id/pay-resource` lets
+    // the provider spend. A caller naming ITSELF as provider would mint its own
+    // budget (on a chain without the escrow contract nothing is locked) and
+    // bypass whatever budget another agent / the operator set. The escrow path
+    // below refuses it with its own code; everywhere else it is refused here.
+    if (!useErc8183 && Boolean(body.reward?.amount) && provider.id === request.agentId) {
+      return reply.code(400).send({
+        error: 'JOB_PROVIDER_IS_REQUESTER',
+        message: 'A paid job cannot name its requester as the provider: the reward is the budget the provider may spend, set by someone else',
+      });
+    }
+
     let requester: { id: string; walletId: string; safeAddress: string } | null = null;
     let escrowToken: string | null = null;
     if (useErc8183) {

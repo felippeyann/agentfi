@@ -30,8 +30,8 @@ vi.hoisted(() => {
   }
 });
 
-const { mockDb } = vi.hoisted(() => ({
-  mockDb: {
+const { mockDb } = vi.hoisted(() => {
+  const mockDb: any = {
     agent: {
       findUnique: vi.fn(),
       findUniqueOrThrow: vi.fn(),
@@ -40,8 +40,17 @@ const { mockDb } = vi.hoisted(() => ({
       findUnique: vi.fn(),
       upsert: vi.fn(),
     },
-  } as any,
-}));
+    // The policy write runs in one transaction under the Agent / policy row
+    // locks (PolicyService.patchPolicyAtomically): the stub runs the callback
+    // on the same mock; the Agent lock query answers `agentRowExists`.
+    agentRowExists: true,
+  };
+  mockDb.$transaction = vi.fn(async (fn: (tx: unknown) => unknown) => fn(mockDb));
+  mockDb.$queryRaw = vi.fn(async (strings: TemplateStringsArray) =>
+    strings.join('?').includes('"Agent" WHERE') ? (mockDb.agentRowExists ? [{ id: 'agent-1' }] : []) : [],
+  );
+  return { mockDb };
+});
 
 vi.mock('@prisma/client', () => ({
   PrismaClient: vi.fn(() => mockDb),
@@ -140,6 +149,7 @@ beforeEach(() => {
     async ({ update }: { update: Partial<AgentPolicy> }) => basePolicy(update),
   );
   mockDb.agent.findUnique.mockResolvedValue({ id: 'agent-1', active: true, tier: 'FREE' });
+  mockDb.agentRowExists = true;
 });
 
 // ── Handler semantics ──────────────────────────────────────────────────────
@@ -273,10 +283,7 @@ describe('PATCH /v1/agents/:id/policy — operator caller', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(mockDb.agent.findUnique).toHaveBeenCalledWith({
-      where: { id: 'agent-1' },
-      select: { id: true },
-    });
+    expect(mockDb.$transaction).toHaveBeenCalledTimes(1);
     expect(mockDb.agentPolicy.upsert).toHaveBeenCalledTimes(1);
 
     await app.close();
@@ -284,7 +291,7 @@ describe('PATCH /v1/agents/:id/policy — operator caller', () => {
 
   it('returns 404 for an unknown agent id', async () => {
     mockDb.agentPolicy.findUnique.mockResolvedValue(null);
-    mockDb.agent.findUnique.mockResolvedValue(null);
+    mockDb.agentRowExists = false;
     const app = await buildApp({ isOperator: true });
 
     const res = await app.inject({
