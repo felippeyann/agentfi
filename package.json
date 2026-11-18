@@ -18,7 +18,7 @@
     "test": "npm run test --workspaces --if-present",
     "smoke:dev": "node scripts/smoke-dev.mjs",
     "alpha:demo": "node scripts/alpha/demo.mjs",
-    "alpha:serve": "npm run demo:x402:serve -w packages/backend --",
+    "alpha:serve": "node scripts/alpha/serve.mjs",
     "alpha:framework": "node scripts/alpha/framework.mjs",
     "alpha:test": "node --test scripts/alpha/guard.test.mjs scripts/alpha/framework-lib.test.mjs",
     "demo:claude-mcp": "node scripts/demo-claude-mcp.mjs",

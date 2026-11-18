@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { PAYER_SAFE_TOOLS, checkAllowed, checkBlocked, pairTrace, parseEnvFile, terminationPlan } from './framework-lib.mjs';
+import { PAYER_SAFE_TOOLS, checkAllowed, checkBlocked, pairTrace, parseEnvFile, spawnDetached, terminationPlan } from './framework-lib.mjs';
 
 const SELLER = '0x00000000000000000000000000000000000000AA';
 const AGENT = '0x00000000000000000000000000000000000000BB';
@@ -76,20 +76,20 @@ test('checkAllowed fails on a wrong amount, a missing transfer, missing proof, o
 const goodBlocked = () => {
   const a = 'fw-overbudget-0000000000000001';
   const b = 'fw-overpolicy-0000000000000001';
-  const row = (jobId, paymentId) => ({ jobId, paymentId, status: 'failed_before_signing', amount: '300000', payTo: SELLER, authorizationNonce: null, settlementTxHash: null, chainVerifiedAt: null, responseStatus: null });
+  const row = (jobId, paymentId, amount) => ({ jobId, paymentId, status: 'failed_before_signing', amount, payTo: SELLER, authorizationNonce: null, settlementTxHash: null, chainVerifiedAt: null, responseStatus: null });
   const base = snapshot({ agentUsdc: '4700000', sellerUsdc: '300000', sellerCounts: { plain: { '/report': 1 }, paid: { '/report': 1 } }, transfers: [{ tx: TX, from: AGENT, to: SELLER, value: '300000' }] });
   return {
     result: {
       exposedTools: [...PAYER_SAFE_TOOLS],
       trace: [
-        { call: 'pay_for_resource', arguments: JSON.stringify({ job_id: SMALL, url: 'x/report', payment_id: a }) },
-        { result: { paid: false, httpStatus: 402, code: 'BUDGET_EXCEEDED' } },
-        { call: 'pay_for_resource', arguments: JSON.stringify({ job_id: JOB, url: 'x/report-premium', payment_id: b }) },
+        { call: 'pay_for_resource', arguments: JSON.stringify({ job_id: SMALL, url: 'http://127.0.0.1:1/report', payment_id: a }) },
+        { result: { paid: false, httpStatus: 402, code: 'BUDGET_EXCEEDED', price: '300000' } },
+        { call: 'pay_for_resource', arguments: JSON.stringify({ job_id: JOB, url: 'http://127.0.0.1:1/report-premium', payment_id: b }) },
         { result: { paid: false, httpStatus: 403, code: 'POLICY_VIOLATION', rule: 'maxValuePerTxUsd' } },
       ],
     },
     before: base,
-    after: { ...base, transfers: [...base.transfers], sellerCounts: { plain: { '/report': 2, '/report-premium': 1 }, paid: { '/report': 1 } }, ledger: [row(SMALL, a), row(JOB, b)] },
+    after: { ...base, transfers: [...base.transfers], sellerCounts: { plain: { '/report': 2, '/report-premium': 1 }, paid: { '/report': 1 } }, ledger: [row(SMALL, a, '300000'), row(JOB, b, '600000')] },
     statusText: `- ${a} failed_before_signing 0.3 USDC money:not-moved [not counted]\n- ${b} failed_before_signing 0.6 USDC money:not-moved [not counted]`,
     smallJobId: SMALL, jobId: JOB,
   };
@@ -107,6 +107,9 @@ test('checkBlocked fails if a nonce exists, money moved, a paid request arrived,
     (i) => { i.after.transfers.push({ tx: '0x' + '11'.repeat(32), from: AGENT, to: SELLER, value: '1' }); },
     (i) => { i.statusText = ''; },
     (i) => { i.result.trace[1].result.code = 'PAYMENT_REFUSED'; },
+    (i) => { i.after.ledger[1].amount = '300000'; },
+    (i) => { i.result.trace[2].arguments = JSON.stringify({ job_id: JOB, url: 'http://127.0.0.1:1/report', payment_id: 'fw-overpolicy-0000000000000001' }); },
+    (i) => { i.after.sellerUsdc = '600000'; },
   ];
   for (const mutate of mutations) {
     const input = goodBlocked();
@@ -126,4 +129,11 @@ test('terminationPlan: taskkill tree on win32, process-group SIGTERM then SIGKIL
   }
   assert.throws(() => terminationPlan('linux', 0));
   assert.throws(() => terminationPlan('linux', -5));
+  assert.throws(() => terminationPlan('linux', undefined));
+});
+
+test('spawnDetached: own process group on POSIX only', () => {
+  assert.equal(spawnDetached('win32'), false);
+  assert.equal(spawnDetached('linux'), true);
+  assert.equal(spawnDetached('darwin'), true);
 });

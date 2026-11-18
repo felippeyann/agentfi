@@ -24,10 +24,10 @@ import { spawn, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
-import { DEFAULT_DATABASE_URL, DEFAULT_REDIS_URL, destructiveProblems, isDefaultTarget, scopeBanner } from './guard.mjs';
-import { checkAllowed, checkBlocked, parseEnvFile, renderChecks, terminationPlan } from './framework-lib.mjs';
+import { confirmWipe } from './confirm.mjs';
+import { DEFAULT_DATABASE_URL, DEFAULT_REDIS_URL, destructiveProblems } from './guard.mjs';
+import { checkAllowed, checkBlocked, parseEnvFile, renderChecks, spawnDetached, terminationPlan } from './framework-lib.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BACKEND = join(ROOT, 'packages', 'backend');
@@ -35,7 +35,8 @@ const checkOnly = process.argv.includes('--check');
 const assumeYes = process.argv.includes('--yes');
 const DATABASE_URL = process.env.X402_DEMO_DATABASE_URL?.trim() || DEFAULT_DATABASE_URL;
 const REDIS_URL = process.env.X402_DEMO_REDIS_URL?.trim() || DEFAULT_REDIS_URL;
-const PYTHON = process.env.ALPHA_PYTHON?.trim() || 'python';
+const PYTHON = process.env.ALPHA_PYTHON?.trim() || (process.platform === 'win32' ? 'python' : 'python3');
+const CHILD_TIMEOUT_MS = 180_000;
 const TRANSCRIPT = process.env.X402_FRAMEWORK_TRANSCRIPT?.trim() || join(tmpdir(), 'agentfi-alpha-framework-transcript.txt');
 const WORK = join(tmpdir(), `agentfi-alpha-framework-${process.pid}`);
 
@@ -59,19 +60,6 @@ function run(cmd, args, opts = {}) {
   return spawnSync(cmd, args, { encoding: 'utf8', shell: process.platform === 'win32' && cmd === 'npm', ...opts });
 }
 
-async function confirmed() {
-  console.log(`\n${scopeBanner(DATABASE_URL, REDIS_URL)}\n`);
-  if (isDefaultTarget(DATABASE_URL, REDIS_URL) || assumeYes) return true;
-  if (!process.stdin.isTTY) {
-    console.log('The targets are not the documented defaults and this is not an interactive terminal: refusing. Re-run with --yes to confirm the wipe above.');
-    return false;
-  }
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const answer = await rl.question('These are not the documented defaults. Type "wipe" to continue: ');
-  rl.close();
-  return answer.trim() === 'wipe';
-}
-
 async function main() {
   say('AgentFi alpha: agent framework x real local backend - mode: LOCAL FORK (scripted model; no LLM, no key, nothing sent to a public network)\n');
   for (const problem of destructiveProblems({ databaseUrl: DATABASE_URL, redisUrl: REDIS_URL, allowRemote: process.env.X402_DEMO_ALLOW_REMOTE === '1' })) {
@@ -81,15 +69,16 @@ async function main() {
   // Same prerequisite checks as the demo (Node, deps, anvil, Postgres, Redis, ports, RPC).
   const prereq = run('node', [join(ROOT, 'scripts', 'alpha', 'demo.mjs'), '--check'], { stdio: 'inherit', env: process.env });
   if (prereq.status !== 0) return 2;
-  const py = run(PYTHON, ['-c', 'import agents, sys; print("python", sys.version.split()[0], "- openai-agents importable")']);
+  const py = run(PYTHON, ['-c', 'import sys, agents, mcp; from importlib.metadata import version as v; print("python", sys.version.split()[0], "· openai-agents", v("openai-agents"), "· mcp", v("mcp"), "· openai", v("openai"))'], { timeout: CHILD_TIMEOUT_MS });
   if (py.status !== 0) {
     say(`  FAIL  "${PYTHON}" cannot import the OpenAI Agents SDK (${(py.stderr || py.error?.message || '').trim().split('\n').pop()})`);
-    say('        -> python -m venv .venv && .venv/bin/pip install -r examples/openai-agents/requirements.txt (Windows: .venv\\Scripts\\pip), then ALPHA_PYTHON=.venv/bin/python (Windows: .venv\\Scripts\\python.exe)');
+    say('        -> python3 -m venv .venv && .venv/bin/pip install -r examples/openai-agents/requirements.txt, then ALPHA_PYTHON=.venv/bin/python (Windows: py -m venv .venv, .venv/Scripts/pip, ALPHA_PYTHON=.venv/Scripts/python.exe)');
     return 2;
   }
-  say(`  ok    ${py.stdout.trim()}`);
+  const mcpServerVersion = JSON.parse(readFileSync(join(ROOT, 'packages', 'mcp-server', 'package.json'), 'utf8')).version;
+  say(`  ok    ${py.stdout.trim()} · AgentFi MCP server (packages/mcp-server from this checkout) ${mcpServerVersion} · node ${process.versions.node} · ${process.platform}`);
   if (checkOnly) return 0;
-  if (!(await confirmed())) return 4;
+  if (!(await confirmWipe({ databaseUrl: DATABASE_URL, redisUrl: REDIS_URL, assumeYes }))) return 4;
 
   say('\nBuilding (idempotent): Prisma client, MCP server...');
   for (const [cmd, args] of [
@@ -108,23 +97,29 @@ async function main() {
   const stopFile = join(WORK, 'stop');
   const serveLog = join(WORK, 'serve.log');
   say(`\nStarting the real local backend (API + worker + seller + Anvil fork); log ${serveLog}`);
-  const plan = terminationPlan(process.platform, 1); // only the `detached` choice is needed here
   const logFd = openSync(serveLog, 'w');
   const serve = spawn(`npm run demo:x402:serve -- --out-dir "${WORK}" --stop-file "${stopFile}"`, {
-    cwd: BACKEND, shell: true, stdio: ['ignore', logFd, logFd], env: process.env, detached: plan.detached,
+    cwd: BACKEND, shell: true, stdio: ['ignore', logFd, logFd], env: process.env, detached: spawnDetached(process.platform),
   });
   closeSync(logFd);
   let serveExited = false;
   const serveDone = new Promise((r) => serve.on('exit', () => { serveExited = true; r(); }));
-  const stopServe = async () => {
+  let stopping;
+  const stopServe = () => (stopping ??= stopServeOnce()); // idempotent: finally and a signal may both ask
+  const stopServeOnce = async () => {
     // Graceful first: the stop file lets serve close the API, worker, seller and Anvil itself.
-    writeFileSync(stopFile, 'stop');
+    try {
+      writeFileSync(stopFile, 'stop');
+    } catch {
+      /* the work dir may be gone */
+    }
     await Promise.race([serveDone, sleep(30_000)]);
     if (serveExited && process.platform === 'win32') return;
+    if (!Number.isInteger(serve.pid)) return; // spawn failed: nothing to terminate
     // Timeout, error or leftovers: terminate the whole process tree, and wait for it.
     for (const step of terminationPlan(process.platform, serve.pid).steps) {
       if (step.kind === 'command') {
-        spawnSync(step.command, step.args, { stdio: 'ignore' });
+        spawnSync(step.command, step.args, { stdio: 'ignore', timeout: 30_000 });
       } else {
         try {
           process.kill(step.target, step.signal);
@@ -140,6 +135,16 @@ async function main() {
       }
     }
   };
+  // Ctrl+C / SIGTERM on the driver: on POSIX serve runs in its own process group and would survive us otherwise.
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => {
+      say(`\n${signal} received: stopping the backend...`);
+      stopServe().finally(() => {
+        flush(130);
+        process.exit(130);
+      });
+    });
+  }
 
   try {
     const agentEnvPath = join(WORK, 'agent.env');
@@ -156,17 +161,18 @@ async function main() {
     say(readFileSync(serveLog, 'utf8').split('\n').filter((l) => l.startsWith('SERVE READY')).join('\n'));
     const evidence = async () => (await fetch(`${opEnv.CONTROL_URL}/evidence`)).json();
     const ops = (job) => {
-      const out = spawnSync(`npm run x402:ops -- status --job ${job}`, { cwd: BACKEND, shell: true, encoding: 'utf8', env: { ...process.env, ...opEnv } });
+      if (!/^[A-Za-z0-9_-]+$/.test(job)) throw new Error(`unexpected job id ${job}`);
+      const out = spawnSync(`npm run x402:ops -- status --job ${job}`, { cwd: BACKEND, shell: true, encoding: 'utf8', env: { ...process.env, ...opEnv }, timeout: CHILD_TIMEOUT_MS });
       if (out.status !== 0) throw new Error(`x402:ops status failed:\n${out.stdout}\n${out.stderr}`);
       return out.stdout.slice(out.stdout.search(/^\s*(Agent|Job)\b/m) >= 0 ? out.stdout.search(/^\s*(Agent|Job)\b/m) : 0).trim();
     };
     const framework = (scenario) => {
       const resultFile = join(WORK, `result-${scenario}.json`);
       const args = [join(ROOT, 'examples', 'openai-agents', 'agent.py'), '--mode', 'stub', '--backend', 'env-file', '--env-file', agentEnvPath, '--scenario', scenario, '--result-file', resultFile];
-      const out = spawnSync(PYTHON, args, { encoding: 'utf8', env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
+      const out = spawnSync(PYTHON, args, { encoding: 'utf8', env: { ...process.env, PYTHONIOENCODING: 'utf-8' }, timeout: CHILD_TIMEOUT_MS });
       say(indent(`$ python examples/openai-agents/agent.py --mode stub --backend env-file --env-file <agent.env> --scenario ${scenario}`));
       say(indent(out.stdout.trim()));
-      if (out.status !== 0) throw new Error(`framework run (${scenario}) exited ${out.status}:\n${out.stderr}`);
+      if (out.status !== 0) throw new Error(`framework run (${scenario}) exited ${out.status ?? out.signal ?? out.error?.message}:\n${out.stderr}`);
       const parsed = JSON.parse(readFileSync(resultFile, 'utf8'));
       say(indent('full tool results (JSON):'));
       for (const item of parsed.trace) if ('result' in item) say(indent(JSON.stringify(item.result, null, 2), 6));
@@ -212,7 +218,11 @@ async function main() {
     say(`\nOK: ${allowed.checks.length + blocked.checks.length} invariants held.`);
     return 0;
   } finally {
-    await stopServe();
+    try {
+      await stopServe();
+    } catch (error) {
+      say(`warning: stopping the backend failed (${error instanceof Error ? error.message : String(error)}); check for leftover anvil/node processes`);
+    }
   }
 }
 

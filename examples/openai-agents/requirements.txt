@@ -1,2 +1,4 @@
-# Pinned 2026-11-16 (PyPI latest on that day). `mcp` is pulled in by openai-agents (it requires mcp>=1.19,<3).
+# Pinned 2026-11-16 (PyPI latest on that day). Both packages declare Requires-Python >=3.10; we ran 3.14.3.
+# `mcp` is pulled in by openai-agents (it requires mcp>=1.19,<3); pinned to the version every recorded run used.
 openai-agents==0.24.0
+mcp==2.3.0

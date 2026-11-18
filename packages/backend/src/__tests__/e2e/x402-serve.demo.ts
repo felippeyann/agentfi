@@ -26,10 +26,10 @@
  * refuses non-loopback hosts, names outside /(^|_)(e2e|demo|test)(_|$)/i and Redis DB 0).
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, createWriteStream, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import { config as loadDotenv } from 'dotenv';
 import { getAddress, parseAbiItem, type Address, type Hex } from 'viem';
@@ -62,28 +62,42 @@ const FORK_URL = process.env['E2E_ANVIL_FORK_URL']?.trim() || 'https://sepolia.b
 const FORK_BLOCK = process.env['E2E_ANVIL_FORK_BLOCK_NUMBER']?.trim() || undefined;
 const DATABASE_URL = process.env['X402_DEMO_DATABASE_URL']?.trim() || 'postgresql://agentfi:agentfi@localhost:5432/agentfi_e2e_x402';
 const REDIS_URL = process.env['X402_DEMO_REDIS_URL']?.trim() || 'redis://localhost:6379/14';
-const API_SECRET = 'x402-demo-operator-secret-min-32-chars!!';
-const ADMIN_SECRET = 'x402-demo-admin-secret-min-32-chars!!!!';
+const API_SECRET = 'x402-serve-operator-secret-min-32-chars-local';
+const ADMIN_SECRET = 'x402-serve-admin-secret-min-32-chars-local-xx';
 const LOG_DIR = join(tmpdir(), 'agentfi-x402-demo');
 
 const argValue = (flag: string): string | undefined => {
   const i = process.argv.indexOf(flag);
   return i >= 0 ? process.argv[i + 1] : undefined;
 };
-const OUT_DIR = resolve(argValue('--out-dir') || join(tmpdir(), 'agentfi-alpha-serve'));
-const STOP_FILE = resolve(argValue('--stop-file') || join(OUT_DIR, 'stop'));
+// Absolute paths only: npm runs this in packages/backend, so a relative path would land somewhere unexpected
+// (`npm run alpha:serve` at the repository root resolves them for you).
+const OUT_DIR = argValue('--out-dir') || join(tmpdir(), 'agentfi-alpha-serve');
+const STOP_FILE = argValue('--stop-file') || join(OUT_DIR, 'stop');
+for (const [flag, path] of [['--out-dir', OUT_DIR], ['--stop-file', STOP_FILE]] as const) {
+  if (!isAbsolute(path)) throw new Error(`${flag} must be an absolute path (got "${path}"); npm run alpha:serve resolves relative ones`);
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const say = (text = '') => console.log(text);
 const TRANSFER = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)');
 
-/** KEY=VALUE lines, written to a temp name and renamed so a reader never sees half a file. */
-function writeEnvFile(path: string, entries: Record<string, string>): void {
+/** Values that are safe to `source` unquoted in a POSIX shell (URLs, ids, hex, the demo secrets). */
+const SAFE_ENV_VALUE = /^[A-Za-z0-9_.,:/@%+=-]*$/;
+
+/**
+ * KEY=VALUE lines, written to a temp name and renamed so a reader never sees half a file. A value with a shell
+ * metacharacter is refused (the files are meant to be sourced with `set -a; . file`). `mode` 0o600 for secrets.
+ */
+function writeEnvFile(path: string, entries: Record<string, string>, opts: { header?: string; mode?: number } = {}): void {
   for (const [key, value] of Object.entries(entries)) {
-    if (!/^[A-Z][A-Z0-9_]*$/.test(key) || /[\r\n]/.test(value)) throw new Error(`bad env entry ${key}`);
+    if (!/^[A-Z][A-Z0-9_]*$/.test(key)) throw new Error(`bad env key ${key}`);
+    if (!SAFE_ENV_VALUE.test(value)) throw new Error(`env value of ${key} has a shell metacharacter; refusing to write it unquoted`);
   }
   const tmp = `${path}.tmp`;
-  writeFileSync(tmp, `${Object.entries(entries).map(([k, v]) => `${k}=${v}`).join('\n')}\n`);
+  const body = `${opts.header ? `${opts.header}\n` : ''}${Object.entries(entries).map(([k, v]) => `${k}=${v}`).join('\n')}\n`;
+  writeFileSync(tmp, body, { mode: opts.mode ?? 0o644 });
+  if (opts.mode !== undefined) chmodSync(tmp, opts.mode); // writeFileSync's mode only applies to a new file
   renameSync(tmp, path);
 }
 
@@ -108,6 +122,8 @@ async function main(): Promise<void> {
   if (sourceChain !== 84532) throw new Error(`E2E_ANVIL_FORK_URL answers chain ${sourceChain}; need Base Sepolia (84532)`);
   await assertPortFree(ANVIL_PORT, 'Anvil (X402_DEMO_ANVIL_PORT)');
   await assertPortFree(BACKEND_PORT, 'backend (X402_DEMO_BACKEND_PORT)');
+  // A stale stop file from an earlier run must not stop this one at once; checked before anything is wiped.
+  if (existsSync(STOP_FILE)) throw new Error(`stop file ${STOP_FILE} already exists; remove it first (nothing was wiped)`);
   const pgUrl = new URL(DATABASE_URL);
   const redisUrl = new URL(REDIS_URL);
   say(
@@ -117,13 +133,11 @@ async function main(): Promise<void> {
   await resetTestDatabase(DATABASE_URL);
   await flushTestRedis(REDIS_URL);
   mkdirSync(OUT_DIR, { recursive: true });
-  // A stale stop file from an earlier run must not stop this one at once.
-  const staleStop = existsSync(STOP_FILE);
-  if (staleStop) throw new Error(`stop file ${STOP_FILE} already exists; remove it first`);
 
   const anvilRpc = `http://127.0.0.1:${ANVIL_PORT}`;
   const anvil = await startAnvil({ port: ANVIL_PORT, chainId: 84532, forkUrl: FORK_URL, forkBlockNumber: FORK_BLOCK, readyTimeoutMs: 60_000 });
-  const cleanups: Array<() => Promise<void> | void> = [() => stopAnvil(anvil)];
+  // Last cleanup to run: remove the stop file so the next run does not refuse to start.
+  const cleanups: Array<() => Promise<void> | void> = [() => rmSync(STOP_FILE, { force: true }), () => stopAnvil(anvil)];
   const db = new PrismaClient({ datasources: { db: { url: DATABASE_URL } } });
   cleanups.push(() => db.$disconnect());
   let worker: WorkerHandle | undefined;
@@ -236,6 +250,8 @@ async function main(): Promise<void> {
     cleanups.push(() => new Promise<void>((r) => { control.closeAllConnections(); control.close(() => r()); }));
 
     writeEnvFile(join(OUT_DIR, 'operator.env'), {
+      AGENTFI_AGENT_ID: agent.id,
+      ANVIL_RPC_URL: anvilRpc,
       NODE_ENV: 'development',
       API_PORT: String(BACKEND_PORT),
       API_SECRET,
@@ -250,18 +266,15 @@ async function main(): Promise<void> {
       CONTROL_URL: `http://127.0.0.1:${controlAddr.port}`,
       AGENTFI_JOB_ID: jobId,
       AGENTFI_SMALL_JOB_ID: smallJobId,
-    });
+    }, { header: '# OPERATOR secrets (demo only) - never give this file to an agent', mode: 0o600 });
+    // Only what the agent side reads: no operator secret, no RPC (Anvil's RPC can rewrite balances and storage).
     writeEnvFile(join(OUT_DIR, 'agent.env'), {
       AGENTFI_API_URL: backend.url,
       AGENTFI_API_KEY: agent.apiKey,
-      AGENTFI_AGENT_ID: agent.id,
       AGENTFI_JOB_ID: jobId,
       AGENTFI_SMALL_JOB_ID: smallJobId,
       SELLER_URL: shop.base,
-      SELLER_ADDRESS: seller,
-      AGENT_WALLET: agent.address,
-      ANVIL_RPC_URL: anvilRpc,
-    });
+    }, { header: "# agent side of npm run alpha:serve: the buyer agent's own key, its jobs, the seller (local demo values)" });
     say(`SERVE READY: API ${backend.url} · Anvil ${anvilRpc} (fork block ${forkBlock}) · seller ${shop.base} · job ${jobId} (budget 5.00) · small job ${smallJobId} (0.20)`);
     say(`agent env: ${join(OUT_DIR, 'agent.env')}`);
     say(`operator env: ${join(OUT_DIR, 'operator.env')}`);

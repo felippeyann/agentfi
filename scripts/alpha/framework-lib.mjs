@@ -105,16 +105,26 @@ export function checkBlocked({ result, before, after, statusText, smallJobId, jo
   const [overBudget, overPolicy] = calls;
   const b = overBudget?.result ?? {};
   const p = overPolicy?.result ?? {};
-  checks.push(check(calls.length === 2 && overBudget.args.job_id === smallJobId && overPolicy.args.job_id === jobId, 'the framework made two pay_for_resource calls: 0.30 on the 0.20 job, 0.60 on the budget job'));
-  checks.push(check(b.paid === false && b.httpStatus === 402 && b.code === 'BUDGET_EXCEEDED', `over-budget tool result: paid=${b.paid} HTTP ${b.httpStatus} ${b.code} (price ${b.priceFormatted}, remaining ${b.remainingFormatted})`));
-  checks.push(check(p.paid === false && p.httpStatus === 403 && p.code === 'POLICY_VIOLATION', `over-policy tool result: paid=${p.paid} HTTP ${p.httpStatus} ${p.code} (rule ${p.rule})`));
-  for (const [name, call] of [['over-budget', overBudget], ['over-policy', overPolicy]]) {
+  const path = (call) => {
+    try {
+      return new URL(call?.args?.url).pathname;
+    } catch {
+      return '';
+    }
+  };
+  checks.push(check(
+    calls.length === 2 && overBudget.args.job_id === smallJobId && path(overBudget) === '/report' && overPolicy.args.job_id === jobId && path(overPolicy) === '/report-premium',
+    'the framework made two pay_for_resource calls: /report (0.30) on the 0.20 job, /report-premium (0.60) on the budget job',
+  ));
+  checks.push(check(b.paid === false && b.httpStatus === 402 && b.code === 'BUDGET_EXCEEDED' && b.price === PRICE_ALLOWED.toString(), `over-budget tool result: paid=${b.paid} HTTP ${b.httpStatus} ${b.code} (price ${b.priceFormatted}, remaining ${b.remainingFormatted})`));
+  checks.push(check(p.paid === false && p.httpStatus === 403 && p.code === 'POLICY_VIOLATION' && p.rule === 'maxValuePerTxUsd', `over-policy tool result: paid=${p.paid} HTTP ${p.httpStatus} ${p.code} (rule ${p.rule})`));
+  for (const [name, call, price] of [['over-budget', overBudget, PRICE_ALLOWED], ['over-policy', overPolicy, PRICE_PREMIUM]]) {
     const rows = call?.args?.payment_id ? rowsFor(after, call.args.payment_id) : [];
     const row = rows[0];
-    checks.push(check(rows.length === 1 && row.status === 'failed_before_signing' && row.authorizationNonce === null && !row.settlementTxHash && row.responseStatus === null, `${name}: ledger row ${row?.status}, authorization nonce ${row?.authorizationNonce}, no settlement tx, no paid response`));
+    checks.push(check(rows.length === 1 && row.status === 'failed_before_signing' && row.amount === price.toString() && row.authorizationNonce === null && !row.settlementTxHash && row.responseStatus === null, `${name}: ledger row ${row?.status} for ${row ? usdc(row.amount) : '?'}, authorization nonce ${row?.authorizationNonce}, no settlement tx, no paid response`));
   }
-  checks.push(check(transfersTo(after, after.seller).length === transfersTo(before, before.seller).length, 'no new USDC Transfer on the fork'));
-  checks.push(check(after.agentUsdc === before.agentUsdc && after.sellerUsdc === before.sellerUsdc, `agent wallet unchanged at ${usdc(after.agentUsdc)}; seller unchanged`));
+  checks.push(check(transfersTo(after, after.seller).length === transfersTo(before, before.seller).length && after.agentUsdc === before.agentUsdc, `no USDC transfer from the agent wallet to the seller; the agent wallet balance is unchanged at ${usdc(after.agentUsdc)}`));
+  checks.push(check(after.sellerUsdc === before.sellerUsdc, `the seller balance is unchanged at ${usdc(after.sellerUsdc)}`));
   const paidKeys = new Set([...Object.keys(before.sellerCounts.paid), ...Object.keys(after.sellerCounts.paid)]);
   checks.push(check([...paidKeys].every((k) => (after.sellerCounts.paid[k] ?? 0) === (before.sellerCounts.paid[k] ?? 0)), 'zero paid requests reached the seller during the blocked run'));
   checks.push(check((after.sellerCounts.paid['/report-premium'] ?? 0) === 0, 'the seller never saw a paid request for /report-premium'));
@@ -141,8 +151,12 @@ export function renderChecks(checks, say) {
  * win32: `taskkill /T /F` kills the tree. POSIX: the child is spawned detached (its own process group), so a
  * signal to -pid reaches the whole group: SIGTERM first, SIGKILL after `graceMs` if it is still alive.
  */
+export function spawnDetached(platform) {
+  return platform !== 'win32';
+}
+
 export function terminationPlan(platform, pid, graceMs = 10_000) {
   if (!Number.isInteger(pid) || pid <= 0) throw new Error('pid must be a positive integer');
-  if (platform === 'win32') return { detached: false, steps: [{ kind: 'command', command: 'taskkill', args: ['/pid', String(pid), '/T', '/F'] }] };
+  if (!spawnDetached(platform)) return { detached: false, steps: [{ kind: 'command', command: 'taskkill', args: ['/pid', String(pid), '/T', '/F'] }] };
   return { detached: true, steps: [{ kind: 'signal', target: -pid, signal: 'SIGTERM', waitMs: graceMs }, { kind: 'signal', target: -pid, signal: 'SIGKILL', waitMs: 0 }] };
 }
