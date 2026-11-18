@@ -20,7 +20,7 @@ The agent authenticates with **its own agent API key** (`agfi_…`). The server 
 | deactivate itself, rewrite its public manifest, sign the fixed `AgentFiHandshake` envelope, get a Stripe checkout URL, read its own data and public data | yes (see payer-authorization.md §2) |
 | anything under `/admin/*`, another agent's data, rotate or list keys | no |
 
-So: **the credential you hand to the agent also allows the actions in the "yes" rows.** The reference policy refuses the routes that send value out of the wallet (transfers, swaps, deposits, batches with value or ERC-20 transfers, A2A payments, paid jobs off the escrow chains) except x402 payments to the sellers you list; gas for the transactions it may still send (withdrawals, zero-value batches) comes from the wallet's ETH. Do not describe it as an "x402-only key"; it is an agent key under a payer policy.
+So: **the credential you hand to the agent also allows the actions in the "yes" rows.** The reference policy refuses the routes that send value out of the wallet (transfers, swaps, deposits, batches with value or ERC-20 transfers, A2A payments, paid jobs off the escrow chains) except x402 payments to the sellers you list; gas for the transactions it may still send (withdrawals, zero-value batches, the steps of an escrow job on an escrow chain) comes from the wallet's ETH. Do not describe it as an "x402-only key"; it is an agent key under a payer policy.
 
 What the agent is **shown** is a different thing. The MCP stdio server (`packages/mcp-server`) lists all its tools (35). The OpenAI Agents example filters them to four (`get_my_agent_profile`, `get_policy`, `get_job`, `pay_for_resource`), and the adapters expose three. That filter runs **in the client**: it keeps the model focused, it is not a permission. Anyone holding the key can call every route in the table above.
 
@@ -80,13 +80,15 @@ The answer contains the agent's API key **once**; give it to the agent and keep 
 
 USDC on Base Sepolia is `0x036CbD53842c5426634e7929541eC2318f3dCF7e`; on another network use that network's USDC.
 
-**An existing agent** (registered earlier, or with the defaults): `PATCH /v1/agents/<id>/policy` with the operator secret and **every** field, because fields you leave out keep their current value. In particular send `"maxOutflowPerTxUsd": null` and `"allowedContracts": []` explicitly: leaving them out would keep an outflow cap or a contract list the agent already has, and transfers or uncounted batch calls would stay open:
+**An existing agent** (registered earlier, or with the defaults): `PATCH /v1/agents/<id>/policy` with the operator secret and every payer field below, because fields you leave out keep their current value. In particular send `"maxOutflowPerTxUsd": null` and `"allowedContracts": []` explicitly: leaving them out would keep an outflow cap or a contract list the agent already has, and transfers or uncounted batch calls would stay open:
 
 ```json
 { "maxValuePerTxUsd": "0.50", "maxDailyVolumeUsd": "3.00", "allowedRecipients": ["0xSELLER_PAYTO_ADDRESS"],
   "allowedTokens": ["0x036CbD53842c5426634e7929541eC2318f3dCF7e"], "allowedContracts": [], "maxOutflowPerTxUsd": null,
-  "cooldownSeconds": 60, "active": true, "expiresAt": null, "reason": "alpha payer reference" }
+  "maxValuePerTxEth": "1.0", "cooldownSeconds": 60, "expiresAt": null, "reason": "alpha payer reference" }
 ```
+
+`active` is left out on purpose: sending `"active": true` with the operator secret would also resume a policy that you (or the kill switch) paused. Resume it separately, deliberately, if that is what you want.
 
 Then run `x402:ops payer` (section 5). The registration defaults (no `policy` in the body) are **not** a payer configuration: `allowedRecipients` is empty, so they pay any recipient up to 1.00 USD per payment and 10 000 USD a day.
 

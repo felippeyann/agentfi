@@ -239,19 +239,19 @@ export const agentTools = [
         .array(z.string())
         .optional()
         .describe(
-          'Replacement token whitelist. Must be a subset of the current whitelist; adding new tokens or clearing a non-empty whitelist requires the operator.',
+          'Replacement token whitelist. While the current list is non-empty it must be a subset of it; adding new tokens or clearing a non-empty whitelist requires the operator. An empty list means any token, so setting one then is a tightening.',
         ),
       allowed_contracts: z
         .array(z.string())
         .optional()
         .describe(
-          'Replacement contract whitelist. Must be a subset of the current whitelist; adding new contracts or clearing a non-empty whitelist requires the operator.',
+          'Replacement contract whitelist. While the current list is non-empty it must be a subset of it; adding new contracts or clearing a non-empty whitelist requires the operator. Leave it to the operator: a listed contract may be called from a batch with calldata the backend does not count.',
         ),
       allowed_recipients: z
         .array(z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 0x-prefixed 20-byte hex address'))
         .optional()
         .describe(
-          'Replacement recipient whitelist (addresses that may receive value from you). Must be a subset of the current list; adding recipients or clearing a non-empty list requires the operator.',
+          'Replacement recipient whitelist (addresses that may receive value from you). While the current list is non-empty it must be a subset of it; adding recipients or clearing a non-empty list requires the operator. An empty list means any recipient, so setting one then is a tightening.',
         ),
       reason: z
         .string()
