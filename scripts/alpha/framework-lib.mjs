@@ -135,3 +135,14 @@ export function renderChecks(checks, say) {
   }
   return failed;
 }
+
+/**
+ * How to stop a spawned process TREE (npm -> shell -> node -> backend, worker, Anvil), per platform.
+ * win32: `taskkill /T /F` kills the tree. POSIX: the child is spawned detached (its own process group), so a
+ * signal to -pid reaches the whole group: SIGTERM first, SIGKILL after `graceMs` if it is still alive.
+ */
+export function terminationPlan(platform, pid, graceMs = 10_000) {
+  if (!Number.isInteger(pid) || pid <= 0) throw new Error('pid must be a positive integer');
+  if (platform === 'win32') return { detached: false, steps: [{ kind: 'command', command: 'taskkill', args: ['/pid', String(pid), '/T', '/F'] }] };
+  return { detached: true, steps: [{ kind: 'signal', target: -pid, signal: 'SIGTERM', waitMs: graceMs }, { kind: 'signal', target: -pid, signal: 'SIGKILL', waitMs: 0 }] };
+}

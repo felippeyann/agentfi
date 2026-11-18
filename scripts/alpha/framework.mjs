@@ -21,13 +21,13 @@
  * examples/openai-agents/requirements.txt`) and X402_FRAMEWORK_TRANSCRIPT (default <tmp>/agentfi-alpha-framework-transcript.txt).
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_DATABASE_URL, DEFAULT_REDIS_URL, destructiveProblems, isDefaultTarget, scopeBanner } from './guard.mjs';
-import { checkAllowed, checkBlocked, parseEnvFile, renderChecks } from './framework-lib.mjs';
+import { checkAllowed, checkBlocked, parseEnvFile, renderChecks, terminationPlan } from './framework-lib.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const BACKEND = join(ROOT, 'packages', 'backend');
@@ -108,13 +108,37 @@ async function main() {
   const stopFile = join(WORK, 'stop');
   const serveLog = join(WORK, 'serve.log');
   say(`\nStarting the real local backend (API + worker + seller + Anvil fork); log ${serveLog}`);
-  const serve = spawn(`npm run demo:x402:serve -- --out-dir "${WORK}" --stop-file "${stopFile}" > "${serveLog}" 2>&1`, { cwd: BACKEND, shell: true, stdio: 'ignore', env: process.env });
+  const plan = terminationPlan(process.platform, 1); // only the `detached` choice is needed here
+  const logFd = openSync(serveLog, 'w');
+  const serve = spawn(`npm run demo:x402:serve -- --out-dir "${WORK}" --stop-file "${stopFile}"`, {
+    cwd: BACKEND, shell: true, stdio: ['ignore', logFd, logFd], env: process.env, detached: plan.detached,
+  });
+  closeSync(logFd);
   let serveExited = false;
   const serveDone = new Promise((r) => serve.on('exit', () => { serveExited = true; r(); }));
   const stopServe = async () => {
+    // Graceful first: the stop file lets serve close the API, worker, seller and Anvil itself.
     writeFileSync(stopFile, 'stop');
     await Promise.race([serveDone, sleep(30_000)]);
-    if (!serveExited) spawnSync(`taskkill /pid ${serve.pid} /T /F`, { shell: true, stdio: 'ignore' });
+    if (serveExited && process.platform === 'win32') return;
+    // Timeout, error or leftovers: terminate the whole process tree, and wait for it.
+    for (const step of terminationPlan(process.platform, serve.pid).steps) {
+      if (step.kind === 'command') {
+        spawnSync(step.command, step.args, { stdio: 'ignore' });
+      } else {
+        try {
+          process.kill(step.target, step.signal);
+        } catch {
+          return; // the group is gone
+        }
+        await sleep(step.waitMs);
+        try {
+          process.kill(step.target, 0);
+        } catch {
+          return; // gone after the signal
+        }
+      }
+    }
   };
 
   try {

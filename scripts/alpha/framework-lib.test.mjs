@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { PAYER_SAFE_TOOLS, checkAllowed, checkBlocked, pairTrace, parseEnvFile } from './framework-lib.mjs';
+import { PAYER_SAFE_TOOLS, checkAllowed, checkBlocked, pairTrace, parseEnvFile, terminationPlan } from './framework-lib.mjs';
 
 const SELLER = '0x00000000000000000000000000000000000000AA';
 const AGENT = '0x00000000000000000000000000000000000000BB';
@@ -113,4 +113,17 @@ test('checkBlocked fails if a nonce exists, money moved, a paid request arrived,
     mutate(input);
     assert.ok(checkBlocked(input).checks.some((c) => !c.ok), String(mutate));
   }
+});
+
+test('terminationPlan: taskkill tree on win32, process-group SIGTERM then SIGKILL on POSIX', () => {
+  const win = terminationPlan('win32', 123);
+  assert.equal(win.detached, false);
+  assert.deepEqual(win.steps, [{ kind: 'command', command: 'taskkill', args: ['/pid', '123', '/T', '/F'] }]);
+  for (const platform of ['linux', 'darwin']) {
+    const posix = terminationPlan(platform, 123, 500);
+    assert.equal(posix.detached, true);
+    assert.deepEqual(posix.steps.map((s) => [s.signal, s.target, s.waitMs]), [['SIGTERM', -123, 500], ['SIGKILL', -123, 0]]);
+  }
+  assert.throws(() => terminationPlan('linux', 0));
+  assert.throws(() => terminationPlan('linux', -5));
 });
