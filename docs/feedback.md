@@ -4,7 +4,7 @@ AgentFi is an alpha. The most useful thing you can do is try it and tell us, in 
 
 ## What we ask
 
-Open an issue from [the issue chooser](https://github.com/felippeyann/agentfi/issues/new/choose):
+Open an issue from [the issue chooser](https://github.com/felippeyann/agentfi/issues/new/choose) (you need to be signed in to GitHub; a free account is enough, and there is no account-free channel yet):
 
 | Form | Use it when |
 |---|---|

@@ -14,11 +14,11 @@ Every row has exactly one status:
 | `planned` | Not built or not tried. No date. |
 | `incompatible` | Does not work today (and why). |
 
-**Every `tested` row ran against the STUB API** (`examples/_stub-api/stub-api.mjs`: real-shaped answers,
+**Every `tested` row except 7b ran against the STUB API** (`examples/_stub-api/stub-api.mjs`: real-shaped answers,
 no budget, no policy, no ledger, no wallet, no chain, nothing paid) **and, where a model is involved,
-a scripted stub model.** No row was run against a paid LLM API or with real funds, and none was run
-against the real backend by this change: the real backend's x402 behaviour is covered by its own tests
-and by the fork demo in the alpha quickstart, not by this matrix. Environment of every run: Windows 11,
+a scripted stub model.** No row was run against a paid LLM API or with real funds, and, **except row 7b (2026-11-18)**, none was run
+against the real backend: the real backend's x402 behaviour is covered by its own tests
+and by the fork demo in the alpha quickstart. Row 7b ran against the real local backend with a scripted model (see the row for what is real). Environment of every run: Windows 11,
 Node 24.14.1, npm 11.11.0, Python 3.14.3.
 
 ## Matrix
@@ -31,10 +31,11 @@ Node 24.14.1, npm 11.11.0, Python 3.14.3.
 | 4 | MCP, standalone server in **SSE** mode (`MCP_TRANSPORT=sse`, `/mcp/sse` + `/mcp/messages`) | same server; SDK 1.29.0 SSE client | SSE | `x-api-key` header on the SSE GET and every POST must equal the server's `AGENTFI_API_KEY` (it is a gate; **backend calls use the server's own key from the environment**, not the presented one); 401 otherwise | `tested` (against STUB), with a limit | `node examples/_stub-api/mcp-sse-check.mjs`: 401 without / with a wrong key, 35 tools, `pay_for_resource` settled. **Limit found:** one shared `Server` instance is connected to every SSE transport, so a second concurrent session resets the first (`ECONNRESET`). Use one session per server process. |
 | 5 | MCP, backend proxy `GET /mcp/sse` (the API's own SSE route) | API `main` | SSE | `x-api-key` header, bound per session | `incompatible` (for the x402 path) | Source read, not run: 18 DeFi proxy tools (`execute_swap`, `execute_transfer`, Aave, ...), **no `pay_for_resource`**. Not a payer-safe surface for the alpha. |
 | 6 | MCP, streamable HTTP | n/a | streamable HTTP | n/a | `incompatible` | Not implemented: `packages/mcp-server/src/index.ts` implements stdio and SSE only (read; `Dockerfile.mcp` runs the SSE server on port 3002). Clients that only speak streamable HTTP cannot connect. |
-| 7 | **OpenAI Agents SDK** (Python), MCP | `openai-agents` 0.24.0, `mcp` 2.3.0, `openai` 3.51.0 | stdio (`MCPServerStdio`) | env of the spawned server | `tested` (against STUB, **stub model**) | `python examples/openai-agents/agent.py --mode stub` (see its README): tool filter left exactly 4 tools, 3 `pay_for_resource` calls, structured `PAYMENT_OUTCOME_UNKNOWN`, same-id replay paid nothing. |
+| 7 | **OpenAI Agents SDK** (Python), MCP, **against the STUB API** | `openai-agents` 0.24.0, `mcp` 2.3.0, `openai` 3.51.0 | stdio (`MCPServerStdio`) | env of the spawned server | `tested` (against STUB, **stub model**) | `python examples/openai-agents/agent.py --mode stub` (see its README): tool filter left exactly 4 tools, 3 `pay_for_resource` calls, structured `PAYMENT_OUTCOME_UNKNOWN`, same-id replay paid nothing. |
 | 8 | OpenAI Agents SDK, MCP | same | SSE (`MCPServerSse`, `x-api-key` header) | header gate as in row 4 | `tested` (against STUB, **stub model**) | same script with `--transport sse --mcp-url ...`. The SDK docs mark SSE deprecated for new servers. |
+| 7b | **OpenAI Agents SDK** (Python), MCP, **against the REAL LOCAL BACKEND** | `openai-agents` 0.24.0, `mcp` 2.3.0, Python 3.14.3; AgentFi MCP server from the checkout (`package.json` 0.5.0, printed by the run); anvil 1.7.1; Node 24.14.1 | stdio (`MCPServerStdio`) | env of the spawned server (the buyer agent's own key) | `tested` (2026-11-18; **real local backend, scripted model**) | `npm run alpha:framework -- --yes` (quickstart section 10): an allowed 0.30 USDC purchase (tool call -> ledger row `settled`/`money:proven`/`delivery:delivered` -> USDC Transfer log and tx hash on the fork -> wallet -0.30, seller +0.30, committed 0.3 / remaining 4.7) and two blocked purchases (402 `BUDGET_EXCEEDED`, 403 `POLICY_VIOLATION`; ledger `failed_before_signing`, null nonce, zero paid requests at the seller, no Transfer, wallet unchanged); the tool allowlist is asserted to be the payer-safe four. **Real:** the framework, the MCP stdio transport and server, the API and worker, the EIP-3009 signature, the `@x402/evm` exact facilitator, the USDC contract on a local Anvil fork of Base Sepolia. **Stubbed / ours:** the model (a scripted one: no LLM ran), the seller (ours), the chain is a fork (not a public testnet). Windows 11 only. |
 | 9 | OpenAI Agents SDK with a **real OpenAI model** | same | stdio / SSE | `OPENAI_API_KEY` (user's) | `interface-compatible, not tested` | `--mode real` exists and is documented; **not run** (no paid API). Model behaviour with the do-not-retry rules is unknown. |
-| 10 | **Google ADK** (Python), `McpToolset` | `google-adk[mcp]` 2.14.1, `mcp` 2.3.0, `google-genai` 2.34.0 | stdio (`StdioConnectionParams`) | env of the spawned server | `tested` (against STUB, **stub model**) | `python examples/google-adk/agent.py --mode stub`: `tool_filter` left exactly 4 tools, 3 calls, structured unknown, same-id replay paid nothing. |
+| 10 | **Google ADK** (Python), `McpToolset`, **against the STUB API** | `google-adk[mcp]` 2.14.1, `mcp` 2.3.0, `google-genai` 2.34.0 | stdio (`StdioConnectionParams`) | env of the spawned server | `tested` (against STUB, **stub model**) | `python examples/google-adk/agent.py --mode stub`: `tool_filter` left exactly 4 tools, 3 calls, structured unknown, same-id replay paid nothing. |
 | 11 | Google ADK, `McpToolset` | same | SSE (`SseConnectionParams`, `x-api-key` header) | header gate as in row 4 | `tested` (against STUB, **stub model**) | same script with `--transport sse`. |
 | 12 | Google ADK with a **real Gemini model** | same | stdio / SSE | `GOOGLE_API_KEY` (user's) | `interface-compatible, not tested` | `--mode real` exists; **not run** (no paid API). |
 | 13 | LangChain JS **tools** from `@agent_fi/adapters` (`DynamicStructuredTool`) | `@langchain/core` 1.4.1 | in-process, adapter calls HTTP | `apiKey` option | `tested` (against STUB, tool level only) | `npm run build -w packages/adapters && cd examples/langchain-js && npm install && node check.mjs`: 3 payer-safe tools built and invoked, replay and unknown handled. **No LangChain agent or model was run.** |
@@ -47,6 +48,8 @@ Node 24.14.1, npm 11.11.0, Python 3.14.3.
 | 20 | Legacy DeFi tools (swap, transfer, Aave) in the adapters (`legacyDefi: true`) | n/a | in-process | `apiKey` option | `interface-compatible, not tested` | Off by default, outside the alpha path, move funds outside any job budget. `execute_swap` was fixed to send the required `simulationId`; `get_defi_rates` was removed (it returned wallet balances). Not run against a backend. |
 
 ## Known gaps behind the matrix
+
+* **Google ADK has no real-backend run yet** (rows 10-12 are stub-only); the OpenAI Agents SDK example is the one wired to the real local backend (row 7b). No row ran with a real LLM or on a public testnet.
 
 * **MCP from npm does not have x402.** `@agent_fi/mcp-server@0.5.0` on npm has 31 tools and no `pay_for_resource`;
   rows 3, 4, 7, 8, 10, 11 and 16 use the build from the checkout. Publishing 0.6.0 is a separate decision.
@@ -68,6 +71,7 @@ node examples/_stub-api/mcp-check.mjs                 # row 3
 node examples/_stub-api/mcp-sse-check.mjs             # row 4
 node examples/x402-http-reference/run-stub-demo.mjs   # rows 1-2 (build ts/ first, see its README)
 # rows 7-8, 10-11: examples/openai-agents and examples/google-adk (a venv per README)
+# row 7b (real local backend; needs Postgres, Redis, anvil 1.7.1 and the quickstart section 10 setup): npm run alpha:framework -- --yes
 # row 13: examples/langchain-js
 npm test -w packages/adapters                         # row 17 (logic only)
 ```

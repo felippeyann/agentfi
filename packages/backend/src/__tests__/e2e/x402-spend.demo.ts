@@ -77,11 +77,13 @@ function say(text = ''): void {
   lines.push(text);
   console.log(text);
 }
+let invariants = 0;
 function check(condition: unknown, what: string): void {
   if (!condition) {
     say(`  ✗ INVARIANT BROKEN: ${what}`);
     throw new Error(what);
   }
+  invariants++;
   say(`  ✓ ${what}`);
 }
 const usdc = (units: bigint) => `${(Number(units) / 1e6).toFixed(2)} USDC`;
@@ -250,9 +252,11 @@ async function main(): Promise<void> {
     };
 
     const premium = await pay('/report-premium', 'demo-premium-0001-abcdef');
+    const premiumRow = await db.resourcePayment.findUnique({ where: { jobId_paymentId: { jobId, paymentId: 'demo-premium-0001-abcdef' } } });
     check(
-      premium.status === 403 && premium.body['code'] === 'POLICY_VIOLATION' && shop.paid('/report-premium') === 0,
-      `a 0.60 purchase (limit 0.50) → ${premium.status} ${String(premium.body['code'])} rule ${String(premium.body['rule'])}; 0 paid requests reached the seller`,
+      premium.status === 403 && premium.body['code'] === 'POLICY_VIOLATION' && shop.paid('/report-premium') === 0 &&
+        premiumRow?.status === 'failed_before_signing' && premiumRow.authorizationNonce === null,
+      `a 0.60 purchase (limit 0.50) → ${premium.status} ${String(premium.body['code'])} rule ${String(premium.body['rule'])}; ledger row ${premiumRow?.status}, no authorization nonce; 0 paid requests reached the seller`,
     );
     // The job's own budget: a second job that can only afford 0.20 USDC. The 0.30 price is within the
     // per-payment policy, but not within the job's remaining reward → refused before any signature.
@@ -380,7 +384,12 @@ async function main(): Promise<void> {
     say(indent(await runOps(opsEnv, ['status', '--agent', agent.id])));
     say();
     say(`Worker logs: ${workers.map((w) => w.logFile).join(', ')}`);
+    say(
+      `Read this run's ledger yourself (the data lives in the database above; the CLI refuses to start in a container without NODE_ENV): in packages/backend, with NODE_ENV=development WALLET_PROVIDER=local ALCHEMY_API_KEY=x OPERATOR_FEE_WALLET=${ANVIL_ACCOUNTS.feeWallet.address} API_SECRET=<any 32+ chars> ADMIN_SECRET=<any 32+ chars> REDIS_URL=${REDIS_URL} DATABASE_URL=${DATABASE_URL} set, run: npm run x402:ops -- status --agent ${agent.id}`,
+    );
     say('What this run is: a LOCAL fork (Anvil) of Base Sepolia with the real FiatToken contract and a seller we control; not the public testnet, not an independent seller.');
+    say();
+    say(`All ${invariants} invariants held.`);
   } finally {
     for (const cleanup of cleanups.reverse()) await cleanup();
   }
