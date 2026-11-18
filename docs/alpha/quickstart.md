@@ -1,6 +1,6 @@
 # AgentFi alpha — local quickstart
 
-**What you will see (the demo itself took about 2.5 minutes on Windows and about 3.5 on a Linux container; `npm ci` took 5 to 6 minutes on both: plan for 10 to 15 minutes to a first result):** an agent buys paid resources over x402 under rules you set; a purchase that breaks the rules is stopped **before anything is signed**; a purchase whose answer was lost is proven from the chain **without being paid twice**; a payment that never settled is released **only on proof**. Payment (money) and delivery (content) are tracked separately.
+**What you will see (measured: the demo takes 2.5 minutes on Windows and 3.6 on a Linux container; `npm ci` took about 6 minutes on Windows and 4m53 on Linux; the Linux rehearsal needed about 21 minutes to the first result, installing the prerequisites included):** an agent buys paid resources over x402 under rules you set; a purchase that breaks the rules is stopped **before anything is signed**; a purchase whose answer was lost is proven from the chain **without being paid twice**; a payment that never settled is released **only on proof**. Payment (money) and delivery (content) are tracked separately.
 
 **You need no credentials, no funds and no accounts.** Nothing in this guide signs with a real key, spends real money or sends a transaction to a public network.
 
@@ -223,7 +223,7 @@ API_SECRET=<32+ characters> ADMIN_SECRET=<32+ characters> \
 npm run x402:ops -- status --agent <agent id>        # or --job <job id>
 ```
 
-**Which database holds the demo's data:** the one in `X402_DEMO_DATABASE_URL` (default `postgresql://agentfi:agentfi@localhost:5432/agentfi_e2e_x402`), and it is wiped at the start of the next run. The demo prints this command, with your values filled in, at the end of its output. The agent id is printed in the `Operator view` of the transcript; `npm run alpha:serve`-style runs (section 10) write a ready-to-source `operator.env`.
+**Which database holds the demo's data:** the one in `X402_DEMO_DATABASE_URL` (default `postgresql://agentfi:agentfi@localhost:5432/agentfi_e2e_x402`), and it is wiped at the start of the next run. The demo prints this command, with your values filled in, at the end of its output. The agent id is printed in the `Operator view` of the transcript; `npm run alpha:serve` (section 10) writes a ready-to-source `operator.env`.
 
 ## 5. Glossary
 
@@ -278,70 +278,107 @@ The commands of section 2 were followed literally, from a fresh `git clone`, on 
 
 ## 10. Run it through an agent framework — LOCAL FORK, scripted model
 
-Sections 2-3 drive the backend with a test script. This section drives **the same backend** with a real agent framework: the **OpenAI Agents SDK** (Python) calls the **AgentFi MCP server** (stdio, built from this checkout), which calls the real local API; the API signs a real EIP-3009 authorization with the buyer agent's wallet and the seller's real `@x402/evm` exact facilitator settles it on the local Anvil fork. As run on **2026-11-18**.
+Sections 2-3 drive the backend with a test script. This section drives **the same backend** with a real agent framework: the **OpenAI Agents SDK** (Python) calls the **AgentFi MCP server** (stdio, built from this checkout), which calls the real local API; the API signs a real EIP-3009 authorization with the buyer agent's wallet and the seller's real `@x402/evm` exact facilitator settles it on the local Anvil fork.
 
-**What is real and what is not.** Real: the framework (`openai-agents` 0.24.0, `mcp` 2.3.0), the MCP stdio transport and server, the API and worker, the signature, the `@x402/evm` facilitator, the USDC contract code on a **local fork** of Base Sepolia. **Not real:** the model is a **scripted stand-in** (a fixed list of tool calls: no LLM ran, no key, no cost; never read this as "a model decided to buy"); the seller is **ours**; the chain is a **local fork, not a public testnet**; the API accepts a seller on `127.0.0.1` only because the harness starts it with `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS=true` (a non-production switch for local sellers; never set it on a shared API). The agent is restricted to the payer-safe tools `get_my_agent_profile`, `get_policy`, `get_job`, `pay_for_resource`, and the example asserts it.
+**What is real and what is not.** Real: the framework, the MCP stdio transport and server, the API and worker, the signature, the `@x402/evm` facilitator, the USDC contract code on a **local fork** of Base Sepolia. **Not real:** the model is a **scripted stand-in** (a fixed list of tool calls: no LLM ran, no key, no cost; never read this as "a model decided to buy"); the seller is **ours**; the chain is a **local fork, not a public testnet**; the API accepts a seller on `127.0.0.1` only because the harness starts it with `RESOURCE_PAYMENT_ALLOW_PRIVATE_HOSTS=true` (a non-production switch for local sellers; never set it on a shared API). The agent is restricted to the payer-safe tools `get_my_agent_profile`, `get_policy`, `get_job`, `pay_for_resource`, and the example asserts it.
 
-**Prerequisites** (on top of section 1): Python (3.14.3 was run; the SDK states no minimum) and the example's pinned packages in a virtual environment. The same destructive-target rules as the demo apply: use private targets and `--yes` (section 6).
+**Prerequisites** (on top of section 1): Python **3.10 or newer** (the `Requires-Python` of both pinned packages; 3.14.3 was run) and the example's pinned packages (`openai-agents==0.24.0`, `mcp==2.3.0`) in a virtual environment. On Debian/Ubuntu `python3 -m venv` needs the `python3-venv` package. The same destructive-target rules as the demo apply: private targets and `--yes` (section 6).
 
 ```bash
 # repository root, after npm ci (section 2), with Postgres, Redis and anvil as in section 1
-python -m venv .venv
-.venv/bin/pip install -r examples/openai-agents/requirements.txt      # Windows: .venv\Scripts\pip
-export ALPHA_PYTHON=.venv/bin/python                                    # Windows: .venv\Scripts\python.exe
-export X402_DEMO_DATABASE_URL=postgresql://agentfi:agentfi@localhost:5432/agentfi_<you>_demo   # private; WIPED
-export X402_DEMO_REDIS_URL=redis://localhost:6379/7                                            # private; FLUSHED
+
+# Linux / macOS (NOT run: only Windows was run for this section)
+python3 -m venv .venv
+.venv/bin/pip install -r examples/openai-agents/requirements.txt
+export ALPHA_PYTHON=.venv/bin/python
+
+# Windows, Git Bash (what was run)
+python -m venv .venv                 # what was run; the py launcher (py -m venv .venv) also works if installed
+.venv/Scripts/pip install -r examples/openai-agents/requirements.txt
+export ALPHA_PYTHON=.venv/Scripts/python.exe
+
+# both: private targets (WIPED / FLUSHED), then the run
+export X402_DEMO_DATABASE_URL=postgresql://agentfi:agentfi@localhost:5432/agentfi_<you>_demo
+export X402_DEMO_REDIS_URL=redis://localhost:6379/11
 npm run alpha:framework -- --yes
 ```
 
-`npm run alpha:framework` checks the prerequisites (the demo's checks plus the Python import), prints the destructive-target banner, builds the MCP server, starts the backend (`npm run demo:x402:serve`: Anvil fork, API, worker, seller, an operator policy of at most 0.50 USD per payment and 3.00 per day to the seller only, a 5.00 USDC job and a 0.20 USDC job, the buyer wallet funded with 5.00 USDC **on the fork**), runs the framework twice, reads the ledger, the chain and the seller, checks every invariant, and stops everything. It exits 0 only if all held (`OK: 28 invariants held.`); the first broken invariant exits 1. Allow about 4 to 6 minutes on top of the build. The transcript is written to `<tmp>/agentfi-alpha-framework-transcript.txt` (`X402_FRAMEWORK_TRANSCRIPT`).
+`npm run alpha:framework` checks the prerequisites (the demo's checks plus the Python import, printing the versions it found), prints the destructive-target banner, builds the MCP server, starts the backend (`demo:x402:serve`: Anvil fork, API, worker, seller, an operator policy of at most 0.50 USD per payment and 3.00 per day to the seller only, a 5.00 USDC job and a 0.20 USDC job, the buyer wallet funded with 5.00 USDC **on the fork**), runs the framework twice, reads the ledger, the chain and the seller, checks every invariant, and stops everything (also on Ctrl+C). It exits 0 only if all held; the first broken invariant makes it exit 1. Allow about 4 minutes on top of the build. The transcript is written to `<tmp>/agentfi-alpha-framework-transcript.txt` (`X402_FRAMEWORK_TRANSCRIPT`).
 
-To run the pieces yourself: start the backend with `npm run alpha:serve -- --out-dir <dir>` (it runs `demo:x402:serve` in `packages/backend`; same environment variables and the same wipe; the harness guard refuses unsafe targets, but this entry does not print the banner or ask, the driver does), wait for `SERVE READY`, then `python examples/openai-agents/agent.py --mode stub --backend env-file --env-file <dir>/agent.env --scenario allowed` (or `blocked`), and read the ledger with `set -a; . <dir>/operator.env; set +a; cd packages/backend && npm run x402:ops -- status --job $AGENTFI_JOB_ID`. Stop with Ctrl+C or by creating `<dir>/stop`. `agent.env` holds only what the agent side needs (API URL, the buyer's key, job ids, seller URL); `operator.env` holds the demo's operator secrets and a read-only evidence endpoint: never give it to an agent.
+**Running the pieces yourself.** `npm run alpha:serve -- --out-dir <dir> --yes` starts the backend with the same checks, banner and `--yes` rule (a relative `<dir>` is resolved against the directory you run npm in), prints `SERVE READY` and keeps running until Ctrl+C or until `<dir>/stop` exists. It writes two files:
+
+- `<dir>/agent.env`, exactly: `AGENTFI_API_URL`, `AGENTFI_API_KEY` (the buyer agent's own key), `AGENTFI_JOB_ID` (the 5.00 job), `AGENTFI_SMALL_JOB_ID` (the 0.20 job), `SELLER_URL`. No operator secret and no chain RPC (the Anvil RPC can rewrite balances and storage, so it is not the agent's).
+- `<dir>/operator.env`: the demo's operator secrets, the backend configuration `x402:ops` needs, `ANVIL_RPC_URL`, `AGENTFI_AGENT_ID` and a read-only evidence endpoint (`CONTROL_URL`). First line `# OPERATOR secrets (demo only) - never give this file to an agent`; mode 0600 on Linux/macOS (Windows does not apply POSIX modes). Never give it to an agent.
+
+Then, in a second terminal: `.venv/Scripts/python.exe examples/openai-agents/agent.py --mode stub --backend env-file --env-file <dir>/agent.env --scenario allowed` (or `--scenario blocked`; `.venv/bin/python` on Linux/macOS), and read the ledger with `set -a; . <dir>/operator.env; set +a; cd packages/backend && npm run x402:ops -- status --job $AGENTFI_JOB_ID`. Every value in both files is written without shell metacharacters (the backend refuses to write one that has any), so sourcing them is safe.
 
 ### What you see: an allowed purchase
 
-The framework's trace (ids differ on every run; the full run is in the transcript):
+Verbatim from the recorded run (section "Verified run" below; ids, addresses and hashes differ on every run). The versions the run found, and the framework's trace:
 
 ```text
-[tools exposed to the agent] ['get_policy', 'get_my_agent_profile', 'get_job', 'pay_for_resource']
-[tool call] pay_for_resource {"job_id": "cmwlp24ap00091uabeb8chg98", "url": "http://127.0.0.1:64674/report", "payment_id": "fw-allowed-89ad860462-0000001"}
-[tool result] payment.status "settled", authorizationNonce 0x3d19…, settlementTxHash 0x4c2dd4f9…, responseStatus 200, remainingBudget {total 5000000, spent 300000, remaining 4700000}
+  ok    python 3.14.3 | openai-agents 0.24.0 | mcp 2.3.0 | openai 3.54.0 | AgentFi MCP server (packages/mcp-server from this checkout) 0.5.0 | node 24.14.1 | win32
+    [tools exposed to the agent] ['get_policy', 'get_my_agent_profile', 'get_job', 'pay_for_resource']
+    [tool call] pay_for_resource {"job_id": "cmwlqj3xt0009ewefphrxang1", "url": "http://127.0.0.1:63871/report", "payment_id": "fw-allowed-112df35f56-0000001"}
 ```
 
-Then the operator's view, the Anvil Transfer log and the wallets, all agreeing (paymentId → ledger row → transaction):
+The tool result is the full ledger row plus the job's budget (condensed from the transcript: the payment's `status` is `"settled"`, `amount` `"300000"`, a non-null `authorizationNonce` and `settlementTxHash`, `responseStatus` 200, and):
 
 ```text
-- fw-allowed-89ad860462-0000001 settled   0.3 USDC  money:proven  delivery:delivered (HTTP 200)
-    http://127.0.0.1:64674/report → 0xD6442C…  tx 0x4c2dd4f9b649c424e45072f576b58953e5da18a5fdb68d4038b0184c8ebe1f96
-    reconciled: transfer proven on-chain in 0x4c2dd4f9…, block 60293168 (was settled)
-Job cmwlp24a… [ACCEPTED] budget 5 · committed 0.3 (proven 0.3, reported 0, open 0) · remaining 4.7
-Anvil Transfer (agent -> seller): tx 0x4c2dd4f9…  value 300000  (0.30 USDC)
-agent wallet 5.00 -> 4.70 USDC · seller 0.00 -> 0.30 USDC · seller saw 1 paid request for /report
+        "remainingBudget": {
+          ...
+          "total": "5000000",
+          "spent": "300000",
+          "remaining": "4700000",
+          "remainingFormatted": "4.7"
+        },
 ```
 
-**How to read the ledger line, three separate facts.** *Money*: `settled` is the seller's word; `money:proven` means the worker found a USDC Transfer for exactly this payment on-chain (right after the tool call it still reads `money:reported`, and flips on its own within seconds, with no operator command). *Delivery*: `delivered (HTTP 200)` is what arrived (with its SHA-256); it says nothing about whether the money moved, and the other way round. *Budget*: `committed 0.3 … remaining 4.7` is what the job's 5.00 reward still allows; a payment counts against it from the moment it is reserved.
+The operator's view, the Anvil Transfer log and the seller's counters (verbatim):
+
+```text
+      Job cmwlqj3xt0009ewefphrxang1 [ACCEPTED] budget 5 · committed 0.3 (proven 0.3, reported 0, open 0) · remaining 4.7
+        - fw-allowed-112df35f56-0000001 settled                    0.3 USDC  money:proven  delivery:delivered (HTTP 200)
+            http://127.0.0.1:63871/report → 0x9e9B22E97Ae3C5234e0504AD208ceeBf20B51B9d  tx 0x4787c11ca9ee09fe50256c82034a16f89e5486185187febe04d9df6e088b537f
+            reconciled: transfer proven on-chain in 0x4787c11ca9ee09fe50256c82034a16f89e5486185187febe04d9df6e088b537f, block 60305585 (was settled)
+  Anvil Transfer logs (agent -> seller): [{"tx":"0x4787c11ca9ee09fe50256c82034a16f89e5486185187febe04d9df6e088b537f","from":"0x759cE075827CC9c8301653fDDf369244546fA513","to":"0x9e9B22E97Ae3C5234e0504AD208ceeBf20B51B9d","value":"300000","block":"60305585"}]
+  seller request counters: {"plain":{"/report":1},"paid":{"/report":1}}
+  paymentId fw-allowed-112df35f56-0000001 -> tx 0x4787c11ca9ee09fe50256c82034a16f89e5486185187febe04d9df6e088b537f
+  ✓ agent wallet 5.00 USDC -> 4.70 USDC (-0.30)
+```
+
+**How to read the ledger line, three separate facts.** *Money*: `settled` is the seller's word; `money:proven` means the worker found a USDC Transfer for exactly this payment on-chain (in the tool result the row still has `chainVerifiedAt: null`: the worker proves it a few seconds later, with no operator command). *Delivery*: `delivered (HTTP 200)` is what arrived (with its SHA-256); it says nothing about whether the money moved, and the other way round. *Budget*: `committed 0.3 … remaining 4.7` is what the job's 5.00 reward still allows; a payment counts against it from the moment it is reserved.
 
 ### What you see: blocked purchases (before anything is signed)
 
-The scripted model then tries two purchases the rules forbid: 0.30 USDC on the job that has 0.20 left, and 0.60 USDC (the policy allows 0.50 per payment) on the big job.
+The scripted model then tries two purchases the rules forbid: `/report` (0.30 USDC) on the job that has 0.20 left, and `/report-premium` (0.60 USDC; the policy allows 0.50 per payment) on the big job. Verbatim:
 
 ```text
-[tool result] {"paid": false, "httpStatus": 402, "code": "BUDGET_EXCEEDED", "price": "300000", "remainingFormatted": "0.2", ...}
-[tool result] {"paid": false, "httpStatus": 403, "code": "POLICY_VIOLATION", "rule": "maxValuePerTxUsd", ...}
+    [tool call] pay_for_resource {"job_id": "cmwlqj3z4000bewef4nbensbe", "url": "http://127.0.0.1:63871/report", "payment_id": "fw-overbudget-ec6d978dc8-00001"}
+    [tool call] pay_for_resource {"job_id": "cmwlqj3xt0009ewefphrxang1", "url": "http://127.0.0.1:63871/report-premium", "payment_id": "fw-overpolicy-ec6d978dc8-00001"}
+  ✓ over-budget tool result: paid=false HTTP 402 BUDGET_EXCEEDED (price 0.3, remaining 0.2)
+  ✓ over-policy tool result: paid=false HTTP 403 POLICY_VIOLATION (rule maxValuePerTxUsd)
 ```
 
 ```text
-- fw-overpolicy-a8c01cd05b-00001 failed_before_signing   0.6 USDC  money:not-moved  delivery:unknown  [not counted]
-    reason: Payment of 0.6 USDC exceeds the policy's per-transaction limit of 0.50 USD (maxValuePerTxUsd)
-- fw-overbudget-a8c01cd05b-00001 failed_before_signing   0.3 USDC  money:not-moved  delivery:unknown  [not counted]
-    reason: Cheapest acceptable option on [internal-url] costs 0.3 USDC, above the cap of $0.2
+        - fw-overpolicy-ec6d978dc8-00001 failed_before_signing      0.6 USDC  money:not-moved  delivery:unknown  [not counted]
+            reason: Payment of 0.6 USDC exceeds the policy's per-transaction limit of 0.50 USD (maxValuePerTxUsd)
+        - fw-overbudget-ec6d978dc8-00001 failed_before_signing      0.3 USDC  money:not-moved  delivery:unknown  [not counted]
+            reason: Cheapest acceptable option on [internal-url] costs 0.3 USDC, above the cap of $0.2
+  agent wallet 4.70 USDC after (before this run: 4.70); seller counters {"plain":{"/report":2,"/report-premium":1},"paid":{"/report":1}}
+  ✓ over-budget: ledger row failed_before_signing for 0.30 USDC, authorization nonce null, no settlement tx, no paid response
+  ✓ over-policy: ledger row failed_before_signing for 0.60 USDC, authorization nonce null, no settlement tx, no paid response
+  ✓ no USDC transfer from the agent wallet to the seller; the agent wallet balance is unchanged at 4.70 USDC
+  ✓ zero paid requests reached the seller during the blocked run
 ```
 
-**How the operator recognises a block:** the row says `failed_before_signing` with `money:not-moved` and `[not counted]`, and a `reason:` line names the rule. Both kinds of block leave a ledger row (a policy block does too), both with a **null authorization nonce** (no signature ever existed). The driver also proves, from outside the backend, that nothing moved: no new Transfer log on the fork, the buyer wallet unchanged at 4.70 USDC, and the seller's counters show **zero paid requests** during the blocked run (it saw only the unpaid 402 probes: `{"plain":{"/report":2,"/report-premium":1},"paid":{"/report":1}}`, the one paid request being the allowed purchase).
+(The two `failed_before_signing` rows are verbatim lines from two different `x402:ops status --job` blocks in the transcript, shown together here.)
 
-**Verified run.** These commands were followed literally from a fresh `git clone` of the branch (commit `4b02c24`, before merge) on 2026-11-18, Windows 11 (Git Bash), Node 24.14.1, Python 3.14.3, anvil 1.7.1, Postgres 16 and Redis 7 in Docker, a private database, Redis DB and ports: exit 0, `OK: 28 invariants held.` On the working checkout the first attempt failed on a wrong assertion of ours and the second on a worker setting the harness lacked (how soon the worker re-reads a settled-but-unproven payment; default 5 minutes, the harness sets 10 seconds); both were fixed before the passing runs.
+**How the operator recognises a block:** the row says `failed_before_signing` with `money:not-moved` and `[not counted]`, and a `reason:` line names the rule. Both kinds of block leave a ledger row (a policy block does too), both with a **null authorization nonce**: no signature ever existed. Outside the backend, nothing moved either: no new Transfer from the agent wallet to the seller, the wallet unchanged at 4.70 USDC, and the seller counted only unpaid 402 probes during the blocked run (its one paid request is the allowed purchase).
 
-**Limits.** A local fork, not the public testnet; a scripted model, not an LLM; a seller we control; only Windows 11, Node 24.14.1, Python 3.14.3 and anvil 1.7.1 were run (Linux ran the section 2 demo, not this section). A second framework (Google ADK) is not wired to the real backend: the example still runs against the stub only. The compatibility matrix says the same, row by row.
+**Verified run.** The excerpts above are from the run recorded at commit `a4edf4a` of the PR branch (later commits change documentation only), on 2026-11-18, Windows 11 (Git Bash), Node 24.14.1, Python 3.14.3, openai-agents 0.24.0, mcp 2.3.0, anvil 1.7.1, Postgres 16 and Redis 7 in Docker, private database, Redis DB and ports: exit 0, `OK: 28 invariants held.` Earlier on the same day the section was also followed literally from a fresh `git clone` of the branch (commit `4b02c24`): exit 0, 28 invariants. Along the way two attempts failed and were fixed before those runs: a wrong assertion of ours, and a worker setting the harness lacked (how soon the worker re-reads a settled-but-unproven payment: 5 minutes by default, 10 seconds in the harness).
+
+**Limits.** A local fork, not the public testnet; a scripted model, not an LLM; a seller we control; this section ran only on Windows 11 with the versions above (Linux ran the section 2 demo, not this section; the `.venv/bin` commands and the POSIX process-group shutdown were not run). A second framework (Google ADK) is not wired to the real backend: its example still runs against the stub only. The compatibility matrix says the same, row by row.
 
 ## 11. Feedback
 

@@ -55,8 +55,8 @@ AgentFi's standalone server implements stdio and SSE, **not** streamable HTTP).
 ## Against the real local backend (scripted model; run 2026-11-18)
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -r examples/openai-agents/requirements.txt   # Windows: .venv\Scripts\pip
-ALPHA_PYTHON=.venv/bin/python X402_DEMO_DATABASE_URL=<private test db> X402_DEMO_REDIS_URL=<private redis db> npm run alpha:framework -- --yes
+python3 -m venv .venv && .venv/bin/pip install -r examples/openai-agents/requirements.txt   # Windows (Git Bash, what was run): python -m venv .venv && .venv/Scripts/pip ...
+ALPHA_PYTHON=.venv/bin/python X402_DEMO_DATABASE_URL=<private test db> X402_DEMO_REDIS_URL=<private redis db> npm run alpha:framework -- --yes      # Windows: ALPHA_PYTHON=.venv/Scripts/python.exe
 ```
 
 `--backend env-file --env-file <agent.env> --scenario allowed|blocked` reads the API URL, the buyer agent's key, job ids and seller URL that `npm run alpha:serve` writes; the driver `npm run alpha:framework` starts the backend, runs both scenarios and checks ledger, chain and seller. Real: this SDK, the MCP stdio server, the API, worker, EIP-3009 signature, `@x402/evm` facilitator, USDC on a local Anvil fork. Not real: the model (scripted), the seller (ours), the chain (a fork). It WIPES the database and Redis DB you point it at. Details and expected output: [docs/alpha/quickstart.md](../../docs/alpha/quickstart.md) section 10.
