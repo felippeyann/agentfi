@@ -100,8 +100,8 @@ Gas cost = `gasUsed * effectiveGasPriceWei` per CONFIRMED/REVERTED tx, converted
 ### POST /v1/agents (Register)
 
 ```json
-// Request (x-api-key: <API_SECRET>)
-{ "name": "MyAgent", "chainIds": [8453], "tier": "FREE" }
+// Request (x-api-key: <API_SECRET>); `policy` optional — omitted, the default row below
+{ "name": "MyAgent", "chainIds": [8453], "tier": "FREE", "policy": { "maxOutflowPerTxUsd": "100" } }
 
 // Response 201
 {
@@ -113,6 +113,15 @@ Gas cost = `gasUsed * effectiveGasPriceWei` per CONFIRMED/REVERTED tx, converted
   "ensName": "myagent-abc123.agentfi.eth"
 }
 ```
+
+Every registration (this route and the public one) creates the agent's policy row. Without `policy` it is the
+server default: `maxValuePerTxEth` 1.0, `maxValuePerTxUsd` 1.0, `maxDailyVolumeUsd`
+10000, cooldown 60 s, empty whitelists and `maxOutflowPerTxUsd` **not configured**,
+so every ordinary outflow (transfer, swap input, deposit, GMX collateral, batch,
+legacy A2A payment, paid legacy job) is refused with `USD_CAP_NOT_CONFIGURED`
+until the operator sets it — in the body (`"policy": {"maxOutflowPerTxUsd": "100"}`)
+or later with `PATCH /v1/agents/<id>/policy` and the operator secret. The agent's
+own key can only tighten it ([payer authorization](architecture/payer-authorization.md)).
 
 ### POST /v1/public/agents (Self-Register, no auth)
 
@@ -208,7 +217,10 @@ operator sets it, every ordinary outflow of that agent is refused with a
 diagnostic naming the field. `null` is the most restrictive value: setting any
 value from `null` is a loosening (operator credential); the agent may lower it
 or set it back to `null`. With no policy row at all nothing is restricted (as
-for every limit).
+for every limit): every registration now creates the row, so only agents
+registered by the operator without `policy` before that change have none — the
+operator gives them one with `PATCH`, and their own key cannot seed limits above
+the registration defaults.
 
 **No silent widening at creation.** `POST /v1/agents` with an omitted
 `maxValuePerTxUsd` stores the default `"1.0"` (never the ETH number), and an

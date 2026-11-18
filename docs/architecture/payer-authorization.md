@@ -301,3 +301,7 @@ registered in `admin.ts` (the only file whose handlers it checks for the guard).
 - F3: scripts and examples that register with `POST /v1/agents` and no `policy`
   and then move funds now get the default row (outflows refused until
   `maxOutflowPerTxUsd` is set): they must pass an explicit `policy`.
+- F4: the stdio MCP `update_policy` description (`packages/mcp-server/src/tools/agent.ts`)
+  does not mention the first-policy rule (an agent without a policy row is judged
+  against the registration defaults). Left to the MCP packaging front:
+  `packages/mcp-server/src` changed on main since this branch was cut.
