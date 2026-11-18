@@ -1859,6 +1859,10 @@ export interface paths {
                  *     volume would be exceeded), or on an ERC-8183 chain:
                  *     `ERC8183_USDC_ONLY` (reward token is not USDC / the escrow token),
                  *     `ERC8183_PROVIDER_IS_REQUESTER`, `ERC8183_PROVIDER_IS_EVALUATOR`.
+                 *     On a chain without the escrow contract a PAID job that names its
+                 *     own requester as provider is `JOB_PROVIDER_IS_REQUESTER` (the
+                 *     reward is the budget the provider may spend on x402 resources; an
+                 *     agent cannot set it for itself).
                  */
                 400: {
                     headers: {
