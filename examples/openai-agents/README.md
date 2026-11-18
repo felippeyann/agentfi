@@ -30,7 +30,7 @@ that any model behaves well. Tracing is disabled in stub mode (it would call the
 npm install && npm run build -w packages/mcp-server
 node examples/_stub-api/stub-api.mjs --port 3000 &          # the STUB API (key: agfi_stub_not_a_secret)
 
-python -m venv .venv && . .venv/bin/activate                 # Windows: .venv\Scripts\activate
+python -m venv .venv && . .venv/bin/activate                 # Windows (Git Bash): . .venv/Scripts/activate
 pip install -r examples/openai-agents/requirements.txt
 AGENTFI_API_URL=http://localhost:3000 AGENTFI_API_KEY=agfi_stub_not_a_secret \
   python examples/openai-agents/agent.py --mode stub
