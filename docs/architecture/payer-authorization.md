@@ -305,6 +305,8 @@ registered in `admin.ts` (the only file whose handlers it checks for the guard).
 
 ## 7. Follow-ups (not in this change)
 
+Status on 2026-11-18 (alpha payer reference, [docs/alpha/payer-setup.md](../alpha/payer-setup.md) §7): F1 does not affect the x402 payer (pay-resource re-reads the policy under the locks; F1 is the legacy transactions routes only, which the reference payer policy refuses); F2 affects a payer only if a pre-existing row-less agent is used as one (`x402:ops payer` flags it as `NO_POLICY_ROW`); F4 is fixed (documentation only).
+
 - F1: re-run the static policy checks (caps, allowlists, cooldown) under the
   Agent lock on the legacy `/v1/transactions/*` path (section 3.2). Needs the
   check inputs passed into `createTransactionWithVolume` from the 12
@@ -317,7 +319,6 @@ registered in `admin.ts` (the only file whose handlers it checks for the guard).
   (`scripts/e2e-issue-81.mjs`, `smoke-dev.mjs`, `demo-claude-mcp.mjs`,
   `examples/a2a-collab`, `examples/delegation-chain`), and the registration docs
   say the default row applies.
-- F4: the stdio MCP `update_policy` description (`packages/mcp-server/src/tools/agent.ts`)
-  does not mention the first-policy rule (an agent without a policy row is judged
-  against the registration defaults). Left to the MCP packaging front:
-  `packages/mcp-server/src` changed on main since this branch was cut.
+- F4 (done 2026-11-18): the stdio MCP `update_policy` description (`packages/mcp-server/src/tools/agent.ts`)
+  did not mention the first-policy rule (an agent without a policy row is judged
+  against the registration defaults); it now says so, and that an empty list is unrestricted.

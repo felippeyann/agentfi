@@ -9,6 +9,12 @@
  *                                 [--stale-minutes M] [--rpc <url>] [--json]
  *   npm run x402:ops -- resolve   --job <id> --payment <paymentId> --as expired|settled [--tx <hash>]
  *                                 --operator <name> --note "<evidence / why>" [--apply]
+ *   npm run x402:ops -- payer     --agent <id> [--json]
+ *
+ * `payer` is read-only: what the agent's key can do with money as the server
+ * enforces it (x402 ceilings and recipients, other outflows, batch calldata,
+ * policy changes) and whether it is the alpha's reference payer
+ * (`services/policy/payer-profile.ts`, docs/alpha/payer-setup.md).
  *
  * `auto` runs ONE cycle of the automatic reconciliation the worker runs on
  * every payment-recovery tick (backoff, escalation, leases — see
@@ -66,9 +72,10 @@ import {
   runAutoReconcileCycle,
   type AutoReconcileOutcome,
 } from '../services/payments/resource-payment-auto-reconcile.js';
+import { describePayerProfile, renderPayerProfile } from '../services/policy/payer-profile.js';
 
 export interface OpsArgs {
-  command: 'status' | 'reconcile' | 'resolve' | 'auto';
+  command: 'status' | 'reconcile' | 'resolve' | 'auto' | 'payer';
   /** True when --head / --confirmations was given (otherwise `auto` keeps the env's head). */
   headGiven?: boolean;
   paymentId?: string;
@@ -90,8 +97,8 @@ export interface OpsArgs {
 
 export function parseOpsArgs(argv: string[]): OpsArgs | string {
   const command = argv[0];
-  if (command !== 'status' && command !== 'reconcile' && command !== 'resolve' && command !== 'auto') {
-    return 'usage: x402:ops <status|reconcile|auto|resolve> [options]';
+  if (command !== 'status' && command !== 'reconcile' && command !== 'resolve' && command !== 'auto' && command !== 'payer') {
+    return 'usage: x402:ops <status|reconcile|auto|resolve|payer> [options]';
   }
   const value = (flag: string) => {
     const i = argv.indexOf(flag);
@@ -137,7 +144,8 @@ export function parseOpsArgs(argv: string[]): OpsArgs | string {
   if (jobId) args.jobId = jobId;
   if (rpc) args.rpc = rpc;
   if (stale !== undefined) args.staleMinutes = Number(stale);
-  if (args.apply && (command === 'status' || command === 'auto')) return `--apply does not apply to ${command}`;
+  if (args.apply && (command === 'status' || command === 'auto' || command === 'payer')) return `--apply does not apply to ${command}`;
+  if (command === 'payer' && !agentId) return 'payer needs --agent <id>';
   if (command === 'resolve') {
     const as = value('--as');
     if (as !== 'expired' && as !== 'settled') return 'resolve needs --as expired|settled';
@@ -195,6 +203,17 @@ export async function runOps(args: OpsArgs, deps: OpsDeps): Promise<number> {
       ...(staleAfterMs !== undefined ? { staleAfterMs } : {}),
     });
     deps.print(args.json ? JSON.stringify(report, null, 2) : renderSpendReport(report));
+    return 0;
+  }
+
+  if (args.command === 'payer') {
+    const agent = await deps.db.agent.findUnique({ where: { id: args.agentId! }, include: { policy: true } });
+    if (!agent) {
+      deps.print(`No agent ${args.agentId}`);
+      return 1;
+    }
+    const profile = describePayerProfile(agent, agent.policy);
+    deps.print(args.json ? JSON.stringify(profile, null, 2) : renderPayerProfile(profile));
     return 0;
   }
 
