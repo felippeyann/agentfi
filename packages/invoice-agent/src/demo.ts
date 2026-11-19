@@ -160,6 +160,8 @@ async function main() {
   out('\n2. Invoice INV-001 for 8 tUSD8 arrives.');
   const first = await send(inv('INV-001', '8'));
   show('agent', first);
+  const firstReceipt = (first as { receipt?: unknown }).receipt;
+  if (firstReceipt) for (const l of JSON.stringify(firstReceipt, null, 2).split('\n')) out(`      ${l}`);
   const firstTx = (first as { receipt?: { txHash: string } }).receipt?.txHash;
   await showOps('verify', 'INV-001');
 
@@ -253,6 +255,7 @@ async function main() {
   await stopAgent(agent);
   out(failures === 0 ? '\nOK: every invariant held.' : `\nFAILED: ${failures} invariant(s) broken.`);
   out(`Transcript: ${transcript}`);
+  out(`Ledger (one row per invoice, with its receipt; events): ${env.INVOICE_LEDGER}. Anvil was stopped: the chain itself is gone.`);
   return failures === 0 ? 0 : 1;
 }
 

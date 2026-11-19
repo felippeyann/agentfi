@@ -2,22 +2,28 @@
 
 **One invoice, one payment, one receipt.** An operator approves an agent in advance to pay a known vendor up to a limit per invoice. Invoices arrive; the agent checks the vendor, the payee address and the limits, pays in tUSD8 with a plain ERC-20 transfer, and returns a receipt the operator can check on-chain. The same invoice id is paid at most once, including when the agent dies after the payment went out and before it could answer (the exact guarantee and its conditions: [What is guaranteed](#what-is-guaranteed-and-under-which-conditions)).
 
-> **Status: local prototype (2026-11-19).** It runs on a **local Anvil chain** with a **local test token** (`tUSD8-LOCAL`, *not* QDay's tUSD8) and demo data. Nothing here has run on Aevum Testnet yet; see [What is missing for Aevum Testnet](#what-is-missing-for-aevum-testnet).
+> **Status: local prototype (2026-11-19).** It runs on a **local Anvil chain** (chain id 31337) with a **local test ERC-20** (`tUSD8-LOCAL`: 6 decimals like QDay's tUSD8, open mint, deployed by the demo; *not* QDay's tUSD8) and demo data. Nothing here has run on Aevum Testnet yet; see [What is missing for Aevum Testnet](#what-is-missing-for-aevum-testnet).
 
 ## Run it
 
-Needs Node 22.13+ and Foundry's `anvil` (on `PATH` or in `~/.foundry/bin`). From the repository root (`npm ci` installs the whole monorepo, a few minutes: the mandate imports AgentFi's policy evaluator from `packages/backend`):
+Needs Node 22.13+ and Foundry's `anvil` ([install Foundry](https://book.getfoundry.sh/getting-started/installation): `curl -L https://foundry.paradigm.xyz | bash`, then `foundryup`; on `PATH` or in `~/.foundry/bin`). No wallet, key, faucet or public network is needed: everything runs on your machine.
 
 ```bash
-npm ci
+git clone https://github.com/felippeyann/agentfi.git
+cd agentfi
+npm ci                 # the whole monorepo, a few minutes: the mandate imports AgentFi's policy evaluator from packages/backend
 cd packages/invoice-agent
-npm run demo        # ~40 s: starts anvil and the agent, runs the scenario, checks invariants, stops everything
-npm test            # 14 tests on a local chain: lost response, races, RPC failures, the lock, ~12 s
+npm run demo           # ~40 s: starts anvil and the agent, runs the scenario, checks invariants, stops everything
+npm test               # 17 tests on a local chain: lost response, races, RPC failures, the lock, the key guard, ~15 s
 ```
 
-Node prints `ExperimentalWarning: SQLite is an experimental feature`: the ledger uses Node's built-in `node:sqlite`; the warning is expected.
+**What to expect.** The demo prints each step (below) with the agent's answer, the operator's `ops verify` / `ops status` output and a `✓` per invariant, and ends with `OK: every invariant held.` and exit code 0 (a broken invariant prints `✗ INVARIANT BROKEN` and exits 1). Node prints `ExperimentalWarning: SQLite is an experimental feature`: the ledger uses Node's built-in `node:sqlite`; the warning is expected.
 
-`npm run demo` exits 0 only if every invariant held and writes a transcript (path printed at the end; `DEMO_TRANSCRIPT=<file>` to choose it). Ports: Anvil 8566, agent 8787 (`DEMO_ANVIL_PORT`, `DEMO_AGENT_PORT`).
+**Where the receipt is.** The agent answers `POST /invoices` with JSON; when paid, `receipt` holds `invoiceId`, `invoiceHash`, `chainId`, `token`, `from`, `to`, `amount` (and `amountUnits`, 6 decimals), `txHash`, `blockNumber`, `logIndex`. The demo prints INV-001's receipt in full and checks it with `npm run ops -- verify INV-001`, which reads the transaction and its `Transfer` log from the chain. The same receipt is kept in the ledger (a SQLite file, one row per invoice, plus an event log). The transcript, ledger and mandate go to a temporary folder printed at the start and at the end (`DEMO_TRANSCRIPT=<file>` chooses the transcript path). Anvil is stopped at the end, so the chain itself does not outlive the run. Ports: Anvil 8566, agent 8787 (`DEMO_ANVIL_PORT`, `DEMO_AGENT_PORT`).
+
+**The keys are Anvil's public development keys** (from Foundry's published `test … junk` mnemonic): fine on a local chain, swept within seconds on any real one. The agent refuses them, and the simulated crashes (`INVOICE_FAIL_AT`), on any chain other than Anvil's 31337.
+
+A 3-minute walkthrough of the same run: [DEMO-SCRIPT.md](DEMO-SCRIPT.md).
 
 ## What the demo shows
 
@@ -53,12 +59,12 @@ Before signing a new invoice, open rows are reconciled first (one that cannot be
 ## What is guaranteed, and under which conditions
 
 - **At most one payment per invoice id**, with **one agent process per ledger file**: the agent holds an exclusive lock (a SQLite file next to the ledger, locked for the life of the process) and a second process refuses to start. The operating system releases the lock when the process dies, however it dies, so a restart after a crash starts at once and there is no stale lock to take over (tested: ten processes starting together after a crash, exactly one runs). Two agents on different machines with separate ledgers are not protected against each other.
-- **The id is the key, exactly as written** (case-sensitive): `INV-001` and `inv-001` are two invoices; the same content under a new id is a new invoice. The vendor's invoice number is the natural key.
+- **Deduplication is only as good as the invoice id and the ledger.** The id is the key, exactly as written (case-sensitive): `INV-001` and `inv-001` are two invoices, and the same invoice resent under a new id is a new invoice, paid again if the mandate allows it (the per-invoice and daily limits still apply). The vendor's own invoice number is the natural key; whoever submits invoices must keep it stable. The memory is the ledger file: an agent started on a new or different ledger does not know earlier payments (their `Transfer` logs stay on-chain and `ops status` lists them, but the agent does not match them to invoices on its own).
 - **A payment is `confirmed` as soon as one block includes it** (0 confirmations): right for a local chain, not enough for a public one (see below).
 - **A transaction that stays in the mempool** is reported `pending` forever: there is no fee bump or replacement yet.
 - **`ops verify` reads the chain**, and it also uses the agent's ledger to know which transaction belongs to which invoice: it fails when the receipt's block or log differ from the ledger, or when a transfer to that payee is not matched to an invoice.
 
-Tested on a local chain (`npm test`, 14 tests): crash after broadcast, after signing, while nothing is mined; a transaction dropped from the mempool is resent with the same bytes; two writers racing on one invoice; RPC failures during the resubmission; the nonce taken by another transaction; refusal, conflict, re-judged refusal.
+Tested on a local chain (`npm test`, 17 tests): crash after broadcast, after signing, while nothing is mined; a transaction dropped from the mempool is resent with the same bytes; two writers racing on one invoice; RPC failures during the resubmission; the nonce taken by another transaction; refusal, conflict, re-judged refusal.
 
 **The operator's view** (`npm run ops -- …`, never needs the agent's key): `status` (mandate, every invoice, balances, every Transfer from the payer), `verify <id>` (the receipt against the chain, plus the count of transfers to that payee), `reconcile [<id>]` (brings open rows up to the chain, never signs), `resolve <id> --not-paid --by NAME --note …` (closes a stuck invoice after the operator checked the chain), `mandate …` (writes the mandate).
 

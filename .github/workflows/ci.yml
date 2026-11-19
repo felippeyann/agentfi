@@ -22,6 +22,26 @@ jobs:
       - run: npm run lint --workspaces --if-present
       - run: npm run alpha:test
 
+  # packages/invoice-agent (QDay Aevum Builder Challenge): its tests and its demo, on a local Anvil
+  # chain with a local test token, the way its README tells a tester to run them.
+  invoice-agent:
+    name: Invoice agent (QDay demo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+      - run: npm ci
+      - working-directory: packages/invoice-agent
+        run: npm test
+      - working-directory: packages/invoice-agent
+        run: npm run demo
+
   openapi-spec:
     name: OpenAPI Spec
     runs-on: ubuntu-latest
