@@ -21,6 +21,8 @@
     "alpha:serve": "node scripts/alpha/serve.mjs",
     "alpha:framework": "node scripts/alpha/framework.mjs",
     "alpha:test": "node --test scripts/alpha/guard.test.mjs scripts/alpha/framework-lib.test.mjs",
+    "qday:demo": "npm run demo -w @agentfi/invoice-agent",
+    "qday:test": "npm test -w @agentfi/invoice-agent",
     "demo:claude-mcp": "node scripts/demo-claude-mcp.mjs",
     "preflight": "tsx scripts/preflight.ts",
     "abi": "node scripts/gen-abi.mjs",

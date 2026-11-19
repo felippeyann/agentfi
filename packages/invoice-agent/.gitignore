@@ -1,0 +1,5 @@
+contracts/out/
+contracts/cache/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

@@ -1,0 +1,27 @@
+{
+  "name": "@agentfi/invoice-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QDay Aevum Builder Challenge: an agent pays a vendor's invoice in tUSD8 under an operator mandate, once, with a verifiable receipt (local demo).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "demo": "tsx src/demo.ts",
+    "server": "tsx src/server.ts",
+    "ops": "tsx src/ops.ts",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit -p .",
+    "build:token": "cd contracts && forge build && node ../scripts/gen-token.mjs"
+  },
+  "dependencies": {
+    "viem": "^2.48.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.7.0",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
