@@ -87,14 +87,14 @@ export function judgeInvoice(m: Mandate, inv: Invoice, spentTodayUnits: bigint, 
         allowed: false,
         rule: 'maxPerInvoice',
         reason: `The invoice is for ${formatUnits6(amount)} tUSD8, above the ${m.maxPerInvoice} tUSD8 per invoice the operator approved.`,
-        whatToDo: 'Ask the operator to approve this invoice or raise the limit; the agent will not pay part of it.',
+        whatToDo: 'Ask the operator to raise the limit, then resubmit the same invoice (it is judged again); the agent will not pay part of it.',
       };
     case 'maxDailyVolume':
       return {
         allowed: false,
         rule: 'maxPerDay',
         reason: `Paying ${formatUnits6(amount)} tUSD8 would exceed the ${m.maxPerDay} tUSD8 per day the operator approved (already committed today: ${formatUnits6(spentTodayUnits)}).`,
-        whatToDo: 'Resubmit tomorrow, or ask the operator to raise the daily limit.',
+        whatToDo: 'Resubmit the same invoice on another day (it is judged again), or ask the operator to raise the daily limit.',
       };
     case 'policyExpired':
       return { allowed: false, rule: 'expired', reason: `The operator's mandate expired at ${m.expiresAt}.`, whatToDo: 'Ask the operator to renew the mandate.' };

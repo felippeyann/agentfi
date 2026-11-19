@@ -10,11 +10,57 @@
  *   signed     signed and recorded, maybe not broadcast (a crash can stop between the two)
  *   broadcast  handed to the node; no receipt seen yet
  *   confirmed  mined, success, and the Transfer log matches (payer → payTo, exact amount)
- *   reverted   mined but failed: no money moved; the invoice needs the operator
+ *   stuck      the payer's nonce is used on-chain but this transaction was not found: either another
+ *              transaction took the nonce (no money moved) or the node has not indexed ours. Stays
+ *              OPEN: re-checked on every resubmission and reconcile; never read as "no money moved"
+ *   reverted   mined but failed: no tokens moved; the invoice needs the operator
+ *
+ * ONE agent process per ledger file: `acquireInstanceLock` refuses a second one (two processes
+ * deciding on the same invoice id is how the same invoice gets paid twice).
  */
+import { closeSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
-export type PaymentStatus = 'refused' | 'signed' | 'broadcast' | 'confirmed' | 'reverted';
+export type PaymentStatus = 'refused' | 'signed' | 'broadcast' | 'stuck' | 'confirmed' | 'reverted';
+/** Rows whose money may still move or may have moved: they count against limits and are reconciled. */
+export const OPEN_STATUSES: readonly PaymentStatus[] = ['signed', 'broadcast', 'stuck'];
+
+/**
+ * Exclusive lock for the agent process on a ledger file (`<ledger>.lock` holding the pid). A lock
+ * left by a process that no longer exists (a crash) is taken over. Returns the release function.
+ */
+export function acquireInstanceLock(ledgerPath: string): () => void {
+  const lockPath = `${ledgerPath}.lock`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(lockPath, 'wx');
+      writeSync(fd, String(process.pid));
+      closeSync(fd);
+      return () => {
+        try {
+          if (readFileSync(lockPath, 'utf8') === String(process.pid)) unlinkSync(lockPath);
+        } catch {
+          /* already gone */
+        }
+      };
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      const pid = Number(readFileSync(lockPath, 'utf8'));
+      let alive = false;
+      try {
+        process.kill(pid, 0);
+        alive = true;
+      } catch (err) {
+        alive = (err as NodeJS.ErrnoException).code === 'EPERM';
+      }
+      if (alive && pid !== process.pid) {
+        throw new Error(`another agent process (pid ${pid}) holds the ledger ${ledgerPath}; only one may run (${lockPath})`);
+      }
+      unlinkSync(lockPath); // stale: its process is gone
+    }
+  }
+  throw new Error(`could not take the ledger lock ${lockPath}`);
+}
 
 export interface PaymentRow {
   invoice_id: string;
@@ -41,6 +87,7 @@ export class Ledger {
   constructor(path: string) {
     this.db = new DatabaseSync(path);
     this.db.exec(`
+      PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = FULL;
       CREATE TABLE IF NOT EXISTS payments (
@@ -83,7 +130,12 @@ export class Ledger {
     return Number(r.changes) === 1;
   }
 
-  update(invoiceId: string, fields: Partial<Pick<PaymentRow, 'status' | 'block_number' | 'log_index' | 'reason' | 'what_to_do'>>): void {
+  /** Removes a REFUSED row (nothing was signed for it) so a resubmission can be judged again. */
+  deleteRefused(invoiceId: string): boolean {
+    return Number(this.db.prepare("DELETE FROM payments WHERE invoice_id = ? AND status = 'refused'").run(invoiceId).changes) === 1;
+  }
+
+  update(invoiceId: string, fields: Partial<Pick<PaymentRow, 'status' | 'block_number' | 'log_index' | 'reason' | 'what_to_do' | 'rule'>>): void {
     const keys = Object.keys(fields) as (keyof typeof fields)[];
     if (keys.length === 0) return;
     const set = keys.map((k) => `${k} = ?`).join(', ');
@@ -101,11 +153,11 @@ export class Ledger {
       : this.db.prepare('SELECT at, invoice_id, event, detail FROM events ORDER BY seq').all()) as never;
   }
 
-  /** Base units committed today (UTC) by rows that may move money: confirmed, broadcast or signed. */
+  /** Base units committed today (UTC, by the day the payment was signed) by rows whose money moved or may move. */
   committedToday(now = new Date()): bigint {
     const day = now.toISOString().slice(0, 10);
     const rows = this.db
-      .prepare("SELECT amount FROM payments WHERE status IN ('signed','broadcast','confirmed') AND substr(created_at, 1, 10) = ?")
+      .prepare("SELECT amount FROM payments WHERE status IN ('signed','broadcast','stuck','confirmed') AND substr(created_at, 1, 10) = ?")
       .all(day) as { amount: string }[];
     return rows.reduce((sum, r) => sum + BigInt(r.amount), 0n);
   }

@@ -16,6 +16,8 @@ import {
   http,
   keccak256,
   parseEventLogs,
+  TransactionNotFoundError,
+  TransactionReceiptNotFoundError,
   type Hex,
   type PublicClient,
   type TransactionReceipt,
@@ -84,19 +86,26 @@ export async function broadcast(cfg: ChainConfig, raw: Hex): Promise<'sent' | 'a
   }
 }
 
+/**
+ * The receipt, or null when the node says it has none. Any OTHER failure (timeout, 429, 503, a
+ * node that cannot be reached) is thrown: "the RPC failed" must never be read as "not on-chain".
+ */
 export async function receiptOf(cfg: ChainConfig, hash: Hex): Promise<TransactionReceipt | null> {
   try {
     return await publicClientFor(cfg).getTransactionReceipt({ hash });
-  } catch {
-    return null;
+  } catch (e) {
+    if (e instanceof TransactionReceiptNotFoundError) return null;
+    throw e;
   }
 }
 
-export async function isInMempool(cfg: ChainConfig, hash: Hex): Promise<boolean> {
+/** Whether the node knows the transaction (mined or in its mempool). Transport failures are thrown. */
+export async function isKnownToNode(cfg: ChainConfig, hash: Hex): Promise<boolean> {
   try {
     return (await publicClientFor(cfg).getTransaction({ hash })) !== null;
-  } catch {
-    return false;
+  } catch (e) {
+    if (e instanceof TransactionNotFoundError) return false;
+    throw e;
   }
 }
 

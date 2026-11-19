@@ -16,9 +16,9 @@
  * (same hash: it can be mined at most once); nonce used by something else → needs the operator.
  */
 import type { Hex } from 'viem';
-import { broadcast, isInMempool, nonces, receiptOf, signTransfer, transfersIn, type ChainConfig } from './chain.js';
+import { broadcast, isKnownToNode, nonces, receiptOf, signTransfer, transfersIn, type ChainConfig } from './chain.js';
 import { formatUnits6, invoiceHash, toBaseUnits, type Invoice } from './invoice.js';
-import type { Ledger, PaymentRow } from './ledger.js';
+import { OPEN_STATUSES, type Ledger, type PaymentRow } from './ledger.js';
 import { judgeInvoice, type Mandate } from './mandate.js';
 
 export type FailPoint = 'after-sign' | 'after-broadcast';
@@ -56,8 +56,10 @@ export type Outcome =
   | { outcome: 'refused'; invoiceId: string; rule: string; reason: string; whatToDo: string }
   /** Same invoice id, different content: refused, the original stands. */
   | { outcome: 'conflict'; invoiceId: string; reason: string }
-  /** Mined but failed, or its nonce was taken: no money moved for it, the operator decides. */
-  | { outcome: 'failed'; invoiceId: string; txHash: string | null; reason: string; next: string };
+  /** Mined but reverted: no tokens moved for it, the operator decides. */
+  | { outcome: 'failed'; invoiceId: string; txHash: string | null; reason: string; next: string }
+  /** The payer's nonce is used but this transaction was not found: money may or may not have moved. Do NOT pay again. */
+  | { outcome: 'unresolved'; invoiceId: string; txHash: string; reason: string; next: string };
 
 export interface PayerOptions {
   ledger: Ledger;
@@ -98,11 +100,28 @@ export class InvoicePayer {
           reason: `Invoice ${inv.id} was already received with different content (payee or amount). The first one stands; this one is not paid.`,
         };
       }
-      return this.answerFor(await this.reconcile(existing), true);
+      if (existing.status !== 'refused') return this.answerFor(await this.reconcile(existing), true);
+      // A refused invoice signed nothing: judge it again under today's mandate and limits.
+      const again = judgeInvoice(this.o.mandate, inv, ledger.committedToday());
+      if (!again.allowed) {
+        ledger.update(inv.id, { rule: again.rule, reason: again.reason, what_to_do: again.whatToDo });
+        return { outcome: 'refused', invoiceId: inv.id, rule: again.rule, reason: again.reason, whatToDo: again.whatToDo };
+      }
+      ledger.deleteRefused(inv.id);
+      ledger.event(inv.id, 'refusal-lifted', {});
     }
 
     // Before taking a new nonce, settle what is still open (a signed-but-unsent row holds a nonce too).
-    for (const row of ledger.all()) if (row.status === 'signed' || row.status === 'broadcast') await this.reconcile(row);
+    // A row that cannot be settled right now (RPC down, a rebroadcast refused) does not block new invoices:
+    // its nonce is still skipped by nextNonce, and it is retried on its next resubmission or reconcile.
+    for (const row of ledger.all()) {
+      if (!OPEN_STATUSES.includes(row.status)) continue;
+      try {
+        await this.reconcile(row);
+      } catch (e) {
+        ledger.event(row.invoice_id, 'reconcile-error', { error: e instanceof Error ? e.message.slice(0, 300) : String(e) });
+      }
+    }
 
     const verdict = judgeInvoice(this.o.mandate, inv, ledger.committedToday());
     const amount = toBaseUnits(inv.amount);
@@ -116,8 +135,13 @@ export class InvoicePayer {
     if (!this.o.payerKey) throw new Error('no payer key: this process cannot pay');
     const nonce = await this.nextNonce();
     const signed = await signTransfer(this.o.chain, this.o.payerKey, inv.payTo, amount, nonce);
-    // Write-ahead: the signed transaction is on disk before it can reach the chain.
-    ledger.insert({ ...base, status: 'signed', rule: null, reason: null, what_to_do: null, nonce, raw_tx: signed.raw, tx_hash: signed.hash, block_number: null, log_index: null });
+    // Write-ahead: the signed transaction is on disk before it can reach the chain. If the id is
+    // already taken (another writer got there first), these signed bytes are discarded, never sent.
+    const inserted = ledger.insert({ ...base, status: 'signed', rule: null, reason: null, what_to_do: null, nonce, raw_tx: signed.raw, tx_hash: signed.hash, block_number: null, log_index: null });
+    if (!inserted) {
+      ledger.event(inv.id, 'discarded-duplicate-signature', { txHash: signed.hash });
+      return this.answerFor(await this.reconcile(ledger.get(inv.id)!), true);
+    }
     ledger.event(inv.id, 'signed', { txHash: signed.hash, nonce });
     this.maybeFail('after-sign');
 
@@ -136,19 +160,25 @@ export class InvoicePayer {
    */
   async reconcile(row: PaymentRow, opts: { wait?: boolean } = {}): Promise<PaymentRow> {
     const { ledger, chain } = this.o;
-    if (row.status !== 'signed' && row.status !== 'broadcast') return row;
+    if (!OPEN_STATUSES.includes(row.status)) return row;
     const hash = row.tx_hash as Hex;
+    // Nonce first, then the receipt: a payment mined in between is then seen by the receipt read.
+    // Any RPC failure is thrown (the row stays as it is); only the node's explicit "not found" counts.
+    const { latest } = await nonces(chain, this.o.mandate.payer);
     let receipt = await receiptOf(chain, hash);
-    if (!receipt && !(await isInMempool(chain, hash))) {
-      const { latest } = await nonces(chain, this.o.mandate.payer);
+    if (!receipt && !(await isKnownToNode(chain, hash))) {
       if (latest > (row.nonce ?? -1)) {
-        // The nonce was consumed, but not by our transaction: it can never be mined now.
-        ledger.update(row.invoice_id, {
-          status: 'reverted',
-          reason: `Nonce ${row.nonce} was used by another transaction; ${hash} can never be mined. No money moved for this invoice.`,
-          what_to_do: 'Operator: check the payer account history before approving a new payment for this invoice.',
-        });
-        ledger.event(row.invoice_id, 'nonce-superseded', { txHash: hash });
+        // Our nonce is used, but the node does not know our transaction. Either another transaction took
+        // the nonce (then nothing moved for this invoice) or this node has not indexed ours. We cannot tell:
+        // the row stays OPEN and is checked again every time.
+        if (row.status !== 'stuck') {
+          ledger.update(row.invoice_id, {
+            status: 'stuck',
+            reason: `The payer's nonce ${row.nonce} is used on-chain, but transaction ${hash} was not found by this node. Either another transaction used the nonce (then no money moved for this invoice) or the node has not indexed this one yet.`,
+            what_to_do: `Do NOT pay this invoice again. Operator: look up the payer's transaction with nonce ${row.nonce} in an explorer; run reconcile again later.`,
+          });
+          ledger.event(row.invoice_id, 'stuck', { txHash: hash, nonce: row.nonce, latest });
+        }
         return ledger.get(row.invoice_id)!;
       }
       // Never reached the node (crash before broadcast, or dropped): send the SAME bytes again.
@@ -198,6 +228,8 @@ export class InvoicePayer {
       }
       case 'refused':
         return { outcome: 'refused', invoiceId: row.invoice_id, rule: row.rule ?? '', reason: row.reason ?? '', whatToDo: row.what_to_do ?? '' };
+      case 'stuck':
+        return { outcome: 'unresolved', invoiceId: row.invoice_id, txHash: row.tx_hash!, reason: row.reason ?? '', next: row.what_to_do ?? '' };
       case 'signed':
       case 'broadcast':
         return {
@@ -230,7 +262,7 @@ export class InvoicePayer {
 
   private async nextNonce(): Promise<number> {
     const { pending } = await nonces(this.o.chain, this.o.mandate.payer);
-    const open = this.o.ledger.all().filter((r) => (r.status === 'signed' || r.status === 'broadcast') && r.nonce !== null);
+    const open = this.o.ledger.all().filter((r) => OPEN_STATUSES.includes(r.status) && r.nonce !== null);
     return Math.max(pending, ...open.map((r) => r.nonce! + 1));
   }
 

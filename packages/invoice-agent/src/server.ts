@@ -15,7 +15,7 @@ import { getAddress } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { loadConfig } from './config.js';
 import { InvoiceError, parseInvoice } from './invoice.js';
-import { Ledger } from './ledger.js';
+import { acquireInstanceLock, Ledger } from './ledger.js';
 import { FailPointError, InvoicePayer } from './payer.js';
 
 const cfg = loadConfig();
@@ -23,6 +23,16 @@ if (!cfg.payerKey) throw new Error('INVOICE_PAYER_KEY is not set: the agent need
 if (getAddress(privateKeyToAccount(cfg.payerKey).address) !== cfg.mandate.payer) {
   throw new Error(`INVOICE_PAYER_KEY is not the mandate's payer ${cfg.mandate.payer}`);
 }
+// One agent process per ledger: a second one would decide on the same invoice ids (the double payment).
+let releaseLock: () => void;
+try {
+  releaseLock = acquireInstanceLock(cfg.ledgerPath);
+} catch (e) {
+  console.error(`[agent] refusing to start: ${e instanceof Error ? e.message : String(e)}`);
+  process.exit(3);
+}
+process.on('exit', releaseLock);
+for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, () => process.exit(0));
 const ledger = new Ledger(cfg.ledgerPath);
 const payer = new InvoicePayer({ ledger, chain: cfg.chain, mandate: cfg.mandate, payerKey: cfg.payerKey, ...(cfg.failAt ? { failAt: cfg.failAt } : {}) });
 

@@ -83,11 +83,17 @@ async function main(): Promise<number> {
     const block = await publicClientFor(cfg.chain).getBlock({ blockNumber: receipt.blockNumber });
     const match = transfersIn(cfg.chain, receipt).filter((t) => t.from === m.payer && t.to === getAddress(row.pay_to) && t.value === BigInt(row.amount));
     const all = await transfersFrom(cfg.chain, m.payer, row.pay_to);
-    const ok = receipt.status === 'success' && match.length === 1;
+    // The chain is the judge, not the agent's ledger: every transfer to this payee must belong to exactly one paid invoice.
+    const paidRows = ledger.all().filter((r) => r.pay_to.toLowerCase() === row.pay_to.toLowerCase() && r.tx_hash && r.status !== 'refused');
+    const known = new Set(paidRows.map((r) => r.tx_hash!.toLowerCase()));
+    const unexplained = all.filter((t) => !known.has(t.txHash.toLowerCase()));
+    const sameAsLedger = row.status !== 'confirmed' || (row.block_number === receipt.blockNumber.toString() && row.log_index === match[0]?.logIndex);
+    const ok = receipt.status === 'success' && match.length === 1 && sameAsLedger && unexplained.length === 0;
     console.log(`${id}: ${ok ? 'VERIFIED' : 'NOT VERIFIED'} on chain ${cfg.chain.chainId}`);
     console.log(`  tx ${row.tx_hash} · block ${receipt.blockNumber} (${new Date(Number(block.timestamp) * 1000).toISOString()}) · status ${receipt.status}`);
     console.log(`  Transfer ${m.payer} → ${row.pay_to}: ${match.map((t) => `${formatUnits6(t.value)} tUSD8 (log ${t.logIndex})`).join(', ') || 'none matching'}`);
-    console.log(`  all transfers from the payer to this payee so far: ${all.length} (${all.map((t) => formatUnits6(t.value)).join(' + ') || '-'} tUSD8)`);
+    if (!sameAsLedger) console.log(`  the ledger says block ${row.block_number} log ${row.log_index}; the chain says block ${receipt.blockNumber} log ${match[0]?.logIndex ?? '-'}`);
+    console.log(`  all transfers from the payer to this payee: ${all.length} (${all.map((t) => formatUnits6(t.value)).join(' + ') || '-'} tUSD8), each matched to one invoice: ${unexplained.length === 0 ? 'yes' : `NO, ${unexplained.length} unexplained: ${unexplained.map((t) => t.txHash).join(', ')}`}`);
     return ok ? 0 : 1;
   }
 

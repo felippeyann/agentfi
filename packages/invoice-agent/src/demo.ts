@@ -169,6 +169,17 @@ async function main() {
   check((again as { outcome?: string }).outcome === 'replayed' && (again as { receipt?: { txHash: string } }).receipt?.txHash === firstTx, 'same receipt (same tx hash), outcome replayed');
   const conflict = await send(inv('INV-001', '9'));
   show('INV-001 again but for 9 tUSD8', conflict);
+  const second = await new Promise<{ code: number | null; text: string }>((resolve) => {
+    const c = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
+      cwd: PKG, env: { ...process.env, ...env, INVOICE_PAYER_KEY: KEYS.payer, INVOICE_PORT: String(AGENT_PORT + 1), INVOICE_FAIL_AT: '' }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let text = '';
+    c.stderr!.on('data', (d) => (text += d));
+    c.on('exit', (code) => resolve({ code, text }));
+  });
+  const why = /another agent process[^\n]*/.exec(second.text)?.[0] ?? second.text.trim().split('\n').pop();
+  out(`  a second agent process on the same ledger → refused to start: ${why}`);
+  check(second.code !== 0 && /another agent process/.test(second.text), 'only one agent process may decide on these invoices');
   let toVendor = await transfersFrom(cfg, PAYER, VENDOR);
   check(toVendor.length === 1 && toVendor[0]!.value === 8_000_000n, `one transfer payer → acme on-chain (${toVendor.length}), 8 tUSD8`);
   check((await balanceOf(cfg, PAYER)) === 92_000_000n, 'payer balance 100 → 92');
