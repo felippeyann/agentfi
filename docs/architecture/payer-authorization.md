@@ -289,6 +289,7 @@ overtaking the kill switch or a concurrent tightening with a racing PATCH.
 | K5 | `GET /v1/public/transactions/:id`, `/v1/agents/:id/manifest`, `/trust-report`, `/erc8004.json`, `/v1/jobs/:id/feedback.json`, `/v1/agents/search` are readable without a key (ids are unguessable cuids, content is public by design). | `auth.ts` | Public discovery / ERC-8004 consumers need them. |
 | K6 | `PATCH /v1/agents/me/manifest` lets an agent publish arbitrary JSON under its own id (read by peers via `get_agent_manifest`; peers must treat it as untrusted). | `agents.ts` | Product feature. |
 | K7 | The billing checkout and portal routes return Stripe URLs for the agent (a human pays); there is no key rotation route. | `billing.ts` | Product feature. |
+| K8 | The agent key can fill an EMPTY `allowedContracts`: `classifyPolicyChange` (`whitelistLoosens`) reads an empty list as "any contract", as `validateTransaction` does, so `[] -> [X]` is a tightening; the batch route (`batch-calldata.ts`) reads an empty list as "no non-transfer call" while a daily limit applies, so the same change reopens uncounted batch calls to X (not an outflow for `maxOutflowPerTxUsd`). Found by the independent review of 2026-11-18 (alpha payer reference). | `policy-authority.ts`, `api/routes/transactions.ts` batch route | **Owner decision pending:** treat empty -> non-empty `allowedContracts` as a loosening (operator only); it changes what existing agents may do. Meanwhile `x402:ops payer` notes it (`AGENT_CAN_LIST_CONTRACTS`) and flags a filled list (`CONTRACT_CALLS_OPEN`). |
 
 ## 6. Keeping this page true
 
@@ -305,6 +306,8 @@ registered in `admin.ts` (the only file whose handlers it checks for the guard).
 
 ## 7. Follow-ups (not in this change)
 
+Status on 2026-11-18 (alpha payer reference, [docs/alpha/payer-setup.md](../alpha/payer-setup.md) §7): F1 does not affect the x402 payer (pay-resource re-reads the policy under the locks; F1 is the legacy transactions routes only, which the reference payer policy refuses); F2 affects a payer only if a pre-existing row-less agent is used as one (`x402:ops payer` flags it as `NO_POLICY_ROW`); F4 is fixed (documentation only).
+
 - F1: re-run the static policy checks (caps, allowlists, cooldown) under the
   Agent lock on the legacy `/v1/transactions/*` path (section 3.2). Needs the
   check inputs passed into `createTransactionWithVolume` from the 12
@@ -317,7 +320,6 @@ registered in `admin.ts` (the only file whose handlers it checks for the guard).
   (`scripts/e2e-issue-81.mjs`, `smoke-dev.mjs`, `demo-claude-mcp.mjs`,
   `examples/a2a-collab`, `examples/delegation-chain`), and the registration docs
   say the default row applies.
-- F4: the stdio MCP `update_policy` description (`packages/mcp-server/src/tools/agent.ts`)
-  does not mention the first-policy rule (an agent without a policy row is judged
-  against the registration defaults). Left to the MCP packaging front:
-  `packages/mcp-server/src` changed on main since this branch was cut.
+- F4 (done 2026-11-18): the stdio MCP `update_policy` description (`packages/mcp-server/src/tools/agent.ts`)
+  did not mention the first-policy rule (an agent without a policy row is judged
+  against the registration defaults); it now says so, and that an empty list is unrestricted.

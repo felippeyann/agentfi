@@ -6,6 +6,7 @@ Welcome to the AgentFi documentation. AgentFi is a **developer alpha**: a self-h
 
 ### 🚀 Alpha: try it (start here)
 - **[Alpha quickstart](alpha/quickstart.md)** — the first flow, with every run labelled SIMULATION / LOCAL FORK / PUBLIC TESTNET.
+- **[Setting up a payer agent](alpha/payer-setup.md)** — the credential the agent gets, the reference policy, what the key can do besides buying, `x402:ops payer` to check it, and when the operator steps in.
 - **[Compatibility matrix](integrations/compatibility.md)** — what was tested per framework, version and transport.
 - **[x402 payments](architecture/x402-payments.md)** — job-scoped budget, policy, the payment state machine, reconciliation.
 - **[x402 public-testnet proof package](operations/x402-testnet-proof.md)** — prepared, **not executed**; everything x402 so far ran on a local Anvil fork.
