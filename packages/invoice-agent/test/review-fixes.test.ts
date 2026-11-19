@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { createPublicClient, createWalletClient, getAddress, http, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { makeChain, transfersFrom, type ChainConfig } from '../src/chain.js';
+import { assertNodeChain, makeChain, transfersFrom, type ChainConfig } from '../src/chain.js';
 import { LOCAL_TEST_USD8_ABI, LOCAL_TEST_USD8_BYTECODE } from '../src/generated/local-test-usd8.js';
 import type { Invoice } from '../src/invoice.js';
 import { acquireInstanceLock, Ledger } from '../src/ledger.js';
@@ -162,6 +162,36 @@ describe('review P1-b: chain reads that fail or cannot see the payment', () => {
     const r = await w.agent().submit(invoice('INV-R2', '8'));
     assert.equal(r.outcome, 'recovered');
     assert.equal((await w.sent()).length, 1);
+  });
+
+  it('a NEW payment whose receipt cannot be read after broadcast: PENDING with the tx hash, never a bare error', async () => {
+    const w = await world(proxyUrl);
+    failing.add('eth_getTransactionReceipt').add('eth_getTransactionByHash');
+    let r;
+    try {
+      r = await w.agent().submit(invoice('INV-R7', '4'));
+    } finally {
+      failing.clear();
+    }
+    assert.equal(r.outcome, 'pending');
+    const onChain = await w.sent();
+    assert.equal(onChain.length, 1, 'the money did move');
+    assert.equal((r as { txHash: string }).txHash, onChain[0]!.txHash, 'the answer names the transaction that moved it');
+    assert.match((r as { note: string }).note, /Do NOT pay this invoice again/);
+    const again = await w.agent().submit(invoice('INV-R7', '4'));
+    assert.ok(again.outcome === 'recovered' || again.outcome === 'replayed', again.outcome);
+    assert.equal((await w.sent()).length, 1);
+  });
+
+  it('a node serving another chain than the mandate: refused before anything is signed (review 2, P1)', async () => {
+    const w = await world();
+    const wrong: ChainConfig = { ...w.direct, chainId: 44005 };
+    await assert.rejects(assertNodeChain(wrong), /serves chain 31337, but the mandate is for chain 44005/);
+    const agent = new InvoicePayer({ ledger: new Ledger(join(mkdtempSync(join(tmpdir(), 'invoice-agent-chain-')), 'l.sqlite')), chain: wrong,
+      mandate: { chainId: 44005, token: w.token, payer: PAYER, vendor: { id: 'acme', name: 'Acme', address: VENDOR }, maxPerInvoice: '10', maxPerDay: '50', expiresAt: null, approvedBy: 't', approvedAt: '' },
+      payerKey: PAYER_KEY });
+    await assert.rejects(agent.submit(invoice('INV-R8', '1')), /serves chain 31337/);
+    assert.equal((await w.sent()).length, 0, 'nothing was sent');
   });
 
   it('the payer nonce taken by another transaction: the invoice is UNRESOLVED (open), never "no money moved"', async () => {

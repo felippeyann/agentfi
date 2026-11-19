@@ -153,13 +153,28 @@ export class InvoicePayer {
     ledger.event(inv.id, 'signed', { txHash: signed.hash, nonce });
     this.maybeFail('after-sign');
 
-    const sent = await broadcast(this.o.chain, signed.raw);
-    ledger.update(inv.id, { status: 'broadcast' });
-    ledger.event(inv.id, 'broadcast', { result: sent });
-    this.maybeFail('after-broadcast');
-
-    const row = await this.reconcile(ledger.get(inv.id)!, { wait: true });
-    return this.answerFor(row, false);
+    let stage = 'broadcasting it';
+    try {
+      const sent = await broadcast(this.o.chain, signed.raw);
+      ledger.update(inv.id, { status: 'broadcast' });
+      ledger.event(inv.id, 'broadcast', { result: sent });
+      this.maybeFail('after-broadcast');
+      stage = 'waiting for its receipt';
+      const row = await this.reconcile(ledger.get(inv.id)!, { wait: true });
+      return this.answerFor(row, false);
+    } catch (e) {
+      if (e instanceof FailPointError) throw e;
+      // The signed transaction may have reached the chain: never answer as if nothing happened.
+      const msg = e instanceof Error ? e.message.split('\n')[0]! : String(e);
+      ledger.event(inv.id, 'rpc-error-after-sign', { stage, txHash: signed.hash, error: msg });
+      return {
+        outcome: 'pending',
+        invoiceId: inv.id,
+        txHash: signed.hash,
+        note: `The payment was signed and may already be on-chain, but reading the chain failed while ${stage} (${msg}). Do NOT pay this invoice again, under this id or another.`,
+        next: 'Resubmit this same invoice id (it is reconciled, never paid twice) or run `npm run ops -- reconcile` once the RPC answers.',
+      };
+    }
   }
 
   /**

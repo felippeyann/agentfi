@@ -10,7 +10,7 @@
  * Environment: INVOICE_RPC_URL, INVOICE_MANDATE, INVOICE_LEDGER (as the agent).
  */
 import { getAddress, type Hex } from 'viem';
-import { balanceOf, publicClientFor, receiptOf, transfersFrom, transfersIn } from './chain.js';
+import { assertNodeChain, balanceOf, publicClientFor, receiptOf, transfersFrom, transfersIn } from './chain.js';
 import { loadConfig } from './config.js';
 import { formatUnits6 } from './invoice.js';
 import { Ledger } from './ledger.js';
@@ -51,6 +51,7 @@ async function main(): Promise<number> {
   const ledger = new Ledger(cfg.ledgerPath);
   const m = cfg.mandate;
   ledger.bindContext({ chainId: cfg.chain.chainId, token: m.token, payer: m.payer });
+  await assertNodeChain(cfg.chain);
 
   if (cmd === 'status') {
     console.log(`Mandate (approved by ${m.approvedBy} at ${m.approvedAt}): pay ${m.vendor.name} (${m.vendor.id}) at ${m.vendor.address}, ≤ ${m.maxPerInvoice} tUSD8 per invoice, ≤ ${m.maxPerDay} per day${m.expiresAt ? `, until ${m.expiresAt}` : ''}`);

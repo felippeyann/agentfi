@@ -13,15 +13,17 @@ git clone https://github.com/felippeyann/agentfi.git
 cd agentfi
 npm ci                 # the whole monorepo, a few minutes: the mandate imports AgentFi's policy evaluator from packages/backend
 cd packages/invoice-agent
-npm run demo           # ~40 s: starts anvil and the agent, runs the scenario, checks invariants, stops everything
-npm test               # 19 tests on a local chain: lost response, races, RPC failures, the lock, the key guard, mandate and ledger checks, ~15 s
+npm run demo           # 20-40 s: starts anvil and the agent, runs the scenario, checks invariants, stops everything
+npm test               # 21 tests on a local chain: lost response, races, RPC failures, the lock, the key and chain guards, mandate and ledger checks, 10-20 s
 ```
 
-**What to expect.** The demo prints each step (below) with the agent's answer, the operator's `ops verify` / `ops status` output and a `✓` per invariant, and ends with `OK: every invariant held.` and exit code 0 (a broken invariant prints `✗ INVARIANT BROKEN` and exits 1). Node prints `ExperimentalWarning: SQLite is an experimental feature`: the ledger uses Node's built-in `node:sqlite`; the warning is expected.
+**What to expect.** The demo prints each step (below) with the agent's answer, the operator's `ops verify` / `ops status` output and a `✓` per invariant, and ends with `OK: every invariant held.` and exit code 0 (a broken invariant prints `✗ INVARIANT BROKEN` and exits 1). `npm test` may print `ExperimentalWarning: SQLite is an experimental feature`: the ledger uses Node's built-in `node:sqlite`; the warning is expected.
 
 **Where the receipt is.** The agent answers `POST /invoices` with JSON; when paid, `receipt` holds `invoiceId`, `invoiceHash`, `chainId`, `token`, `from`, `to`, `amount` (and `amountUnits`, 6 decimals), `txHash`, `blockNumber`, `logIndex`. The demo prints INV-001's receipt in full and checks it with `npm run ops -- verify INV-001`, which reads the transaction and its `Transfer` log from the chain. The same receipt is kept in the ledger (a SQLite file, one row per invoice, plus an event log). The transcript, ledger and mandate go to a temporary folder printed at the start and at the end (`DEMO_TRANSCRIPT=<file>` chooses the transcript path). Anvil is stopped at the end, so the chain itself does not outlive the run. Ports: Anvil 8566, agent 8787 (`DEMO_ANVIL_PORT`, `DEMO_AGENT_PORT`).
 
-**The keys are Anvil's public development keys** (from Foundry's published `test … junk` mnemonic): fine on a local chain, swept within seconds on any real one. The agent refuses them, and the simulated crashes (`INVOICE_FAIL_AT`), on any chain other than Anvil's 31337.
+**The keys are Anvil's public development keys** (from Foundry's published `test … junk` mnemonic): fine on a local chain, swept within seconds on any real one. The agent refuses them, and the simulated crashes (`INVOICE_FAIL_AT`), when the mandate names any chain other than Anvil's 31337; and the agent and `ops` refuse to run, and the agent to sign, when the node behind `INVOICE_RPC_URL` serves another chain than the mandate's (`eth_chainId`), so a 31337 mandate pointed at a public RPC stops before anything is signed.
+
+**Running the agent and `ops` yourself** (outside the demo, against your own Anvil): `INVOICE_RPC_URL` (the node), `INVOICE_MANDATE` (the mandate JSON, written with `npm run ops -- mandate …`), `INVOICE_LEDGER` (the SQLite ledger; a `.lock` file appears next to it while the agent runs), and for the agent only `INVOICE_PAYER_KEY` and `INVOICE_PORT` (default 8787). Then `npm run server` and `npm run ops -- status | verify <id> | reconcile`. Inside the demo, `ops verify INV-001` runs while Anvil is still up.
 
 A 3-minute walkthrough of the same run: [DEMO-SCRIPT.md](DEMO-SCRIPT.md).
 
@@ -52,7 +54,8 @@ End state, checked by the script: 4 transfers from the payer (8 + 3 + 2 + 1 = 14
 | unknown to the node, the payer's nonce still unused | rebroadcast the **same signed bytes** (same hash: can be mined at most once) | moves once |
 | unknown to the node, but the payer's nonce is used | `unresolved` (row `stuck`, kept open and checked again every time): "Do NOT pay this invoice again", look up the payer's transaction at that nonce. Another transaction may have used the nonce, or the node has not indexed ours: the agent cannot tell, so it never says "no money moved". Once the operator has checked, `ops resolve <id> --not-paid --by NAME --note …` closes it as not paid (it refuses if the transaction has appeared on-chain meanwhile) | unknown |
 | mined but reverted | `failed`: no tokens moved, operator decides | none |
-| the RPC fails (timeout, 5xx, …) | an error; the row is left as it was, nothing is decided from a failed read | — |
+| the RPC fails (timeout, 5xx, …) on a resubmission | an error; the row is left as it was, nothing is decided from a failed read | — |
+| the RPC fails while a NEW payment is broadcast or its receipt awaited | `pending` + tx hash: "may already be on-chain … Do NOT pay this invoice again, under this id or another"; resubmitting the same id reconciles it | maybe moved, once |
 
 Before signing a new invoice, open rows are reconciled first (one that cannot be settled right now does not block new invoices), and a new nonce never reuses the nonce of a signed-but-unsent payment (tested). If the id was taken between the check and the write, the freshly signed bytes are discarded, never sent. A refused invoice signed nothing, so a resubmission is judged again (it is paid if the operator has since raised the limit).
 
@@ -65,7 +68,7 @@ Before signing a new invoice, open rows are reconciled first (one that cannot be
 - **A transaction that stays in the mempool** is reported `pending` forever: there is no fee bump or replacement yet.
 - **`ops verify` reads the chain**, and it also uses the agent's ledger to know which transaction belongs to which invoice: it fails when the receipt's block or log differ from the ledger, or when a transfer to that payee is not matched to an invoice.
 
-Tested on a local chain (`npm test`, 19 tests): crash after broadcast, after signing, while nothing is mined; a transaction dropped from the mempool is resent with the same bytes; two writers racing on one invoice; RPC failures during the resubmission; the nonce taken by another transaction; refusal, conflict, re-judged refusal.
+Tested on a local chain (`npm test`, 21 tests): crash after broadcast, after signing, while nothing is mined; a transaction dropped from the mempool is resent with the same bytes; two writers racing on one invoice; RPC failures during the resubmission and right after a new payment is sent; a node serving another chain; the nonce taken by another transaction; refusal, conflict, re-judged refusal.
 
 **The operator's view** (`npm run ops -- …`, never needs the agent's key): `status` (mandate, every invoice, balances, every Transfer from the payer), `verify <id>` (the receipt against the chain, plus the count of transfers to that payee), `reconcile [<id>]` (brings open rows up to the chain, never signs), `resolve <id> --not-paid --by NAME --note …` (closes a stuck invoice after the operator checked the chain), `mandate …` (writes the mandate).
 

@@ -52,8 +52,20 @@ export interface SignedTransfer {
   nonce: number;
 }
 
+/**
+ * The node behind INVOICE_RPC_URL must serve the mandate's chain: the key guard, the receipts and the
+ * signatures all assume it. Checked at startup (agent and ops) and before every signature.
+ */
+export async function assertNodeChain(cfg: ChainConfig): Promise<void> {
+  const actual = await publicClientFor(cfg).getChainId();
+  if (actual !== cfg.chainId) {
+    throw new Error(`the node at ${cfg.rpcUrl} serves chain ${actual}, but the mandate is for chain ${cfg.chainId}: nothing is signed or reported against the wrong chain`);
+  }
+}
+
 /** Signs `token.transfer(to, amount)` from the payer key with the given nonce; nothing is sent. */
 export async function signTransfer(cfg: ChainConfig, payerKey: Hex, to: string, amount: bigint, nonce: number): Promise<SignedTransfer> {
+  await assertNodeChain(cfg);
   const account = privateKeyToAccount(payerKey);
   const client = publicClientFor(cfg);
   const data = encodeFunctionData({ abi: ERC20_ABI, functionName: 'transfer', args: [getAddress(to), amount] });

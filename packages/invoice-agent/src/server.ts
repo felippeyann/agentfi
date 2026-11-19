@@ -13,6 +13,7 @@
 import { createServer } from 'node:http';
 import { getAddress } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import { assertNodeChain } from './chain.js';
 import { loadConfig } from './config.js';
 import { InvoiceError, parseInvoice } from './invoice.js';
 import { acquireInstanceLock, Ledger } from './ledger.js';
@@ -73,6 +74,13 @@ const server = createServer(async (req, res) => {
     return json(res, 500, { error: e instanceof Error ? e.message : String(e) });
   }
 });
+
+try {
+  await assertNodeChain(cfg.chain);
+} catch (e) {
+  console.error(`[agent] refusing to start: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`);
+  process.exit(4);
+}
 
 server.listen(cfg.port, '127.0.0.1', () => {
   console.log(`[agent] listening on http://127.0.0.1:${cfg.port} · payer ${cfg.mandate.payer} · vendor ${cfg.mandate.vendor.name} ${cfg.mandate.vendor.address} · ≤ ${cfg.mandate.maxPerInvoice} tUSD8/invoice${cfg.failAt ? ` · FAIL_AT=${cfg.failAt}` : ''}`);
