@@ -4,3 +4,4 @@ contracts/cache/
 *.sqlite-shm
 *.sqlite-wal
 *.sqlite.lock
+.sessions/

@@ -19,7 +19,13 @@ import { InvoiceError, parseInvoice } from './invoice.js';
 import { acquireInstanceLock, Ledger } from './ledger.js';
 import { FailPointError, InvoicePayer } from './payer.js';
 
-const cfg = loadConfig();
+let cfg: ReturnType<typeof loadConfig>;
+try {
+  cfg = loadConfig();
+} catch (e) {
+  console.error(`[agent] refusing to start: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`);
+  process.exit(3);
+}
 if (!cfg.payerKey) throw new Error('INVOICE_PAYER_KEY is not set: the agent needs its own key to pay');
 if (getAddress(privateKeyToAccount(cfg.payerKey).address) !== cfg.mandate.payer) {
   throw new Error(`INVOICE_PAYER_KEY is not the mandate's payer ${cfg.mandate.payer}`);

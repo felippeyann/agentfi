@@ -23,6 +23,7 @@ import {
   type TransactionReceipt,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import type { ConfirmRule } from './finality.js';
 import { LOCAL_TEST_USD8_ABI } from './generated/local-test-usd8.js';
 
 export const ERC20_ABI = LOCAL_TEST_USD8_ABI;
@@ -31,6 +32,12 @@ export interface ChainConfig {
   rpcUrl: string;
   chainId: number;
   token: string;
+  /** When a payment counts as confirmed (see finality.ts). Default: inclusion on 31337, finalized elsewhere. */
+  confirm?: ConfirmRule;
+  /** Block explorer base URL (receipts link to `<explorer>/tx/<hash>`). */
+  explorerUrl?: string;
+  /** First block the operator's Transfer counts read (default 0). */
+  logsFromBlock?: bigint;
 }
 
 export function makeChain(cfg: ChainConfig) {
@@ -153,16 +160,27 @@ export function transfersIn(cfg: ChainConfig, receipt: TransactionReceipt): Tran
   }));
 }
 
-/** Every token Transfer from `from` (optionally to `to`) since block 0: the operator's independent count. */
+/**
+ * Every token Transfer from `from` (optionally to `to`) since `cfg.logsFromBlock` (block 0 by
+ * default; on a public chain, a block before the payer's first payment): the operator's independent
+ * count. Read in windows of `LOG_WINDOW` blocks, which public RPCs accept.
+ */
+const LOG_WINDOW = 50_000n;
 export async function transfersFrom(cfg: ChainConfig, from: string, to?: string): Promise<TransferLog[]> {
-  const logs = await publicClientFor(cfg).getContractEvents({
-    address: getAddress(cfg.token),
-    abi: ERC20_ABI,
-    eventName: 'Transfer',
-    args: { from: getAddress(from), ...(to ? { to: getAddress(to) } : {}) },
-    fromBlock: 0n,
-    toBlock: 'latest',
-  });
+  const client = publicClientFor(cfg);
+  const head = await client.getBlockNumber({ cacheTime: 0 });
+  const logs = [];
+  for (let start = cfg.logsFromBlock ?? 0n; start <= head; start += LOG_WINDOW) {
+    const end = start + LOG_WINDOW - 1n < head ? start + LOG_WINDOW - 1n : head;
+    logs.push(...(await client.getContractEvents({
+      address: getAddress(cfg.token),
+      abi: ERC20_ABI,
+      eventName: 'Transfer',
+      args: { from: getAddress(from), ...(to ? { to: getAddress(to) } : {}) },
+      fromBlock: start,
+      toBlock: end,
+    })));
+  }
   return logs.map((l) => ({
     txHash: l.transactionHash!,
     blockNumber: l.blockNumber!,

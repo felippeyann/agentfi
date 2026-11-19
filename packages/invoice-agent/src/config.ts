@@ -1,6 +1,7 @@
 /** Configuration from the environment, shared by the server and the operator CLI. */
 import type { Hex } from 'viem';
 import { mnemonicToAccount, privateKeyToAccount } from 'viem/accounts';
+import { parseConfirmRule } from './finality.js';
 import { loadMandate, type Mandate } from './mandate.js';
 import type { ChainConfig } from './chain.js';
 import type { FailPoint } from './payer.js';
@@ -48,6 +49,15 @@ export function loadConfig(): Config {
     }
     if (failAt) throw new Error(`INVOICE_FAIL_AT (simulated crashes) is accepted only on a local Anvil chain (${ANVIL_CHAIN_ID})`);
   }
+  const confirmEnv = process.env['INVOICE_CONFIRMATION']?.trim();
+  const confirm = confirmEnv ? parseConfirmRule(confirmEnv) : undefined;
+  if (confirm?.kind === 'inclusion' && mandate.chainId !== ANVIL_CHAIN_ID) {
+    throw new Error(`INVOICE_CONFIRMATION=inclusion is accepted only on a local Anvil chain (${ANVIL_CHAIN_ID}): on a public chain one block is not a confirmation`);
+  }
+  const known = KNOWN_NETWORKS[mandate.chainId];
+  const explorerUrl = process.env['INVOICE_EXPLORER_URL']?.trim() || known?.explorerUrl;
+  const fromEnv = process.env['INVOICE_LOGS_FROM_BLOCK']?.trim();
+  if (fromEnv && !/^\d+$/.test(fromEnv)) throw new Error('INVOICE_LOGS_FROM_BLOCK must be a block number');
   return {
     rpcUrl: need('INVOICE_RPC_URL'),
     mandatePath,
@@ -56,6 +66,29 @@ export function loadConfig(): Config {
     payerKey: key ? (key as Hex) : undefined,
     failAt: (failAt || undefined) as FailPoint | undefined,
     mandate,
-    chain: { rpcUrl: need('INVOICE_RPC_URL'), chainId: mandate.chainId, token: mandate.token },
+    chain: {
+      rpcUrl: need('INVOICE_RPC_URL'),
+      chainId: mandate.chainId,
+      token: mandate.token,
+      ...(confirm ? { confirm } : {}),
+      ...(explorerUrl ? { explorerUrl } : {}),
+      ...(fromEnv ? { logsFromBlock: BigInt(fromEnv) } : {}),
+    },
   };
 }
+
+/**
+ * Public networks this package knows, from the official QDay Builder Challenge page
+ * (https://qday.io/builder-challenge) and its "Add QDay Aevum" wiki page, read 2026-11-19.
+ */
+export const KNOWN_NETWORKS: Record<number, { name: string; rpcUrl: string; explorerUrl: string; gasSymbol: string; tUSD8: string; tUSD8Decimals: number; faucet: string }> = {
+  44005: {
+    name: 'QDay Aevum Testnet',
+    rpcUrl: 'https://rpc-test.qday.info',
+    explorerUrl: 'https://explorer-test.qday.info',
+    gasSymbol: 'tQDAY',
+    tUSD8: '0x456569838f1d43009A91ebA4263147Afd7233483',
+    tUSD8Decimals: 6,
+    faucet: 'https://faucet.qday.info/en',
+  },
+};

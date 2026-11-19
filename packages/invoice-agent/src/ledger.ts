@@ -9,6 +9,8 @@
  *   refused    the mandate refused it; nothing was signed
  *   signed     signed and recorded, maybe not broadcast (a crash can stop between the two)
  *   broadcast  handed to the node; no receipt seen yet
+ *   included   mined in a block, Transfer matches, but the block does not satisfy the confirmation rule yet
+ *              (finality.ts): still OPEN, re-checked (it can leave the canonical chain)
  *   confirmed  mined, success, and the Transfer log matches (payer → payTo, exact amount)
  *   stuck      the payer's nonce is used on-chain but this transaction was not found: either another
  *              transaction took the nonce (no money moved) or the node has not indexed ours. Stays
@@ -20,9 +22,9 @@
  */
 import { DatabaseSync } from 'node:sqlite';
 
-export type PaymentStatus = 'refused' | 'signed' | 'broadcast' | 'stuck' | 'confirmed' | 'reverted';
+export type PaymentStatus = 'refused' | 'signed' | 'broadcast' | 'included' | 'stuck' | 'confirmed' | 'reverted';
 /** Rows whose money may still move or may have moved: they count against limits and are reconciled. */
-export const OPEN_STATUSES: readonly PaymentStatus[] = ['signed', 'broadcast', 'stuck'];
+export const OPEN_STATUSES: readonly PaymentStatus[] = ['signed', 'broadcast', 'included', 'stuck'];
 
 /**
  * Exclusive lock for the agent process on a ledger file: a separate SQLite file
@@ -187,7 +189,7 @@ export class Ledger {
   committedToday(now = new Date()): bigint {
     const day = now.toISOString().slice(0, 10);
     const rows = this.db
-      .prepare("SELECT amount FROM payments WHERE status IN ('signed','broadcast','stuck','confirmed') AND substr(created_at, 1, 10) = ?")
+      .prepare("SELECT amount FROM payments WHERE status IN ('signed','broadcast','included','stuck','confirmed') AND substr(created_at, 1, 10) = ?")
       .all(day) as { amount: string }[];
     return rows.reduce((sum, r) => sum + BigInt(r.amount), 0n);
   }

@@ -9,6 +9,8 @@
     "demo": "tsx src/demo.ts",
     "server": "tsx src/server.ts",
     "ops": "tsx src/ops.ts",
+    "preflight": "tsx src/preflight.ts",
+    "session": "tsx src/session.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit -p .",
     "build:token": "cd contracts && forge build && node ../scripts/gen-token.mjs"

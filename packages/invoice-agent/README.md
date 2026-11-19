@@ -14,7 +14,7 @@ cd agentfi
 npm ci                 # the whole monorepo, a few minutes: the mandate imports AgentFi's policy evaluator from packages/backend
 cd packages/invoice-agent
 npm run demo           # 20-40 s: starts anvil and the agent, runs the scenario, checks invariants, stops everything
-npm test               # 21 tests on a local chain: lost response, races, RPC failures, the lock, the key and chain guards, mandate and ledger checks, 10-20 s
+npm test               # 31 tests on a local chain: lost response, races, RPC failures, the lock, guards, confirmation rule and reorgs, 15-30 s
 ```
 
 **What to expect.** The demo prints each step (below) with the agent's answer, the operator's `ops verify` / `ops status` output and a `✓` per invariant, and ends with `OK: every invariant held.` and exit code 0 (a broken invariant prints `✗ INVARIANT BROKEN` and exits 1). `npm test` may print `ExperimentalWarning: SQLite is an experimental feature`: the ledger uses Node's built-in `node:sqlite`; the warning is expected.
@@ -23,7 +23,7 @@ npm test               # 21 tests on a local chain: lost response, races, RPC fa
 
 **The keys are Anvil's public development keys** (from Foundry's published `test … junk` mnemonic): fine on a local chain, swept within seconds on any real one. The agent refuses them, and the simulated crashes (`INVOICE_FAIL_AT`), when the mandate names any chain other than Anvil's 31337; and the agent and `ops` refuse to run, and the agent to sign, when the node behind `INVOICE_RPC_URL` serves another chain than the mandate's (`eth_chainId`), so a 31337 mandate pointed at a public RPC stops before anything is signed.
 
-**Running the agent and `ops` yourself** (outside the demo, against your own Anvil): `INVOICE_RPC_URL` (the node), `INVOICE_MANDATE` (the mandate JSON, written with `npm run ops -- mandate …`), `INVOICE_LEDGER` (the SQLite ledger; a `.lock` file appears next to it while the agent runs), and for the agent only `INVOICE_PAYER_KEY` and `INVOICE_PORT` (default 8787). Then `npm run server` and `npm run ops -- status | verify <id> | reconcile`. Inside the demo, `ops verify INV-001` runs while Anvil is still up.
+**Running the agent and `ops` yourself** (outside the demo, against your own Anvil): `INVOICE_RPC_URL` (the node), `INVOICE_MANDATE` (the mandate JSON, written with `npm run ops -- mandate …`), `INVOICE_LEDGER` (the SQLite ledger; a `.lock` file appears next to it while the agent runs), and for the agent only `INVOICE_PAYER_KEY` and `INVOICE_PORT` (default 8787). Optional: `INVOICE_CONFIRMATION` (`finalized`, `depth:N`, or `inclusion` on Anvil only), `INVOICE_EXPLORER_URL` (default for 44005: the official explorer), `INVOICE_LOGS_FROM_BLOCK` (first block of the `Transfer` counts). Then `npm run server` and `npm run ops -- status | verify <id> | reconcile`. Inside the demo, `ops verify INV-001` runs while Anvil is still up.
 
 A 3-minute walkthrough of the same run: [DEMO-SCRIPT.md](DEMO-SCRIPT.md).
 
@@ -49,7 +49,9 @@ End state, checked by the script: 4 transfers from the payer (8 + 3 + 2 + 1 = 14
 
 | The chain says | Answer | Money |
 |---|---|---|
-| mined, success, Transfer payer → payTo of the exact amount | `recovered` (or `replayed` if already confirmed): the receipt | moved once |
+| mined, success, Transfer payer → payTo of the exact amount, the block meets the [confirmation rule](#when-the-operator-can-trust-the-receipt) and is canonical | `recovered` (or `replayed` if already confirmed): the receipt | moved once |
+| mined and matching, the rule not met yet (or the block at that height changed) | `pending`, stage `included`, + tx hash, block, explorer link: "do not treat it as paid yet"; ask again any time | moved once (not final) |
+| it was in a block, and that block left the canonical chain | back to "sent": found in the mempool → `pending`; unknown and the nonce unused → the **same signed bytes** are sent again | moves once |
 | known to the node, not mined | `pending` + tx hash + "run `ops reconcile`" | not sent again |
 | unknown to the node, the payer's nonce still unused | rebroadcast the **same signed bytes** (same hash: can be mined at most once) | moves once |
 | unknown to the node, but the payer's nonce is used | `unresolved` (row `stuck`, kept open and checked again every time): "Do NOT pay this invoice again", look up the payer's transaction at that nonce. Another transaction may have used the nonce, or the node has not indexed ours: the agent cannot tell, so it never says "no money moved". Once the operator has checked, `ops resolve <id> --not-paid --by NAME --note …` closes it as not paid (it refuses if the transaction has appeared on-chain meanwhile) | unknown |
@@ -64,11 +66,51 @@ Before signing a new invoice, open rows are reconciled first (one that cannot be
 - **At most one payment per invoice id**, with **one agent process per ledger file**: the agent holds an exclusive lock (a SQLite file next to the ledger, locked for the life of the process) and a second process refuses to start. The operating system releases the lock when the process dies, however it dies, so a restart after a crash starts at once and there is no stale lock to take over (tested: ten processes starting together after a crash, exactly one runs). Two agents on different machines with separate ledgers are not protected against each other.
 - **Deduplication is only as good as the invoice id and the ledger.** The id is the key, exactly as written (case-sensitive): `INV-001` and `inv-001` are two invoices, and the same invoice resent under a new id is a new invoice, paid again if the mandate allows it (the per-invoice and daily limits still apply). The vendor's own invoice number is the natural key; whoever submits invoices must keep it stable. The memory is the ledger file: an agent started on a new or different ledger does not know earlier payments (their `Transfer` logs stay on-chain and `ops status` lists them, but the agent does not match them to invoices on its own). A ledger is bound to the chain, token and payer it was first used with; the agent and `ops` refuse it under another one (the mandate's limits, expiry and vendor may change).
 - **The mandate is checked when written and every time it is read**: limits must be plain decimals above 0 (`10`, `2.5`; not `1e1`), the expiry a valid date or `null`, the addresses valid. A malformed mandate stops the agent instead of loosening the limits.
-- **A payment is `confirmed` as soon as one block includes it** (0 confirmations): right for a local chain, not enough for a public one (see below).
-- **A transaction that stays in the mempool** is reported `pending` forever: there is no fee bump or replacement yet.
+- **A payment is `confirmed` only under the chain's confirmation rule** ([below](#when-the-operator-can-trust-the-receipt)): one block on the local Anvil demo, the node's `finalized` block on Aevum. Until then it is `pending` with its hash.
+- **A transaction that stays in the mempool** is reported `pending` with its hash: there is no fee bump or replacement. The operator stops there and checks the payer in the explorer; the session command stops by itself after 10 minutes without a block.
 - **`ops verify` reads the chain**, and it also uses the agent's ledger to know which transaction belongs to which invoice: it fails when the receipt's block or log differ from the ledger, or when a transfer to that payee is not matched to an invoice.
 
-Tested on a local chain (`npm test`, 21 tests): crash after broadcast, after signing, while nothing is mined; a transaction dropped from the mempool is resent with the same bytes; two writers racing on one invoice; RPC failures during the resubmission and right after a new payment is sent; a node serving another chain; the nonce taken by another transaction; refusal, conflict, re-judged refusal.
+Tested on a local chain (`npm test`, 31 tests): crash after broadcast, after signing, while nothing is mined; a transaction dropped from the mempool is resent with the same bytes; two writers racing on one invoice; RPC failures during the resubmission and right after a new payment is sent; a node serving another chain; the nonce taken by another transaction; refusal, conflict, re-judged refusal; and the confirmation rule: pending until finalized, a block that leaves the canonical chain before the rule is met (dropped, or replaced by a reorg), a receipt inconsistent with the block at its height, the finalized block unreadable.
+
+## When the operator can trust the receipt
+
+A receipt is returned only when the payment's block satisfies the confirmation rule **and** is canonical. Before that the agent answers `pending` (stage `included`) with the transaction hash, the block, the explorer link and what is missing; resubmitting the same invoice, `ops reconcile` and `ops verify` all apply the same rule, and any of them can be asked again at any time.
+
+| Rule (`INVOICE_CONFIRMATION`) | Confirmed when | Where |
+|---|---|---|
+| `inclusion` | one block includes it | local Anvil (31337) only: the demo's behaviour; refused on any other chain |
+| `finalized` | its block number ≤ the node's `finalized` block (`eth_getBlockByNumber("finalized")`) | **default on every other chain, used for Aevum** |
+| `depth:N` | confirmations ≥ N, where confirmations = head − inclusion block + 1 (the including block counts as 1; head = `eth_blockNumber` at the time of the check). **An operational choice, not a protocol guarantee** | only when chosen explicitly |
+
+**Canonical check, on every rule:** the receipt is read again by transaction hash and the block at that height must carry the receipt's block hash. A block that leaves the canonical chain is never confirmed; the agent then finds the transaction again (mempool, or mined in a new block) or sends the same signed bytes again, never a new payment.
+
+**What `finalized` means on Aevum** (read from the RPC on 2026-11-19; the official pages say nothing about finality): the node is `cdk-erigon … validium` (Polygon CDK), with ~1 s blocks. Its `finalized` and `safe` blocks equal the last block whose batch is verified on L1 (`zkevm_isBlockConsolidated`). It was about 62 minutes behind the head at 19:43 UTC, and then did not move for more than 80 minutes (it stayed at block 3600041 while the head kept growing: `zkevm_verifiedBatchNumber` stayed at 544892). So a payment on Aevum is `pending` for an hour or more before it is `confirmed`; the session command checks the lag before signing and stops waiting after `--max-wait-min`, leaving the payment `pending`, never sending anything else.
+
+## Aevum Testnet: preflight and the public session
+
+**Preflight** (read-only, no key, sends nothing):
+
+```bash
+npm run preflight -- --network aevum [--payer 0x…public] [--vendor 0x…public] [--amount 1] [--max-finalized-lag-min 150]
+```
+
+It checks the chain the node reports (44005), the official tUSD8 (`0x456569838f1d43009A91ebA4263147Afd7233483`: contract code, `decimals()` = 6, symbol), that the explorer knows the same token and follows the same chain, the `finalized` lag; with the payer's public address, its tQDAY and tUSD8 balances and an empty mempool; with the vendor too, the gas of `transfer(vendor, amount)` and its cost in tQDAY. Exit 0 only if every check passed.
+
+**Rehearsal** of the public sequence, on a local Anvil with one block per second and the `finalized` rule (Anvil reports finalized = head − 64; the rehearsal mines blocks to move it):
+
+```bash
+npm run session -- --rehearse
+```
+
+**The public session** (needs the owner's authorization: it signs and sends one transfer on Aevum):
+
+```bash
+INVOICE_PAYER_KEY=<set by the owner, never written to disk> npm run session -- --aevum --vendor 0x… --by NAME --amount 1 --i-authorize-a-public-transaction
+```
+
+Both run the same steps: preflight; a mandate for that vendor, ≤ 1 tUSD8 per invoice and per day; one invoice of 1 tUSD8; the moment the ledger records the broadcast, the caller drops the connection and the agent is **killed** (a real crash, no simulated fail point); the agent restarts, the operator resends the same invoice, the agent answers with the **original** hash (pending until the rule is met); the same invoice is resent every 30 s; once confirmed, `ops verify` and an independent count of `Transfer` logs payer → vendor since the session's first block must show exactly one transfer, the receipt's. The ledger, mandate and transcript stay in `.sessions/<mode>-<time>/` (ignored by git), so `ops verify` can be run again later.
+
+**Stop criteria** (exit 3, nothing more is sent): preflight fails, including when `finalized` is already further behind than the session will wait; the agent records no payment; a resend answers anything but the original hash; the transaction stays out of a block for 10 minutes (`--max-unmined-min`): do not resend, check the payer in the explorer; `ops verify` fails; not exactly one transfer. Exit 2: still pending after `--max-wait-min` (default 150): nothing more is sent; run `ops verify` later with the environment it prints. An Anvil key, `INVOICE_FAIL_AT` or the `inclusion` rule are refused on Aevum.
 
 **The operator's view** (`npm run ops -- …`, never needs the agent's key): `status` (mandate, every invoice, balances, every Transfer from the payer), `verify <id>` (the receipt against the chain, plus the count of transfers to that payee), `reconcile [<id>]` (brings open rows up to the chain, never signs), `resolve <id> --not-paid --by NAME --note …` (closes a stuck invoice after the operator checked the chain), `mandate …` (writes the mandate).
 
@@ -84,14 +126,12 @@ The x402 ledger taught the vocabulary used here (money proven on-chain vs. repor
 
 ## What is missing for Aevum Testnet
 
-Nothing below has been done; each needs the QDay round's own scope (keys, faucet, public transactions).
+Ready and rehearsed locally: the network profile (44005, official RPC, explorer, tUSD8, 6 decimals; nothing to deploy), the `finalized` confirmation rule, a starting block for `Transfer` counts (`INVOICE_LOGS_FROM_BLOCK`, read in 50,000-block windows), the read-only preflight, and the session command with a real crash. Read on the public RPC and explorer: chain id, token, decimals, the `finalized` block, a gas estimate. **Not done, and each needs the owner's authorization:**
 
-- Point the mandate at Aevum: `chainId` 44005, `token` = tUSD8 `0x456569838f1d43009A91ebA4263147Afd7233483` (6 decimals), RPC `https://rpc-test.qday.info`, explorer `https://explorer-test.qday.info`. Nothing needs deploying.
-- A payer key funded from the faucet (tQDAY for gas, tUSD8 to pay), kept out of the repository, and a vendor address.
-- `ops status` and `verify` read Transfer logs from block 0; on a public chain they need a starting block (a small change).
-- Confirmation depth before `confirmed` (and re-checking a confirmed payment after a reorg), fee bumping for a transaction stuck in the mempool, and the RPC's behaviour under load (its "not found" vs. its errors).
-- The demo's crash scenarios use Anvil-only calls (`evm_setAutomine`, `evm_mine`); on Aevum the lost-response case is shown with a real crash and a resubmission, and the pending case depends on block timing.
-- Not verified: the RPC's behaviour for `eth_sendRawTransaction` of already-known transactions and for `txpool` calls (only `eth_*` methods are used outside the demo).
+- A payer key funded from the faucet (tQDAY for gas, tUSD8 to pay), kept out of the repository, and the vendor's public address.
+- Any signature or transaction on Aevum: nothing has been sent there.
+- Not verified on Aevum until the first session: the RPC's answer to `eth_sendRawTransaction` of an already-known transaction, its "not found" vs. its errors under load, and how often `finalized` advances.
+- Fee bumping for a transaction stuck in the mempool: not implemented (the session stops instead).
 
 ## Third-party code
 
@@ -102,4 +142,6 @@ Runtime: [viem](https://github.com/wevm/viem) (MIT). Development: [tsx](https://
 - `src/invoice.ts` invoice shape, amounts, content hash · `src/mandate.ts` the operator's mandate and the verdict (uses AgentFi's evaluator)
 - `src/ledger.ts` the write-ahead ledger · `src/chain.ts` sign / broadcast / receipts / Transfer logs · `src/payer.ts` the decision and the reconciliation
 - `src/server.ts` the headless agent (HTTP) · `src/ops.ts` the operator CLI · `src/demo.ts` the scenario
+- `src/finality.ts` the confirmation rule · `src/preflight.ts` the read-only checks · `src/session.ts` the rehearsal and the public session · `src/config.ts` environment and the Aevum profile
+- `test/finality.test.ts` the confirmation rule, reorgs before confirmation, inconsistent receipts, an unreadable finalized block · `test/config-guard.test.ts` keys, mandate, ledger binding, confirmation settings
 - `test/lost-response.test.ts` the crash cases · `test/review-fixes.test.ts` races, the lock, RPC failures, nonce taken, re-judged refusal, operator resolve (from the independent review) · `contracts/src/LocalTestUSD8.sol` the local test token

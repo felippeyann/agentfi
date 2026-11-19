@@ -35,3 +35,17 @@ two refusals with reasons, one conflict. Every line is checkable on the chain."
 
 **2:50 — What is next (10 s).** "This runs locally today. Next: the same agent on Aevum Testnet
 with the real tUSD8, and a first team with recurring invoices to try it."
+
+## Variant: the public proof on Aevum Testnet (after the owner authorizes it)
+
+Same story, one invoice, real chain. Run beforehand: `npm run preflight -- --network aevum --payer 0x… --vendor 0x…`
+(read-only). Then `npm run session -- --aevum …` (see the README, "The public session").
+
+- **The invoice (20 s).** "One fictitious invoice of 1 tUSD8 to a vendor the operator pre-approved, on QDay Aevum."
+- **The lost response (30 s).** "The agent sends the payment and we kill it the moment its ledger records the
+  broadcast. The caller got nothing back."
+- **The resend (30 s).** "We restart it and resend the same invoice: it answers with the original transaction hash,
+  PENDING, because on Aevum we only call a payment paid once its block is finalized, verified on L1. That takes
+  about an hour, so this part is shown from the session transcript."
+- **The proof (30 s).** Open the explorer link from the receipt: "One transfer, 1 tUSD8, payer to vendor, the same
+  hash as the first attempt. Anyone can check it here."

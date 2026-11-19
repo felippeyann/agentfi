@@ -12,6 +12,7 @@
 import { getAddress, type Hex } from 'viem';
 import { assertNodeChain, balanceOf, publicClientFor, receiptOf, transfersFrom, transfersIn } from './chain.js';
 import { loadConfig } from './config.js';
+import { describeRule, explorerTx, judgeFinality, ruleFor } from './finality.js';
 import { formatUnits6 } from './invoice.js';
 import { Ledger } from './ledger.js';
 import { saveMandate } from './mandate.js';
@@ -50,12 +51,13 @@ async function main(): Promise<number> {
   const cfg = loadConfig();
   const ledger = new Ledger(cfg.ledgerPath);
   const m = cfg.mandate;
-  ledger.bindContext({ chainId: cfg.chain.chainId, token: m.token, payer: m.payer });
+  // The node first: a mandate pointed at the wrong node must not bind a fresh ledger to it.
   await assertNodeChain(cfg.chain);
+  ledger.bindContext({ chainId: cfg.chain.chainId, token: m.token, payer: m.payer });
 
   if (cmd === 'status') {
     console.log(`Mandate (approved by ${m.approvedBy} at ${m.approvedAt}): pay ${m.vendor.name} (${m.vendor.id}) at ${m.vendor.address}, ≤ ${m.maxPerInvoice} tUSD8 per invoice, ≤ ${m.maxPerDay} per day${m.expiresAt ? `, until ${m.expiresAt}` : ''}`);
-    console.log(`Chain ${cfg.chain.chainId} · token ${m.token} · payer ${m.payer}`);
+    console.log(`Chain ${cfg.chain.chainId} · token ${m.token} · payer ${m.payer} · confirmation ${describeRule(ruleFor(cfg.chain))}`);
     for (const r of ledger.all()) {
       const amt = `${formatUnits6(BigInt(r.amount))} tUSD8`.padStart(13);
       console.log(`  ${r.invoice_id.padEnd(10)} ${r.status.padEnd(10)} ${amt} → ${r.pay_to}${r.tx_hash ? `  tx ${r.tx_hash}` : ''}${r.block_number ? ` block ${r.block_number}` : ''}`);
@@ -89,14 +91,20 @@ async function main(): Promise<number> {
     const paidRows = ledger.all().filter((r) => r.pay_to.toLowerCase() === row.pay_to.toLowerCase() && r.tx_hash && r.status !== 'refused');
     const known = new Set(paidRows.map((r) => r.tx_hash!.toLowerCase()));
     const unexplained = all.filter((t) => !known.has(t.txHash.toLowerCase()));
-    const sameAsLedger = row.status !== 'confirmed' || (row.block_number === receipt.blockNumber.toString() && row.log_index === match[0]?.logIndex);
-    const ok = receipt.status === 'success' && match.length === 1 && sameAsLedger && unexplained.length === 0;
-    console.log(`${id}: ${ok ? 'VERIFIED' : 'NOT VERIFIED'} on chain ${cfg.chain.chainId}`);
+    const sameAsLedger = !['confirmed', 'included'].includes(row.status) || (row.block_number === receipt.blockNumber.toString() && row.log_index === match[0]?.logIndex);
+    const fin = await judgeFinality(cfg.chain, receipt);
+    const onChainOk = receipt.status === 'success' && match.length === 1 && sameAsLedger && unexplained.length === 0;
+    const ok = onChainOk && fin.final;
+    const notFinal = onChainOk && !fin.final;
+    console.log(`${id}: ${ok ? 'VERIFIED' : notFinal ? 'IN A BLOCK, NOT CONFIRMED YET' : 'NOT VERIFIED'} on chain ${cfg.chain.chainId}`);
     console.log(`  tx ${row.tx_hash} · block ${receipt.blockNumber} (${new Date(Number(block.timestamp) * 1000).toISOString()}) · status ${receipt.status}`);
+    console.log(`  confirmation rule ${describeRule(ruleFor(cfg.chain))}: ${fin.detail}${fin.final ? ' → met' : ' → not met: do not treat it as paid yet, do not pay again; run verify again later'}`);
+    const link = explorerTx(cfg.chain, row.tx_hash);
+    if (link) console.log(`  explorer: ${link}`);
     console.log(`  Transfer ${m.payer} → ${row.pay_to}: ${match.map((t) => `${formatUnits6(t.value)} tUSD8 (log ${t.logIndex})`).join(', ') || 'none matching'}`);
     if (!sameAsLedger) console.log(`  the ledger says block ${row.block_number} log ${row.log_index}; the chain says block ${receipt.blockNumber} log ${match[0]?.logIndex ?? '-'}`);
     console.log(`  all transfers from the payer to this payee: ${all.length} (${all.map((t) => formatUnits6(t.value)).join(' + ') || '-'} tUSD8), each matched to one invoice: ${unexplained.length === 0 ? 'yes' : `NO, ${unexplained.length} unexplained: ${unexplained.map((t) => t.txHash).join(', ')}`}`);
-    return ok ? 0 : 1;
+    return ok ? 0 : notFinal ? 2 : 1;
   }
 
   if (cmd === 'reconcile') {
