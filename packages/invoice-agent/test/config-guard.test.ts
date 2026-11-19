@@ -1,12 +1,13 @@
 // The demo's keys are Anvil's public development keys: the agent must refuse them off a local chain.
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { isPublicAnvilKey, loadConfig } from '../src/config.js';
-import { saveMandate } from '../src/mandate.js';
+import { Ledger } from '../src/ledger.js';
+import { loadMandate, saveMandate } from '../src/mandate.js';
 
 const ANVIL_PAYER = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d' as const;
 
@@ -45,6 +46,33 @@ test('Anvil development keys are recognized; a fresh key is not', () => {
 test('a public Anvil key is refused off chain 31337 (e.g. Aevum 44005), accepted on 31337', () => {
   withMandate(44005, { INVOICE_PAYER_KEY: ANVIL_PAYER }, () => assert.throws(() => loadConfig(), /public development keys/));
   withMandate(31337, { INVOICE_PAYER_KEY: ANVIL_PAYER }, () => assert.equal(loadConfig().payerKey, ANVIL_PAYER));
+});
+
+test('a mandate with limits that are not plain decimals, or an invalid expiry, is refused on save and on load', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'invoice-agent-mandate-'));
+  const good = {
+    chainId: 31337, token: '0x456569838f1d43009A91ebA4263147Afd7233483', payer: privateKeyToAccount(ANVIL_PAYER).address,
+    vendor: { id: 'acme', name: 'Acme', address: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC' },
+    maxPerInvoice: '10', maxPerDay: '50', expiresAt: null, approvedBy: 'test', approvedAt: new Date().toISOString(),
+  };
+  for (const patch of [{ maxPerInvoice: '1e1' }, { maxPerDay: '5e1' }, { maxPerInvoice: '0' }, { maxPerDay: '' }, { expiresAt: 'tomorrow' }]) {
+    assert.throws(() => saveMandate(join(dir, 'm.json'), { ...good, ...patch }), /invalid mandate/, JSON.stringify(patch));
+    writeFileSync(join(dir, 'hand.json'), JSON.stringify({ ...good, ...patch }));
+    assert.throws(() => loadMandate(join(dir, 'hand.json')), /invalid mandate/, JSON.stringify(patch));
+  }
+  saveMandate(join(dir, 'ok.json'), { ...good, maxPerInvoice: '2.5', expiresAt: '2027-01-01T00:00:00Z' });
+  assert.equal(loadMandate(join(dir, 'ok.json')).maxPerInvoice, '2.5');
+});
+
+test('a ledger is bound to its chain, token and payer; limits may change', () => {
+  const ledger = new Ledger(join(mkdtempSync(join(tmpdir(), 'invoice-agent-ctx-')), 'ledger.sqlite'));
+  const ctx = { chainId: 31337, token: '0x456569838f1d43009A91ebA4263147Afd7233483', payer: privateKeyToAccount(ANVIL_PAYER).address };
+  ledger.bindContext(ctx);
+  ledger.bindContext({ ...ctx, token: ctx.token.toLowerCase() });
+  assert.throws(() => ledger.bindContext({ ...ctx, chainId: 44005 }), /written for chainId 31337/);
+  assert.throws(() => ledger.bindContext({ ...ctx, token: '0x5FbDB2315678afecb367f032d93F642f64180aa3' }), /new ledger file/);
+  assert.throws(() => ledger.bindContext({ ...ctx, payer: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC' }), /payer/);
+  ledger.close();
 });
 
 test('simulated crashes (INVOICE_FAIL_AT) are refused off chain 31337', () => {

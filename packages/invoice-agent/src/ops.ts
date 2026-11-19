@@ -50,6 +50,7 @@ async function main(): Promise<number> {
   const cfg = loadConfig();
   const ledger = new Ledger(cfg.ledgerPath);
   const m = cfg.mandate;
+  ledger.bindContext({ chainId: cfg.chain.chainId, token: m.token, payer: m.payer });
 
   if (cmd === 'status') {
     console.log(`Mandate (approved by ${m.approvedBy} at ${m.approvedAt}): pay ${m.vendor.name} (${m.vendor.id}) at ${m.vendor.address}, ≤ ${m.maxPerInvoice} tUSD8 per invoice, ≤ ${m.maxPerDay} per day${m.expiresAt ? `, until ${m.expiresAt}` : ''}`);

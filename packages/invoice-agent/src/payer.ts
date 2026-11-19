@@ -84,6 +84,8 @@ export class InvoicePayer {
 
   constructor(private o: PayerOptions) {
     this.failAt = o.failAt;
+    // Receipts are rebuilt from the ledger row plus this context: refuse a ledger written for another one.
+    o.ledger.bindContext({ chainId: o.chain.chainId, token: o.chain.token, payer: o.mandate.payer });
   }
 
   /** Invoices are handled one at a time (one nonce sequence, one ledger). */

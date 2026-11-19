@@ -33,13 +33,42 @@ export interface Mandate {
   approvedAt: string;
 }
 
+const PLAIN_AMOUNT = /^\d{1,12}(\.\d{1,6})?$/;
+
+/**
+ * Refuses a mandate that would silently weaken the authorization: the reused evaluator treats a
+ * limit that is not a plain decimal (e.g. "1e1") as no limit, and an invalid date never expires.
+ * Applied when the mandate is written and every time it is read.
+ */
+export function validateMandate(m: Mandate): Mandate {
+  const bad = (what: string): never => {
+    throw new Error(`invalid mandate: ${what}`);
+  };
+  if (!Number.isSafeInteger(m.chainId) || m.chainId <= 0) bad(`chainId ${JSON.stringify(m.chainId)} is not a positive integer`);
+  for (const k of ['maxPerInvoice', 'maxPerDay'] as const) {
+    const v = m[k];
+    if (typeof v !== 'string' || !PLAIN_AMOUNT.test(v)) bad(`${k} ${JSON.stringify(v)} must be a plain decimal amount of tUSD8 such as "10" or "2.5" (at most 6 decimals)`);
+    if (!/[1-9]/.test(v)) bad(`${k} must be above 0`);
+  }
+  if (m.expiresAt !== null && (typeof m.expiresAt !== 'string' || Number.isNaN(Date.parse(m.expiresAt)))) bad(`expiresAt ${JSON.stringify(m.expiresAt)} is not a valid date (use an ISO time, or null for no expiry)`);
+  if (!m.vendor || typeof m.vendor.id !== 'string' || m.vendor.id === '') bad('vendor.id is missing');
+  if (typeof m.approvedBy !== 'string' || m.approvedBy === '') bad('approvedBy is missing');
+  const addr = (what: string, a: string) => {
+    try {
+      return getAddress(a);
+    } catch {
+      return bad(`${what} ${JSON.stringify(a)} is not an address`);
+    }
+  };
+  return { ...m, token: addr('token', m.token), payer: addr('payer', m.payer), vendor: { ...m.vendor, address: addr('vendor.address', m.vendor.address) } };
+}
+
 export function loadMandate(path: string): Mandate {
-  const m = JSON.parse(readFileSync(path, 'utf8')) as Mandate;
-  return { ...m, token: getAddress(m.token), payer: getAddress(m.payer), vendor: { ...m.vendor, address: getAddress(m.vendor.address) } };
+  return validateMandate(JSON.parse(readFileSync(path, 'utf8')) as Mandate);
 }
 
 export function saveMandate(path: string, m: Mandate): void {
-  writeFileSync(path, JSON.stringify(m, null, 2) + '\n');
+  writeFileSync(path, JSON.stringify(validateMandate(m), null, 2) + '\n');
 }
 
 /** The mandate as an AgentFi policy row, for `evaluateUsdcSpend`. */

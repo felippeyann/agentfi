@@ -106,6 +106,24 @@ export class Ledger {
     `);
   }
 
+  /**
+   * Binds the ledger to the payment context its rows were written in (chain, token, payer): the
+   * first agent or operator command records it, every later one must match. A receipt is rebuilt
+   * from a row plus this context, so a ledger reused under another chain, token or payer would
+   * label old payments with the wrong one. Mandate limits, expiry and vendor can still change.
+   */
+  bindContext(ctx: { chainId: number; token: string; payer: string }): void {
+    const want = { chainId: String(ctx.chainId), token: ctx.token.toLowerCase(), payer: ctx.payer.toLowerCase() };
+    this.db.exec('CREATE TABLE IF NOT EXISTS context (k TEXT PRIMARY KEY, v TEXT NOT NULL)');
+    const ins = this.db.prepare('INSERT OR IGNORE INTO context (k, v) VALUES (?, ?)');
+    for (const [k, v] of Object.entries(want)) ins.run(k, v);
+    const have = Object.fromEntries((this.db.prepare('SELECT k, v FROM context').all() as { k: string; v: string }[]).map((r) => [r.k, r.v]));
+    const diff = (Object.keys(want) as (keyof typeof want)[]).filter((k) => have[k] !== want[k]);
+    if (diff.length > 0) {
+      throw new Error(`this ledger was written for ${diff.map((k) => `${k} ${have[k]}`).join(', ')}; the mandate now says ${diff.map((k) => `${k} ${want[k]}`).join(', ')}. Use a new ledger file (INVOICE_LEDGER) for a new chain, token or payer.`);
+    }
+  }
+
   get(invoiceId: string): PaymentRow | undefined {
     return this.db.prepare('SELECT * FROM payments WHERE invoice_id = ?').get(invoiceId) as PaymentRow | undefined;
   }
