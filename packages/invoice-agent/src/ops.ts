@@ -107,7 +107,31 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  console.log('usage: npm run ops -- <mandate|status|verify <invoiceId>|reconcile [<invoiceId>]>');
+  if (cmd === 'resolve') {
+    // Only for a STUCK invoice, after the operator looked up the payer's transaction at that nonce.
+    const id = rest[0];
+    const by = flag('by'), note = flag('note');
+    if (!id || !rest.includes('--not-paid') || !by || !note) {
+      console.log('usage: npm run ops -- resolve <invoiceId> --not-paid --by NAME --note "what you checked (explorer link, tx at that nonce)"');
+      return 2;
+    }
+    const row = ledger.get(id);
+    if (!row || row.status !== 'stuck') {
+      console.log(`${id}: only a stuck invoice can be resolved (status: ${row?.status ?? 'unknown'}). Run reconcile first.`);
+      return 1;
+    }
+    // Last look before writing: if our transaction has appeared since, it WAS paid.
+    const receipt = await receiptOf(cfg.chain, row.tx_hash as Hex);
+    if (receipt) {
+      console.log(`${id}: transaction ${row.tx_hash} is on-chain now (block ${receipt.blockNumber}): not resolved; run reconcile.`);
+      return 1;
+    }
+    ledger.resolveStuckAsNotPaid(id, by, note);
+    console.log(`${id}: resolved as NOT paid by ${by}.`);
+    return 0;
+  }
+
+  console.log('usage: npm run ops -- <mandate|status|verify <invoiceId>|reconcile [<invoiceId>]|resolve <invoiceId> --not-paid --by NAME --note TEXT>');
   return 2;
 }
 

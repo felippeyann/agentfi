@@ -18,7 +18,6 @@
  * ONE agent process per ledger file: `acquireInstanceLock` refuses a second one (two processes
  * deciding on the same invoice id is how the same invoice gets paid twice).
  */
-import { closeSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
 export type PaymentStatus = 'refused' | 'signed' | 'broadcast' | 'stuck' | 'confirmed' | 'reverted';
@@ -26,40 +25,39 @@ export type PaymentStatus = 'refused' | 'signed' | 'broadcast' | 'stuck' | 'conf
 export const OPEN_STATUSES: readonly PaymentStatus[] = ['signed', 'broadcast', 'stuck'];
 
 /**
- * Exclusive lock for the agent process on a ledger file (`<ledger>.lock` holding the pid). A lock
- * left by a process that no longer exists (a crash) is taken over. Returns the release function.
+ * Exclusive lock for the agent process on a ledger file: a separate SQLite file
+ * (`<ledger>.lock`) held in an EXCLUSIVE transaction for the life of the process. The operating
+ * system releases it when the process dies, however it dies, so there is never a stale lock to take
+ * over (a pid file with "take over if the pid is dead" was racy: two restarts at once could both
+ * win). A second process fails at once. Returns the release function.
  */
 export function acquireInstanceLock(ledgerPath: string): () => void {
   const lockPath = `${ledgerPath}.lock`;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fd = openSync(lockPath, 'wx');
-      writeSync(fd, String(process.pid));
-      closeSync(fd);
-      return () => {
-        try {
-          if (readFileSync(lockPath, 'utf8') === String(process.pid)) unlinkSync(lockPath);
-        } catch {
-          /* already gone */
-        }
-      };
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      const pid = Number(readFileSync(lockPath, 'utf8'));
-      let alive = false;
-      try {
-        process.kill(pid, 0);
-        alive = true;
-      } catch (err) {
-        alive = (err as NodeJS.ErrnoException).code === 'EPERM';
-      }
-      if (alive && pid !== process.pid) {
-        throw new Error(`another agent process (pid ${pid}) holds the ledger ${ledgerPath}; only one may run (${lockPath})`);
-      }
-      unlinkSync(lockPath); // stale: its process is gone
+  const db = new DatabaseSync(lockPath);
+  try {
+    db.exec('PRAGMA busy_timeout = 0; PRAGMA locking_mode = EXCLUSIVE; PRAGMA journal_mode = DELETE;');
+    db.exec('BEGIN EXCLUSIVE');
+    db.exec('CREATE TABLE IF NOT EXISTS holder (pid INTEGER, since TEXT)');
+    db.exec('DELETE FROM holder');
+    db.prepare('INSERT INTO holder (pid, since) VALUES (?, ?)').run(process.pid, new Date().toISOString());
+  } catch (e) {
+    db.close();
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/locked|busy/i.test(msg)) throw new Error(`another agent process holds the ledger ${ledgerPath}; only one may run (${lockPath})`);
+    if (/not a database/i.test(msg)) {
+      throw new Error(`${lockPath} is not an agent lock (left by an older version?). Make sure no agent is running on ${ledgerPath}, delete that file, and start again.`);
     }
+    throw e;
   }
-  throw new Error(`could not take the ledger lock ${lockPath}`);
+  // The transaction is never committed: the lock lives as long as this connection.
+  return () => {
+    try {
+      db.exec('ROLLBACK');
+      db.close();
+    } catch {
+      /* already closed */
+    }
+  };
 }
 
 export interface PaymentRow {
@@ -128,6 +126,20 @@ export class Ledger {
       .run(row.invoice_id, row.invoice_hash, row.vendor_id, row.pay_to, row.amount, row.status, row.rule, row.reason, row.what_to_do,
         row.nonce, row.raw_tx, row.tx_hash, row.block_number, row.log_index, now, now);
     return Number(r.changes) === 1;
+  }
+
+  /**
+   * The operator's exit for a STUCK row, after checking the payer's transaction at that nonce in an
+   * explorer: it was not this payment, so nothing moved for the invoice. Only stuck rows.
+   */
+  resolveStuckAsNotPaid(invoiceId: string, by: string, note: string): boolean {
+    const r = this.db
+      .prepare("UPDATE payments SET status = 'reverted', reason = ?, what_to_do = ?, updated_at = ? WHERE invoice_id = ? AND status = 'stuck'")
+      .run(`Operator ${by} checked the chain: the payer's nonce was used by another transaction, so this payment never happened. Note: ${note}`,
+        'The invoice was not paid. A new payment needs a new decision (a new invoice id).', new Date().toISOString(), invoiceId);
+    const ok = Number(r.changes) === 1;
+    if (ok) this.event(invoiceId, 'operator-resolved-not-paid', { by, note });
+    return ok;
   }
 
   /** Removes a REFUSED row (nothing was signed for it) so a resubmission can be judged again. */

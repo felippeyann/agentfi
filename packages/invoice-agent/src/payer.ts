@@ -72,6 +72,12 @@ export interface PayerOptions {
   receiptTimeoutMs?: number;
 }
 
+/**
+ * Assumes exclusive use of its ledger: the agent process takes the ledger lock
+ * (`acquireInstanceLock`) before creating one. Two payers on one ledger are not supported (they could
+ * exceed the daily limit); the duplicate-signature check below is a last line of defence for the same
+ * invoice id, not a substitute for the lock.
+ */
 export class InvoicePayer {
   private queue: Promise<unknown> = Promise.resolve();
   private failAt: FailPoint | undefined;

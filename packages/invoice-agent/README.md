@@ -12,7 +12,7 @@ Needs Node 22.13+ and Foundry's `anvil` (on `PATH` or in `~/.foundry/bin`). From
 npm ci
 cd packages/invoice-agent
 npm run demo        # ~40 s: starts anvil and the agent, runs the scenario, checks invariants, stops everything
-npm test            # 11 tests on a local chain: lost response, races, RPC failures, ~7 s
+npm test            # 14 tests on a local chain: lost response, races, RPC failures, the lock, ~12 s
 ```
 
 Node prints `ExperimentalWarning: SQLite is an experimental feature`: the ledger uses Node's built-in `node:sqlite`; the warning is expected.
@@ -44,7 +44,7 @@ End state, checked by the script: 4 transfers from the payer (8 + 3 + 2 + 1 = 14
 | mined, success, Transfer payer → payTo of the exact amount | `recovered` (or `replayed` if already confirmed): the receipt | moved once |
 | known to the node, not mined | `pending` + tx hash + "run `ops reconcile`" | not sent again |
 | unknown to the node, the payer's nonce still unused | rebroadcast the **same signed bytes** (same hash: can be mined at most once) | moves once |
-| unknown to the node, but the payer's nonce is used | `unresolved` (row `stuck`, kept open and checked again every time): "Do NOT pay this invoice again", look up the payer's transaction at that nonce. Another transaction may have used the nonce, or the node has not indexed ours: the agent cannot tell, so it never says "no money moved" | unknown |
+| unknown to the node, but the payer's nonce is used | `unresolved` (row `stuck`, kept open and checked again every time): "Do NOT pay this invoice again", look up the payer's transaction at that nonce. Another transaction may have used the nonce, or the node has not indexed ours: the agent cannot tell, so it never says "no money moved". Once the operator has checked, `ops resolve <id> --not-paid --by NAME --note …` closes it as not paid (it refuses if the transaction has appeared on-chain meanwhile) | unknown |
 | mined but reverted | `failed`: no tokens moved, operator decides | none |
 | the RPC fails (timeout, 5xx, …) | an error; the row is left as it was, nothing is decided from a failed read | — |
 
@@ -52,15 +52,15 @@ Before signing a new invoice, open rows are reconciled first (one that cannot be
 
 ## What is guaranteed, and under which conditions
 
-- **At most one payment per invoice id**, with **one agent process per ledger file**: the agent takes an exclusive lock on the ledger at start-up and a second process refuses to start (a lock left by a crashed process is taken over). Two agents on different machines with separate ledgers are not protected against each other.
+- **At most one payment per invoice id**, with **one agent process per ledger file**: the agent holds an exclusive lock (a SQLite file next to the ledger, locked for the life of the process) and a second process refuses to start. The operating system releases the lock when the process dies, however it dies, so a restart after a crash starts at once and there is no stale lock to take over (tested: ten processes starting together after a crash, exactly one runs). Two agents on different machines with separate ledgers are not protected against each other.
 - **The id is the key, exactly as written** (case-sensitive): `INV-001` and `inv-001` are two invoices; the same content under a new id is a new invoice. The vendor's invoice number is the natural key.
 - **A payment is `confirmed` as soon as one block includes it** (0 confirmations): right for a local chain, not enough for a public one (see below).
 - **A transaction that stays in the mempool** is reported `pending` forever: there is no fee bump or replacement yet.
 - **`ops verify` reads the chain**, and it also uses the agent's ledger to know which transaction belongs to which invoice: it fails when the receipt's block or log differ from the ledger, or when a transfer to that payee is not matched to an invoice.
 
-Tested on a local chain (`npm test`, 11 tests): crash after broadcast, after signing, while nothing is mined; a transaction dropped from the mempool is resent with the same bytes; two writers racing on one invoice; RPC failures during the resubmission; the nonce taken by another transaction; refusal, conflict, re-judged refusal.
+Tested on a local chain (`npm test`, 14 tests): crash after broadcast, after signing, while nothing is mined; a transaction dropped from the mempool is resent with the same bytes; two writers racing on one invoice; RPC failures during the resubmission; the nonce taken by another transaction; refusal, conflict, re-judged refusal.
 
-**The operator's view** (`npm run ops -- …`, never needs the agent's key): `status` (mandate, every invoice, balances, every Transfer from the payer), `verify <id>` (the receipt against the chain, plus the count of transfers to that payee), `reconcile [<id>]` (brings open rows up to the chain, never signs), `mandate …` (writes the mandate).
+**The operator's view** (`npm run ops -- …`, never needs the agent's key): `status` (mandate, every invoice, balances, every Transfer from the payer), `verify <id>` (the receipt against the chain, plus the count of transfers to that payee), `reconcile [<id>]` (brings open rows up to the chain, never signs), `resolve <id> --not-paid --by NAME --note …` (closes a stuck invoice after the operator checked the chain), `mandate …` (writes the mandate).
 
 ## AgentFi before the challenge vs. built for the challenge
 
@@ -92,4 +92,4 @@ Runtime: [viem](https://github.com/wevm/viem) (MIT). Development: [tsx](https://
 - `src/invoice.ts` invoice shape, amounts, content hash · `src/mandate.ts` the operator's mandate and the verdict (uses AgentFi's evaluator)
 - `src/ledger.ts` the write-ahead ledger · `src/chain.ts` sign / broadcast / receipts / Transfer logs · `src/payer.ts` the decision and the reconciliation
 - `src/server.ts` the headless agent (HTTP) · `src/ops.ts` the operator CLI · `src/demo.ts` the scenario
-- `test/lost-response.test.ts` the crash cases · `test/review-fixes.test.ts` races, RPC failures, nonce taken, re-judged refusal (from the independent review) · `contracts/src/LocalTestUSD8.sol` the local test token
+- `test/lost-response.test.ts` the crash cases · `test/review-fixes.test.ts` races, the lock, RPC failures, nonce taken, re-judged refusal, operator resolve (from the independent review) · `contracts/src/LocalTestUSD8.sol` the local test token

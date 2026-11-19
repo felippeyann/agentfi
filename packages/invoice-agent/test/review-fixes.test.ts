@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -95,15 +95,55 @@ describe('review P1-a: two writers on one ledger', () => {
     assert.ok(events.includes('discarded-duplicate-signature'), `events: ${events.join(', ')}`);
   });
 
-  it('a second agent process on the same ledger is refused; a lock left by a dead process is taken over', () => {
+  it('the ledger lock: a second holder is refused; released on release()', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'invoice-agent-lock-')), 'ledger.sqlite');
     const release = acquireInstanceLock(path);
-    writeFileSync(`${path}.lock`, String(process.ppid)); // a live process that is not us
     assert.throws(() => acquireInstanceLock(path), /another agent process/);
-    writeFileSync(`${path}.lock`, '2147483646'); // a pid that does not exist
-    const again = acquireInstanceLock(path);
-    again();
     release();
+    acquireInstanceLock(path)();
+  });
+
+  const holdLock = (path: string, holdMs: number) =>
+    new Promise<{ out: string; child: ChildProcess }>((resolve) => {
+      const child = spawn(process.execPath, ['--import', 'tsx', join(import.meta.dirname, 'fixtures', 'hold-lock.ts'), path, String(holdMs)], { stdio: ['ignore', 'pipe', 'ignore'] });
+      let out = '';
+      child.stdout!.on('data', (d) => {
+        out += d;
+        if (/OK|BUSY/.test(out)) resolve({ out: out.trim(), child });
+      });
+      child.on('exit', () => resolve({ out: out.trim(), child }));
+    });
+
+  it('the ledger lock is released by the OS when its process is killed: no stale lock to take over', async () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'invoice-agent-lock-')), 'ledger.sqlite');
+    const holder = await holdLock(path, 60_000);
+    assert.equal(holder.out, 'OK');
+    assert.throws(() => acquireInstanceLock(path), /another agent process/, 'held while the process lives');
+    holder.child.kill('SIGKILL');
+    await new Promise((r) => (holder.child.exitCode !== null || holder.child.signalCode ? r(null) : holder.child.once('exit', r)));
+    acquireInstanceLock(path)(); // taken at once after the crash
+  });
+
+  it('ten processes starting at the same instant on one ledger (after a crash): exactly one wins', async () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'invoice-agent-lock-')), 'ledger.sqlite');
+    const crashed = await holdLock(path, 60_000);
+    crashed.child.kill('SIGKILL');
+    await new Promise((r) => (crashed.child.exitCode !== null || crashed.child.signalCode ? r(null) : crashed.child.once('exit', r)));
+    const results = await Promise.all(Array.from({ length: 10 }, () => holdLock(path, 3_000)));
+    assert.equal(results.filter((r) => r.out === 'OK').length, 1, results.map((r) => r.out).join(','));
+    await Promise.all(results.map((r) => (r.child.exitCode !== null ? null : new Promise((res) => r.child.once('exit', res)))));
+  });
+
+  it('a stuck invoice can be closed by the operator as NOT paid, and only a stuck one', () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'invoice-agent-resolve-')), 'ledger.sqlite');
+    const l = new Ledger(path);
+    const base = { invoice_hash: '0x', vendor_id: 'acme', pay_to: VENDOR, amount: '1', rule: null, reason: null, what_to_do: null, nonce: 1, raw_tx: '0x', block_number: null, log_index: null };
+    l.insert({ ...base, invoice_id: 'S1', status: 'stuck', tx_hash: '0x01' });
+    l.insert({ ...base, invoice_id: 'S2', status: 'broadcast', tx_hash: '0x02' });
+    assert.equal(l.resolveStuckAsNotPaid('S2', 'op', 'n'), false);
+    assert.equal(l.resolveStuckAsNotPaid('S1', 'op', 'explorer: nonce 1 is tx 0xabc'), true);
+    assert.equal(l.get('S1')!.status, 'reverted');
+    assert.equal(l.committedToday(), 1n, 'only the open S2 still counts against the day; the resolved S1 no longer does');
   });
 });
 
