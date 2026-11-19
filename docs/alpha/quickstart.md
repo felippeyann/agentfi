@@ -329,6 +329,8 @@ Then, in a second terminal: `.venv/Scripts/python.exe examples/openai-agents/age
 
 `x402:ops` on the demo backend prints `WARN: SYNTHETIC_TEST_PRICES_USD is set …=1`: the demo prices the fork's USDC at exactly 1 USD so daily limits can be counted without a price oracle. Expected here; never set it on a real network.
 
+**Before you connect your own agent:** [payer-setup.md](payer-setup.md) says which credential the agent gets, the reference policy (this section's buyer is close to it: it leaves `allowedTokens` empty and the cooldown at 0), what the agent's key can still do besides buying (it is not an x402-only key), and how to check the permissions in force: `npm run x402:ops -- payer --agent <id>` (with `operator.env` sourced, from `packages/backend`).
+
 ### What you see: an allowed purchase
 
 Verbatim from the recorded run (section "Verified run" below; ids, addresses and hashes differ on every run). The versions the run found, and the framework's trace:

@@ -202,6 +202,9 @@ export const agentTools = [
       'This tool can ONLY tighten: the backend rejects any change that loosens the policy with 403 ' +
       '(raising max_value_per_tx_eth, max_value_per_tx_usd or max_outflow_per_tx_usd, or setting max_outflow_per_tx_usd ' +
       'while it is not configured; adding an address that is not already whitelisted, or clearing a whitelist). ' +
+      'An EMPTY allowed_recipients or allowed_tokens list means unrestricted, so setting one while it is empty is a tightening. ' +
+      'If you have no policy row yet, your first change is judged against the registration defaults ' +
+      '(max_value_per_tx_usd 1.0, max_value_per_tx_eth 1.0, outflows not configured): you can only set values at or below them. ' +
       'Loosening requires the operator credential (API_SECRET) — if you need higher limits or new whitelisted ' +
       'tokens/contracts/recipients to complete a mission, ask the operator instead of retrying. ' +
       'Provide a `reason` for audit — the backend writes it to its policy audit log line (it is not stored ' +
@@ -236,19 +239,19 @@ export const agentTools = [
         .array(z.string())
         .optional()
         .describe(
-          'Replacement token whitelist. Must be a subset of the current whitelist; adding new tokens or clearing a non-empty whitelist requires the operator.',
+          'Replacement token whitelist. While the current list is non-empty it must be a subset of it; adding new tokens or clearing a non-empty whitelist requires the operator. An empty list means any token, so setting one then is a tightening.',
         ),
       allowed_contracts: z
         .array(z.string())
         .optional()
         .describe(
-          'Replacement contract whitelist. Must be a subset of the current whitelist; adding new contracts or clearing a non-empty whitelist requires the operator.',
+          'Replacement contract whitelist. While the current list is non-empty it must be a subset of it; adding new contracts or clearing a non-empty whitelist requires the operator. Leave it to the operator: a listed contract may be called from a batch with calldata the backend does not count.',
         ),
       allowed_recipients: z
         .array(z.string().regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 0x-prefixed 20-byte hex address'))
         .optional()
         .describe(
-          'Replacement recipient whitelist (addresses that may receive value from you). Must be a subset of the current list; adding recipients or clearing a non-empty list requires the operator.',
+          'Replacement recipient whitelist (addresses that may receive value from you). While the current list is non-empty it must be a subset of it; adding recipients or clearing a non-empty list requires the operator. An empty list means any recipient, so setting one then is a tightening.',
         ),
       reason: z
         .string()
