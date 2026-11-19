@@ -116,7 +116,26 @@ export class InvoicePayer {
           reason: `Invoice ${inv.id} was already received with different content (payee or amount). The first one stands; this one is not paid.`,
         };
       }
-      if (existing.status !== 'refused') return this.answerFor(await this.reconcile(existing), true);
+      if (existing.status !== 'refused') {
+        try {
+          return this.answerFor(await this.reconcile(existing), true);
+        } catch (e) {
+          if (!existing.tx_hash) throw e;
+          // The chain could not be read: answer from the ledger, keep the uncertainty, never pay again.
+          const msg = e instanceof Error ? e.message.split('\n')[0]! : String(e);
+          ledger.event(inv.id, 'reconcile-error', { error: msg.slice(0, 300) });
+          return {
+            outcome: 'pending',
+            invoiceId: inv.id,
+            txHash: existing.tx_hash,
+            stage: existing.status === 'included' || existing.status === 'confirmed' ? 'included' : 'sent',
+            ...(existing.block_number ? { blockNumber: existing.block_number } : {}),
+            ...this.explorerOf(existing.tx_hash),
+            note: `Could not read the chain right now (${msg}). Last known state of ${existing.tx_hash}: ${existing.status}. Do NOT pay this invoice again, under this id or another.`,
+            next: 'Resubmit this same invoice id once the RPC answers, or run `npm run ops -- reconcile`.',
+          };
+        }
+      }
       // A refused invoice signed nothing: judge it again under today's mandate and limits.
       const again = judgeInvoice(this.o.mandate, inv, ledger.committedToday());
       if (!again.allowed) {
@@ -193,6 +212,19 @@ export class InvoicePayer {
    */
   async reconcile(row: PaymentRow, opts: { wait?: boolean } = {}): Promise<PaymentRow> {
     const { ledger, chain } = this.o;
+    // Under depth:N (an operational rule, not finality) a confirmation can be undone by a deeper reorg:
+    // a confirmed row is checked again every time and withdrawn if its block is no longer canonical.
+    if (row.status === 'confirmed' && row.tx_hash && ruleFor(chain).kind === 'depth') {
+      const r = await receiptOf(chain, row.tx_hash as Hex);
+      const still = r !== null && r.blockNumber.toString() === row.block_number && (await judgeFinality(chain, r)).canonical;
+      if (still) return row;
+      ledger.update(row.invoice_id, {
+        status: 'broadcast', block_number: null, log_index: null,
+        reason: `The block ${row.block_number} that confirmed ${row.tx_hash} is no longer canonical (reorg deeper than the depth rule): confirmation withdrawn, checked again.`,
+      });
+      ledger.event(row.invoice_id, 'confirmation-withdrawn', { txHash: row.tx_hash, block: row.block_number });
+      row = ledger.get(row.invoice_id)!;
+    }
     if (!OPEN_STATUSES.includes(row.status)) return row;
     const hash = row.tx_hash as Hex;
     // Nonce first, then the receipt: a payment mined in between is then seen by the receipt read.
@@ -254,6 +286,11 @@ export class InvoicePayer {
     ledger.update(row.invoice_id, { status: 'confirmed', block_number: block, log_index: match.logIndex, reason: null });
     ledger.event(row.invoice_id, 'confirmed', { txHash: hash, block, blockHash: receipt.blockHash, logIndex: match.logIndex, rule: describeRule(ruleFor(chain)), detail: fin.detail });
     return ledger.get(row.invoice_id)!;
+  }
+
+  private confirmedRule(invoiceId: string): string | undefined {
+    const ev = this.o.ledger.events(invoiceId).filter((e) => e.event === 'confirmed').pop();
+    return ev?.detail ? (JSON.parse(ev.detail) as { rule?: string }).rule : undefined;
   }
 
   private explorerOf(hash: string): { explorer?: string } {
@@ -324,7 +361,8 @@ export class InvoicePayer {
       txHash: row.tx_hash!,
       blockNumber: row.block_number!,
       logIndex: row.log_index!,
-      confirmation: describeRule(ruleFor(this.o.chain)),
+      // The rule this payment was actually confirmed under (recorded in the ledger), not today's setting.
+      confirmation: this.confirmedRule(row.invoice_id) ?? describeRule(ruleFor(this.o.chain)),
       ...this.explorerOf(row.tx_hash!),
     };
   }

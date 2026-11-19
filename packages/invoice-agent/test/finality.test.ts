@@ -205,7 +205,10 @@ describe('confirmation rules', () => {
     await w.mine(70);
     failing.add('finalized-tag');
     try {
-      await assert.rejects(w.agent().submit(invoice('E-1')), 'a failed read of the finalized block is an error, never "final"');
+      const during = await w.agent().submit(invoice('E-1'));
+      assert.equal(during.outcome, 'pending', 'a failed read of the finalized block is never "final"');
+      assert.equal(hashOf(during), original, 'the answer keeps the hash');
+      assert.match((during as { note: string }).note, /Could not read the chain.*Do NOT pay this invoice again/);
       assert.equal(new Ledger(w.ledgerPath).get('E-1')!.status, 'included');
     } finally {
       failing.clear();
@@ -214,6 +217,30 @@ describe('confirmation rules', () => {
     assert.ok(r2.outcome === 'recovered' || r2.outcome === 'replayed', r2.outcome);
     assert.equal(hashOf(r2), original);
     assert.equal((await w.sent()).length, 1);
+  });
+
+  it('depth:N is operational: a confirmation undone by a deeper reorg is WITHDRAWN on the next resend, the same signed bytes are mined again, one transfer (review P2-1)', async () => {
+    const w = await world({ kind: 'depth', blocks: 3 });
+    const snap = await raw('evm_snapshot');
+    const r1 = await w.agent().submit(invoice('W-1'));
+    const original = hashOf(r1)!;
+    await w.mine(3);
+    assert.equal((await w.agent().submit(invoice('W-1'))).outcome, 'recovered', 'confirmed at depth 3');
+    // A reorg deeper than 3 blocks removes it.
+    await raw('evm_revert', [snap]);
+    await w.mine(10);
+    assert.equal((await w.sent()).length, 0);
+    const r2 = await w.agent().submit(invoice('W-1'));
+    assert.equal(r2.outcome, 'pending', `no longer paid: ${JSON.stringify(r2)}`);
+    assert.equal(hashOf(r2), original);
+    const events = new Ledger(w.ledgerPath).events('W-1').map((e) => e.event);
+    assert.ok(events.includes('confirmation-withdrawn') && events.includes('rebroadcast-same-bytes'), events.join(', '));
+    await w.mine(3);
+    const r3 = await w.agent().submit(invoice('W-1'));
+    assert.ok(r3.outcome === 'recovered' || r3.outcome === 'replayed', JSON.stringify(r3));
+    assert.equal(hashOf(r3), original);
+    assert.equal((await w.sent()).length, 1);
+    assert.equal(events.filter((e) => e === 'signed').length, 1);
   });
 
   it('a payment in a block but not confirmed counts against the daily limit', async () => {

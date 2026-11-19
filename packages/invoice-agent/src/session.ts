@@ -128,6 +128,9 @@ async function main(): Promise<number> {
     vendor = ANVIL.vendor;
     const exe = process.platform === 'win32' ? 'anvil.exe' : 'anvil';
     const home = join(homedir(), '.foundry', 'bin', exe);
+    // The rehearsal needs its OWN fresh chain: refuse a port where something already answers.
+    const busy = await fetch(rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' }).then(() => true, () => false);
+    if (busy) stop(`port ${ANVIL_PORT} already answers: the rehearsal needs its own fresh Anvil (--anvil-port N)`);
     const anvil = spawn(existsSync(home) ? home : exe, ['--port', String(ANVIL_PORT), '--chain-id', '31337', '--block-time', '1', '--silent'], { stdio: 'ignore' });
     children.push(anvil);
     const chain = makeChain({ rpcUrl, chainId, token: '0x0000000000000000000000000000000000000000' });
@@ -186,7 +189,17 @@ async function main(): Promise<number> {
     return child;
   };
   const invoice = { id: INVOICE_ID, vendorId: 'vendor-1', payTo: vendor, amount: AMOUNT, currency: 'tUSD8', description: 'QDay Builder Challenge test invoice (fictitious)' };
-  const send = async () => (await (await fetch(`http://127.0.0.1:${AGENT_PORT}/invoices`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(invoice) })).json()) as Record<string, unknown>;
+  // A resend. An agent error (e.g. the RPC failing) decides nothing and moves no money: it is reported
+  // and the same invoice is asked again later, never paid under another id.
+  const send = async (): Promise<Record<string, unknown>> => {
+    try {
+      const res = await fetch(`http://127.0.0.1:${AGENT_PORT}/invoices`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(invoice) });
+      const body = (await res.json()) as Record<string, unknown>;
+      return res.ok ? body : { outcome: 'agent-error', note: `HTTP ${res.status}: ${String(body['error'] ?? body['reason'] ?? '')}`.slice(0, 300) };
+    } catch (e) {
+      return { outcome: 'agent-error', note: e instanceof Error ? e.message : String(e) };
+    }
+  };
   const ledger = new Ledger(env.INVOICE_LEDGER);
 
   // ---- 3. The payment, and the lost response ------------------------------------------------------
@@ -200,12 +213,15 @@ async function main(): Promise<number> {
   });
   req.on('error', () => undefined);
   req.end(JSON.stringify(invoice));
-  await waitFor(async () => ledger.events(INVOICE_ID).some((e) => e.event === 'broadcast' || e.event === 'refused'), 'the broadcast in the ledger', 60_000, 10).catch(() => undefined);
+  const sawBroadcast = await waitFor(async () => ledger.events(INVOICE_ID).some((e) => e.event === 'broadcast' || e.event === 'refused' || e.event === 'rpc-error-after-sign'), 'the broadcast in the ledger', 60_000, 10).then(() => true, () => false);
   agent.kill('SIGKILL');
   req.destroy();
   await new Promise((r) => (agent.exitCode !== null || agent.signalCode ? r(null) : agent.once('exit', r)));
   const row = ledger.get(INVOICE_ID);
   if (!row || !row.tx_hash) stop(`the agent recorded no payment for ${INVOICE_ID} (${row ? `${row.status}: ${row.reason}` : 'no row'})`);
+  if (!sawBroadcast || !ledger.events(INVOICE_ID).some((e) => e.event === 'broadcast')) {
+    stop(`the ledger did not record the broadcast within 60 s (status ${row!.status}, tx ${row!.tx_hash}): the agent was stopped. Not the planned scenario; do NOT pay this invoice again. Check ${tx(row!.tx_hash!)} and run ops reconcile.`);
+  }
   const original = row!.tx_hash!;
   out(`  the ledger recorded ${original} as ${row!.status} (${ledger.events(INVOICE_ID).map((e) => e.event).join(' → ')})`);
   out(`  the agent process was KILLED at that moment and the caller dropped the connection: ${answered ? 'an answer had started to arrive and was discarded unread' : 'no answer reached the caller'} — the lost response.`);
@@ -221,9 +237,22 @@ async function main(): Promise<number> {
     return h;
   };
   const allowed = ['pending', 'recovered', 'replayed', 'paid'];
+  const where = MODE === 'aevum' ? `${explorerUrl}/address/${payer}` : 'the ledger';
+  // Any outcome but these, or another hash, stops the session (unresolved, failed, conflict, refused).
+  const check = (r: Record<string, unknown>, h: string | undefined) => {
+    if (r['outcome'] === 'agent-error') return;
+    if (!allowed.includes(String(r['outcome']))) stop(`the agent answered ${String(r['outcome']).toUpperCase()} for ${original}${r['reason'] ? ` (${r['reason']})` : ''}: stop, do not resend; check ${where}`);
+    if (h !== original) stop(`the agent answered ${h ?? 'no hash'}, not the original ${original}: stop, do not resend; check ${where}`);
+  };
   let r = await send();
+  for (let i = 0; i < 5 && r['outcome'] === 'agent-error'; i++) {
+    out(`  agent error, nothing decided: ${r['note']}; asking again in 10 s`);
+    await new Promise((res) => setTimeout(res, 10_000));
+    r = await send();
+  }
+  if (r['outcome'] === 'agent-error') stop(`the agent kept failing (${r['note']}): do not pay again; run ops reconcile later`);
   let h = show(r);
-  if (!allowed.includes(String(r['outcome'])) || h !== original) stop(`the resend answered ${String(r['outcome'])} with ${h ?? 'no hash'}, not the original ${original}: do not resend; check ${MODE === 'aevum' ? `${explorerUrl}/address/${payer}` : 'the ledger'}`);
+  check(r, h);
   out('  operator view while waiting:');
   for (const l of (await ops(env, 'verify', INVOICE_ID)).split('\n')) out(`    ${l}`);
 
@@ -237,18 +266,23 @@ async function main(): Promise<number> {
       out(`  still not confirmed after ${MAX_WAIT_MS / 60_000} min. Nothing more is sent. Check later: INVOICE_RPC_URL=${rpcUrl} INVOICE_MANDATE=${env.INVOICE_MANDATE} INVOICE_LEDGER=${env.INVOICE_LEDGER} INVOICE_CONFIRMATION=${confirmation} npm run ops -- verify ${INVOICE_ID}`);
       return 2;
     }
-    if (r['stage'] === 'sent') {
-      if (Date.now() - sentSince > MAX_UNMINED_MS) stop(`transaction ${original} has stayed out of a block for ${MAX_UNMINED_MS / 60_000} min: stop. Do NOT resend under another id; check ${tx(original)} and the payer's transactions.`);
-    } else sentSince = Date.now();
+    if (r['stage'] === 'included') sentSince = Date.now();
+    else if (r['outcome'] === 'pending' && Date.now() - sentSince > MAX_UNMINED_MS) {
+      stop(`transaction ${original} has stayed out of a block for ${MAX_UNMINED_MS / 60_000} min: stop. Do NOT resend under another id; check ${tx(original)} and the payer's transactions.`);
+    }
     if (MODE === 'rehearse') await rehearsalClient!.request({ method: 'anvil_mine' as never, params: ['0x21'] as never });
     await new Promise((res) => setTimeout(res, POLL_MS));
     r = await send();
     const stage = `${r['outcome']}/${r['stage'] ?? ''}/${r['blockNumber'] ?? ''}`;
+    if (r['outcome'] === 'agent-error') {
+      out(`  agent error, nothing decided: ${r['note']}; asking again`);
+      continue;
+    }
     if (stage !== lastStage) {
       h = show(r);
       lastStage = stage;
-      if (h !== original) stop(`a resend answered ${h}, not the original ${original}`);
     }
+    check(r, (((r['receipt'] as Record<string, unknown> | undefined)?.['txHash']) ?? r['txHash']) as string | undefined);
   }
   out(`  confirmed after ${Math.round((Date.now() - t0) / 1000)} s of waiting. Receipt:`);
   for (const l of JSON.stringify(r['receipt'], null, 2).split('\n')) out(`      ${l}`);
