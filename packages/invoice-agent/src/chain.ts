@@ -130,18 +130,33 @@ export async function signTransfer(cfg: ChainConfig, payerKey: Hex, to: string, 
     gas: plan.gas,
     maxFeePerGas: plan.maxFeePerGas,
     maxPriorityFeePerGas: plan.maxPriorityFeePerGas,
+    // Pinned here, never taken from the node (viem would otherwise ask the RPC to fill them).
+    chainId: cfg.chainId,
+    type: 'eip1559',
     chain: makeChain(cfg),
   });
-  const r = request as { gas?: bigint; maxFeePerGas?: bigint; gasPrice?: bigint };
-  const perGas = r.maxFeePerGas ?? r.gasPrice;
-  if (r.gas === undefined || perGas === undefined) throw new Error('the prepared transaction has no gas limit or fee: not signed');
-  const maxCost = r.gas * perGas;
+  // Every field that ends up in the signed bytes is checked against what the agent decided.
+  const r = request as { to?: string; data?: Hex; nonce?: number; chainId?: number; type?: string; gas?: bigint; maxFeePerGas?: bigint; maxPriorityFeePerGas?: bigint; gasPrice?: bigint; value?: bigint };
+  const mismatch = [
+    r.chainId !== cfg.chainId && `chainId ${r.chainId} ≠ ${cfg.chainId}`,
+    r.type !== 'eip1559' && `type ${r.type} ≠ eip1559`,
+    r.gasPrice !== undefined && 'a legacy gasPrice',
+    (r.to ?? '').toLowerCase() !== cfg.token.toLowerCase() && `to ${r.to} ≠ the token ${cfg.token}`,
+    r.data !== plan.data && 'calldata changed',
+    r.nonce !== nonce && `nonce ${r.nonce} ≠ ${nonce}`,
+    (r.value ?? 0n) !== 0n && `value ${r.value} ≠ 0`,
+    r.gas !== plan.gas && `gas ${r.gas} ≠ ${plan.gas}`,
+    r.maxFeePerGas !== plan.maxFeePerGas && `maxFeePerGas ${r.maxFeePerGas} ≠ ${plan.maxFeePerGas}`,
+    r.maxPriorityFeePerGas !== plan.maxPriorityFeePerGas && `maxPriorityFeePerGas ${r.maxPriorityFeePerGas} ≠ ${plan.maxPriorityFeePerGas}`,
+  ].filter(Boolean);
+  if (mismatch.length > 0) throw new Error(`the prepared transaction differs from what the agent decided (${mismatch.join('; ')}): not signed`);
+  const maxCost = r.gas! * r.maxFeePerGas!;
   if (cfg.maxGasCostWei !== undefined && maxCost > cfg.maxGasCostWei) {
     signingStats.ceilingRefusals++;
-    throw new GasCeilingError(maxCost, cfg.maxGasCostWei, r.gas, perGas);
+    throw new GasCeilingError(maxCost, cfg.maxGasCostWei, r.gas!, r.maxFeePerGas!);
   }
-  signingStats.signatures++;
   const raw = await account.signTransaction(request as never);
+  signingStats.signatures++;
   return { raw, hash: keccak256(raw), nonce, maxCostWei: maxCost };
 }
 

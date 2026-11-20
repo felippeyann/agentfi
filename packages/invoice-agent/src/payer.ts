@@ -132,7 +132,7 @@ export class InvoicePayer {
             stage: existing.status === 'included' || existing.status === 'confirmed' ? 'included' : 'sent',
             ...(existing.block_number ? { blockNumber: existing.block_number } : {}),
             ...this.explorerOf(existing.tx_hash),
-            note: `Could not read the chain right now (${msg}). Last known state of ${existing.tx_hash}: ${existing.status}. Do NOT pay this invoice again, under this id or another.`,
+            note: `Could not read the chain, or the node refused the recorded transaction, right now (${msg}). Last known state of ${existing.tx_hash}: ${existing.status}. Do NOT pay this invoice again, under this id or another.`,
             next: 'Resubmit this same invoice id once the RPC answers, or run `npm run ops -- reconcile`.',
           };
         }

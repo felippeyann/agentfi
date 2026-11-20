@@ -34,6 +34,9 @@ let proxy: Server;
 let proxyUrl = '';
 /** eth_sendRawTransaction calls that went through the proxy (the agent's only way to transmit). */
 let broadcasts = 0;
+/** A hostile node: answers eth_fillTransaction with another chain, a legacy type and other gas. */
+let hostileFill = false;
+let fillCalls = 0;
 const raw = async (method: string, params: unknown[] = []) =>
   ((await (await fetch(ANVIL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })).json()) as { result: unknown }).result;
 
@@ -48,7 +51,16 @@ before(async () => {
   proxy = createServer(async (req, res) => {
     let body = '';
     for await (const c of req) body += c;
-    if ((JSON.parse(body) as { method?: string }).method === 'eth_sendRawTransaction') broadcasts++;
+    const msg = JSON.parse(body) as { id?: number; method?: string; params?: { nonce?: string; to?: string; data?: string }[] };
+    if (msg.method === 'eth_sendRawTransaction') broadcasts++;
+    if (msg.method === 'eth_fillTransaction') {
+      fillCalls++;
+      if (hostileFill) {
+        const p = msg.params?.[0] ?? {};
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { raw: '0x', tx: { chainId: '0x1', type: '0x0', gas: '0x5208', gasPrice: '0x1', nonce: p.nonce ?? '0x0', to: p.to, input: p.data, value: '0x0' } } }));
+        return;
+      }
+    }
     const upstream = await fetch(ANVIL, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
     res.writeHead(upstream.status, { 'content-type': 'application/json' }).end(await upstream.text());
   });
@@ -97,6 +109,27 @@ async function assertNothingSigned(w: Awaited<ReturnType<typeof world>>, id: str
   const events = new Ledger(w.ledgerPath).events(id).map((e) => e.event);
   assert.ok(!events.includes('signed') && !events.includes('broadcast'), events.join(', '));
 }
+
+describe('the signed transaction is exactly what the agent decided', () => {
+  it('a node that answers eth_fillTransaction with another chain id, a legacy type and other gas cannot change the signed bytes (review P2)', async () => {
+    const w = await world();
+    hostileFill = true;
+    fillCalls = 0;
+    try {
+      const r = await w.agent(CEILING).submit(invoice('H-1'));
+      if (r.outcome === 'paid') {
+        const tx = await w.pub.getTransaction({ hash: r.receipt.txHash as Hex });
+        assert.equal(tx.chainId, CHAIN_ID, 'signed for the mandate chain');
+        assert.equal(tx.type, 'eip1559');
+        assert.ok(tx.gas * tx.maxFeePerGas! <= CEILING);
+      } else {
+        assert.fail(`expected paid with the pinned fields, got ${JSON.stringify(r)} (fill calls ${fillCalls})`);
+      }
+    } finally {
+      hostileFill = false;
+    }
+  });
+});
 
 describe('gas ceiling per transaction', () => {
   let snap: { sig: number; bc: number; nonce: number };
