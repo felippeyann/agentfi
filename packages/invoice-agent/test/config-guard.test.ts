@@ -26,7 +26,7 @@ function withMandate(chainId: number, env: Record<string, string>, fn: () => voi
     approvedBy: 'test',
     approvedAt: new Date().toISOString(),
   });
-  const keys = ['INVOICE_MANDATE', 'INVOICE_LEDGER', 'INVOICE_RPC_URL', 'INVOICE_PAYER_KEY', 'INVOICE_FAIL_AT', 'INVOICE_CONFIRMATION', 'INVOICE_EXPLORER_URL', 'INVOICE_LOGS_FROM_BLOCK'];
+  const keys = ['INVOICE_MANDATE', 'INVOICE_LEDGER', 'INVOICE_RPC_URL', 'INVOICE_PAYER_KEY', 'INVOICE_FAIL_AT', 'INVOICE_CONFIRMATION', 'INVOICE_EXPLORER_URL', 'INVOICE_LOGS_FROM_BLOCK', 'INVOICE_MAX_GAS_COST'];
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   Object.assign(process.env, { INVOICE_MANDATE: path, INVOICE_LEDGER: join(dir, 'l.sqlite'), INVOICE_RPC_URL: 'http://127.0.0.1:1' }, env);
   try {
@@ -89,4 +89,13 @@ test('confirmation: inclusion is refused off chain 31337; Aevum defaults to "fin
   });
   withMandate(44005, { INVOICE_CONFIRMATION: 'depth:30' }, () => assert.deepEqual(loadConfig().chain.confirm, { kind: 'depth', blocks: 30 }));
   withMandate(31337, {}, () => assert.equal(ruleFor(loadConfig().chain).kind, 'inclusion'));
+});
+
+test('the agent on a public chain needs an explicit gas ceiling; it parses to exact wei', () => {
+  const fresh = generatePrivateKey();
+  withMandate(44005, { INVOICE_PAYER_KEY: fresh }, () => assert.throws(() => loadConfig(), /INVOICE_MAX_GAS_COST is required/));
+  withMandate(44005, { INVOICE_PAYER_KEY: fresh, INVOICE_MAX_GAS_COST: '0.0001' }, () => assert.equal(loadConfig().chain.maxGasCostWei, 100_000_000_000_000n));
+  withMandate(44005, { INVOICE_PAYER_KEY: fresh, INVOICE_MAX_GAS_COST: '1e-4' }, () => assert.throws(() => loadConfig(), /plain decimal/));
+  withMandate(44005, {}, () => assert.equal(loadConfig().chain.maxGasCostWei, undefined, 'ops (no key) does not need it'));
+  withMandate(31337, { INVOICE_PAYER_KEY: ANVIL_PAYER }, () => assert.equal(loadConfig().chain.maxGasCostWei, undefined, 'the local demo keeps no ceiling'));
 });

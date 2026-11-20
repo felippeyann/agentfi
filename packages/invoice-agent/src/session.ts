@@ -22,7 +22,10 @@
  *                --vendor 0x… (public address), --by NAME, and the explicit flag
  *                --i-authorize-a-public-transaction. Signs and sends ONE transfer of AMOUNT.
  *
- * Stop criteria (exit 3, nothing else is sent): preflight fails; the agent records no payment;
+ * Gas: --max-gas-cost (default 0.0001, native coin) is the ceiling per transaction, checked by the preflight
+ * and again by the agent on the prepared transaction right before signing (gas limit × maxFeePerGas).
+ * Stop criteria (exit 3, nothing else is sent): preflight fails (including a maximum above the ceiling);
+ * the agent refuses on the ceiling (nothing signed); the agent records no payment;
  * the resend answers anything but the ORIGINAL hash; the transaction stays out of a block for
  * --max-unmined-min (default 10) minutes (do not resend, check the payer in the explorer); the
  * receipt fails `ops verify`; the count of transfers is not exactly one.
@@ -38,13 +41,13 @@ import { fileURLToPath } from 'node:url';
 import { createPublicClient, createWalletClient, getAddress, http, type Address, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { balanceOf, makeChain, transfersFrom, type ChainConfig } from './chain.js';
-import { isPublicAnvilKey, KNOWN_NETWORKS } from './config.js';
+import { isPublicAnvilKey, KNOWN_NETWORKS, parseGasCeiling } from './config.js';
 import { parseConfirmRule } from './finality.js';
 import { LOCAL_TEST_USD8_ABI, LOCAL_TEST_USD8_BYTECODE } from './generated/local-test-usd8.js';
 import { formatUnits6, toBaseUnits } from './invoice.js';
 import { Ledger } from './ledger.js';
 import { saveMandate } from './mandate.js';
-import { preflight } from './preflight.js';
+import { DEFAULT_AEVUM_GAS_CEILING, preflight } from './preflight.js';
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -55,6 +58,7 @@ const opt = (n: string) => {
 };
 const MODE = flag('aevum') ? 'aevum' : flag('rehearse') ? 'rehearse' : null;
 const AMOUNT = opt('amount') ?? '1';
+const GAS_CEILING = opt('max-gas-cost') ?? DEFAULT_AEVUM_GAS_CEILING;
 const AGENT_PORT = Number(opt('agent-port') ?? 8788);
 const ANVIL_PORT = Number(opt('anvil-port') ?? 8567);
 const MAX_UNMINED_MS = Number(opt('max-unmined-min') ?? 10) * 60_000;
@@ -131,7 +135,7 @@ async function main(): Promise<number> {
     // The rehearsal needs its OWN fresh chain: refuse a port where something already answers.
     const busy = await fetch(rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' }).then(() => true, () => false);
     if (busy) stop(`port ${ANVIL_PORT} already answers: the rehearsal needs its own fresh Anvil (--anvil-port N)`);
-    const anvil = spawn(existsSync(home) ? home : exe, ['--port', String(ANVIL_PORT), '--chain-id', '31337', '--block-time', '1', '--silent'], { stdio: 'ignore' });
+    const anvil = spawn(existsSync(home) ? home : exe, ['--port', String(ANVIL_PORT), '--chain-id', '31337', '--block-time', '1', '--base-fee', '7', '--silent'], { stdio: 'ignore' });
     children.push(anvil);
     const chain = makeChain({ rpcUrl, chainId, token: '0x0000000000000000000000000000000000000000' });
     rehearsalClient = createPublicClient({ chain, transport: http(rpcUrl) });
@@ -142,19 +146,20 @@ async function main(): Promise<number> {
     await rehearsalClient.waitForTransactionReceipt({ hash: await deployer.writeContract({ address: token, abi: LOCAL_TEST_USD8_ABI, functionName: 'mint', args: [getAddress(privateKeyToAccount(ANVIL.payer).address), 10_000_000n] }) });
   }
   const payer = getAddress(privateKeyToAccount(payerKey).address);
-  const chain: ChainConfig = { rpcUrl, chainId, token, confirm: parseConfirmRule(confirmation), ...(explorerUrl ? { explorerUrl } : {}) };
+  const ceilingWei = parseGasCeiling(GAS_CEILING);
+  const chain: ChainConfig = { rpcUrl, chainId, token, confirm: parseConfirmRule(confirmation), maxGasCostWei: ceilingWei, ...(explorerUrl ? { explorerUrl } : {}) };
   const client = createPublicClient({ chain: makeChain(chain), transport: http(rpcUrl) });
   const startBlock = await client.getBlockNumber();
   chain.logsFromBlock = startBlock;
   const tx = (h: string) => (explorerUrl ? `${explorerUrl}/tx/${h}` : h);
 
   out(`AgentFi invoice agent — session (${MODE === 'aevum' ? 'PUBLIC: QDay Aevum Testnet 44005, official tUSD8' : 'REHEARSAL: local Anvil 31337, local test token, nothing public'})`);
-  out(`Session dir ${DIR} · invoice ${INVOICE_ID} · ${AMOUNT} tUSD8 · payer ${payer} → vendor ${vendor} · confirmation rule: ${confirmation} · counting from block ${startBlock}`);
+  out(`Session dir ${DIR} · invoice ${INVOICE_ID} · ${AMOUNT} tUSD8 · payer ${payer} → vendor ${vendor} · confirmation rule: ${confirmation} · gas ceiling ${GAS_CEILING} ${MODE === 'aevum' ? 'tQDAY' : 'ETH'} (${ceilingWei} wei) per transaction · counting from block ${startBlock}`);
   if (MODE === 'rehearse') out('  (on Anvil the node reports finalized = head − 64 blocks; the rehearsal mines blocks to move it. On Aevum it is the last L1-verified block.)');
 
   // ---- 1. Preflight ----------------------------------------------------------------------------
   out('\n1. Preflight (read-only)');
-  const pf = await preflight({ rpcUrl, chainId, token, explorerUrl, gasSymbol: MODE === 'aevum' ? 'tQDAY' : 'ETH', expectedDecimals: 6, payer, vendor, amount: AMOUNT, ...(confirmation === 'finalized' ? { maxFinalizedLagSec: MAX_WAIT_MS / 1000 } : {}) });
+  const pf = await preflight({ rpcUrl, chainId, token, explorerUrl, gasSymbol: MODE === 'aevum' ? 'tQDAY' : 'ETH', expectedDecimals: 6, payer, vendor, amount: AMOUNT, maxGasCostWei: ceilingWei, ...(confirmation === 'finalized' ? { maxFinalizedLagSec: MAX_WAIT_MS / 1000 } : {}) });
   pf.lines.forEach((l) => out(`  ${l}`));
   if (!pf.ok) stop('preflight failed');
 
@@ -166,6 +171,7 @@ async function main(): Promise<number> {
     INVOICE_CONFIRMATION: confirmation,
     INVOICE_LOGS_FROM_BLOCK: startBlock.toString(),
     INVOICE_FAIL_AT: '',
+    INVOICE_MAX_GAS_COST: GAS_CEILING,
     ...(explorerUrl ? { INVOICE_EXPLORER_URL: explorerUrl } : {}),
   };
   saveMandate(env.INVOICE_MANDATE, {
@@ -213,16 +219,19 @@ async function main(): Promise<number> {
   });
   req.on('error', () => undefined);
   req.end(JSON.stringify(invoice));
-  const sawBroadcast = await waitFor(async () => ledger.events(INVOICE_ID).some((e) => e.event === 'broadcast' || e.event === 'refused' || e.event === 'rpc-error-after-sign'), 'the broadcast in the ledger', 60_000, 10).then(() => true, () => false);
+  const sawBroadcast = await waitFor(async () => ledger.events(INVOICE_ID).some((e) => e.event === 'broadcast' || e.event === 'refused' || e.event === 'refused-gas-ceiling' || e.event === 'rpc-error-after-sign'), 'the broadcast in the ledger', 60_000, 10).then(() => true, () => false);
   agent.kill('SIGKILL');
   req.destroy();
   await new Promise((r) => (agent.exitCode !== null || agent.signalCode ? r(null) : agent.once('exit', r)));
   const row = ledger.get(INVOICE_ID);
-  if (!row || !row.tx_hash) stop(`the agent recorded no payment for ${INVOICE_ID} (${row ? `${row.status}: ${row.reason}` : 'no row'})`);
+  if (!row || !row.tx_hash) stop(`the agent recorded no payment for ${INVOICE_ID} (${row ? `${row.status}${row.rule ? ` [${row.rule}]` : ''}: ${row.reason}` : 'no row'}). Nothing was signed or sent.`);
   if (!sawBroadcast || !ledger.events(INVOICE_ID).some((e) => e.event === 'broadcast')) {
     stop(`the ledger did not record the broadcast within 60 s (status ${row!.status}, tx ${row!.tx_hash}): the agent was stopped. Not the planned scenario; do NOT pay this invoice again. Check ${tx(row!.tx_hash!)} and run ops reconcile.`);
   }
   const original = row!.tx_hash!;
+  const signedEv = ledger.events(INVOICE_ID).find((e) => e.event === 'signed');
+  const sd = signedEv?.detail ? (JSON.parse(signedEv.detail) as { maxGasCostWei?: string; ceilingWei?: string }) : {};
+  out(`  signed with a maximum gas cost of ${sd.maxGasCostWei ?? '?'} wei (gas limit × maxFeePerGas), ceiling ${sd.ceilingWei ?? '?'} wei`);
   out(`  the ledger recorded ${original} as ${row!.status} (${ledger.events(INVOICE_ID).map((e) => e.event).join(' → ')})`);
   out(`  the agent process was KILLED at that moment and the caller dropped the connection: ${answered ? 'an answer had started to arrive and was discarded unread' : 'no answer reached the caller'} — the lost response.`);
 

@@ -7,12 +7,14 @@
  *   --payer 0x…                the payer's PUBLIC address: tQDAY and tUSD8 balances, nonces
  *   --vendor 0x… --amount 1    with --payer: gas estimate of transfer(vendor, amount) and its cost in tQDAY
  *   --max-finalized-lag-min N  fail if the node's finalized block is more than N minutes behind the head
+ *   --max-gas-cost 0.0001      the gas ceiling per transaction (native coin): fail if the transfer could cost more
+ *                              [default 0.0001 on --network aevum]
  *
  * Exit 0 when every check passed, 1 otherwise. Every line says what was read and from where.
  */
 import { createPublicClient, formatEther, getAddress, http, type Address, type Hex } from 'viem';
-import { ERC20_ABI, makeChain } from './chain.js';
-import { KNOWN_NETWORKS } from './config.js';
+import { ERC20_ABI, makeChain, planTransfer } from './chain.js';
+import { KNOWN_NETWORKS, parseGasCeiling } from './config.js';
 import { formatUnits6, toBaseUnits } from './invoice.js';
 
 export interface PreflightOptions {
@@ -27,6 +29,8 @@ export interface PreflightOptions {
   amount: string;
   /** Fail when the node's finalized block is further behind the head than this (the session could not confirm in time). */
   maxFinalizedLagSec?: number;
+  /** The operator's gas ceiling per transaction, wei: fail when the transfer could cost more. */
+  maxGasCostWei?: bigint;
 }
 
 export interface PreflightResult {
@@ -37,6 +41,8 @@ export interface PreflightResult {
 }
 
 const SAFETY = 3n; // the payer should hold at least 3× the estimated gas cost
+/** The gas ceiling proposed for the first Aevum session (native coin per transaction). */
+export const DEFAULT_AEVUM_GAS_CEILING = '0.0001';
 
 export async function preflight(o: PreflightOptions): Promise<PreflightResult> {
   const lines: string[] = [];
@@ -107,11 +113,14 @@ export async function preflight(o: PreflightOptions): Promise<PreflightResult> {
     if (o.vendor) {
       info(`vendor ${o.vendor}: ${formatUnits6((await client.readContract({ address: o.token, abi: ERC20_ABI, functionName: 'balanceOf', args: [o.vendor] })) as bigint)} ${symbol}`);
       try {
-        const gas = await client.estimateContractGas({ address: o.token, abi: ERC20_ABI, functionName: 'transfer', args: [o.vendor, amount], account: o.payer });
-        const fees = await client.estimateFeesPerGas();
-        const cost = gas * fees.maxFeePerGas;
+        // The SAME rule the signing path applies (chain.ts planTransfer): estimate + 20% margin, × maxFeePerGas.
+        const plan = await planTransfer({ rpcUrl: o.rpcUrl, chainId: o.chainId, token: o.token }, o.payer, o.vendor, amount);
+        const cost = plan.maxCostWei;
         result.gasCostWei = cost;
-        info(`gas for transfer(${o.vendor}, ${o.amount} ${symbol}) from the payer: ${gas} units × max fee ${fees.maxFeePerGas} wei = at most ${formatEther(cost)} ${o.gasSymbol} [eth_estimateGas, eth_feeHistory]`);
+        info(`gas for transfer(${o.vendor}, ${o.amount} ${symbol}) from the payer, as the agent will sign it: estimate ${plan.estimatedGas} + 20% = gas limit ${plan.gas} × max fee ${plan.maxFeePerGas} wei = at most ${cost} wei = ${formatEther(cost)} ${o.gasSymbol} [eth_estimateGas, eth_feeHistory]`);
+        if (o.maxGasCostWei !== undefined) {
+          pass(cost <= o.maxGasCostWei, `that maximum is within the ceiling of ${formatEther(o.maxGasCostWei)} ${o.gasSymbol} (${o.maxGasCostWei} wei) per transaction${cost <= o.maxGasCostWei ? `, ${o.maxGasCostWei - cost} wei to spare` : `: ${cost - o.maxGasCostWei} wei above`}. The agent checks it again on the transaction it signs, and refuses to sign above it`);
+        }
         pass(native >= cost * SAFETY, `payer holds at least ${SAFETY}× that gas (${formatEther(cost * SAFETY)} ${o.gasSymbol})`);
       } catch (e) {
         pass(false, `gas estimate failed (the transfer would revert from this payer?): ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`);
@@ -152,6 +161,7 @@ function args(argv: string[]) {
     ...(vendor ? { vendor } : {}),
     amount: get('amount') ?? '1',
     ...(get('max-finalized-lag-min') ? { maxFinalizedLagSec: Number(get('max-finalized-lag-min')) * 60 } : {}),
+    ...((get('max-gas-cost') ?? (known ? DEFAULT_AEVUM_GAS_CEILING : undefined)) ? { maxGasCostWei: parseGasCeiling(get('max-gas-cost') ?? DEFAULT_AEVUM_GAS_CEILING) } : {}),
   } satisfies PreflightOptions;
 }
 

@@ -16,7 +16,8 @@
  * (same hash: it can be mined at most once); nonce used by something else → needs the operator.
  */
 import type { Hex } from 'viem';
-import { broadcast, isKnownToNode, nonces, receiptOf, signTransfer, transfersIn, type ChainConfig } from './chain.js';
+import { formatEther } from 'viem';
+import { broadcast, GasCeilingError, isKnownToNode, nonces, receiptOf, signTransfer, transfersIn, type ChainConfig } from './chain.js';
 import { describeRule, explorerTx, judgeFinality, ruleFor } from './finality.js';
 import { formatUnits6, invoiceHash, toBaseUnits, type Invoice } from './invoice.js';
 import { OPEN_STATUSES, type Ledger, type PaymentRow } from './ledger.js';
@@ -169,7 +170,20 @@ export class InvoicePayer {
 
     if (!this.o.payerKey) throw new Error('no payer key: this process cannot pay');
     const nonce = await this.nextNonce();
-    const signed = await signTransfer(this.o.chain, this.o.payerKey, inv.payTo, amount, nonce);
+    let signed;
+    try {
+      signed = await signTransfer(this.o.chain, this.o.payerKey, inv.payTo, amount, nonce);
+    } catch (e) {
+      if (!(e instanceof GasCeilingError)) throw e;
+      // Refused BEFORE signing: nothing signed, nothing sent, no nonce used. Recorded as a refusal (no tx
+      // hash, no raw bytes), so it is never read as sent or pending; a resubmission is judged again.
+      const ceiling = formatEther(e.ceilingWei), max = formatEther(e.maxCostWei);
+      const reason = `Paying would authorize up to ${max} ${this.gasSymbol()} of gas (gas ${e.gas} × max fee ${e.maxFeePerGas} wei = ${e.maxCostWei} wei), above the operator's ceiling of ${ceiling} ${this.gasSymbol()} (${e.ceilingWei} wei) per transaction. Nothing was signed or sent.`;
+      const whatToDo = 'Resubmit the same invoice later, when fees are lower (it is judged again), or the operator raises INVOICE_MAX_GAS_COST.';
+      ledger.insert({ ...base, status: 'refused', rule: 'maxGasCost', reason, what_to_do: whatToDo, nonce: null, raw_tx: null, tx_hash: null, block_number: null, log_index: null });
+      ledger.event(inv.id, 'refused-gas-ceiling', { maxCostWei: e.maxCostWei.toString(), ceilingWei: e.ceilingWei.toString(), gas: e.gas.toString(), maxFeePerGas: e.maxFeePerGas.toString() });
+      return { outcome: 'refused', invoiceId: inv.id, rule: 'maxGasCost', reason, whatToDo };
+    }
     // Write-ahead: the signed transaction is on disk before it can reach the chain. If the id is
     // already taken (another writer got there first), these signed bytes are discarded, never sent.
     const inserted = ledger.insert({ ...base, status: 'signed', rule: null, reason: null, what_to_do: null, nonce, raw_tx: signed.raw, tx_hash: signed.hash, block_number: null, log_index: null });
@@ -177,7 +191,7 @@ export class InvoicePayer {
       ledger.event(inv.id, 'discarded-duplicate-signature', { txHash: signed.hash });
       return this.answerFor(await this.reconcile(ledger.get(inv.id)!), true);
     }
-    ledger.event(inv.id, 'signed', { txHash: signed.hash, nonce });
+    ledger.event(inv.id, 'signed', { txHash: signed.hash, nonce, maxGasCostWei: signed.maxCostWei.toString(), ceilingWei: this.o.chain.maxGasCostWei?.toString() ?? null });
     this.maybeFail('after-sign');
 
     let stage = 'broadcasting it';
@@ -286,6 +300,10 @@ export class InvoicePayer {
     ledger.update(row.invoice_id, { status: 'confirmed', block_number: block, log_index: match.logIndex, reason: null });
     ledger.event(row.invoice_id, 'confirmed', { txHash: hash, block, blockHash: receipt.blockHash, logIndex: match.logIndex, rule: describeRule(ruleFor(chain)), detail: fin.detail });
     return ledger.get(row.invoice_id)!;
+  }
+
+  private gasSymbol(): string {
+    return this.o.chain.chainId === 44005 ? 'tQDAY' : 'ETH';
   }
 
   private confirmedRule(invoiceId: string): string | undefined {

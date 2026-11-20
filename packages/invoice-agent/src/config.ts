@@ -1,5 +1,5 @@
 /** Configuration from the environment, shared by the server and the operator CLI. */
-import type { Hex } from 'viem';
+import { parseEther, type Hex } from 'viem';
 import { mnemonicToAccount, privateKeyToAccount } from 'viem/accounts';
 import { parseConfirmRule } from './finality.js';
 import { loadMandate, type Mandate } from './mandate.js';
@@ -58,6 +58,11 @@ export function loadConfig(): Config {
   const explorerUrl = process.env['INVOICE_EXPLORER_URL']?.trim() || known?.explorerUrl;
   const fromEnv = process.env['INVOICE_LOGS_FROM_BLOCK']?.trim();
   if (fromEnv && !/^\d+$/.test(fromEnv)) throw new Error('INVOICE_LOGS_FROM_BLOCK must be a block number');
+  const ceilingEnv = process.env['INVOICE_MAX_GAS_COST']?.trim();
+  const maxGasCostWei = ceilingEnv ? parseGasCeiling(ceilingEnv) : undefined;
+  if (key && mandate.chainId !== ANVIL_CHAIN_ID && maxGasCostWei === undefined) {
+    throw new Error(`INVOICE_MAX_GAS_COST is required on chain ${mandate.chainId}: the most one payment may cost in gas, in the native coin (e.g. 0.0001)`);
+  }
   return {
     rpcUrl: need('INVOICE_RPC_URL'),
     mandatePath,
@@ -73,8 +78,18 @@ export function loadConfig(): Config {
       ...(confirm ? { confirm } : {}),
       ...(explorerUrl ? { explorerUrl } : {}),
       ...(fromEnv ? { logsFromBlock: BigInt(fromEnv) } : {}),
+      ...(maxGasCostWei !== undefined ? { maxGasCostWei } : {}),
     },
   };
+}
+
+/**
+ * The gas ceiling per transaction, in the native coin as a plain decimal ("0.0001"; at most 18
+ * decimals, above 0), to wei. Exact integer arithmetic (viem's parseEther).
+ */
+export function parseGasCeiling(v: string): bigint {
+  if (!/^\d{1,9}(\.\d{1,18})?$/.test(v) || !/[1-9]/.test(v)) throw new Error(`INVOICE_MAX_GAS_COST must be a plain decimal above 0 in the native coin, e.g. 0.0001; got "${v}"`);
+  return parseEther(v);
 }
 
 /**

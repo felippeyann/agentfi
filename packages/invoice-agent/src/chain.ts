@@ -38,6 +38,8 @@ export interface ChainConfig {
   explorerUrl?: string;
   /** First block the operator's Transfer counts read (default 0). */
   logsFromBlock?: bigint;
+  /** Most one payment transaction may cost in gas, wei (gas limit × maxFeePerGas). Required off 31337. */
+  maxGasCostWei?: bigint;
 }
 
 export function makeChain(cfg: ChainConfig) {
@@ -57,6 +59,8 @@ export interface SignedTransfer {
   raw: Hex;
   hash: Hex;
   nonce: number;
+  /** gas × maxFeePerGas of the signed transaction, wei. */
+  maxCostWei: bigint;
 }
 
 /**
@@ -70,26 +74,75 @@ export async function assertNodeChain(cfg: ChainConfig): Promise<void> {
   }
 }
 
-/** Signs `token.transfer(to, amount)` from the payer key with the given nonce; nothing is sent. */
+/**
+ * THE gas rule, shared by the preflight and the signing path (so what the operator is shown is what
+ * the transaction will authorize): gas limit = the node's estimate + 20% margin (integer division),
+ * maxFeePerGas and maxPriorityFeePerGas = viem's `estimateFeesPerGas()` (EIP-1559), and the most the
+ * transaction can ever cost = gas limit × maxFeePerGas, in wei.
+ */
+export const GAS_MARGIN_NUM = 12n;
+export const GAS_MARGIN_DEN = 10n;
+
+export interface TransferPlan {
+  data: Hex;
+  estimatedGas: bigint;
+  gas: bigint;
+  maxFeePerGas: bigint;
+  maxPriorityFeePerGas: bigint;
+  /** gas × maxFeePerGas, wei: the most this transaction can cost. */
+  maxCostWei: bigint;
+}
+
+export async function planTransfer(cfg: ChainConfig, from: string, to: string, amount: bigint): Promise<TransferPlan> {
+  const client = publicClientFor(cfg);
+  const data = encodeFunctionData({ abi: ERC20_ABI, functionName: 'transfer', args: [getAddress(to), amount] });
+  const estimatedGas = await client.estimateGas({ account: getAddress(from), to: getAddress(cfg.token), data });
+  const fees = await client.estimateFeesPerGas();
+  const gas = (estimatedGas * GAS_MARGIN_NUM) / GAS_MARGIN_DEN;
+  return { data, estimatedGas, gas, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas, maxCostWei: gas * fees.maxFeePerGas };
+}
+
+/** Thrown BEFORE signing when the prepared transaction could cost more than the operator's ceiling. Nothing was signed or sent. */
+export class GasCeilingError extends Error {
+  constructor(public maxCostWei: bigint, public ceilingWei: bigint, public gas: bigint, public maxFeePerGas: bigint) {
+    super(`the transaction could cost up to ${maxCostWei} wei (gas ${gas} × max fee ${maxFeePerGas} wei), above the ceiling of ${ceilingWei} wei: not signed, not sent`);
+  }
+}
+
+/** Counters for tests and the operator's evidence: signatures produced by this process. */
+export const signingStats = { signatures: 0, ceilingRefusals: 0 };
+
+/**
+ * Signs `token.transfer(to, amount)` from the payer key with the given nonce; nothing is sent.
+ * Immediately before signing, the EFFECTIVE fields of the prepared transaction (its gas limit and its
+ * maxFeePerGas, or gasPrice for a legacy one) are multiplied and compared with `cfg.maxGasCostWei`:
+ * above it, GasCeilingError and no signature.
+ */
 export async function signTransfer(cfg: ChainConfig, payerKey: Hex, to: string, amount: bigint, nonce: number): Promise<SignedTransfer> {
   await assertNodeChain(cfg);
   const account = privateKeyToAccount(payerKey);
-  const client = publicClientFor(cfg);
-  const data = encodeFunctionData({ abi: ERC20_ABI, functionName: 'transfer', args: [getAddress(to), amount] });
-  const gas = await client.estimateGas({ account: account.address, to: getAddress(cfg.token), data });
-  const fees = await client.estimateFeesPerGas();
+  const plan = await planTransfer(cfg, account.address, to, amount);
   const wallet = createWalletClient({ account, chain: makeChain(cfg), transport: http(cfg.rpcUrl) });
   const request = await wallet.prepareTransactionRequest({
     to: getAddress(cfg.token),
-    data,
+    data: plan.data,
     nonce,
-    gas: (gas * 12n) / 10n,
-    maxFeePerGas: fees.maxFeePerGas,
-    maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+    gas: plan.gas,
+    maxFeePerGas: plan.maxFeePerGas,
+    maxPriorityFeePerGas: plan.maxPriorityFeePerGas,
     chain: makeChain(cfg),
   });
+  const r = request as { gas?: bigint; maxFeePerGas?: bigint; gasPrice?: bigint };
+  const perGas = r.maxFeePerGas ?? r.gasPrice;
+  if (r.gas === undefined || perGas === undefined) throw new Error('the prepared transaction has no gas limit or fee: not signed');
+  const maxCost = r.gas * perGas;
+  if (cfg.maxGasCostWei !== undefined && maxCost > cfg.maxGasCostWei) {
+    signingStats.ceilingRefusals++;
+    throw new GasCeilingError(maxCost, cfg.maxGasCostWei, r.gas, perGas);
+  }
+  signingStats.signatures++;
   const raw = await account.signTransaction(request as never);
-  return { raw, hash: keccak256(raw), nonce };
+  return { raw, hash: keccak256(raw), nonce, maxCostWei: maxCost };
 }
 
 export async function broadcast(cfg: ChainConfig, raw: Hex): Promise<'sent' | 'already-known'> {
