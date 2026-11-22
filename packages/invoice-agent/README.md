@@ -14,7 +14,7 @@ cd agentfi
 npm ci                 # the whole monorepo, a few minutes: the mandate imports AgentFi's policy evaluator from packages/backend
 cd packages/invoice-agent
 npm run demo           # 20-40 s: starts anvil and the agent, runs the scenario, checks invariants, stops everything
-npm test               # 40 tests on a local chain: lost response, races, RPC failures, the lock, guards, confirmation rule and reorgs, 15-30 s
+npm test               # 46 tests on a local chain: lost response, races, RPC failures, the lock, guards, confirmation rule and reorgs, 15-30 s
 ```
 
 **What to expect.** The demo prints each step (below) with the agent's answer, the operator's `ops verify` / `ops status` output and a `✓` per invariant, and ends with `OK: every invariant held.` and exit code 0 (a broken invariant prints `✗ INVARIANT BROKEN` and exits 1). `npm test` may print `ExperimentalWarning: SQLite is an experimental feature`: the ledger uses Node's built-in `node:sqlite`; the warning is expected.
@@ -70,7 +70,7 @@ Before signing a new invoice, open rows are reconciled first (one that cannot be
 - **A transaction that stays in the mempool** is reported `pending` with its hash: there is no fee bump or replacement. The operator stops there and checks the payer in the explorer; the session command stops by itself after 10 minutes without a block.
 - **`ops verify` reads the chain**, and it also uses the agent's ledger to know which transaction belongs to which invoice: it fails when the receipt's block or log differ from the ledger, or when a transfer to that payee is not matched to an invoice.
 
-Tested on a local chain (`npm test`, 40 tests): crash after broadcast, after signing, while nothing is mined; a transaction dropped from the mempool is resent with the same bytes; two writers racing on one invoice; RPC failures during the resubmission and right after a new payment is sent; a node serving another chain; the nonce taken by another transaction; refusal, conflict, re-judged refusal; and the confirmation rule: pending until finalized, a block that leaves the canonical chain before the rule is met (dropped, or replaced by a reorg), a depth confirmation withdrawn after a deeper reorg, a receipt inconsistent with the block at its height, the finalized block unreadable; and the gas ceiling: a maximum exactly at the ceiling is paid, 1 wei above is refused, a fee rise after an approved preflight is refused (zero signatures, zero transmissions), a payment already sent stays recoverable when fees rise.
+Tested on a local chain (`npm test`, 46 tests): crash after broadcast, after signing, while nothing is mined; a transaction dropped from the mempool is resent with the same bytes; two writers racing on one invoice; RPC failures during the resubmission and right after a new payment is sent; a node serving another chain; the nonce taken by another transaction; refusal, conflict, re-judged refusal; and the confirmation rule: pending until finalized, a block that leaves the canonical chain before the rule is met (dropped, or replaced by a reorg), a depth confirmation withdrawn after a deeper reorg, a receipt inconsistent with the block at its height, the finalized block unreadable; and the gas ceiling: a maximum exactly at the ceiling is paid, 1 wei above is refused, a fee rise after an approved preflight is refused (zero signatures, zero transmissions), a payment already sent stays recoverable when fees rise.
 
 ## When the operator can trust the receipt
 
@@ -116,7 +116,22 @@ Both run the same steps: preflight; a mandate for that vendor, ≤ 1 tUSD8 per i
 
 **Stop criteria** (exit 3, nothing more is sent): preflight fails, including when `finalized` is already further behind than the session will wait or the transfer could cost more gas than the ceiling; the agent refuses on the gas ceiling when it prepares the transaction (nothing signed); the agent records no payment, or the broadcast is not recorded within 60 s; a resend answers anything but pending/paid with the original hash (unresolved, failed, conflict, refused, another hash); an agent error (HTTP 500, RPC down) decides nothing and is asked again, five times at the start, then every 30 s until the wait ends; the transaction stays out of a block for 10 minutes (`--max-unmined-min`): do not resend, check the payer in the explorer; `ops verify` fails; not exactly one transfer. Exit 2: still pending after `--max-wait-min` (default 150): nothing more is sent; run `ops verify` later with the environment it prints. An Anvil key, `INVOICE_FAIL_AT` or the `inclusion` rule are refused on Aevum.
 
-**The operator's view** (`npm run ops -- …`, never needs the agent's key): `status` (mandate, every invoice, balances, every Transfer from the payer), `verify <id>` (the receipt against the chain, plus the count of transfers to that payee), `reconcile [<id>]` (brings open rows up to the chain, never signs), `resolve <id> --not-paid --by NAME --note …` (closes a stuck invoice after the operator checked the chain), `mandate …` (writes the mandate).
+**The operator's view** (`npm run ops -- …`, never needs the agent's key): `status` (mandate, every invoice, balances, every Transfer from the payer), `verify <id>` (the receipt against the chain, plus the count of transfers to that payee), `reconcile [<id>]` (brings open rows up to the chain, never signs), `resolve <id> --not-paid --by NAME --note …` (closes a stuck invoice after the operator checked the chain), `ask <id>` (the read-only "was it paid?" answer, as JSON), `mandate …` (writes the mandate).
+
+## Ask Claude: "was invoice INV-001 paid?" (read-only MCP, experiment)
+
+`npm run mcp` is a stdio MCP server with **two read-only tools**: `invoice_status { invoiceId }` (the ledger's record checked against the chain, the same check as `ops verify`) and `list_invoices` (ledger only). It never holds the payer key, opens the ledger with a read-only connection and exposes no signing, sending, reconcile, mandate or admin tool. `invoice_status` answers one state:
+
+| State | Meaning | What it tells the operator |
+|---|---|---|
+| `paid_verified` | the Transfer is on-chain, matches, meets the confirmation rule, and every transfer to that payee is matched to an invoice | the receipt: hash, block, amount, payee, explorer link |
+| `pending` | a transaction exists, not in a block yet or not confirmed under the rule | the hash and block; "do NOT pay again; ask later" |
+| `not_paid` | refused (mandate or gas ceiling): nothing was signed | the reason |
+| `failed` / `unresolved` / `mismatch` | reverted or no matching Transfer / nonce used without our transaction / chain and ledger disagree | what to inspect; never "pay again" |
+| `unknown_invoice` | not in this ledger (ids are case-sensitive) | only that THIS agent never paid it |
+| `cannot_verify_now` | the chain could not be read (or the node serves another chain) | the ledger's last known state and the original transaction to check first; "do NOT pay again" |
+
+The same answer from the shell: `npm run ops -- ask INV-001` (JSON). To try it locally with synthetic invoices (Anvil, local token; INV-001 confirmed, INV-002 pending, INV-003 refused): `npm run mcp:fixture` prints a Claude Code command with the MCP config it writes (`.sessions/mcp-fixture/mcp.json`); Ctrl+C stops the chain, so the next answer is `cannot_verify_now`. Tested by `test/mcp.test.ts` with the MCP SDK client over stdio.
 
 ## AgentFi before the challenge vs. built for the challenge
 
@@ -139,13 +154,14 @@ Ready and rehearsed locally: the network profile (44005, official RPC, explorer,
 
 ## Third-party code
 
-Runtime: [viem](https://github.com/wevm/viem) (MIT). Development: [tsx](https://github.com/privatenumber/tsx) (MIT), [TypeScript](https://github.com/microsoft/TypeScript) (Apache-2.0), `@types/node` (MIT). SQLite through Node's built-in `node:sqlite`. The test token is compiled with Foundry (`npm run build:token`; solc 0.8.24).
+Runtime: [viem](https://github.com/wevm/viem) (MIT), [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk) (MIT, the read-only MCP server). Development: [tsx](https://github.com/privatenumber/tsx) (MIT), [TypeScript](https://github.com/microsoft/TypeScript) (Apache-2.0), `@types/node` (MIT). SQLite through Node's built-in `node:sqlite`. The test token is compiled with Foundry (`npm run build:token`; solc 0.8.24).
 
 ## Files
 
 - `src/invoice.ts` invoice shape, amounts, content hash · `src/mandate.ts` the operator's mandate and the verdict (uses AgentFi's evaluator)
 - `src/ledger.ts` the write-ahead ledger · `src/chain.ts` sign / broadcast / receipts / Transfer logs · `src/payer.ts` the decision and the reconciliation
 - `src/server.ts` the headless agent (HTTP) · `src/ops.ts` the operator CLI · `src/demo.ts` the scenario
+- `src/inquiry.ts` "was it paid?" (shared by `ops verify`, `ops ask` and the MCP tool) · `src/mcp.ts` the read-only MCP server · `src/mcp-fixture.ts` a local synthetic world to ask it
 - `src/finality.ts` the confirmation rule · `src/preflight.ts` the read-only checks · `src/session.ts` the rehearsal and the public session · `src/config.ts` environment and the Aevum profile
 - `test/finality.test.ts` the confirmation rule, reorgs before confirmation, inconsistent receipts, an unreadable finalized block · `test/config-guard.test.ts` keys, mandate, ledger binding, confirmation settings
 - `test/lost-response.test.ts` the crash cases · `test/review-fixes.test.ts` races, the lock, RPC failures, nonce taken, re-judged refusal, operator resolve (from the independent review) · `contracts/src/LocalTestUSD8.sol` the local test token

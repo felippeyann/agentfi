@@ -11,11 +11,14 @@
     "ops": "tsx src/ops.ts",
     "preflight": "tsx src/preflight.ts",
     "session": "tsx src/session.ts",
+    "mcp": "tsx src/mcp.ts",
+    "mcp:fixture": "tsx src/mcp-fixture.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit -p .",
     "build:token": "cd contracts && forge build && node ../scripts/gen-token.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "viem": "^2.48.8"
   },
   "devDependencies": {

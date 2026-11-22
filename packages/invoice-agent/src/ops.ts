@@ -6,6 +6,7 @@
  *   npm run ops -- status            the mandate, every invoice in the ledger, balances and on-chain transfers
  *   npm run ops -- verify <invoiceId>  checks a receipt against the chain, independently of the agent's answer
  *   npm run ops -- reconcile [<invoiceId>]  brings open rows up to what the chain says (never signs)
+ *   npm run ops -- ask <invoiceId>   "was it paid?": the read-only answer the MCP tool gives, as JSON
  *
  * Environment: INVOICE_RPC_URL, INVOICE_MANDATE, INVOICE_LEDGER (as the agent).
  */
@@ -16,6 +17,7 @@ import { describeRule, explorerTx, judgeFinality, ruleFor } from './finality.js'
 import { formatUnits6 } from './invoice.js';
 import { Ledger } from './ledger.js';
 import { saveMandate } from './mandate.js';
+import { inquireInvoice, verifyInvoice } from './inquiry.js';
 import { InvoicePayer } from './payer.js';
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -49,6 +51,13 @@ async function main(): Promise<number> {
   }
 
   const cfg = loadConfig();
+  if (cmd === 'ask') {
+    // Read-only, before anything that could write (no ledger binding, no node check that would abort):
+    // an unreachable chain is an answer ("cannot verify now"), not an error.
+    if (!rest[0]) throw new Error('usage: npm run ops -- ask <invoiceId>');
+    console.log(JSON.stringify(await inquireInvoice(cfg.chain, cfg.mandate, cfg.ledgerPath, rest[0]), null, 2));
+    return 0;
+  }
   const ledger = new Ledger(cfg.ledgerPath);
   const m = cfg.mandate;
   // The node first: a mandate pointed at the wrong node must not bind a fresh ledger to it.
@@ -71,33 +80,26 @@ async function main(): Promise<number> {
 
   if (cmd === 'verify') {
     const id = rest[0];
-    const row = id ? ledger.get(id) : undefined;
-    if (!row) throw new Error(`unknown invoice ${id}`);
+    // The same check the read-only inquiry (and the MCP tool) uses: inquiry.ts verifyInvoice.
+    const v = id ? await verifyInvoice(cfg.chain, m, ledger, id) : undefined;
+    if (!v) throw new Error(`unknown invoice ${id}`);
+    const row = v.row;
     if (!row.tx_hash) {
       console.log(`${id}: ${row.status}, nothing was signed${row.reason ? ` (${row.reason})` : ''}.`);
-      const sentTo = await transfersFrom(cfg.chain, m.payer, row.pay_to);
-      console.log(`  transfers from the payer to ${row.pay_to} on-chain: ${sentTo.length}`);
+      console.log(`  transfers from the payer to ${row.pay_to} on-chain: ${v.allToPayee.length}`);
       return 0;
     }
-    const receipt = await receiptOf(cfg.chain, row.tx_hash as Hex);
+    const receipt = v.receipt;
     if (!receipt) {
       console.log(`${id}: NOT on-chain yet (tx ${row.tx_hash}, ledger status ${row.status}). Do not pay again; run reconcile.`);
       return 2;
     }
-    const block = await publicClientFor(cfg.chain).getBlock({ blockNumber: receipt.blockNumber });
-    const match = transfersIn(cfg.chain, receipt).filter((t) => t.from === m.payer && t.to === getAddress(row.pay_to) && t.value === BigInt(row.amount));
-    const all = await transfersFrom(cfg.chain, m.payer, row.pay_to);
-    // The chain is the judge, not the agent's ledger: every transfer to this payee must belong to exactly one paid invoice.
-    const paidRows = ledger.all().filter((r) => r.pay_to.toLowerCase() === row.pay_to.toLowerCase() && r.tx_hash && r.status !== 'refused');
-    const known = new Set(paidRows.map((r) => r.tx_hash!.toLowerCase()));
-    const unexplained = all.filter((t) => !known.has(t.txHash.toLowerCase()));
-    const sameAsLedger = !['confirmed', 'included'].includes(row.status) || (row.block_number === receipt.blockNumber.toString() && row.log_index === match[0]?.logIndex);
-    const fin = await judgeFinality(cfg.chain, receipt);
-    const onChainOk = receipt.status === 'success' && match.length === 1 && sameAsLedger && unexplained.length === 0;
-    const ok = onChainOk && fin.final;
-    const notFinal = onChainOk && !fin.final;
+    const { match, allToPayee: all, unexplained, sameAsLedger } = v;
+    const fin = v.finality!;
+    const ok = v.verified;
+    const notFinal = v.notFinal;
     console.log(`${id}: ${ok ? 'VERIFIED' : notFinal ? 'IN A BLOCK, NOT CONFIRMED YET' : 'NOT VERIFIED'} on chain ${cfg.chain.chainId}`);
-    console.log(`  tx ${row.tx_hash} · block ${receipt.blockNumber} (${new Date(Number(block.timestamp) * 1000).toISOString()}) · status ${receipt.status}`);
+    console.log(`  tx ${row.tx_hash} · block ${receipt.blockNumber} (${v.blockTime}) · status ${receipt.status}`);
     console.log(`  confirmation rule ${describeRule(ruleFor(cfg.chain))}: ${fin.detail}${fin.final ? ' → met' : ' → not met: do not treat it as paid yet, do not pay again; run verify again later'}`);
     const link = explorerTx(cfg.chain, row.tx_hash);
     if (link) console.log(`  explorer: ${link}`);

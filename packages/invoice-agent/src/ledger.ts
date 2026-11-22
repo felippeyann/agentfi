@@ -84,7 +84,16 @@ export interface PaymentRow {
 export class Ledger {
   private db: DatabaseSync;
 
-  constructor(path: string) {
+  /**
+   * `readOnly`: opens an EXISTING ledger with a read-only SQLite connection (no schema creation, no
+   * writes possible): used by the inquiry/MCP surface. The agent and `ops` open it read-write.
+   */
+  constructor(path: string, opts: { readOnly?: boolean } = {}) {
+    if (opts.readOnly) {
+      this.db = new DatabaseSync(path, { readOnly: true });
+      this.db.exec('PRAGMA busy_timeout = 5000;');
+      return;
+    }
     this.db = new DatabaseSync(path);
     this.db.exec(`
       PRAGMA busy_timeout = 5000;
@@ -123,6 +132,16 @@ export class Ledger {
     const diff = (Object.keys(want) as (keyof typeof want)[]).filter((k) => have[k] !== want[k]);
     if (diff.length > 0) {
       throw new Error(`this ledger was written for ${diff.map((k) => `${k} ${have[k]}`).join(', ')}; the mandate now says ${diff.map((k) => `${k} ${want[k]}`).join(', ')}. Use a new ledger file (INVOICE_LEDGER) for a new chain, token or payer.`);
+    }
+  }
+
+  /** The recorded context (chain, token, payer), read-only; undefined when the ledger was never bound. */
+  readContext(): { chainId?: string; token?: string; payer?: string } | undefined {
+    try {
+      const rows = this.db.prepare('SELECT k, v FROM context').all() as { k: string; v: string }[];
+      return rows.length ? Object.fromEntries(rows.map((r) => [r.k, r.v])) : undefined;
+    } catch {
+      return undefined; // no context table yet
     }
   }
 
