@@ -50,6 +50,8 @@ async function main(): Promise<number> {
     return 0;
   }
 
+  // ask is read-only: it must not hold the key (nor need the signing settings that come with it).
+  if (cmd === 'ask') delete process.env['INVOICE_PAYER_KEY'];
   const cfg = loadConfig();
   if (cmd === 'ask') {
     // Read-only, before anything that could write (no ledger binding, no node check that would abort):

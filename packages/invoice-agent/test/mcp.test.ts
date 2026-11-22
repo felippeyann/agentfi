@@ -16,7 +16,7 @@ import { createPublicClient, createWalletClient, getAddress, http, type Hex } fr
 import { privateKeyToAccount } from 'viem/accounts';
 import { makeChain, type ChainConfig } from '../src/chain.js';
 import { LOCAL_TEST_USD8_ABI, LOCAL_TEST_USD8_BYTECODE } from '../src/generated/local-test-usd8.js';
-import type { Inquiry } from '../src/inquiry.js';
+import { inquireInvoice, type Inquiry } from '../src/inquiry.js';
 import type { Invoice } from '../src/invoice.js';
 import { Ledger } from '../src/ledger.js';
 import { saveMandate, type Mandate } from '../src/mandate.js';
@@ -182,6 +182,18 @@ describe('MCP: "was invoice X paid?" (read-only)', () => {
       chainDown = false;
       await client.close();
     }
+  });
+
+  it('a ledger that never recorded its chain/token/payer: cannot_verify_now for a paid invoice, never "failed" or "not paid" (review P3)', async () => {
+    const legacy = join(mkdtempSync(join(tmpdir(), 'invoice-agent-legacy-')), 'ledger.sqlite');
+    const l = new Ledger(legacy);
+    l.insert({ ...new Ledger(ledgerPath).get('INV-001')!, invoice_id: 'INV-001' });
+    l.close();
+    const m = JSON.parse(readFileSync(mandatePath, 'utf8')) as Mandate;
+    const other = { ...m, token: '0x0000000000000000000000000000000000000001' };
+    const a = await inquireInvoice({ rpcUrl: ANVIL, chainId: CHAIN_ID, token: other.token }, other, legacy, 'INV-001');
+    assert.equal(a.state, 'cannot_verify_now', JSON.stringify(a));
+    assert.match(a.next, /Do NOT pay this invoice again/);
   });
 
   it('the questions changed nothing: the ledger rows and events are byte-for-byte the same', async () => {

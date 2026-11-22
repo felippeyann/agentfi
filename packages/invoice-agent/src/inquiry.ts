@@ -103,6 +103,11 @@ export async function inquireInvoice(chain: ChainConfig, mandate: Mandate, ledge
     const ctx = ledger.readContext();
     const want = { chainId: String(chain.chainId), token: chain.token.toLowerCase(), payer: mandate.payer.toLowerCase() };
     const wrong = ctx ? (Object.keys(want) as (keyof typeof want)[]).filter((k) => ctx[k] !== undefined && ctx[k] !== want[k]) : [];
+    if (!ctx && row.tx_hash) {
+      // A ledger that never recorded its chain, token and payer (older versions): its transactions
+      // cannot be tied to this mandate, so no verdict, least of all "not paid".
+      return { ...base, state: 'cannot_verify_now', error: 'the ledger has no recorded chain/token/payer context', answer: 'This ledger never recorded which chain, token and payer it was written for, so its transaction cannot be checked against this mandate.', next: `${DO_NOT_PAY} Check the original transaction ${explorer ?? row.tx_hash} by hand, or run the agent or \`ops status\` once on this ledger with the right mandate to record the context.` };
+    }
     if (wrong.length) {
       return { ...base, state: 'cannot_verify_now', error: `ledger context ${wrong.map((k) => `${k} ${ctx![k]}`).join(', ')} ≠ mandate ${wrong.map((k) => `${k} ${want[k]}`).join(', ')}`, answer: 'This ledger was written for another chain, token or payer than the mandate: its answer cannot be checked against this chain.', next: `${DO_NOT_PAY} Point INVOICE_MANDATE and INVOICE_LEDGER at the same agent.` };
     }
@@ -156,7 +161,7 @@ export async function inquireInvoice(chain: ChainConfig, mandate: Mandate, ledge
     }
     return {
       ...withChain, state: 'mismatch',
-      answer: `The chain and the ledger disagree for ${invoiceId}: ${!v.sameAsLedger ? `the ledger says block ${row.block_number}, the chain says ${v.receipt.blockNumber}; ` : ''}${v.unexplained.length ? `${v.unexplained.length} transfer(s) to this payee are not matched to any invoice: ${v.unexplained.map((t) => t.txHash).join(', ')}` : ''}`.replace(/; $/, ''),
+      answer: `The chain and the ledger disagree for ${invoiceId}: ${!v.sameAsLedger ? `the ledger says block ${row.block_number}, the chain says ${v.receipt.blockNumber}; ` : ''}${v.unexplained.length ? `${v.unexplained.length} transfer(s) to this payee are not matched to any invoice: ${v.unexplained.map((t) => t.txHash).join(', ')}; ` : ''}${v.match.length > 1 ? `the transaction carries ${v.match.length} matching transfers, expected exactly one; ` : ''}`.replace(/; $/, ''),
       next: `${DO_NOT_PAY} The operator inspects the transactions above before anything else.`,
     };
   } finally {

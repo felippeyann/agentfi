@@ -58,9 +58,9 @@ async function main() {
     mcpServers: {
       invoice: {
         command: process.execPath,
-        args: ['--import', 'tsx', join(PKG, 'src', 'mcp.ts')],
+        // Absolute loader path: works whatever directory Claude Code is started from.
+        args: ['--import', import.meta.resolve('tsx'), join(PKG, 'src', 'mcp.ts')],
         env: { INVOICE_RPC_URL: RPC, INVOICE_MANDATE: mandatePath, INVOICE_LEDGER: ledgerPath, INVOICE_CONFIRMATION: 'depth:3' },
-        cwd: PKG,
       },
     },
   };
