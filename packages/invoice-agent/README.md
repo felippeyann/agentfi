@@ -14,8 +14,11 @@ cd agentfi
 npm ci                 # the whole monorepo, a few minutes: the mandate imports AgentFi's policy evaluator from packages/backend
 cd packages/invoice-agent
 npm run demo           # 20-40 s: starts anvil and the agent, runs the scenario, checks invariants, stops everything
-npm test               # 47 tests on a local chain: lost response, races, RPC failures, the lock, guards, confirmation rule and reorgs, 15-30 s
+npm run demo:vault     # the same scenario paid through the on-chain InvoiceMandate vault, plus a lost ledger and a pause
+npm test               # 58 tests on a local chain: lost response, races, RPC failures, the lock, guards, confirmation rule and reorgs, the vault path, 15-30 s
 ```
+
+The contract's own tests (Foundry, 28 including 2 fuzz): `cd contracts && forge test` (forge-std comes from the monorepo's `packages/contracts/lib/forge-std` submodule: `git submodule update --init` once). See [The on-chain vault](#the-on-chain-vault-invoicemandate).
 
 **What to expect.** The demo prints each step (below) with the agent's answer, the operator's `ops verify` / `ops status` output and a `✓` per invariant, and ends with `OK: every invariant held.` and exit code 0 (a broken invariant prints `✗ INVARIANT BROKEN` and exits 1). `npm test` may print `ExperimentalWarning: SQLite is an experimental feature`: the ledger uses Node's built-in `node:sqlite`; the warning is expected.
 
@@ -64,7 +67,7 @@ Before signing a new invoice, open rows are reconciled first (one that cannot be
 ## What is guaranteed, and under which conditions
 
 - **At most one payment per invoice id**, with **one agent process per ledger file**: the agent holds an exclusive lock (a SQLite file next to the ledger, locked for the life of the process) and a second process refuses to start. The operating system releases the lock when the process dies, however it dies, so a restart after a crash starts at once and there is no stale lock to take over (tested: ten processes starting together after a crash, exactly one runs). Two agents on different machines with separate ledgers are not protected against each other.
-- **Deduplication is only as good as the invoice id and the ledger.** The id is the key, exactly as written (case-sensitive): `INV-001` and `inv-001` are two invoices, and the same invoice resent under a new id is a new invoice, paid again if the mandate allows it (the per-invoice and daily limits still apply). The vendor's own invoice number is the natural key; whoever submits invoices must keep it stable. The memory is the ledger file: an agent started on a new or different ledger does not know earlier payments (their `Transfer` logs stay on-chain and `ops status` lists them, but the agent does not match them to invoices on its own). A ledger is bound to the chain, token and payer it was first used with; the agent and `ops` refuse it under another one (the mandate's limits, expiry and vendor may change).
+- **Deduplication is only as good as the invoice id and the ledger.** The id is the key, exactly as written (case-sensitive): `INV-001` and `inv-001` are two invoices, and the same invoice resent under a new id is a new invoice, paid again if the mandate allows it (the per-invoice and daily limits still apply). The vendor's own invoice number is the natural key; whoever submits invoices must keep it stable. The memory is the ledger file: an agent started on a new or different ledger does not know earlier payments (their `Transfer` logs stay on-chain and `ops status` lists them, but the agent does not match them to invoices on its own). **With the on-chain vault** this limit goes away for the same invoice id: the chain itself refuses a second settlement and answers "was it paid?" without the ledger ([The on-chain vault](#the-on-chain-vault-invoicemandate)). A ledger is bound to the chain, token and payer it was first used with; the agent and `ops` refuse it under another one (the mandate's limits, expiry and vendor may change).
 - **The mandate is checked when written and every time it is read**: limits must be plain decimals above 0 (`10`, `2.5`; not `1e1`), the expiry a valid date or `null`, the addresses valid. A malformed mandate stops the agent instead of loosening the limits.
 - **A payment is `confirmed` only under the chain's confirmation rule** ([below](#when-the-operator-can-trust-the-receipt)): one block on the local Anvil demo, the node's `finalized` block on Aevum. Until then it is `pending` with its hash.
 - **A transaction that stays in the mempool** is reported `pending` with its hash: there is no fee bump or replacement. The operator stops there and checks the payer in the explorer; the session command stops by itself after 10 minutes without a block.
@@ -133,6 +136,75 @@ Both run the same steps: preflight; a mandate for that vendor, ≤ 1 tUSD8 per i
 
 The same answer from the shell: `npm run ops -- ask INV-001` (JSON). To try it locally with synthetic invoices (Anvil, local token; INV-001 confirmed, INV-002 pending, INV-003 refused): `npm run mcp:fixture` prints a Claude Code command with the MCP config it writes (`.sessions/mcp-fixture/mcp.json`); Ctrl+C stops the chain, so the next answer is `cannot_verify_now`. Tested by `test/mcp.test.ts` with the MCP SDK client over stdio.
 
+## The on-chain vault (`InvoiceMandate`)
+
+`contracts/src/InvoiceMandate.sol` (Solidity 0.8.24, `evm_version = shanghai` because Aevum is a Shanghai-level chain; about 140 lines of code, no dependencies, no upgradeability, no admin above the operator) moves the "paid once" rule from the agent's ledger onto the chain. **One vault per operator**: whoever deploys it is the operator, for good.
+
+| Who | Can | Cannot |
+|---|---|---|
+| **Operator** (the deployer) | fund it (a plain tUSD8 `transfer` to the vault's address); `setMandate(agent, vendor, payTo, maxPerInvoice, maxPerDay, expiresAt)`; `pause` / `unpause`; `revokeAgent` (instant); `withdraw(amount)` (always to the operator) | pay invoices (only the agent can) |
+| **Agent** (the mandate's key) | `payInvoice(invoiceId, amount)` | choose the payee (fixed by the mandate), exceed the cap per invoice or the daily limit (UTC days), pay after the expiry or while paused, change the mandate, withdraw, unpause |
+| **Anyone** | read `mandate()`, `settlementOf(invoiceId)`, `settlements(key)`, the events | anything else |
+
+**`payInvoice(invoiceId, amount)`** checks, in order: caller is the agent (`NotAgent`), not paused (`MandatePaused`), before the expiry (`MandateExpired`), id of 1–64 bytes (`InvalidInvoiceId`), amount above 0 and at most the cap (`ZeroAmount`, `AboveInvoiceCap`), the invoice not settled yet (`AlreadySettled(key, block)`), today's total within the daily limit (`AboveDailyLimit`). It then records `settlements[keccak256(abi.encode(invoiceId, vendor))] = {agent, amount, block}`, adds to today's total, emits `InvoiceSettled(invoiceKey, invoiceId, vendor, payTo, amount, agent)` and only then calls `tUSD8.transfer(payTo, amount)` (effects before the external call; the call must succeed and return `true` or nothing, else `TransferFailed` and the whole payment reverts). `settlementOf(invoiceId)` returns `(settled, amount, blockNumber, agent, key)` for the current vendor.
+
+**What it guarantees** (each one tested in `contracts/test/InvoiceMandate.t.sol`):
+- **One settlement per (invoice id, vendor), enforced by the chain.** A second `payInvoice` for the same invoice reverts, whatever the amount, the nonce, the day, the agent process or its ledger; also after the operator rotates the agent key or changes the vendor's payee. Ids are exact (case-sensitive), like the ledger's; the vendor is part of the key, so two vendors' `INV-001` are two invoices.
+- **A stolen agent key pays nobody else and no more than the limits.** Its only possible action is `payInvoice` to the registered payee: at most the daily limit per UTC day until the operator pauses or revokes it. Replacing the mandate never resets today's total, and does not lift a pause.
+- **Instant revocation and exit:** `pause`, `revokeAgent` and `withdraw` take effect in the next block; nothing else is needed.
+- **A re-entrant or misbehaving token** cannot settle twice or pass the limit (tested with a token that re-enters as the agent, and one that returns `false`).
+
+**Its limits:** the operator is trusted (it can name any agent or payee, and withdraw); the key is the invoice id as written, so the same bill under a new id is a new invoice (paid again within the limits, as off-chain); amounts and limits are `uint48` base units (at most ~281 million tUSD8); it trusts tUSD8 itself (FiatToken can blacklist or pause: a payment then reverts and nothing is recorded); one vendor per vault at a time; expiry is mandatory (`setMandate` refuses a past one).
+
+### The agent through the vault
+
+The flag is the mandate: `npm run ops -- mandate … --vault 0x<vault>`. With it the agent signs `vault.payInvoice(invoiceId, amount)` instead of `token.transfer(payTo, amount)`; the tUSD8 leave the vault, and the agent key (`payer` in the mandate) only signs and pays gas. **Unchanged, and shared with the direct path:** the write-ahead of the signed bytes before broadcast, the crash recovery by hash and nonce, the confirmation rule and the gas ceiling (`planTransfer` plans the vault call with the same rule: the node's estimate + 20%, × maxFeePerGas, refused above `INVOICE_MAX_GAS_COST` before signing). **New:**
+- The agent refuses to start when the mandate file and the vault disagree on the token, the agent, the vendor or the payee.
+- If the vault would revert the payment (already settled, paused, revoked, expired, above an on-chain limit), the gas estimate reverts **before anything is signed**, and the answer is `refused` with the vault's reason (rule `vault:AlreadySettled`, `vault:MandatePaused`, …). An agent restarted on a new, empty ledger that receives an invoice already paid gets `vault:AlreadySettled`, not a second payment.
+- A payment is `confirmed` only when the receipt has the `Transfer` vault → payee of the exact amount **and** the vault's `InvoiceSettled` for that invoice, payee and amount.
+- `ops verify`, `ops ask` and the MCP `invoice_status` also read `settlementOf(invoiceId)` and the `InvoiceSettled` event and require them to agree with the receipt (block, amount, payee, agent); for an invoice the ledger does not know (or refused), they answer **from the vault alone**: `paid_verified` / `pending` with the original transaction, `mismatch`, or "not settled by this vault" (`unknown_invoice`). The answer carries a `vault` field.
+
+`npm run demo:vault` runs the whole demo this way (the operator deploys, deposits 100 and sets the mandate; the agent key holds no tUSD8), then restarts the agent on an empty ledger (INV-001 refused by the chain; `ops ask INV-001` answers `paid_verified` from the vault) and pauses the vault. `test/vault.test.ts` covers the same, plus the three crash cases and the gas ceiling on the vault call.
+
+### Gas
+
+Measured on Anvil (`test/vault.test.ts`, the local 6-decimal token) and simulated with `forge script`:
+
+| Transaction | Gas used | At 1 gwei |
+|---|---|---|
+| deploy `InvoiceMandate` (runtime 4,476 bytes) | 1,027,134 | 0.00103 tQDAY |
+| deposit (a tUSD8 transfer to the vault) | 51,654 local; ~62,900 on Aevum to an empty address (the direct transfer read on 2026-11-20) | ~0.000063 |
+| `setMandate` (first time) | 94,564 | 0.0000946 |
+| `payInvoice`, steady state (vendor holds tUSD8, same day) | 77,600 | — |
+| `payInvoice`, the vault's first payment to an empty vendor | 111,703 | — |
+| direct `transfer` (local token): to a holder / to an empty address | 34,542 / 51,450 | — |
+
+The vault adds ~43,000 gas per payment over a direct transfer (mostly the new settlement slot, 22,100). **Inference for Aevum** (not measured there): the FiatToken transfer read on Aevum was 45,503 (holder) / 62,874 (empty), so `payInvoice` should use ~88,600 in steady state and ~123,000 for a first payment to an empty vendor; with the 20% margin the agent authorizes up to ~106,000 / ~148,000 gas, i.e. **~0.000106 / ~0.000148 tQDAY at 1 gwei: above the 0.0001 ceiling proposed for the direct transfer.** The agent would refuse (rule `maxGasCost`, nothing signed); the vault path needs its own ceiling (0.0002 tQDAY covers both cases up to ~1.35 gwei). The deploy has its own budget; it is not a payment.
+
+### Aevum Testnet: the owner's three transactions (not executed)
+
+Nothing below has been run on Aevum. Each step is a **public transaction signed by the owner with his own key**, on his machine, after its own authorization; the script never reads a private key (it uses Foundry's CLI signer: an encrypted keystore via `--account`, or `--ledger`). Without `--broadcast` each command only simulates and prints the gas. Every run checks the chain id (44005) and that the token at `0x456569838f1d43009A91ebA4263147Afd7233483` has 6 decimals, and refuses otherwise.
+
+Prerequisites: Foundry; `cast wallet import qday-operator --interactive` (the operator: tQDAY for gas, ~0.002, and the tUSD8 to deposit); a **separate agent address** with tQDAY only (it never holds tUSD8); the vendor's public address.
+
+```bash
+cd packages/invoice-agent/contracts
+# 1. deploy: the signer becomes the operator. ~1,027,000 gas (~0.00103 tQDAY at 1 gwei)
+forge script script/InvoiceMandate.s.sol --sig "deploy()" --rpc-url aevum --account qday-operator            # simulate
+forge script script/InvoiceMandate.s.sol --sig "deploy()" --rpc-url aevum --account qday-operator --broadcast
+# (optional) verify the source on Blockscout (an API submission: also the owner's call)
+forge verify-contract <vault> src/InvoiceMandate.sol:InvoiceMandate --chain 44005 \
+  --verifier blockscout --verifier-url https://explorer-test.qday.info/api \
+  --constructor-args $(cast abi-encode "constructor(address)" 0x456569838f1d43009A91ebA4263147Afd7233483)
+# 2. deposit 1 tUSD8 (base units, 6 decimals). ~63,000 gas
+forge script script/InvoiceMandate.s.sol --sig "deposit(address,uint256)" <vault> 1000000 --rpc-url aevum --account qday-operator --broadcast
+# 3. the mandate: agent, vendor id, payee, ≤ 1 tUSD8 per invoice and per day, 7 days. ~95,000 gas
+forge script script/InvoiceMandate.s.sol --sig "setMandate(address,address,string,address,uint48,uint48,uint256)" \
+  <vault> <agent> acme <vendor> 1000000 1000000 7 --rpc-url aevum --account qday-operator --broadcast
+```
+
+Then the agent's mandate names the vault: `npm run ops -- mandate --chain-id 44005 --token 0x456569838f1d43009A91ebA4263147Afd7233483 --payer <agent> --vendor-id acme --vendor-name … --vendor-address <vendor> --max-per-invoice 1 --max-per-day 1 --by NAME --vault <vault>`; `npm run ops -- status` shows the on-chain mandate and the vault balance. **Not built yet for the vault:** `npm run preflight` and `npm run session` still check and run the direct transfer only; a public vault payment means starting the agent (`npm run server` with `INVOICE_MAX_GAS_COST` set for the vault, e.g. 0.0002) and checking with `ops verify` / `ops ask`.
+
 ## AgentFi before the challenge vs. built for the challenge
 
 | | Before the challenge (AgentFi open source, Apache-2.0) | Built during the challenge (this package) |
@@ -165,3 +237,4 @@ Runtime: [viem](https://github.com/wevm/viem) (MIT), [@modelcontextprotocol/sdk]
 - `src/finality.ts` the confirmation rule · `src/preflight.ts` the read-only checks · `src/session.ts` the rehearsal and the public session · `src/config.ts` environment and the Aevum profile
 - `test/finality.test.ts` the confirmation rule, reorgs before confirmation, inconsistent receipts, an unreadable finalized block · `test/config-guard.test.ts` keys, mandate, ledger binding, confirmation settings
 - `test/lost-response.test.ts` the crash cases · `test/review-fixes.test.ts` races, the lock, RPC failures, nonce taken, re-judged refusal, operator resolve (from the independent review) · `contracts/src/LocalTestUSD8.sol` the local test token
+- `contracts/src/InvoiceMandate.sol` the on-chain vault · `contracts/test/` its Foundry tests · `contracts/script/InvoiceMandate.s.sol` the owner's three transactions · `src/vault.ts` reading the vault, decoding its refusals · `test/vault.test.ts` the agent through the vault

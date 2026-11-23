@@ -145,7 +145,7 @@ jobs:
         run: forge coverage --report summary
       # packages/invoice-agent's InvoiceMandate (QDay Aevum, evm_version shanghai); forge-std from the submodule above.
       - working-directory: packages/invoice-agent/contracts
-        run: forge fmt --check src test && forge test -vvv
+        run: forge fmt --check src test script && forge test -vvv
       # The ABI and bytecode the agent embeds must be this build's.
       - working-directory: packages/invoice-agent/contracts
         run: node ../scripts/gen-token.mjs --check
