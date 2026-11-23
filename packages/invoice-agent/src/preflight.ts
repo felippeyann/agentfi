@@ -117,7 +117,7 @@ export async function preflight(o: PreflightOptions): Promise<PreflightResult> {
   const amount = toBaseUnits(o.amount);
   const vendorId = o.vendorId ?? 'vendor-1';
   if (o.vault) {
-    const vcfg = { rpcUrl: o.rpcUrl, chainId: o.chainId, token: o.token, vault: o.vault };
+    const vcfg = { rpcUrl: o.rpcUrl, chainId: o.chainId, token: o.token, vault: o.vault, vaultVendorId: vendorId };
     const vcode = await client.getCode({ address: o.vault });
     if (pass(!!vcode && vcode.length > 2, `vault ${o.vault} has contract code (${vcode ? (vcode.length - 2) / 2 : 0} bytes) [eth_getCode]`)) {
       const v = await readVault(vcfg);
@@ -156,10 +156,10 @@ export async function preflight(o: PreflightOptions): Promise<PreflightResult> {
     if (o.vendor) {
       info(`vendor ${o.vendor}: ${formatUnits6((await client.readContract({ address: o.token, abi: ERC20_ABI, functionName: 'balanceOf', args: [o.vendor] })) as bigint)} ${symbol}`);
       const invoiceId = o.invoiceId ?? 'PREFLIGHT-PROBE';
-      const what = o.vault ? `vault.payInvoice("${invoiceId}", ${o.amount} ${symbol}) from the agent` : `transfer(${o.vendor}, ${o.amount} ${symbol}) from the payer`;
+      const what = o.vault ? `vault.payInvoice("${invoiceId}", "${vendorId}", ${o.vendor}, ${o.amount} ${symbol}) from the agent` : `transfer(${o.vendor}, ${o.amount} ${symbol}) from the payer`;
       try {
         // The SAME rule the signing path applies (chain.ts planTransfer): estimate + 20% margin, × maxFeePerGas.
-        const plan = await planTransfer({ rpcUrl: o.rpcUrl, chainId: o.chainId, token: o.token, ...(o.vault ? { vault: o.vault } : {}) }, o.payer, o.vendor, amount, o.vault ? invoiceId : undefined);
+        const plan = await planTransfer({ rpcUrl: o.rpcUrl, chainId: o.chainId, token: o.token, ...(o.vault ? { vault: o.vault, vaultVendorId: vendorId } : {}) }, o.payer, o.vendor, amount, o.vault ? invoiceId : undefined);
         const cost = plan.maxCostWei;
         result.gasCostWei = cost;
         info(`gas for ${what}, as the agent will sign it: estimate ${plan.estimatedGas} + 20% = gas limit ${plan.gas} × max fee ${plan.maxFeePerGas} wei = at most ${cost} wei = ${formatEther(cost)} ${o.gasSymbol} [eth_estimateGas, eth_feeHistory]`);

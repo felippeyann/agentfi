@@ -21,7 +21,7 @@ import { Ledger } from '../src/ledger.js';
 import type { Mandate } from '../src/mandate.js';
 import { FailPointError, InvoicePayer } from '../src/payer.js';
 import { vendorKey } from '../src/vault.js';
-import { encodeStringArg, rpcClient, SELECTORS, TOPICS, verifyInvoice } from '../verify/verify.js';
+import { encodeStringAndBytes32, encodeStringArg, rpcClient, SELECTORS, TOPICS, vendorBytes32, verifyInvoice } from '../verify/verify.js';
 
 const PORT = 9500 + Math.floor(Math.random() * 300);
 const RPC = `http://127.0.0.1:${PORT}`;
@@ -58,14 +58,18 @@ async function world() {
   const now = BigInt((await p.getBlock()).timestamp);
   await wait(await op.writeContract({ address: vault, abi: INVOICE_MANDATE_ABI, functionName: 'setMandate', args: [AGENT, vendorKey('acme'), VENDOR, 10_000_000, 50_000_000, Number(now + 86_400n)] }));
   // The same rule as the page (and Aevum): finalized. Anvil reports finalized = head − 64.
-  const cfg: ChainConfig = { rpcUrl: RPC, chainId: 31337, token, vault, confirm: { kind: 'finalized' } };
+  const cfg: ChainConfig = { rpcUrl: RPC, chainId: 31337, token, vault, vaultVendorId: 'acme', confirm: { kind: 'finalized' } };
   const mandate: Mandate = { chainId: 31337, token, payer: AGENT, vendor: { id: 'acme', name: 'Acme', address: VENDOR }, vault, maxPerInvoice: '10', maxPerDay: '50', expiresAt: null, approvedBy: 'test', approvedAt: new Date().toISOString() };
   const ledgerPath = join(mkdtempSync(join(tmpdir(), 'invoice-agent-page-')), 'ledger.sqlite');
   const agent = (failAt?: 'after-broadcast') => new InvoicePayer({ ledger: new Ledger(ledgerPath), chain: cfg, mandate, payerKey: AGENT_KEY, receiptTimeoutMs: 3_000, ...(failAt ? { failAt } : {}) });
-  const page = (invoiceId: string, extra: { txHash?: string; chainId?: number; vault?: string; rpcUrl?: string } = {}) =>
-    verifyInvoice({ rpc: rpcClient(extra.rpcUrl ?? RPC), vault: extra.vault ?? vault, invoiceId, chainId: extra.chainId ?? 31337, explorerUrl: 'https://explorer.example', ...(extra.txHash ? { txHash: extra.txHash } : {}) });
+  const page = (invoiceId: string, extra: { txHash?: string; chainId?: number; vault?: string; rpcUrl?: string; vendorId?: string } = {}) =>
+    verifyInvoice({ rpc: rpcClient(extra.rpcUrl ?? RPC), vault: extra.vault ?? vault, invoiceId, chainId: extra.chainId ?? 31337, explorerUrl: 'https://explorer.example', ...(extra.txHash ? { txHash: extra.txHash } : {}), ...(extra.vendorId ? { vendorId: extra.vendorId } : {}) });
+  const setVendor = async (id: string, payTo: string) => {
+    const t = BigInt((await p.getBlock()).timestamp);
+    await wait(await op.writeContract({ address: vault, abi: INVOICE_MANDATE_ABI, functionName: 'setMandate', args: [AGENT, vendorKey(id), getAddress(payTo), 10_000_000, 50_000_000, Number(t + 86_400n)] }));
+  };
   const mcp = (invoiceId: string) => inquireInvoice(cfg, mandate, ledgerPath, invoiceId);
-  return { cfg, token, vault, agent, page, mcp };
+  return { cfg, token, vault, agent, page, mcp, setVendor };
 }
 
 const inv = (id: string, amount: string) => ({ id, vendorId: 'acme', payTo: VENDOR, amount, currency: 'tUSD8' as const });
@@ -74,12 +78,14 @@ describe('verification page (read-only, in the browser): verify/verify.js agains
   it('its hand-written selectors, topic and string encoding match the contract ABI', () => {
     const fn = (name: string) => INVOICE_MANDATE_ABI.find((x) => x.type === 'function' && x.name === name) as AbiFunction;
     assert.equal(SELECTORS.settlementOf, toFunctionSelector(fn('settlementOf')));
+    assert.equal(SELECTORS.findSettlement, toFunctionSelector(fn('findSettlement')));
     assert.equal(SELECTORS.mandate, toFunctionSelector(fn('mandate')));
     assert.equal(SELECTORS.token, toFunctionSelector(fn('token')));
     assert.equal(SELECTORS.operator, toFunctionSelector(fn('operator')));
     assert.equal(TOPICS.invoiceSettled, toEventSelector(INVOICE_MANDATE_ABI.find((x) => x.type === 'event' && x.name === 'InvoiceSettled') as AbiEvent));
     for (const s of ['INV-001', '', 'x'.repeat(32), 'y'.repeat(33), 'é-ünïcode']) {
       assert.equal('0x' + encodeStringArg(s), encodeAbiParameters([{ type: 'string' }], [s]));
+      assert.equal('0x' + encodeStringAndBytes32(s, vendorBytes32('vendor-1')), encodeAbiParameters([{ type: 'string' }, { type: 'bytes32' }], [s, vendorKey('vendor-1')]));
     }
   });
 
@@ -134,5 +140,25 @@ describe('verification page (read-only, in the browser): verify/verify.js agains
     assert.equal((await w.page('INV 1')).state, 'cannot_verify_now');
     assert.equal((await w.page('INV-1', { vault: '0x1234' })).state, 'cannot_verify_now');
 
+  });
+
+  it('after a vendor change the page still finds the old vendor\'s settlement (never a false "not paid"); with another vendor id it names the settled one', async () => {
+    const w = await world();
+    await w.agent().submit(inv('INV-9', '2'));
+    await raw('anvil_mine', ['0x50']);
+    await w.setVendor('beta', '0x90F79bf6EB2c4f870365E785982E1f101E93b906');
+    const any = await w.page('INV-9');
+    assert.equal(any.state, 'paid_verified', any.answer);
+    assert.equal(any.settlement?.vendor, 'acme');
+    assert.equal(any.mandate?.vendor, 'beta');
+    const byAcme = await w.page('INV-9', { vendorId: 'acme' });
+    assert.equal(byAcme.state, 'paid_verified', byAcme.answer);
+    const byBeta = await w.page('INV-9', { vendorId: 'beta' });
+    assert.equal(byBeta.state, 'unknown_invoice');
+    assert.match(byBeta.answer, /HAS one under the same id for vendor "acme"/);
+    const never = await w.page('INV-404');
+    assert.match(never.answer, /under any vendor it has had/);
+    // The MCP answers for the agent's vendor (acme) and still finds it.
+    assert.equal((await w.mcp('INV-9')).state, 'paid_verified');
   });
 });

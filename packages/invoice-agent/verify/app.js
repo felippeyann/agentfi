@@ -6,6 +6,7 @@ const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 $('vault').value = params.get('vault') ?? '';
 $('invoice').value = params.get('invoice') ?? '';
+$('vendor').value = params.get('vendor') ?? '';
 $('tx').value = params.get('tx') ?? '';
 $('rpc').value = params.get('rpc') ?? DEFAULTS.rpcUrl;
 $('chain').value = params.get('chain') ?? String(DEFAULTS.chainId);
@@ -45,12 +46,12 @@ function render(v) {
   if (link) $('explorer-a').href = link;
   const m = v.mandate;
   rows($('mandate'), m ? [
-    ['vendor', m.vendor], ['pays only', m.payTo], ['agent', m.agent], ['operator', m.operator], ['token', m.token],
+    ['current vendor', m.vendor], ['pays only', m.payTo], ['agent', m.agent], ['operator', m.operator], ['token', m.token],
     ['cap per invoice', `${m.maxPerInvoice} tUSD8`], ['daily limit', `${m.maxPerDay} tUSD8 (UTC day)`],
     ['expires', m.expiresAt ? new Date(m.expiresAt * 1000).toISOString() : 'not set'], ['paused', m.paused ? 'YES' : 'no'],
   ] : []);
   const s = v.settlement;
-  rows($('settlement'), s ? [['settled', s.settled ? 'yes' : 'no'], ...(s.settled ? [['amount', `${s.amount} tUSD8`], ['block', s.blockNumber], ['agent', s.agent]] : []), ['invoice key', s.invoiceKey]] : []);
+  rows($('settlement'), s ? [['settled', s.settled ? 'yes' : 'no'], ...(s.settled ? [['vendor', s.vendor], ['amount', `${s.amount} tUSD8`], ['block', s.blockNumber], ['agent', s.agent]] : []), ['invoice key', s.invoiceKey]] : []);
   const e = v.event, t = v.transfer;
   rows($('transfer'), [
     ...(e ? [['transaction', e.txHash], ['event', `InvoiceSettled, log ${e.logIndex}`], ['payee', e.payTo]] : []),
@@ -77,6 +78,7 @@ async function run() {
       rpc: rpcClient($('rpc').value.trim()),
       vault: $('vault').value.trim(),
       invoiceId: $('invoice').value.trim(),
+      ...($('vendor').value.trim() ? { vendorId: $('vendor').value.trim() } : {}),
       ...(chain ? { chainId: Number(chain) } : {}),
       explorerUrl: $('explorer').value.trim(),
       ...($('tx').value.trim() ? { txHash: $('tx').value.trim() } : {}),

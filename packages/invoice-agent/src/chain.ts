@@ -26,7 +26,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import type { ConfirmRule } from './finality.js';
 import { INVOICE_MANDATE_ABI } from './generated/invoice-mandate.js';
 import { LOCAL_TEST_USD8_ABI } from './generated/local-test-usd8.js';
-import { VaultRefusalError, vaultErrorOf } from './vault.js';
+import { VaultRefusalError, vaultErrorOf, vendorKey } from './vault.js';
 
 export const ERC20_ABI = LOCAL_TEST_USD8_ABI;
 
@@ -44,9 +44,14 @@ export interface ChainConfig {
   maxGasCostWei?: bigint;
   /**
    * The operator's InvoiceMandate vault (vault.ts), when the mandate names one: payments are then
-   * `vault.payInvoice(invoiceId, amount)` and the tokens leave the vault, not the agent's address.
+   * `vault.payInvoice(invoiceId, vendor, payTo, amount)` and the tokens leave the vault, not the agent's address.
    */
   vault?: string;
+  /**
+   * With a vault: the vendor id the agent judged invoices for (the mandate's vendor.id). payInvoice commits to it and to
+   * the payee, and the vault reverts (MandateChanged) if the operator changed either since.
+   */
+  vaultVendorId?: string;
 }
 
 /** Where the paid tokens come from: the vault when there is one, otherwise the payer's own address. */
@@ -54,11 +59,12 @@ export function fundsSource(cfg: ChainConfig, payer: string): string {
   return getAddress(cfg.vault ?? payer);
 }
 
-/** The payment call: `vault.payInvoice(invoiceId, amount)` with a vault, `token.transfer(to, amount)` without. */
+/** The payment call: `vault.payInvoice(invoiceId, vendor, payTo, amount)` with a vault, `token.transfer(to, amount)` without. */
 export function paymentCall(cfg: ChainConfig, to: string, amount: bigint, invoiceId?: string): { to: `0x${string}`; data: Hex } {
   if (cfg.vault) {
     if (!invoiceId) throw new Error('a vault payment needs the invoice id');
-    return { to: getAddress(cfg.vault), data: encodeFunctionData({ abi: INVOICE_MANDATE_ABI, functionName: 'payInvoice', args: [invoiceId, amount] }) };
+    if (!cfg.vaultVendorId) throw new Error('a vault payment needs the vendor id (ChainConfig.vaultVendorId)');
+    return { to: getAddress(cfg.vault), data: encodeFunctionData({ abi: INVOICE_MANDATE_ABI, functionName: 'payInvoice', args: [invoiceId, vendorKey(cfg.vaultVendorId), getAddress(to), amount] }) };
   }
   return { to: getAddress(cfg.token), data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'transfer', args: [getAddress(to), amount] }) };
 }
@@ -115,7 +121,7 @@ export interface TransferPlan {
 }
 
 /**
- * With a vault, the call planned is `vault.payInvoice(invoiceId, amount)` (the same gas rule and ceiling apply), and
+ * With a vault, the call planned is `vault.payInvoice(invoiceId, vendor, payTo, amount)` (the same gas rule and ceiling apply), and
  * an estimate the vault reverts (already settled, paused, revoked, expired, above a limit) is a VaultRefusalError:
  * the chain has refused it before anything is signed.
  */

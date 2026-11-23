@@ -69,7 +69,7 @@ async function world(opts: { cap?: bigint; payTo?: string } = {}) {
     address: vault, abi: INVOICE_MANDATE_ABI, functionName: 'setMandate',
     args: [AGENT, vendorKey('acme'), getAddress(opts.payTo ?? VENDOR), Number(opts.cap ?? 10_000_000n), 50_000_000, Number(now + 30n * 86400n)],
   }));
-  const cfg: ChainConfig = { rpcUrl: RPC, chainId: CHAIN_ID, token, vault };
+  const cfg: ChainConfig = { rpcUrl: RPC, chainId: CHAIN_ID, token, vault, vaultVendorId: 'acme' };
   const mandate: Mandate = {
     chainId: CHAIN_ID, token, payer: AGENT, vendor: { id: 'acme', name: 'Acme', address: VENDOR }, vault,
     maxPerInvoice: '10', maxPerDay: '50', expiresAt: null, approvedBy: 'test', approvedAt: new Date().toISOString(),
@@ -79,8 +79,12 @@ async function world(opts: { cap?: bigint; payTo?: string } = {}) {
   const proc = (o: { failAt?: FailPoint; ledger?: string; chain?: ChainConfig } = {}) =>
     new InvoicePayer({ ledger: new Ledger(o.ledger ?? ledgerPath), chain: o.chain ?? cfg, mandate, payerKey: AGENT_KEY, receiptTimeoutMs: 5_000, ...(o.failAt ? { failAt: o.failAt } : {}) });
   const vaultCall = async (functionName: 'pause' | 'unpause' | 'revokeAgent') => wait(await op.writeContract({ address: vault, abi: INVOICE_MANDATE_ABI, functionName }));
+  const setVendor = async (id: string, payTo: string) => {
+    const t = BigInt((await p.getBlock()).timestamp);
+    await wait(await op.writeContract({ address: vault, abi: INVOICE_MANDATE_ABI, functionName: 'setMandate', args: [AGENT, vendorKey(id), getAddress(payTo), 10_000_000, 50_000_000, Number(t + 86_400n)] }));
+  };
   return {
-    cfg, mandate, token, vault, ledgerPath, newLedgerPath, proc, vaultCall,
+    cfg, mandate, token, vault, ledgerPath, newLedgerPath, proc, vaultCall, setVendor,
     sent: () => transfersFrom(cfg, vault),
     gas: { deploy: vaultDeploy.gasUsed, deposit: deposit.gasUsed, setMandate: setMandate.gasUsed },
   };
@@ -230,6 +234,22 @@ describe('vault path: the agent pays through InvoiceMandate.payInvoice', () => {
     assert.equal((below as { rule: string }).rule, 'maxGasCost');
     const at = await w.proc({ chain: { ...w.cfg, maxGasCostWei: plan.maxCostWei } }).submit(invoice('INV-10', '1'));
     assert.equal(at.outcome, 'paid');
+  });
+
+  it('vendor switch race (review P2-1): bytes signed for acme, the operator switches to beta, the SAME bytes are re-sent → the vault reverts; beta gets nothing and its INV id stays free', async () => {
+    const w = await world();
+    const BETA_PAYEE = getAddress('0x90F79bf6EB2c4f870365E785982E1f101E93b906');
+    await assert.rejects(w.proc({ failAt: 'after-sign' }).submit(invoice('INV-R', '2')), FailPointError);
+    await w.setVendor('beta', BETA_PAYEE);
+    const r = await w.proc().submit(invoice('INV-R', '2')); // reconcile: the recorded bytes are sent again, unchanged
+    assert.equal(r.outcome, 'failed', JSON.stringify(r));
+    assert.equal(await balanceOf(w.cfg, BETA_PAYEE), 0n, 'beta received nothing');
+    assert.equal((await settlementOf(w.cfg, 'INV-R', 'beta')).settled, false, "beta's INV-R is still payable");
+    assert.equal((await settlementOf(w.cfg, 'INV-R', 'acme')).settled, false);
+    // A NEW invoice is refused before signing (the gas estimate reverts MandateChanged), with the reason.
+    const fresh = await w.proc().submit(invoice('INV-S', '1'));
+    assert.equal((fresh as { rule: string }).rule, 'vault:MandateChanged');
+    assert.match((fresh as { reason: string }).reason, /now names vendor "beta"/);
   });
 
   it('preflight --vault: reads the vault and estimates payInvoice from the agent; fails when paused, for another agent, or above the ceiling', async () => {

@@ -24,7 +24,7 @@ import { describeRule, explorerTx, judgeFinality, ruleFor, type Finality } from 
 import { formatUnits6 } from './invoice.js';
 import { Ledger, type PaymentRow } from './ledger.js';
 import type { Mandate } from './mandate.js';
-import { findSettledEvent, settledEventsIn, settlementOf, type SettledEvent, type SettlementRecord } from './vault.js';
+import { findSettledEvent, findSettlement, invoiceKeyOf, settledEventsIn, settlementOf, vendorIdOf, vendorKey, type SettledEvent, type SettlementRecord } from './vault.js';
 
 /** What the vault itself says about an invoice (only when the mandate names a vault). */
 export interface VaultCheck {
@@ -46,6 +46,9 @@ function checkVault(chain: ChainConfig, mandate: Mandate, invoiceId: string, s: 
   if ((expect.settled || s.settled) && !ev) problems.push('no InvoiceSettled event for it');
   if (s.settled && ev && (s.blockNumber !== ev.blockNumber || s.amount !== ev.amount || s.agent !== ev.agent)) problems.push(`settlementOf (block ${s.blockNumber}, ${formatUnits6(s.amount)} tUSD8, agent ${s.agent}) ≠ the event (block ${ev.blockNumber}, ${formatUnits6(ev.amount)}, agent ${ev.agent})`);
   if (ev && ev.invoiceId !== invoiceId) problems.push(`the event is for "${ev.invoiceId}"`);
+  if (ev && chain.vaultVendorId && (ev.vendor !== vendorKey(chain.vaultVendorId) || ev.invoiceKey !== invoiceKeyOf(invoiceId, chain.vaultVendorId))) {
+    problems.push(`the event is for vendor "${vendorIdOf(ev.vendor)}", not "${chain.vaultVendorId}"`);
+  }
   if (expect.amount !== undefined && s.settled && s.amount !== expect.amount) problems.push(`settled amount ${formatUnits6(s.amount)} ≠ the invoice's ${formatUnits6(expect.amount)} tUSD8`);
   if (expect.payTo && ev && ev.payTo.toLowerCase() !== expect.payTo.toLowerCase()) problems.push(`paid to ${ev.payTo}, the invoice says ${expect.payTo}`);
   if (expect.blockNumber !== undefined && s.settled && s.blockNumber !== expect.blockNumber) problems.push(`settled in block ${s.blockNumber}, the receipt says ${expect.blockNumber}`);
@@ -187,9 +190,18 @@ async function unknownToLedger(chain: ChainConfig, mandate: Mandate, invoiceId: 
     const fromVault = await answerFromVault(chain, mandate, invoiceId, { invoiceId, network });
     if (fromVault) return fromVault;
     const s = await settlementOf(chain, invoiceId);
+    // Not settled for this agent's vendor: was the same id settled for ANOTHER vendor this vault has had?
+    const any = await findSettlement(chain, invoiceId);
+    if (any.settled) {
+      return {
+        ...plain, vault: { address: chain.vault, invoiceKey: s.key, settled: false },
+        answer: `${why}. The vault has no settlement of "${invoiceId}" for vendor "${chain.vaultVendorId}", but it HAS one under the same id for vendor "${any.vendorId}" (${formatUnits6(any.amount)} tUSD8, block ${any.blockNumber}).`,
+        next: `${DO_NOT_PAY} Check which vendor this invoice belongs to: the vault keeps one settlement per (invoice id, vendor).`,
+      };
+    }
     return {
       ...plain, vault: { address: chain.vault, invoiceKey: s.key, settled: false },
-      answer: `${why}, and the vault ${chain.vault} has NO settlement for it: it was not paid through this vault.`,
+      answer: `${why}, and the vault ${chain.vault} has NO settlement for it under any vendor it has had: it was not paid through this vault.`,
       next: 'Check the invoice id exactly as written (case-sensitive) and the vault address. A payment still in the mempool is not settled yet: if one was sent, ask again later before paying.',
     };
   } catch (e) {

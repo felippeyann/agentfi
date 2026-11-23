@@ -18,7 +18,7 @@
 import type { Hex } from 'viem';
 import { formatEther } from 'viem';
 import { broadcast, fundsSource, GasCeilingError, isKnownToNode, nonces, receiptOf, signTransfer, transfersIn, type ChainConfig } from './chain.js';
-import { explainVaultRefusal, settledEventsIn, VaultRefusalError } from './vault.js';
+import { explainVaultRefusal, invoiceKeyOf, settledEventsIn, VaultRefusalError, vendorKey } from './vault.js';
 import { describeRule, explorerTx, judgeFinality, ruleFor } from './finality.js';
 import { formatUnits6, invoiceHash, toBaseUnits, type Invoice } from './invoice.js';
 import { OPEN_STATUSES, type Ledger, type PaymentRow } from './ledger.js';
@@ -293,9 +293,11 @@ export class InvoicePayer {
     const match = transfersIn(chain, receipt).find(
       (t) => t.from === source && t.to.toLowerCase() === row.pay_to.toLowerCase() && t.value === BigInt(row.amount),
     );
-    // Through a vault, the vault's own record must say the same: InvoiceSettled for THIS invoice, payee and amount.
+    // Through a vault, the vault's own record must say the same: InvoiceSettled for THIS invoice, payee and amount, under
+    // the vendor the agent judged it for (its vendor topic and its key, keccak256(invoiceId, vendor)).
     const settledOk = !chain.vault || settledEventsIn(chain, receipt).some(
-      (s) => s.invoiceId === row.invoice_id && s.payTo.toLowerCase() === row.pay_to.toLowerCase() && s.amount === BigInt(row.amount),
+      (s) => s.invoiceId === row.invoice_id && s.payTo.toLowerCase() === row.pay_to.toLowerCase() && s.amount === BigInt(row.amount)
+        && s.vendor === vendorKey(chain.vaultVendorId!) && s.invoiceKey === invoiceKeyOf(row.invoice_id, chain.vaultVendorId!),
     );
     if (!match || !settledOk) {
       ledger.update(row.invoice_id, { status: 'reverted', reason: `Transaction ${hash} succeeded but has no ${!match ? `Transfer of ${row.amount} units from ${source} to ${row.pay_to}` : `InvoiceSettled event for ${row.invoice_id}`}.`, what_to_do: 'Operator: inspect the transaction.' });

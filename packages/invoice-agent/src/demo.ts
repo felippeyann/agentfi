@@ -170,7 +170,7 @@ async function main() {
     await wait(await deployer.writeContract({ address: token, abi: LOCAL_TEST_USD8_ABI, functionName: 'mint', args: [PAYER, 100_000_000n] }));
     out(`Token ${token} (tUSD8-LOCAL, 6 decimals) · payer ${PAYER} funded with 100 · vendor "acme" ${VENDOR}`);
   }
-  const cfg: ChainConfig = { rpcUrl: RPC, chainId: CHAIN_ID, token, ...(vault ? { vault } : {}) };
+  const cfg: ChainConfig = { rpcUrl: RPC, chainId: CHAIN_ID, token, ...(vault ? { vault, vaultVendorId: 'acme' } : {}) };
   /** Where the tUSD8 leave from: the vault, or the payer's own address. */
   const SOURCE = vault ?? PAYER;
   const src = vault ? 'vault' : 'payer';

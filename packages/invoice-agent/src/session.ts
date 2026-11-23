@@ -176,7 +176,7 @@ async function main(): Promise<number> {
   }
   const payer = getAddress(privateKeyToAccount(payerKey).address);
   const ceilingWei = parseGasCeiling(GAS_CEILING);
-  const chain: ChainConfig = { rpcUrl, chainId, token, confirm: parseConfirmRule(confirmation), maxGasCostWei: ceilingWei, ...(explorerUrl ? { explorerUrl } : {}), ...(vault ? { vault } : {}) };
+  const chain: ChainConfig = { rpcUrl, chainId, token, confirm: parseConfirmRule(confirmation), maxGasCostWei: ceilingWei, ...(explorerUrl ? { explorerUrl } : {}), ...(vault ? { vault, vaultVendorId: VENDOR_ID } : {}) };
   /** Where the tUSD8 leave from: the vault, or the payer's own address. */
   const source = vault ?? payer;
   const client = createPublicClient({ chain: makeChain(chain), transport: http(rpcUrl) });

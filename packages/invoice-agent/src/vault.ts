@@ -7,7 +7,7 @@
  *
  * Everything here reads; nothing signs.
  */
-import { BaseError, decodeErrorResult, getAddress, hexToString, parseEventLogs, stringToHex, type Hex, type TransactionReceipt } from 'viem';
+import { BaseError, decodeErrorResult, encodeAbiParameters, getAddress, hexToString, keccak256, parseEventLogs, stringToHex, type Hex, type TransactionReceipt } from 'viem';
 import { publicClientFor, type ChainConfig } from './chain.js';
 import { INVOICE_MANDATE_ABI } from './generated/invoice-mandate.js';
 import { formatUnits6, type Invoice } from './invoice.js';
@@ -85,12 +85,29 @@ export interface SettlementRecord {
   key: Hex;
 }
 
-/** `settlementOf(invoiceId)`: "was it paid?" straight from the chain (for the vault's current vendor). */
-export async function settlementOf(cfg: ChainConfig, invoiceId: string): Promise<SettlementRecord> {
+/** The vault's idempotency key: keccak256(abi.encode(invoiceId, vendor)). */
+export function invoiceKeyOf(invoiceId: string, vendorId: string): Hex {
+  return keccak256(encodeAbiParameters([{ type: 'string' }, { type: 'bytes32' }], [invoiceId, vendorKey(vendorId)]));
+}
+
+/**
+ * `settlementOf(invoiceId, vendor)`: "was it paid?" straight from the chain, for the vendor the agent pays
+ * (`cfg.vaultVendorId`, or `vendorId`). Never the vault's "current" vendor: a vendor change must not hide a payment.
+ */
+export async function settlementOf(cfg: ChainConfig, invoiceId: string, vendorId = cfg.vaultVendorId): Promise<SettlementRecord> {
+  if (!vendorId) throw new Error('settlementOf needs the vendor id');
   const [settled, amount, blockNumber, agent, key] = (await publicClientFor(cfg).readContract({
-    address: getAddress(cfg.vault!), abi: VAULT_ABI, functionName: 'settlementOf', args: [invoiceId],
+    address: getAddress(cfg.vault!), abi: VAULT_ABI, functionName: 'settlementOf', args: [invoiceId, vendorKey(vendorId)],
   })) as readonly [boolean, bigint, bigint, string, Hex];
   return { settled, amount, blockNumber, agent: getAddress(agent), key };
+}
+
+/** `findSettlement(invoiceId)`: the id looked up for EVERY vendor the vault has had (newest first). */
+export async function findSettlement(cfg: ChainConfig, invoiceId: string): Promise<SettlementRecord & { vendor: Hex; vendorId: string }> {
+  const [settled, vendor, amount, blockNumber, agent, key] = (await publicClientFor(cfg).readContract({
+    address: getAddress(cfg.vault!), abi: VAULT_ABI, functionName: 'findSettlement', args: [invoiceId],
+  })) as readonly [boolean, Hex, bigint, bigint, string, Hex];
+  return { settled, vendor, vendorId: settled ? vendorIdOf(vendor) : '', amount, blockNumber, agent: getAddress(agent), key };
 }
 
 export interface SettledEvent {
@@ -197,6 +214,12 @@ export function explainVaultRefusal(e: VaultRefusalError, inv: Invoice): { rule:
       return { rule: 'vault:MandatePaused', reason: 'The operator has paused the vault: it pays nothing until unpaused.', whatToDo: 'Ask the operator; resubmit the same invoice once the vault is unpaused (it is judged again).' };
     case 'NotAgent':
       return { rule: 'vault:NotAgent', reason: "This agent's key is not the vault's agent (revoked, or another key was named).", whatToDo: 'Ask the operator to name this agent in the vault (setMandate) or to use the agent it names.' };
+    case 'MandateChanged':
+      return {
+        rule: 'vault:MandateChanged',
+        reason: `The vault's mandate now names vendor "${vendorIdOf(a[0] as Hex)}" paid at ${String(a[1])}; this agent judged the invoice for vendor "${inv.vendorId}" paid at ${inv.payTo}. The vault refuses to pay a vendor the agent did not judge.`,
+        whatToDo: "The operator changed the on-chain mandate: update the agent's mandate file to match the vault (the agent refuses to start while they differ), then resubmit.",
+      };
     case 'MandateExpired':
       return { rule: 'vault:MandateExpired', reason: 'The on-chain mandate has expired.', whatToDo: 'Ask the operator to renew it (setMandate with a new expiry).' };
     case 'AboveInvoiceCap':

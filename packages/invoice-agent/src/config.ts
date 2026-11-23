@@ -79,7 +79,7 @@ export function loadConfig(): Config {
       ...(explorerUrl ? { explorerUrl } : {}),
       ...(fromEnv ? { logsFromBlock: BigInt(fromEnv) } : {}),
       ...(maxGasCostWei !== undefined ? { maxGasCostWei } : {}),
-      ...(mandate.vault ? { vault: mandate.vault } : {}),
+      ...(mandate.vault ? { vault: mandate.vault, vaultVendorId: mandate.vendor.id } : {}),
     },
   };
 }

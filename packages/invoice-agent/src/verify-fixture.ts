@@ -52,7 +52,7 @@ async function main() {
   const now = (await pub.getBlock()).timestamp;
   await wait(await op.writeContract({ address: vault, abi: INVOICE_MANDATE_ABI, functionName: 'setMandate', args: [agentAddr, vendorKey('acme'), VENDOR, 10_000_000, 50_000_000, Number(now + 7n * 86_400n)] }));
   const mandate = { chainId: 31337, token, payer: agentAddr, vendor: { id: 'acme', name: 'Acme Data Ltd', address: VENDOR }, vault, maxPerInvoice: '10', maxPerDay: '50', expiresAt: null, approvedBy: 'fixture', approvedAt: new Date().toISOString() };
-  const agent = new InvoicePayer({ ledger: new Ledger(join(DIR, 'ledger.sqlite')), chain: { rpcUrl: RPC, chainId: 31337, token, vault, confirm: { kind: 'finalized' } }, mandate, payerKey: KEYS.agent, receiptTimeoutMs: 3_000 });
+  const agent = new InvoicePayer({ ledger: new Ledger(join(DIR, 'ledger.sqlite')), chain: { rpcUrl: RPC, chainId: 31337, token, vault, vaultVendorId: 'acme', confirm: { kind: 'finalized' } }, mandate, payerKey: KEYS.agent, receiptTimeoutMs: 3_000 });
   const inv = (id: string, amount: string) => ({ id, vendorId: 'acme', payTo: VENDOR, amount, currency: 'tUSD8' as const });
   await agent.submit(inv('INV-001', '8'));
   await pub.request({ method: 'anvil_mine' as never, params: ['0x50'] as never }); // Anvil: finalized = head − 64

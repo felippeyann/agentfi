@@ -13,7 +13,8 @@ export const DEFAULTS = Object.freeze({
 });
 
 export const SELECTORS = Object.freeze({
-  settlementOf: '0x32ee95fb', // settlementOf(string)
+  settlementOf: '0x03c09e95', // settlementOf(string,bytes32)
+  findSettlement: '0x143f47e1', // findSettlement(string)
   mandate: '0x39b1b96d', // mandate()
   token: '0xfc0c546a', // token()
   operator: '0x570ca735', // operator()
@@ -48,6 +49,17 @@ export function encodeStringArg(s) {
   const len = (data.length / 2).toString(16).padStart(64, '0');
   const padded = data.padEnd(Math.ceil(data.length / 64) * 64, '0');
   return '0'.repeat(62) + '20' + len + padded;
+}
+
+/** ABI encoding of (string, bytes32): offset 0x40, the bytes32, then the string. */
+export function encodeStringAndBytes32(s, b32) {
+  const tail = encodeStringArg(s).slice(64); // length + padded bytes
+  return '0'.repeat(62) + '40' + strip(b32).padEnd(64, '0') + tail;
+}
+
+/** A vendor id as the vault stores it: its ASCII bytes left-aligned in a bytes32. */
+export function vendorBytes32(id) {
+  return '0x' + utf8Hex(id).padEnd(64, '0');
 }
 
 /** Decodes an ABI string at byte offset `offset` (in a hex blob without 0x). */
@@ -93,7 +105,7 @@ const call = (rpc, to, data) => rpc('eth_call', [{ to, data }, 'latest']);
  *   mismatch           the vault's record, its event and the transfer disagree
  *   cannot_verify_now  the chain could not be read, or it is not the expected chain, or there is no vault there
  *
- * @param {{ rpc: (m: string, p?: unknown[]) => Promise<any>, vault: string, invoiceId: string, chainId?: number, explorerUrl?: string, txHash?: string }} o
+ * @param {{ rpc: (m: string, p?: unknown[]) => Promise<any>, vault: string, invoiceId: string, vendorId?: string, chainId?: number, explorerUrl?: string, txHash?: string }} o
  */
 export async function verifyInvoice(o) {
   const out = { invoiceId: o.invoiceId, vault: o.vault, checks: [] };
@@ -120,8 +132,26 @@ export async function verifyInvoice(o) {
       maxPerInvoice: units6(wordInt(m, 4)), maxPerDay: units6(wordInt(m, 5)), vendor: bytes32ToAscii('0x' + word(m, 6)),
     };
     if (chainId === DEFAULTS.chainId && lower(out.mandate.token) !== lower(DEFAULTS.tUSD8)) bad(`the vault's token ${out.mandate.token} is NOT the official tUSD8 ${DEFAULTS.tUSD8}`);
-    const s = await call(o.rpc, o.vault, SELECTORS.settlementOf + encodeStringArg(o.invoiceId));
-    out.settlement = { settled: wordInt(s, 0) === 1n, amount: units6(wordInt(s, 1)), amountUnits: wordInt(s, 1).toString(), blockNumber: Number(wordInt(s, 2)), agent: wordAddr(s, 3), invoiceKey: '0x' + word(s, 4) };
+    // With a vendor id: settlementOf(id, vendor). Without one, or when that vendor has none: findSettlement(id), which
+    // looks the id up for EVERY vendor the vault has had, so "not settled" is never an artefact of a vendor change.
+    const fromFind = async () => {
+      const f = await call(o.rpc, o.vault, SELECTORS.findSettlement + encodeStringArg(o.invoiceId));
+      return { settled: wordInt(f, 0) === 1n, vendor: bytes32ToAscii('0x' + word(f, 1)), amount: units6(wordInt(f, 2)), amountUnits: wordInt(f, 2).toString(), blockNumber: Number(wordInt(f, 3)), agent: wordAddr(f, 4), invoiceKey: '0x' + word(f, 5) };
+    };
+    if (o.vendorId) {
+      if (!/^[\x21-\x7e]{1,32}$/.test(o.vendorId)) return done('cannot_verify_now', 'The vendor id must be 1–32 printable ASCII characters, as the vault names it.', 'Leave it empty to search every vendor of the vault.');
+      const s = await call(o.rpc, o.vault, SELECTORS.settlementOf + encodeStringAndBytes32(o.invoiceId, vendorBytes32(o.vendorId)));
+      out.settlement = { settled: wordInt(s, 0) === 1n, vendor: o.vendorId, amount: units6(wordInt(s, 1)), amountUnits: wordInt(s, 1).toString(), blockNumber: Number(wordInt(s, 2)), agent: wordAddr(s, 3), invoiceKey: '0x' + word(s, 4) };
+      if (!out.settlement.settled) {
+        const any = await fromFind();
+        if (any.settled) {
+          out.otherVendorSettlement = any;
+          return done('unknown_invoice', `No settlement of "${o.invoiceId}" for vendor "${o.vendorId}", but the vault HAS one under the same id for vendor "${any.vendor}" (${any.amount} tUSD8, block ${any.blockNumber}).`, DO_NOT_PAY + ' Check which vendor this invoice belongs to (leave the vendor empty to see that settlement).');
+        }
+      }
+    } else {
+      out.settlement = await fromFind();
+    }
 
     if (!out.settlement.settled) {
       if (o.txHash) {
@@ -132,9 +162,9 @@ export async function verifyInvoice(o) {
           return done('pending', `Pending: transaction ${o.txHash} is known to the node but not in a block yet; the vault has not settled ${o.invoiceId}.`, DO_NOT_PAY + ' Ask again later.');
         }
       }
-      return done('unknown_invoice', `The vault has NO settlement for invoice "${o.invoiceId}" (vendor "${out.mandate.vendor}"): it was not paid through this vault.`, 'Check the id exactly as written (case-sensitive) and the vault. A payment still in the mempool is not settled yet: if one was sent, ask again later (or give its transaction hash) before paying.');
+      return done('unknown_invoice', `The vault has NO settlement for invoice "${o.invoiceId}" ${o.vendorId ? `for vendor "${o.vendorId}" nor ` : ''}under any vendor it has had: it was not paid through this vault.`, 'Check the id exactly as written (case-sensitive) and the vault. A payment still in the mempool is not settled yet: if one was sent, ask again later (or give its transaction hash) before paying.');
     }
-    ok(`settlementOf: settled, ${out.settlement.amount} tUSD8, block ${out.settlement.blockNumber}, agent ${out.settlement.agent}`);
+    ok(`settlement (vendor "${out.settlement.vendor}"): settled, ${out.settlement.amount} tUSD8, block ${out.settlement.blockNumber}, agent ${out.settlement.agent}`);
 
     const block = '0x' + out.settlement.blockNumber.toString(16);
     const logs = await o.rpc('eth_getLogs', [{ address: o.vault, topics: [TOPICS.invoiceSettled, out.settlement.invoiceKey], fromBlock: block, toBlock: block }]);
@@ -147,7 +177,7 @@ export async function verifyInvoice(o) {
     const ev = {
       txHash: log.transactionHash, logIndex: Number(BigInt(log.logIndex)), blockNumber: Number(BigInt(log.blockNumber)),
       invoiceId: decodeStringAt(body, Number(wordInt(log.data, 0))), amountUnits: wordInt(log.data, 1).toString(), agent: wordAddr(log.data, 2),
-      vendor: bytes32ToAscii(log.topics[2]), payTo: '0x' + strip(log.topics[3]).slice(24),
+      vendor: bytes32ToAscii(log.topics[2]), vendorRaw: log.topics[2], payTo: '0x' + strip(log.topics[3]).slice(24),
     };
     out.event = ev;
     out.explorer = explorerTx(ev.txHash);
@@ -155,6 +185,7 @@ export async function verifyInvoice(o) {
       ev.invoiceId !== o.invoiceId && `the event is for "${ev.invoiceId}"`,
       ev.amountUnits !== out.settlement.amountUnits && 'amount differs from settlementOf',
       lower(ev.agent) !== lower(out.settlement.agent) && 'agent differs from settlementOf',
+      ev.vendor !== out.settlement.vendor && `the event's vendor "${ev.vendor}" differs from the settlement's "${out.settlement.vendor}"`,
     ].filter(Boolean);
     if (evProblems.length) {
       bad(`InvoiceSettled: ${evProblems.join(', ')}`);
