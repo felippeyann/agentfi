@@ -15,7 +15,7 @@ npm ci                 # the whole monorepo, a few minutes: the mandate imports 
 cd packages/invoice-agent
 npm run demo           # 20-40 s: starts anvil and the agent, runs the scenario, checks invariants, stops everything
 npm run demo:vault     # the same scenario paid through the on-chain InvoiceMandate vault, plus a lost ledger and a pause
-npm test               # 58 tests on a local chain: lost response, races, RPC failures, the lock, guards, confirmation rule and reorgs, the vault path, 15-30 s
+npm test               # 62 tests on a local chain: lost response, races, RPC failures, the lock, guards, confirmation rule and reorgs, the vault path, the verification page, 15-40 s
 ```
 
 The contract's own tests (Foundry, 28 including 2 fuzz): `cd contracts && forge test` (forge-std comes from the monorepo's `packages/contracts/lib/forge-std` submodule: `git submodule update --init` once). See [The on-chain vault](#the-on-chain-vault-invoicemandate).
@@ -205,6 +205,12 @@ forge script script/InvoiceMandate.s.sol --sig "setMandate(address,address,strin
 
 Then the agent's mandate names the vault: `npm run ops -- mandate --chain-id 44005 --token 0x456569838f1d43009A91ebA4263147Afd7233483 --payer <agent> --vendor-id acme --vendor-name … --vendor-address <vendor> --max-per-invoice 1 --max-per-day 1 --by NAME --vault <vault>`; `npm run ops -- status` shows the on-chain mandate and the vault balance. **Not built yet for the vault:** `npm run preflight` and `npm run session` still check and run the direct transfer only; a public vault payment means starting the agent (`npm run server` with `INVOICE_MAX_GAS_COST` set for the vault, e.g. 0.0002) and checking with `ops verify` / `ops ask`.
 
+### The verification page (static, read-only; not published)
+
+`verify/` is a static page (`index.html`, `app.js`, `verify.js`, `style.css`; no build, no dependencies, no wallet). It takes a vault address and an invoice id (and optionally a transaction hash), reads the chain **from the browser** over plain JSON-RPC (default: the public `https://rpc-test.qday.info`, chain 44005) and shows the on-chain mandate, `settlementOf`, the `InvoiceSettled` event, the tUSD8 `Transfer` in the same transaction, the finality (the block is canonical and at or below the node's `finalized` block) and the explorer link. Its states are the MCP's names: `paid_verified`, `pending`, `failed`, `unknown_invoice` (no settlement in this vault), `mismatch`, `cannot_verify_now` (RPC down, another chain, no contract). It never signs or sends anything; everything from the chain is rendered as text; a strict Content-Security-Policy allows only its own scripts and RPC connections. A link can carry the inputs: `index.html?vault=0x…&invoice=INV-001`.
+
+Try it locally: `npm run verify:fixture` (Anvil, a vault, INV-001 finalized and INV-002 not yet; it serves the page on 127.0.0.1 and prints the links; Ctrl+C stops it). `test/verify-page.test.ts` runs the page's logic against Anvil and checks its states against the agent's own answer and its hand-written selectors against the contract ABI. **Publishing the page (any public host) is a separate decision.**
+
 ## AgentFi before the challenge vs. built for the challenge
 
 | | Before the challenge (AgentFi open source, Apache-2.0) | Built during the challenge (this package) |
@@ -237,4 +243,4 @@ Runtime: [viem](https://github.com/wevm/viem) (MIT), [@modelcontextprotocol/sdk]
 - `src/finality.ts` the confirmation rule · `src/preflight.ts` the read-only checks · `src/session.ts` the rehearsal and the public session · `src/config.ts` environment and the Aevum profile
 - `test/finality.test.ts` the confirmation rule, reorgs before confirmation, inconsistent receipts, an unreadable finalized block · `test/config-guard.test.ts` keys, mandate, ledger binding, confirmation settings
 - `test/lost-response.test.ts` the crash cases · `test/review-fixes.test.ts` races, the lock, RPC failures, nonce taken, re-judged refusal, operator resolve (from the independent review) · `contracts/src/LocalTestUSD8.sol` the local test token
-- `contracts/src/InvoiceMandate.sol` the on-chain vault · `contracts/test/` its Foundry tests · `contracts/script/InvoiceMandate.s.sol` the owner's three transactions · `src/vault.ts` reading the vault, decoding its refusals · `test/vault.test.ts` the agent through the vault
+- `contracts/src/InvoiceMandate.sol` the on-chain vault · `contracts/test/` its Foundry tests · `contracts/script/InvoiceMandate.s.sol` the owner's three transactions · `src/vault.ts` reading the vault, decoding its refusals · `test/vault.test.ts` the agent through the vault · `verify/` the read-only verification page · `src/verify-fixture.ts` its local fixture · `test/verify-page.test.ts` its tests
