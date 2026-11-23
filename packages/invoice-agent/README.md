@@ -15,7 +15,7 @@ npm ci                 # the whole monorepo, a few minutes: the mandate imports 
 cd packages/invoice-agent
 npm run demo           # 20-40 s: starts anvil and the agent, runs the scenario, checks invariants, stops everything
 npm run demo:vault     # the same scenario paid through the on-chain InvoiceMandate vault, plus a lost ledger and a pause
-npm test               # 62 tests on a local chain: lost response, races, RPC failures, the lock, guards, confirmation rule and reorgs, the vault path, the verification page, 15-40 s
+npm test               # 63 tests on a local chain: lost response, races, RPC failures, the lock, guards, confirmation rule and reorgs, the vault path, the verification page, 15-40 s
 ```
 
 The contract's own tests (Foundry, 28 including 2 fuzz): `cd contracts && forge test` (forge-std comes from the monorepo's `packages/contracts/lib/forge-std` submodule: `git submodule update --init` once). See [The on-chain vault](#the-on-chain-vault-invoicemandate).
@@ -185,7 +185,29 @@ The vault adds ~43,000 gas per payment over a direct transfer (mostly the new se
 
 Nothing below has been run on Aevum. Each step is a **public transaction signed by the owner with his own key**, on his machine, after its own authorization; the script never reads a private key (it uses Foundry's CLI signer: an encrypted keystore via `--account`, or `--ledger`). Without `--broadcast` each command only simulates and prints the gas. Every run checks the chain id (44005) and that the token at `0x456569838f1d43009A91ebA4263147Afd7233483` has 6 decimals, and refuses otherwise.
 
-Prerequisites: Foundry; `cast wallet import qday-operator --interactive` (the operator: tQDAY for gas, ~0.002, and the tUSD8 to deposit); a **separate agent address** with tQDAY only (it never holds tUSD8); the vendor's public address.
+**Three keys, three roles** (the direct path needs two; the vault adds the agent):
+
+| Role | What it is | Holds | Signs |
+|---|---|---|---|
+| **Operator** | the owner's key: payer of the direct path, deployer and operator of the vault | tQDAY for gas (~0.002 for the three transactions) and the tUSD8 to deposit | deploy, deposit, `setMandate`, and later `pause` / `revokeAgent` / `withdraw` |
+| **Agent** | a **separate, new key** used only by the invoice agent (`INVOICE_PAYER_KEY` in the session) | **tQDAY only** (gas for `payInvoice`, ~0.0002 per payment; ~0.001 is plenty for a session). Never tUSD8: the payment leaves the vault | `payInvoice` only; a leak of this key pays nobody but the vendor, within the vault's limits |
+| **Vendor** | receive-only | nothing needed | nothing: only its **public address** is used |
+
+**Importing a key kept in a password manager into a Foundry keystore**, without the key ever touching disk in plain text or the shell history:
+
+```bash
+cast wallet import qday-operator --interactive   # prompts (input hidden) for the private key, then a keystore password
+cast wallet import qday-agent --interactive      # the agent key, the same way
+cast wallet list                                 # names only; ~/.foundry/keystores/<name> holds the encrypted keystore
+```
+
+Paste the key into the hidden prompt from the password manager; never as a command argument (`--private-key 0x…` lands in the shell history and the process list) and never in a `.env` file. The forge commands below then sign with `--account qday-operator` and ask for the keystore password. The session reads the agent key from the environment; set it without echo or history, run the session in the same shell, and clear it after:
+
+```bash
+read -rs INVOICE_PAYER_KEY && export INVOICE_PAYER_KEY   # paste the AGENT key (hidden); not stored in the history
+# … npm run preflight / npm run session (below) …
+unset INVOICE_PAYER_KEY
+```
 
 ```bash
 cd packages/invoice-agent/contracts
@@ -200,10 +222,23 @@ forge verify-contract <vault> src/InvoiceMandate.sol:InvoiceMandate --chain 4400
 forge script script/InvoiceMandate.s.sol --sig "deposit(address,uint256)" <vault> 1000000 --rpc-url aevum --account qday-operator --broadcast
 # 3. the mandate: agent, vendor id, payee, ≤ 1 tUSD8 per invoice and per day, 7 days. ~95,000 gas
 forge script script/InvoiceMandate.s.sol --sig "setMandate(address,address,string,address,uint48,uint48,uint256)" \
-  <vault> <agent> acme <vendor> 1000000 1000000 7 --rpc-url aevum --account qday-operator --broadcast
+  <vault> <agent> vendor-1 <vendor> 1000000 1000000 7 --rpc-url aevum --account qday-operator --broadcast
 ```
 
-Then the agent's mandate names the vault: `npm run ops -- mandate --chain-id 44005 --token 0x456569838f1d43009A91ebA4263147Afd7233483 --payer <agent> --vendor-id acme --vendor-name … --vendor-address <vendor> --max-per-invoice 1 --max-per-day 1 --by NAME --vault <vault>`; `npm run ops -- status` shows the on-chain mandate and the vault balance. **Not built yet for the vault:** `npm run preflight` and `npm run session` still check and run the direct transfer only; a public vault payment means starting the agent (`npm run server` with `INVOICE_MAX_GAS_COST` set for the vault, e.g. 0.0002) and checking with `ops verify` / `ops ask`.
+The vendor id is `vendor-1`, the one the session writes into the agent's mandate (the agent refuses to start if the vault names another).
+
+**Then the vault session**, the same steps as the direct one (preflight; one invoice of 1 tUSD8; the agent killed the moment the broadcast is recorded; restart; the original hash recovered; wait for `finalized`; `ops verify`), with the agent key and the vault:
+
+```bash
+cd packages/invoice-agent
+# read-only, no key: the vault (code, operator, mandate vs agent / vendor-1 / payee, paused, expiry, limits, balance),
+# the agent's tQDAY and mempool, and payInvoice's gas from the agent, printed next to the ceiling
+npm run preflight -- --network aevum --vault <vault> --payer <agent> --vendor <vendor> --amount 1 [--max-gas-cost …]
+# signs and sends ONE vault.payInvoice from the agent key (needs the owner's authorization for the public transaction)
+npm run session -- --aevum --vault <vault> --vendor <vendor> --by NAME --amount 1 --max-gas-cost <the owner's ceiling> --i-authorize-a-public-transaction
+```
+
+Step 6 of the vault session counts independently, since the session's first block: exactly one `InvoiceSettled` of the vault (this invoice, this payee, this amount) and exactly one `Transfer` vault → vendor, both in the original transaction, and `settlementOf` shows it settled by this agent. **The gas ceiling is the owner's decision:** the default stays 0.0001 tQDAY; the preflight prints the vault call's maximum next to it, and with the default the session stops at the preflight when the vault call could cost more (on Anvil, at ~1 gwei, a first payment's maximum is ~0.000134). Rehearse it locally with `npm run session -- --rehearse --vault --max-gas-cost 0.0002` (it deploys a local vault, operator = Anvil's deployer, agent = another Anvil key, vendor `vendor-1`).
 
 ### The verification page (static, read-only; not published)
 
