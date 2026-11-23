@@ -24,7 +24,9 @@ import {
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import type { ConfirmRule } from './finality.js';
+import { INVOICE_MANDATE_ABI } from './generated/invoice-mandate.js';
 import { LOCAL_TEST_USD8_ABI } from './generated/local-test-usd8.js';
+import { VaultRefusalError, vaultErrorOf } from './vault.js';
 
 export const ERC20_ABI = LOCAL_TEST_USD8_ABI;
 
@@ -40,6 +42,25 @@ export interface ChainConfig {
   logsFromBlock?: bigint;
   /** Most one payment transaction may cost in gas, wei (gas limit × maxFeePerGas). Required off 31337. */
   maxGasCostWei?: bigint;
+  /**
+   * The operator's InvoiceMandate vault (vault.ts), when the mandate names one: payments are then
+   * `vault.payInvoice(invoiceId, amount)` and the tokens leave the vault, not the agent's address.
+   */
+  vault?: string;
+}
+
+/** Where the paid tokens come from: the vault when there is one, otherwise the payer's own address. */
+export function fundsSource(cfg: ChainConfig, payer: string): string {
+  return getAddress(cfg.vault ?? payer);
+}
+
+/** The payment call: `vault.payInvoice(invoiceId, amount)` with a vault, `token.transfer(to, amount)` without. */
+export function paymentCall(cfg: ChainConfig, to: string, amount: bigint, invoiceId?: string): { to: `0x${string}`; data: Hex } {
+  if (cfg.vault) {
+    if (!invoiceId) throw new Error('a vault payment needs the invoice id');
+    return { to: getAddress(cfg.vault), data: encodeFunctionData({ abi: INVOICE_MANDATE_ABI, functionName: 'payInvoice', args: [invoiceId, amount] }) };
+  }
+  return { to: getAddress(cfg.token), data: encodeFunctionData({ abi: ERC20_ABI, functionName: 'transfer', args: [getAddress(to), amount] }) };
 }
 
 export function makeChain(cfg: ChainConfig) {
@@ -93,10 +114,23 @@ export interface TransferPlan {
   maxCostWei: bigint;
 }
 
-export async function planTransfer(cfg: ChainConfig, from: string, to: string, amount: bigint): Promise<TransferPlan> {
+/**
+ * With a vault, the call planned is `vault.payInvoice(invoiceId, amount)` (the same gas rule and ceiling apply), and
+ * an estimate the vault reverts (already settled, paused, revoked, expired, above a limit) is a VaultRefusalError:
+ * the chain has refused it before anything is signed.
+ */
+export async function planTransfer(cfg: ChainConfig, from: string, to: string, amount: bigint, invoiceId?: string): Promise<TransferPlan> {
   const client = publicClientFor(cfg);
-  const data = encodeFunctionData({ abi: ERC20_ABI, functionName: 'transfer', args: [getAddress(to), amount] });
-  const estimatedGas = await client.estimateGas({ account: getAddress(from), to: getAddress(cfg.token), data });
+  const call = paymentCall(cfg, to, amount, invoiceId);
+  const data = call.data;
+  let estimatedGas: bigint;
+  try {
+    estimatedGas = await client.estimateGas({ account: getAddress(from), to: call.to, data });
+  } catch (e) {
+    const refusal = cfg.vault ? vaultErrorOf(e) : undefined;
+    if (refusal) throw new VaultRefusalError(refusal.name, refusal.args);
+    throw e;
+  }
   const fees = await client.estimateFeesPerGas();
   const gas = (estimatedGas * GAS_MARGIN_NUM) / GAS_MARGIN_DEN;
   return { data, estimatedGas, gas, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas, maxCostWei: gas * fees.maxFeePerGas };
@@ -118,13 +152,14 @@ export const signingStats = { signatures: 0, ceilingRefusals: 0 };
  * maxFeePerGas, or gasPrice for a legacy one) are multiplied and compared with `cfg.maxGasCostWei`:
  * above it, GasCeilingError and no signature.
  */
-export async function signTransfer(cfg: ChainConfig, payerKey: Hex, to: string, amount: bigint, nonce: number): Promise<SignedTransfer> {
+export async function signTransfer(cfg: ChainConfig, payerKey: Hex, to: string, amount: bigint, nonce: number, invoiceId?: string): Promise<SignedTransfer> {
   await assertNodeChain(cfg);
   const account = privateKeyToAccount(payerKey);
-  const plan = await planTransfer(cfg, account.address, to, amount);
+  const plan = await planTransfer(cfg, account.address, to, amount, invoiceId);
+  const target = paymentCall(cfg, to, amount, invoiceId).to;
   const wallet = createWalletClient({ account, chain: makeChain(cfg), transport: http(cfg.rpcUrl) });
   const request = await wallet.prepareTransactionRequest({
-    to: getAddress(cfg.token),
+    to: target,
     data: plan.data,
     nonce,
     gas: plan.gas,
@@ -141,7 +176,7 @@ export async function signTransfer(cfg: ChainConfig, payerKey: Hex, to: string, 
     r.chainId !== cfg.chainId && `chainId ${r.chainId} ≠ ${cfg.chainId}`,
     r.type !== 'eip1559' && `type ${r.type} ≠ eip1559`,
     r.gasPrice !== undefined && 'a legacy gasPrice',
-    (r.to ?? '').toLowerCase() !== cfg.token.toLowerCase() && `to ${r.to} ≠ the token ${cfg.token}`,
+    (r.to ?? '').toLowerCase() !== target.toLowerCase() && `to ${r.to} ≠ ${cfg.vault ? 'the vault' : 'the token'} ${target}`,
     r.data !== plan.data && 'calldata changed',
     r.nonce !== nonce && `nonce ${r.nonce} ≠ ${nonce}`,
     (r.value ?? 0n) !== 0n && `value ${r.value} ≠ 0`,
