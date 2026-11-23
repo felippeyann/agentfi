@@ -209,6 +209,27 @@ read -rs INVOICE_PAYER_KEY && export INVOICE_PAYER_KEY   # paste the AGENT key (
 unset INVOICE_PAYER_KEY
 ```
 
+The same in **PowerShell 7** (Windows). `Read-Host -MaskInput` hides the input; PSReadLine records the command line, which holds no key, never the masked text. The variable lives only in this PowerShell process and the processes it starts:
+
+```powershell
+$env:INVOICE_PAYER_KEY = Read-Host -MaskInput 'agent key'   # paste the AGENT key (masked)
+# … npm run preflight / npm run session (below; the same command lines work in PowerShell) …
+Remove-Item Env:INVOICE_PAYER_KEY
+```
+
+If `forge` / `cast` are not on `PATH` (Foundry installs them in `%USERPROFILE%\.foundry\bin`), call them by path or add the folder for this session only: `$env:PATH += ";$env:USERPROFILE\.foundry\bin"`. In PowerShell, continue a long line with a backtick (`` ` ``) instead of `\`, and write the Blockscout constructor arguments as `--constructor-args (cast abi-encode "constructor(address)" 0x456569838f1d43009A91ebA4263147Afd7233483)`. For example:
+
+```powershell
+cd packages\invoice-agent\contracts
+& "$env:USERPROFILE\.foundry\bin\cast.exe" wallet import qday-operator --interactive
+& "$env:USERPROFILE\.foundry\bin\forge.exe" script script/InvoiceMandate.s.sol --sig "deploy()" --rpc-url aevum --account qday-operator
+& "$env:USERPROFILE\.foundry\bin\forge.exe" script script/InvoiceMandate.s.sol `
+  --sig "setMandate(address,address,string,address,uint48,uint48,uint256)" `
+  <vault> <agent> vendor-1 <vendor> 1000000 1000000 7 --rpc-url aevum --account qday-operator --broadcast
+```
+
+`npm run preflight -- …` and `npm run session -- …` are typed the same in PowerShell 7: it passes `--` and the flags to npm unchanged. Checked locally on 2026-11-23 with PowerShell 7.6: the variable set this way reaches the agent's process, and `npm run session -- --rehearse --vault --max-gas-cost 0.0002` ran end to end (rehearsal only, Anvil keys, nothing public).
+
 ```bash
 cd packages/invoice-agent/contracts
 # 1. deploy: the signer becomes the operator. ~1,027,000 gas (~0.00103 tQDAY at 1 gwei)
