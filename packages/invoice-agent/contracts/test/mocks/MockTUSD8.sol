@@ -30,6 +30,23 @@ contract FalseTUSD8 is MockTUSD8 {
     }
 }
 
+/// @dev FiatToken-style blacklist: any transfer from or to a blacklisted address reverts.
+contract BlacklistTUSD8 is MockTUSD8 {
+    mapping(address => bool) public blacklisted;
+
+    function ban(address a) external {
+        blacklisted[a] = true;
+    }
+
+    function transfer(address to, uint256 amount) external override returns (bool) {
+        require(!blacklisted[msg.sender] && !blacklisted[to], "Blacklistable: account is blacklisted");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        emit Transfer(msg.sender, to, amount);
+        return true;
+    }
+}
+
 /// @dev 18 decimals: not tUSD8, the constructor refuses it.
 contract EighteenDecimals {
     uint8 public decimals = 18;

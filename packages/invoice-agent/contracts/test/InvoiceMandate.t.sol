@@ -61,7 +61,7 @@ contract InvoiceMandateTest is Test {
 
     function _pay(string memory id, uint256 amount) internal {
         vm.prank(agent);
-        vault.payInvoice(id, amount);
+        vault.payInvoice(id, VENDOR, vendorPayTo, amount);
     }
 
     // ---------------------------------------------------------------- deployment and mandate
@@ -121,10 +121,10 @@ contract InvoiceMandateTest is Test {
         InvoiceMandate fresh = new InvoiceMandate(ITUSD8(address(token)));
         vm.prank(address(0)); // the zero "agent" of an unset mandate is not a caller
         vm.expectRevert(InvoiceMandate.NotAgent.selector);
-        fresh.payInvoice("INV-001", 1);
+        fresh.payInvoice("INV-001", VENDOR, vendorPayTo, 1);
         vm.prank(agent);
         vm.expectRevert(InvoiceMandate.NotAgent.selector);
-        fresh.payInvoice("INV-001", 1);
+        fresh.payInvoice("INV-001", VENDOR, vendorPayTo, 1);
     }
 
     // ---------------------------------------------------------------- happy path and events
@@ -142,7 +142,8 @@ contract InvoiceMandateTest is Test {
 
         assertEq(token.balanceOf(vendorPayTo), 8e6);
         assertEq(token.balanceOf(address(vault)), 92e6);
-        (bool settled, uint256 amount, uint256 blockNumber, address by, bytes32 k) = vault.settlementOf("INV-001");
+        (bool settled, uint256 amount, uint256 blockNumber, address by, bytes32 k) =
+            vault.settlementOf("INV-001", VENDOR);
         assertTrue(settled);
         assertEq(amount, 8e6);
         assertEq(blockNumber, 1234);
@@ -152,7 +153,7 @@ contract InvoiceMandateTest is Test {
     }
 
     function test_settlementOf_unknownInvoice_isNotSettled() public view {
-        (bool settled, uint256 amount, uint256 blockNumber, address by,) = vault.settlementOf("INV-404");
+        (bool settled, uint256 amount, uint256 blockNumber, address by,) = vault.settlementOf("INV-404", VENDOR);
         assertFalse(settled);
         assertEq(amount, 0);
         assertEq(blockNumber, 0);
@@ -167,7 +168,7 @@ contract InvoiceMandateTest is Test {
         bytes32 key = vault.invoiceKey("INV-001", VENDOR);
         vm.prank(agent);
         vm.expectRevert(abi.encodeWithSelector(InvoiceMandate.AlreadySettled.selector, key, 77));
-        vault.payInvoice("INV-001", 8e6);
+        vault.payInvoice("INV-001", VENDOR, vendorPayTo, 8e6);
         assertEq(token.balanceOf(vendorPayTo), 8e6, "paid once");
     }
 
@@ -175,22 +176,24 @@ contract InvoiceMandateTest is Test {
         _pay("INV-001", 8e6);
         vm.roll(block.number + 100); // another nonce, another process: the chain does not care
         vm.warp(block.timestamp + 2 days); // another day: the daily limit is fresh
+        bytes32 key = vault.invoiceKey("INV-001", VENDOR);
         vm.prank(agent);
-        vm.expectRevert();
-        vault.payInvoice("INV-001", 1e6);
+        vm.expectRevert(abi.encodeWithSelector(InvoiceMandate.AlreadySettled.selector, key, 1));
+        vault.payInvoice("INV-001", VENDOR, vendorPayTo, 1e6);
         // The operator rotates the agent key: the invoice is still settled.
         address agent2 = makeAddr("agent2");
         vm.prank(operator);
         vault.setMandate(agent2, VENDOR, vendorPayTo, CAP, DAILY, uint40(block.timestamp + 1 days));
         vm.prank(agent2);
-        vm.expectRevert();
-        vault.payInvoice("INV-001", 8e6);
+        vm.expectRevert(abi.encodeWithSelector(InvoiceMandate.AlreadySettled.selector, key, 1));
+        vault.payInvoice("INV-001", VENDOR, vendorPayTo, 8e6);
         // A new payee for the same vendor (a legitimate bank change) does not reopen the invoice either.
         vm.prank(operator);
-        vault.setMandate(agent2, VENDOR, makeAddr("acme new payee"), CAP, DAILY, uint40(block.timestamp + 1 days));
+        address newPayee = makeAddr("acme new payee");
+        vault.setMandate(agent2, VENDOR, newPayee, CAP, DAILY, uint40(block.timestamp + 1 days));
         vm.prank(agent2);
-        vm.expectRevert();
-        vault.payInvoice("INV-001", 8e6);
+        vm.expectRevert(abi.encodeWithSelector(InvoiceMandate.AlreadySettled.selector, key, 1));
+        vault.payInvoice("INV-001", VENDOR, newPayee, 8e6);
         assertEq(token.balanceOf(vendorPayTo), 8e6, "paid once");
     }
 
@@ -199,19 +202,20 @@ contract InvoiceMandateTest is Test {
         _pay("inv-001", 1e6); // case-sensitive, as in the agent's ledger
         vm.prank(operator);
         vault.setMandate(agent, bytes32("beta"), vendorPayTo, CAP, DAILY, expiry);
-        _pay("INV-001", 1e6); // beta's INV-001 is another invoice
+        vm.prank(agent);
+        vault.payInvoice("INV-001", bytes32("beta"), vendorPayTo, 1e6); // beta's INV-001 is another invoice
         assertEq(token.balanceOf(vendorPayTo), 3e6);
     }
 
     function test_invalidInvoiceId_andZeroAmount() public {
         vm.startPrank(agent);
         vm.expectRevert(InvoiceMandate.InvalidInvoiceId.selector);
-        vault.payInvoice("", 1e6);
+        vault.payInvoice("", VENDOR, vendorPayTo, 1e6);
         vm.expectRevert(InvoiceMandate.InvalidInvoiceId.selector);
-        vault.payInvoice(string(new bytes(65)), 1e6);
-        vault.payInvoice(string(abi.encodePacked(bytes32("x"), bytes32("y"))), 1e6); // 64 bytes: accepted
+        vault.payInvoice(string(new bytes(65)), VENDOR, vendorPayTo, 1e6);
+        vault.payInvoice(string(abi.encodePacked(bytes32("x"), bytes32("y"))), VENDOR, vendorPayTo, 1e6); // 64 bytes: accepted
         vm.expectRevert(InvoiceMandate.ZeroAmount.selector);
-        vault.payInvoice("INV-001", 0);
+        vault.payInvoice("INV-001", VENDOR, vendorPayTo, 0);
         vm.stopPrank();
     }
 
@@ -221,7 +225,7 @@ contract InvoiceMandateTest is Test {
         _pay("INV-AT-CAP", CAP);
         vm.prank(agent);
         vm.expectRevert(abi.encodeWithSelector(InvoiceMandate.AboveInvoiceCap.selector, CAP + 1, CAP));
-        vault.payInvoice("INV-OVER", CAP + 1);
+        vault.payInvoice("INV-OVER", VENDOR, vendorPayTo, CAP + 1);
     }
 
     function test_dailyLimit_andUtcDayRollover() public {
@@ -230,14 +234,14 @@ contract InvoiceMandateTest is Test {
         }
         vm.prank(agent);
         vm.expectRevert(abi.encodeWithSelector(InvoiceMandate.AboveDailyLimit.selector, DAILY, 1, DAILY));
-        vault.payInvoice("D1-5", 1);
+        vault.payInvoice("D1-5", VENDOR, vendorPayTo, 1);
 
         // Same UTC day, one second before midnight: still refused.
         uint256 nextMidnight = (block.timestamp / 1 days + 1) * 1 days;
         vm.warp(nextMidnight - 1);
         vm.prank(agent);
         vm.expectRevert();
-        vault.payInvoice("D1-5", 1);
+        vault.payInvoice("D1-5", VENDOR, vendorPayTo, 1);
 
         // Midnight UTC: a new day, a new limit.
         vm.warp(nextMidnight);
@@ -253,7 +257,7 @@ contract InvoiceMandateTest is Test {
         vault.setMandate(agent, VENDOR, vendorPayTo, CAP, 25e6, expiry);
         vm.prank(agent);
         vm.expectRevert(abi.encodeWithSelector(InvoiceMandate.AboveDailyLimit.selector, 20e6, 6e6, 25e6));
-        vault.payInvoice("C", 6e6);
+        vault.payInvoice("C", VENDOR, vendorPayTo, 6e6);
         _pay("C", 5e6);
     }
 
@@ -263,7 +267,7 @@ contract InvoiceMandateTest is Test {
         vm.warp(expiry);
         vm.prank(agent);
         vm.expectRevert(InvoiceMandate.MandateExpired.selector);
-        vault.payInvoice("AT", 1e6);
+        vault.payInvoice("AT", VENDOR, vendorPayTo, 1e6);
     }
 
     function test_vaultBalanceTooLow_revertsWithoutRecording() public {
@@ -271,8 +275,8 @@ contract InvoiceMandateTest is Test {
         vault.setMandate(agent, VENDOR, vendorPayTo, 100e6, 200e6, expiry);
         vm.prank(agent);
         vm.expectRevert(); // the token reverts: the whole call reverts, nothing recorded
-        vault.payInvoice("BIG", 101e6);
-        (bool settled,,,,) = vault.settlementOf("BIG");
+        vault.payInvoice("BIG", VENDOR, vendorPayTo, 101e6);
+        (bool settled,,,,) = vault.settlementOf("BIG", VENDOR);
         assertFalse(settled);
         assertEq(vault.spentToday(), 0);
     }
@@ -282,10 +286,10 @@ contract InvoiceMandateTest is Test {
     function test_wrongCaller() public {
         vm.prank(attacker);
         vm.expectRevert(InvoiceMandate.NotAgent.selector);
-        vault.payInvoice("INV-001", 1e6);
+        vault.payInvoice("INV-001", VENDOR, vendorPayTo, 1e6);
         vm.prank(operator); // not even the operator pays invoices
         vm.expectRevert(InvoiceMandate.NotAgent.selector);
-        vault.payInvoice("INV-001", 1e6);
+        vault.payInvoice("INV-001", VENDOR, vendorPayTo, 1e6);
     }
 
     function test_pause_unpause() public {
@@ -298,13 +302,13 @@ contract InvoiceMandateTest is Test {
         vault.pause();
         vm.prank(agent);
         vm.expectRevert(InvoiceMandate.MandatePaused.selector);
-        vault.payInvoice("INV-001", 1e6);
+        vault.payInvoice("INV-001", VENDOR, vendorPayTo, 1e6);
         // setMandate keeps the pause: a new mandate is not a way around it.
         vm.prank(operator);
         vault.setMandate(agent, VENDOR, vendorPayTo, CAP, DAILY, expiry);
         vm.prank(agent);
         vm.expectRevert(InvoiceMandate.MandatePaused.selector);
-        vault.payInvoice("INV-001", 1e6);
+        vault.payInvoice("INV-001", VENDOR, vendorPayTo, 1e6);
         vm.prank(agent);
         vm.expectRevert(InvoiceMandate.NotOperator.selector);
         vault.unpause();
@@ -321,7 +325,7 @@ contract InvoiceMandateTest is Test {
         vault.revokeAgent();
         vm.prank(agent);
         vm.expectRevert(InvoiceMandate.NotAgent.selector);
-        vault.payInvoice("INV-002", 1e6);
+        vault.payInvoice("INV-002", VENDOR, vendorPayTo, 1e6);
         vm.prank(agent);
         vm.expectRevert(InvoiceMandate.NotOperator.selector);
         vault.revokeAgent();
@@ -360,7 +364,8 @@ contract InvoiceMandateTest is Test {
         // Draining by many fake invoices stops at the daily limit, and every coin goes to the vendor.
         uint256 paid;
         for (uint256 i = 0; i < 20; i++) {
-            (bool ok,) = address(vault).call(abi.encodeCall(InvoiceMandate.payInvoice, (vm.toString(i), CAP)));
+            (bool ok,) = address(vault)
+                .call(abi.encodeCall(InvoiceMandate.payInvoice, (vm.toString(i), VENDOR, vendorPayTo, CAP)));
             if (ok) paid += CAP;
         }
         vm.stopPrank();
@@ -386,8 +391,8 @@ contract InvoiceMandateTest is Test {
         v.setMandate(agent, VENDOR, vendorPayTo, CAP, DAILY, expiry);
         vm.prank(agent);
         vm.expectRevert(InvoiceMandate.TransferFailed.selector);
-        v.payInvoice("INV-001", 1e6);
-        (bool settled,,,,) = v.settlementOf("INV-001");
+        v.payInvoice("INV-001", VENDOR, vendorPayTo, 1e6);
+        (bool settled,,,,) = v.settlementOf("INV-001", VENDOR);
         assertFalse(settled);
     }
 
@@ -401,18 +406,18 @@ contract InvoiceMandateTest is Test {
         v.setMandate(address(proxy), VENDOR, vendorPayTo, CAP, CAP, expiry);
 
         // During the payout the token re-enters AS the agent with the same invoice: AlreadySettled.
-        bytes memory same = abi.encodeCall(InvoiceMandate.payInvoice, ("INV-001", 5e6));
+        bytes memory same = abi.encodeCall(InvoiceMandate.payInvoice, ("INV-001", VENDOR, vendorPayTo, 5e6));
         evil.arm(address(proxy), abi.encodeCall(AgentProxy.call, (address(v), same)));
         proxy.call(address(v), same);
         assertTrue(evil.reentered());
         assertEq(evil.balanceOf(vendorPayTo), 5e6, "paid once");
 
         // With another invoice: the day's spending was already counted, so 5 + 6 > 10 is refused.
-        bytes memory other = abi.encodeCall(InvoiceMandate.payInvoice, ("INV-002", 6e6));
+        bytes memory other = abi.encodeCall(InvoiceMandate.payInvoice, ("INV-002", VENDOR, vendorPayTo, 6e6));
         evil.arm(address(proxy), abi.encodeCall(AgentProxy.call, (address(v), other)));
-        proxy.call(address(v), abi.encodeCall(InvoiceMandate.payInvoice, ("INV-003", 1e6)));
+        proxy.call(address(v), abi.encodeCall(InvoiceMandate.payInvoice, ("INV-003", VENDOR, vendorPayTo, 1e6)));
         assertEq(evil.balanceOf(vendorPayTo), 6e6, "5 + 1, the re-entrant 6 refused");
-        (bool settled,,,,) = v.settlementOf("INV-002");
+        (bool settled,,,,) = v.settlementOf("INV-002", VENDOR);
         assertFalse(settled);
     }
 
@@ -429,12 +434,13 @@ contract InvoiceMandateTest is Test {
         uint256 vendorBefore = token.balanceOf(vendorPayTo);
 
         vm.prank(agent);
-        (bool ok,) = address(vault).call(abi.encodeCall(InvoiceMandate.payInvoice, (id, amount)));
+        (bool ok,) = address(vault).call(abi.encodeCall(InvoiceMandate.payInvoice, (id, VENDOR, vendorPayTo, amount)));
         assertEq(ok, amount <= cap, "paid iff within the per-invoice cap");
         assertEq(token.balanceOf(vendorPayTo) - vendorBefore, ok ? amount : 0);
 
         vm.prank(agent);
-        (bool again,) = address(vault).call(abi.encodeCall(InvoiceMandate.payInvoice, (id, amount)));
+        (bool again,) =
+            address(vault).call(abi.encodeCall(InvoiceMandate.payInvoice, (id, VENDOR, vendorPayTo, amount)));
         if (ok) assertFalse(again, "never a second settlement");
         assertEq(token.balanceOf(vendorPayTo) - vendorBefore, ok ? amount : 0);
     }
@@ -448,7 +454,8 @@ contract InvoiceMandateTest is Test {
             uint256 a = bound(amounts[i], 1, daily);
             bool expected = total + a <= daily && a <= token.balanceOf(address(vault));
             vm.prank(agent);
-            (bool ok,) = address(vault).call(abi.encodeCall(InvoiceMandate.payInvoice, (vm.toString(i), a)));
+            (bool ok,) =
+                address(vault).call(abi.encodeCall(InvoiceMandate.payInvoice, (vm.toString(i), VENDOR, vendorPayTo, a)));
             assertEq(ok, expected);
             if (ok) total += a;
         }
@@ -464,7 +471,7 @@ contract InvoiceMandateTest is Test {
         vm.roll(block.number + 1);
         vm.prank(agent);
         uint256 g = gasleft();
-        vault.payInvoice("INV-001", 8e6);
+        vault.payInvoice("INV-001", VENDOR, vendorPayTo, 8e6);
         emit log_named_uint("payInvoice execution gas (vendor already holds tUSD8, warm test context)", g - gasleft());
     }
 }
