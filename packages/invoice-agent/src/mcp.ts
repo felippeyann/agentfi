@@ -4,7 +4,8 @@
  *
  *   invoice_status { invoiceId }   the ledger's record checked against the chain (inquiry.ts):
  *                                  paid_verified | pending | not_paid | failed | unresolved | mismatch |
- *                                  unknown_invoice | cannot_verify_now, with network, hash, block, receipt
+ *                                  unknown_invoice | cannot_verify_now, with network, hash, block, receipt;
+ *                                  with a vault (mandate.vault) also its settlementOf and InvoiceSettled event
  *   list_invoices {}               the ids and states in the ledger (no chain reads)
  *
  * Nothing else: no signing, no sending, no reconcile (which can rebroadcast), no mandate or policy
@@ -31,7 +32,7 @@ export const TOOLS = [
   {
     name: 'invoice_status',
     description:
-      'Was this invoice paid? Reads the invoice agent\'s ledger and checks it against the chain (receipt by transaction hash, the exact tUSD8 Transfer, the confirmation rule, every transfer to that payee matched to an invoice). Returns one state: paid_verified, pending, not_paid, failed, unresolved, mismatch, unknown_invoice or cannot_verify_now, with the network, transaction hash, block, explorer link and, when paid and verified, the receipt. Read-only: never pays, retries or changes anything. If the state is not paid_verified, do NOT advise paying again before the original transaction is checked.',
+      'Was this invoice paid? Reads the invoice agent\'s ledger and checks it against the chain (receipt by transaction hash, the exact tUSD8 Transfer, the confirmation rule, every transfer to that payee matched to an invoice). When the operator\'s mandate names an InvoiceMandate vault, it also reads the vault\'s settlementOf(invoiceId) and its InvoiceSettled event, and answers from the vault alone for an invoice the ledger does not know. Returns one state: paid_verified, pending, not_paid, failed, unresolved, mismatch, unknown_invoice or cannot_verify_now, with the network, transaction hash, block, explorer link and, when paid and verified, the receipt. Read-only: never pays, retries or changes anything. If the state is not paid_verified, do NOT advise paying again before the original transaction is checked.',
     inputSchema: {
       type: 'object' as const,
       properties: { invoiceId: { type: 'string', description: 'The invoice id exactly as written (case-sensitive), e.g. INV-001.' } },

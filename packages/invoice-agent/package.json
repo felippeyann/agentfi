@@ -7,6 +7,7 @@
   "type": "module",
   "scripts": {
     "demo": "tsx src/demo.ts",
+    "demo:vault": "tsx src/demo.ts --vault",
     "server": "tsx src/server.ts",
     "ops": "tsx src/ops.ts",
     "preflight": "tsx src/preflight.ts",
