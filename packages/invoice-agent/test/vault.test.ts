@@ -22,6 +22,7 @@ import type { Invoice } from '../src/invoice.js';
 import { Ledger } from '../src/ledger.js';
 import type { Mandate } from '../src/mandate.js';
 import { FailPointError, InvoicePayer, type FailPoint, type Outcome } from '../src/payer.js';
+import { preflight } from '../src/preflight.js';
 import { assertVaultMatches, settlementOf, vendorKey } from '../src/vault.js';
 
 const PORT = 9100 + Math.floor(Math.random() * 300);
@@ -229,6 +230,24 @@ describe('vault path: the agent pays through InvoiceMandate.payInvoice', () => {
     assert.equal((below as { rule: string }).rule, 'maxGasCost');
     const at = await w.proc({ chain: { ...w.cfg, maxGasCostWei: plan.maxCostWei } }).submit(invoice('INV-10', '1'));
     assert.equal(at.outcome, 'paid');
+  });
+
+  it('preflight --vault: reads the vault and estimates payInvoice from the agent; fails when paused, for another agent, or above the ceiling', async () => {
+    const w = await world();
+    const base = { rpcUrl: RPC, chainId: CHAIN_ID, token: w.token, explorerUrl: null, gasSymbol: 'ETH', expectedDecimals: 6, payer: AGENT, vendor: VENDOR, amount: '1', vault: w.vault, vendorId: 'acme', invoiceId: 'PF-1' } as const;
+    const ok = await preflight({ ...base, maxGasCostWei: 10n ** 18n });
+    assert.equal(ok.ok, true, ok.lines.join('\n'));
+    assert.ok(ok.lines.some((l) => /vault payment maximum .* · ceiling /.test(l)), 'prints the vault maximum next to the ceiling');
+    assert.ok(ok.lines.some((l) => /✓ the vault's agent is .*this agent/.test(l)));
+    const tight = await preflight({ ...base, maxGasCostWei: ok.gasCostWei! - 1n });
+    assert.equal(tight.ok, false, 'above the ceiling fails');
+    const other = await preflight({ ...base, payer: getAddress('0x90F79bf6EB2c4f870365E785982E1f101E93b906') });
+    assert.ok(other.lines.some((l) => /✗ the vault's agent is .*NOT this agent/.test(l)));
+    await w.vaultCall('pause');
+    const paused = await preflight(base);
+    assert.equal(paused.ok, false);
+    assert.ok(paused.lines.some((l) => /✗ the vault is PAUSED/.test(l)));
+    assert.ok(paused.lines.some((l) => /✗ the vault would refuse .*MandatePaused/.test(l)), paused.lines.join('\n'));
   });
 
   it('gas used (Anvil, local token): deploy, deposit, setMandate, payInvoice vs a direct transfer', async (t) => {

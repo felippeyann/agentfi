@@ -138,6 +138,20 @@ export async function findSettledEvent(cfg: ChainConfig, key: Hex, atBlock?: big
   return undefined;
 }
 
+/** Every InvoiceSettled event of the vault since `cfg.logsFromBlock` (the operator's independent count), oldest first. */
+export async function settledEventsSince(cfg: ChainConfig): Promise<SettledEvent[]> {
+  const client = publicClientFor(cfg);
+  const address = getAddress(cfg.vault!);
+  const head = await client.getBlockNumber({ cacheTime: 0 });
+  const out: SettledEvent[] = [];
+  for (let start = cfg.logsFromBlock ?? 0n; start <= head; start += LOG_WINDOW) {
+    const end = start + LOG_WINDOW - 1n < head ? start + LOG_WINDOW - 1n : head;
+    const logs = await client.getContractEvents({ address, abi: VAULT_ABI, eventName: 'InvoiceSettled', fromBlock: start, toBlock: end });
+    out.push(...logs.map((l) => toSettled(l as never)));
+  }
+  return out;
+}
+
 /** A vault custom error decoded from a failed call or gas estimate, or undefined when it is not one. */
 export function vaultErrorOf(e: unknown): { name: string; args: readonly unknown[] } | undefined {
   if (!(e instanceof BaseError)) return undefined;

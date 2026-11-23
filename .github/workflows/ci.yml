@@ -45,6 +45,10 @@ jobs:
         run: npm run demo:vault
       - working-directory: packages/invoice-agent
         run: npm run session -- --rehearse
+      # The same session through the InvoiceMandate vault. The vault call costs more gas than a transfer (Anvil prices
+      # ~1 gwei): an explicit ceiling here; the default (0.0001) and the Aevum value are the owner's decision.
+      - working-directory: packages/invoice-agent
+        run: npm run session -- --rehearse --vault --max-gas-cost 0.0002
 
   openapi-spec:
     name: OpenAPI Spec
