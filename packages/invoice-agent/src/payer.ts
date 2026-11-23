@@ -16,7 +16,9 @@
  * (same hash: it can be mined at most once); nonce used by something else → needs the operator.
  */
 import type { Hex } from 'viem';
-import { broadcast, isKnownToNode, nonces, receiptOf, signTransfer, transfersIn, type ChainConfig } from './chain.js';
+import { formatEther } from 'viem';
+import { broadcast, GasCeilingError, isKnownToNode, nonces, receiptOf, signTransfer, transfersIn, type ChainConfig } from './chain.js';
+import { describeRule, explorerTx, judgeFinality, ruleFor } from './finality.js';
 import { formatUnits6, invoiceHash, toBaseUnits, type Invoice } from './invoice.js';
 import { OPEN_STATUSES, type Ledger, type PaymentRow } from './ledger.js';
 import { judgeInvoice, type Mandate } from './mandate.js';
@@ -42,6 +44,10 @@ export interface Receipt {
   txHash: string;
   blockNumber: string;
   logIndex: number;
+  /** The confirmation rule this receipt satisfied (finality.ts). */
+  confirmation: string;
+  /** `<explorer>/tx/<hash>`, when the chain has a known explorer: anyone can check it there. */
+  explorer?: string;
 }
 
 export type Outcome =
@@ -51,8 +57,11 @@ export type Outcome =
   | { outcome: 'replayed'; receipt: Receipt }
   /** Was paid (or sent) before a crash; found on-chain now: the original receipt, nothing new was signed. */
   | { outcome: 'recovered'; receipt: Receipt; note: string }
-  /** Sent, not confirmed yet: do NOT pay again. */
-  | { outcome: 'pending'; invoiceId: string; txHash: string; note: string; next: string }
+  /**
+   * Sent, not confirmed yet: do NOT pay again. `stage`: `sent` (no receipt seen) or `included` (mined,
+   * the block does not satisfy the confirmation rule yet, or it changed).
+   */
+  | { outcome: 'pending'; invoiceId: string; txHash: string; stage: 'sent' | 'included'; blockNumber?: string; note: string; next: string; explorer?: string }
   | { outcome: 'refused'; invoiceId: string; rule: string; reason: string; whatToDo: string }
   /** Same invoice id, different content: refused, the original stands. */
   | { outcome: 'conflict'; invoiceId: string; reason: string }
@@ -108,7 +117,26 @@ export class InvoicePayer {
           reason: `Invoice ${inv.id} was already received with different content (payee or amount). The first one stands; this one is not paid.`,
         };
       }
-      if (existing.status !== 'refused') return this.answerFor(await this.reconcile(existing), true);
+      if (existing.status !== 'refused') {
+        try {
+          return this.answerFor(await this.reconcile(existing), true);
+        } catch (e) {
+          if (!existing.tx_hash) throw e;
+          // The chain could not be read: answer from the ledger, keep the uncertainty, never pay again.
+          const msg = e instanceof Error ? e.message.split('\n')[0]! : String(e);
+          ledger.event(inv.id, 'reconcile-error', { error: msg.slice(0, 300) });
+          return {
+            outcome: 'pending',
+            invoiceId: inv.id,
+            txHash: existing.tx_hash,
+            stage: existing.status === 'included' || existing.status === 'confirmed' ? 'included' : 'sent',
+            ...(existing.block_number ? { blockNumber: existing.block_number } : {}),
+            ...this.explorerOf(existing.tx_hash),
+            note: `Could not read the chain, or the node refused the recorded transaction, right now (${msg}). Last known state of ${existing.tx_hash}: ${existing.status}. Do NOT pay this invoice again, under this id or another.`,
+            next: 'Resubmit this same invoice id once the RPC answers, or run `npm run ops -- reconcile`.',
+          };
+        }
+      }
       // A refused invoice signed nothing: judge it again under today's mandate and limits.
       const again = judgeInvoice(this.o.mandate, inv, ledger.committedToday());
       if (!again.allowed) {
@@ -142,7 +170,20 @@ export class InvoicePayer {
 
     if (!this.o.payerKey) throw new Error('no payer key: this process cannot pay');
     const nonce = await this.nextNonce();
-    const signed = await signTransfer(this.o.chain, this.o.payerKey, inv.payTo, amount, nonce);
+    let signed;
+    try {
+      signed = await signTransfer(this.o.chain, this.o.payerKey, inv.payTo, amount, nonce);
+    } catch (e) {
+      if (!(e instanceof GasCeilingError)) throw e;
+      // Refused BEFORE signing: nothing signed, nothing sent, no nonce used. Recorded as a refusal (no tx
+      // hash, no raw bytes), so it is never read as sent or pending; a resubmission is judged again.
+      const ceiling = formatEther(e.ceilingWei), max = formatEther(e.maxCostWei);
+      const reason = `Paying would authorize up to ${max} ${this.gasSymbol()} of gas (gas ${e.gas} × max fee ${e.maxFeePerGas} wei = ${e.maxCostWei} wei), above the operator's ceiling of ${ceiling} ${this.gasSymbol()} (${e.ceilingWei} wei) per transaction. Nothing was signed or sent.`;
+      const whatToDo = 'Resubmit the same invoice later, when fees are lower (it is judged again), or the operator raises INVOICE_MAX_GAS_COST.';
+      ledger.insert({ ...base, status: 'refused', rule: 'maxGasCost', reason, what_to_do: whatToDo, nonce: null, raw_tx: null, tx_hash: null, block_number: null, log_index: null });
+      ledger.event(inv.id, 'refused-gas-ceiling', { maxCostWei: e.maxCostWei.toString(), ceilingWei: e.ceilingWei.toString(), gas: e.gas.toString(), maxFeePerGas: e.maxFeePerGas.toString() });
+      return { outcome: 'refused', invoiceId: inv.id, rule: 'maxGasCost', reason, whatToDo };
+    }
     // Write-ahead: the signed transaction is on disk before it can reach the chain. If the id is
     // already taken (another writer got there first), these signed bytes are discarded, never sent.
     const inserted = ledger.insert({ ...base, status: 'signed', rule: null, reason: null, what_to_do: null, nonce, raw_tx: signed.raw, tx_hash: signed.hash, block_number: null, log_index: null });
@@ -150,7 +191,7 @@ export class InvoicePayer {
       ledger.event(inv.id, 'discarded-duplicate-signature', { txHash: signed.hash });
       return this.answerFor(await this.reconcile(ledger.get(inv.id)!), true);
     }
-    ledger.event(inv.id, 'signed', { txHash: signed.hash, nonce });
+    ledger.event(inv.id, 'signed', { txHash: signed.hash, nonce, maxGasCostWei: signed.maxCostWei.toString(), ceilingWei: this.o.chain.maxGasCostWei?.toString() ?? null });
     this.maybeFail('after-sign');
 
     let stage = 'broadcasting it';
@@ -171,6 +212,8 @@ export class InvoicePayer {
         outcome: 'pending',
         invoiceId: inv.id,
         txHash: signed.hash,
+        stage: 'sent',
+        ...this.explorerOf(signed.hash),
         note: `The payment was signed and may already be on-chain, but reading the chain failed while ${stage} (${msg}). Do NOT pay this invoice again, under this id or another.`,
         next: 'Resubmit this same invoice id (it is reconciled, never paid twice) or run `npm run ops -- reconcile` once the RPC answers.',
       };
@@ -183,12 +226,30 @@ export class InvoicePayer {
    */
   async reconcile(row: PaymentRow, opts: { wait?: boolean } = {}): Promise<PaymentRow> {
     const { ledger, chain } = this.o;
+    // Under depth:N (an operational rule, not finality) a confirmation can be undone by a deeper reorg:
+    // a confirmed row is checked again every time and withdrawn if its block is no longer canonical.
+    if (row.status === 'confirmed' && row.tx_hash && ruleFor(chain).kind === 'depth') {
+      const r = await receiptOf(chain, row.tx_hash as Hex);
+      const still = r !== null && r.blockNumber.toString() === row.block_number && (await judgeFinality(chain, r)).canonical;
+      if (still) return row;
+      ledger.update(row.invoice_id, {
+        status: 'broadcast', block_number: null, log_index: null,
+        reason: `The block ${row.block_number} that confirmed ${row.tx_hash} is no longer canonical (reorg deeper than the depth rule): confirmation withdrawn, checked again.`,
+      });
+      ledger.event(row.invoice_id, 'confirmation-withdrawn', { txHash: row.tx_hash, block: row.block_number });
+      row = ledger.get(row.invoice_id)!;
+    }
     if (!OPEN_STATUSES.includes(row.status)) return row;
     const hash = row.tx_hash as Hex;
     // Nonce first, then the receipt: a payment mined in between is then seen by the receipt read.
     // Any RPC failure is thrown (the row stays as it is); only the node's explicit "not found" counts.
     const { latest } = await nonces(chain, this.o.mandate.payer);
     let receipt = await receiptOf(chain, hash);
+    if (!receipt && row.status === 'included') {
+      // It was seen in a block, and that block is no longer canonical (reorg): back to "sent", block forgotten.
+      ledger.update(row.invoice_id, { status: 'broadcast', block_number: null, log_index: null });
+      ledger.event(row.invoice_id, 'left-canonical-chain', { txHash: hash, block: row.block_number });
+    }
     if (!receipt && !(await isKnownToNode(chain, hash))) {
       if (latest > (row.nonce ?? -1)) {
         // Our nonce is used, but the node does not know our transaction. Either another transaction took
@@ -225,9 +286,34 @@ export class InvoicePayer {
       ledger.event(row.invoice_id, 'no-matching-transfer', { txHash: hash });
       return ledger.get(row.invoice_id)!;
     }
-    ledger.update(row.invoice_id, { status: 'confirmed', block_number: match.blockNumber.toString(), log_index: match.logIndex });
-    ledger.event(row.invoice_id, 'confirmed', { txHash: hash, block: match.blockNumber.toString(), logIndex: match.logIndex });
+    // Mined and matching: confirmed only when the block satisfies the rule and is still canonical.
+    const fin = await judgeFinality(chain, receipt);
+    const block = match.blockNumber.toString();
+    if (!fin.final) {
+      const prev = ledger.get(row.invoice_id)!;
+      ledger.update(row.invoice_id, { status: 'included', block_number: block, log_index: match.logIndex, reason: fin.detail });
+      if (prev.status !== 'included' || prev.block_number !== block) {
+        ledger.event(row.invoice_id, 'included', { txHash: hash, block, blockHash: receipt.blockHash, canonical: fin.canonical, rule: describeRule(ruleFor(chain)) });
+      }
+      return ledger.get(row.invoice_id)!;
+    }
+    ledger.update(row.invoice_id, { status: 'confirmed', block_number: block, log_index: match.logIndex, reason: null });
+    ledger.event(row.invoice_id, 'confirmed', { txHash: hash, block, blockHash: receipt.blockHash, logIndex: match.logIndex, rule: describeRule(ruleFor(chain)), detail: fin.detail });
     return ledger.get(row.invoice_id)!;
+  }
+
+  private gasSymbol(): string {
+    return this.o.chain.chainId === 44005 ? 'tQDAY' : 'ETH';
+  }
+
+  private confirmedRule(invoiceId: string): string | undefined {
+    const ev = this.o.ledger.events(invoiceId).filter((e) => e.event === 'confirmed').pop();
+    return ev?.detail ? (JSON.parse(ev.detail) as { rule?: string }).rule : undefined;
+  }
+
+  private explorerOf(hash: string): { explorer?: string } {
+    const url = explorerTx(this.o.chain, hash);
+    return url ? { explorer: url } : {};
   }
 
   private answerFor(row: PaymentRow, isResubmission: boolean): Outcome {
@@ -259,8 +345,21 @@ export class InvoicePayer {
           outcome: 'pending',
           invoiceId: row.invoice_id,
           txHash: row.tx_hash!,
-          note: `Payment ${row.tx_hash} was sent and is not confirmed yet. It is NOT sent again.`,
-          next: `Resubmit the same invoice later, or run: npm run ops -- reconcile ${row.invoice_id}`,
+          stage: 'sent',
+          ...this.explorerOf(row.tx_hash!),
+          note: `Payment ${row.tx_hash} was sent and is not in a block yet. It is NOT sent again.`,
+          next: `Resubmit the same invoice later, or run: npm run ops -- reconcile ${row.invoice_id}. If it stays unmined, stop: do not pay this invoice under another id; check the payer's transactions in the explorer.`,
+        };
+      case 'included':
+        return {
+          outcome: 'pending',
+          invoiceId: row.invoice_id,
+          txHash: row.tx_hash!,
+          stage: 'included',
+          blockNumber: row.block_number!,
+          ...this.explorerOf(row.tx_hash!),
+          note: `Payment ${row.tx_hash} is in a block but NOT confirmed under the rule ${describeRule(ruleFor(this.o.chain))}: ${row.reason}. Do not treat the invoice as paid yet; it is NOT sent again.`,
+          next: `Ask again later (resubmit the same invoice, or: npm run ops -- reconcile ${row.invoice_id}, then ops verify ${row.invoice_id}).`,
         };
       case 'reverted':
         return { outcome: 'failed', invoiceId: row.invoice_id, txHash: row.tx_hash, reason: row.reason ?? '', next: row.what_to_do ?? '' };
@@ -280,6 +379,9 @@ export class InvoicePayer {
       txHash: row.tx_hash!,
       blockNumber: row.block_number!,
       logIndex: row.log_index!,
+      // The rule this payment was actually confirmed under (recorded in the ledger), not today's setting.
+      confirmation: this.confirmedRule(row.invoice_id) ?? describeRule(ruleFor(this.o.chain)),
+      ...this.explorerOf(row.tx_hash!),
     };
   }
 

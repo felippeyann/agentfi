@@ -148,12 +148,16 @@ describe('review P1-a: two writers on one ledger', () => {
 });
 
 describe('review P1-b: chain reads that fail or cannot see the payment', () => {
-  it('RPC failing during the resubmission after a lost response: an error, the row unchanged, then recovered', async () => {
+  it('RPC failing during the resubmission after a lost response: PENDING with the hash (never "not found"), the row unchanged, then recovered', async () => {
     const w = await world(proxyUrl);
     await assert.rejects(w.agent({ failAt: 'after-broadcast' }).submit(invoice('INV-R2', '8')), FailPointError);
+    const original = new Ledger(w.ledgerPath).get('INV-R2')!.tx_hash;
     failing.add('eth_getTransactionReceipt').add('eth_getTransactionByHash');
     try {
-      await assert.rejects(w.agent().submit(invoice('INV-R2', '8')), 'a chain read that fails is an error, not "not found"');
+      const during = await w.agent().submit(invoice('INV-R2', '8'));
+      assert.equal(during.outcome, 'pending', 'a chain read that fails is not "not found" and not "paid"');
+      assert.equal((during as { txHash: string }).txHash, original);
+      assert.match((during as { note: string }).note, /Do NOT pay this invoice again/);
       const row = new Ledger(w.ledgerPath).get('INV-R2')!;
       assert.equal(row.status, 'broadcast', 'the row is left open, not marked as failed');
     } finally {

@@ -23,6 +23,7 @@ import {
   type TransactionReceipt,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import type { ConfirmRule } from './finality.js';
 import { LOCAL_TEST_USD8_ABI } from './generated/local-test-usd8.js';
 
 export const ERC20_ABI = LOCAL_TEST_USD8_ABI;
@@ -31,6 +32,14 @@ export interface ChainConfig {
   rpcUrl: string;
   chainId: number;
   token: string;
+  /** When a payment counts as confirmed (see finality.ts). Default: inclusion on 31337, finalized elsewhere. */
+  confirm?: ConfirmRule;
+  /** Block explorer base URL (receipts link to `<explorer>/tx/<hash>`). */
+  explorerUrl?: string;
+  /** First block the operator's Transfer counts read (default 0). */
+  logsFromBlock?: bigint;
+  /** Most one payment transaction may cost in gas, wei (gas limit × maxFeePerGas). Required off 31337. */
+  maxGasCostWei?: bigint;
 }
 
 export function makeChain(cfg: ChainConfig) {
@@ -50,6 +59,8 @@ export interface SignedTransfer {
   raw: Hex;
   hash: Hex;
   nonce: number;
+  /** gas × maxFeePerGas of the signed transaction, wei. */
+  maxCostWei: bigint;
 }
 
 /**
@@ -63,26 +74,90 @@ export async function assertNodeChain(cfg: ChainConfig): Promise<void> {
   }
 }
 
-/** Signs `token.transfer(to, amount)` from the payer key with the given nonce; nothing is sent. */
+/**
+ * THE gas rule, shared by the preflight and the signing path (so what the operator is shown is what
+ * the transaction will authorize): gas limit = the node's estimate + 20% margin (integer division),
+ * maxFeePerGas and maxPriorityFeePerGas = viem's `estimateFeesPerGas()` (EIP-1559), and the most the
+ * transaction can ever cost = gas limit × maxFeePerGas, in wei.
+ */
+export const GAS_MARGIN_NUM = 12n;
+export const GAS_MARGIN_DEN = 10n;
+
+export interface TransferPlan {
+  data: Hex;
+  estimatedGas: bigint;
+  gas: bigint;
+  maxFeePerGas: bigint;
+  maxPriorityFeePerGas: bigint;
+  /** gas × maxFeePerGas, wei: the most this transaction can cost. */
+  maxCostWei: bigint;
+}
+
+export async function planTransfer(cfg: ChainConfig, from: string, to: string, amount: bigint): Promise<TransferPlan> {
+  const client = publicClientFor(cfg);
+  const data = encodeFunctionData({ abi: ERC20_ABI, functionName: 'transfer', args: [getAddress(to), amount] });
+  const estimatedGas = await client.estimateGas({ account: getAddress(from), to: getAddress(cfg.token), data });
+  const fees = await client.estimateFeesPerGas();
+  const gas = (estimatedGas * GAS_MARGIN_NUM) / GAS_MARGIN_DEN;
+  return { data, estimatedGas, gas, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas, maxCostWei: gas * fees.maxFeePerGas };
+}
+
+/** Thrown BEFORE signing when the prepared transaction could cost more than the operator's ceiling. Nothing was signed or sent. */
+export class GasCeilingError extends Error {
+  constructor(public maxCostWei: bigint, public ceilingWei: bigint, public gas: bigint, public maxFeePerGas: bigint) {
+    super(`the transaction could cost up to ${maxCostWei} wei (gas ${gas} × max fee ${maxFeePerGas} wei), above the ceiling of ${ceilingWei} wei: not signed, not sent`);
+  }
+}
+
+/** Counters for tests and the operator's evidence: signatures produced by this process. */
+export const signingStats = { signatures: 0, ceilingRefusals: 0 };
+
+/**
+ * Signs `token.transfer(to, amount)` from the payer key with the given nonce; nothing is sent.
+ * Immediately before signing, the EFFECTIVE fields of the prepared transaction (its gas limit and its
+ * maxFeePerGas, or gasPrice for a legacy one) are multiplied and compared with `cfg.maxGasCostWei`:
+ * above it, GasCeilingError and no signature.
+ */
 export async function signTransfer(cfg: ChainConfig, payerKey: Hex, to: string, amount: bigint, nonce: number): Promise<SignedTransfer> {
   await assertNodeChain(cfg);
   const account = privateKeyToAccount(payerKey);
-  const client = publicClientFor(cfg);
-  const data = encodeFunctionData({ abi: ERC20_ABI, functionName: 'transfer', args: [getAddress(to), amount] });
-  const gas = await client.estimateGas({ account: account.address, to: getAddress(cfg.token), data });
-  const fees = await client.estimateFeesPerGas();
+  const plan = await planTransfer(cfg, account.address, to, amount);
   const wallet = createWalletClient({ account, chain: makeChain(cfg), transport: http(cfg.rpcUrl) });
   const request = await wallet.prepareTransactionRequest({
     to: getAddress(cfg.token),
-    data,
+    data: plan.data,
     nonce,
-    gas: (gas * 12n) / 10n,
-    maxFeePerGas: fees.maxFeePerGas,
-    maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+    gas: plan.gas,
+    maxFeePerGas: plan.maxFeePerGas,
+    maxPriorityFeePerGas: plan.maxPriorityFeePerGas,
+    // Pinned here, never taken from the node (viem would otherwise ask the RPC to fill them).
+    chainId: cfg.chainId,
+    type: 'eip1559',
     chain: makeChain(cfg),
   });
+  // Every field that ends up in the signed bytes is checked against what the agent decided.
+  const r = request as { to?: string; data?: Hex; nonce?: number; chainId?: number; type?: string; gas?: bigint; maxFeePerGas?: bigint; maxPriorityFeePerGas?: bigint; gasPrice?: bigint; value?: bigint };
+  const mismatch = [
+    r.chainId !== cfg.chainId && `chainId ${r.chainId} ≠ ${cfg.chainId}`,
+    r.type !== 'eip1559' && `type ${r.type} ≠ eip1559`,
+    r.gasPrice !== undefined && 'a legacy gasPrice',
+    (r.to ?? '').toLowerCase() !== cfg.token.toLowerCase() && `to ${r.to} ≠ the token ${cfg.token}`,
+    r.data !== plan.data && 'calldata changed',
+    r.nonce !== nonce && `nonce ${r.nonce} ≠ ${nonce}`,
+    (r.value ?? 0n) !== 0n && `value ${r.value} ≠ 0`,
+    r.gas !== plan.gas && `gas ${r.gas} ≠ ${plan.gas}`,
+    r.maxFeePerGas !== plan.maxFeePerGas && `maxFeePerGas ${r.maxFeePerGas} ≠ ${plan.maxFeePerGas}`,
+    r.maxPriorityFeePerGas !== plan.maxPriorityFeePerGas && `maxPriorityFeePerGas ${r.maxPriorityFeePerGas} ≠ ${plan.maxPriorityFeePerGas}`,
+  ].filter(Boolean);
+  if (mismatch.length > 0) throw new Error(`the prepared transaction differs from what the agent decided (${mismatch.join('; ')}): not signed`);
+  const maxCost = r.gas! * r.maxFeePerGas!;
+  if (cfg.maxGasCostWei !== undefined && maxCost > cfg.maxGasCostWei) {
+    signingStats.ceilingRefusals++;
+    throw new GasCeilingError(maxCost, cfg.maxGasCostWei, r.gas!, r.maxFeePerGas!);
+  }
   const raw = await account.signTransaction(request as never);
-  return { raw, hash: keccak256(raw), nonce };
+  signingStats.signatures++;
+  return { raw, hash: keccak256(raw), nonce, maxCostWei: maxCost };
 }
 
 export async function broadcast(cfg: ChainConfig, raw: Hex): Promise<'sent' | 'already-known'> {
@@ -153,16 +228,27 @@ export function transfersIn(cfg: ChainConfig, receipt: TransactionReceipt): Tran
   }));
 }
 
-/** Every token Transfer from `from` (optionally to `to`) since block 0: the operator's independent count. */
+/**
+ * Every token Transfer from `from` (optionally to `to`) since `cfg.logsFromBlock` (block 0 by
+ * default; on a public chain, a block before the payer's first payment): the operator's independent
+ * count. Read in windows of `LOG_WINDOW` blocks, which public RPCs accept.
+ */
+const LOG_WINDOW = 50_000n;
 export async function transfersFrom(cfg: ChainConfig, from: string, to?: string): Promise<TransferLog[]> {
-  const logs = await publicClientFor(cfg).getContractEvents({
-    address: getAddress(cfg.token),
-    abi: ERC20_ABI,
-    eventName: 'Transfer',
-    args: { from: getAddress(from), ...(to ? { to: getAddress(to) } : {}) },
-    fromBlock: 0n,
-    toBlock: 'latest',
-  });
+  const client = publicClientFor(cfg);
+  const head = await client.getBlockNumber({ cacheTime: 0 });
+  const logs = [];
+  for (let start = cfg.logsFromBlock ?? 0n; start <= head; start += LOG_WINDOW) {
+    const end = start + LOG_WINDOW - 1n < head ? start + LOG_WINDOW - 1n : head;
+    logs.push(...(await client.getContractEvents({
+      address: getAddress(cfg.token),
+      abi: ERC20_ABI,
+      eventName: 'Transfer',
+      args: { from: getAddress(from), ...(to ? { to: getAddress(to) } : {}) },
+      fromBlock: start,
+      toBlock: end,
+    })));
+  }
   return logs.map((l) => ({
     txHash: l.transactionHash!,
     blockNumber: l.blockNumber!,

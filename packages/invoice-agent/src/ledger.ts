@@ -9,6 +9,8 @@
  *   refused    the mandate refused it; nothing was signed
  *   signed     signed and recorded, maybe not broadcast (a crash can stop between the two)
  *   broadcast  handed to the node; no receipt seen yet
+ *   included   mined in a block, Transfer matches, but the block does not satisfy the confirmation rule yet
+ *              (finality.ts): still OPEN, re-checked (it can leave the canonical chain)
  *   confirmed  mined, success, and the Transfer log matches (payer → payTo, exact amount)
  *   stuck      the payer's nonce is used on-chain but this transaction was not found: either another
  *              transaction took the nonce (no money moved) or the node has not indexed ours. Stays
@@ -20,9 +22,9 @@
  */
 import { DatabaseSync } from 'node:sqlite';
 
-export type PaymentStatus = 'refused' | 'signed' | 'broadcast' | 'stuck' | 'confirmed' | 'reverted';
+export type PaymentStatus = 'refused' | 'signed' | 'broadcast' | 'included' | 'stuck' | 'confirmed' | 'reverted';
 /** Rows whose money may still move or may have moved: they count against limits and are reconciled. */
-export const OPEN_STATUSES: readonly PaymentStatus[] = ['signed', 'broadcast', 'stuck'];
+export const OPEN_STATUSES: readonly PaymentStatus[] = ['signed', 'broadcast', 'included', 'stuck'];
 
 /**
  * Exclusive lock for the agent process on a ledger file: a separate SQLite file
@@ -82,7 +84,16 @@ export interface PaymentRow {
 export class Ledger {
   private db: DatabaseSync;
 
-  constructor(path: string) {
+  /**
+   * `readOnly`: opens an EXISTING ledger with a read-only SQLite connection (no schema creation, no
+   * writes possible): used by the inquiry/MCP surface. The agent and `ops` open it read-write.
+   */
+  constructor(path: string, opts: { readOnly?: boolean } = {}) {
+    if (opts.readOnly) {
+      this.db = new DatabaseSync(path, { readOnly: true });
+      this.db.exec('PRAGMA busy_timeout = 5000;');
+      return;
+    }
     this.db = new DatabaseSync(path);
     this.db.exec(`
       PRAGMA busy_timeout = 5000;
@@ -121,6 +132,16 @@ export class Ledger {
     const diff = (Object.keys(want) as (keyof typeof want)[]).filter((k) => have[k] !== want[k]);
     if (diff.length > 0) {
       throw new Error(`this ledger was written for ${diff.map((k) => `${k} ${have[k]}`).join(', ')}; the mandate now says ${diff.map((k) => `${k} ${want[k]}`).join(', ')}. Use a new ledger file (INVOICE_LEDGER) for a new chain, token or payer.`);
+    }
+  }
+
+  /** The recorded context (chain, token, payer), read-only; undefined when the ledger was never bound. */
+  readContext(): { chainId?: string; token?: string; payer?: string } | undefined {
+    try {
+      const rows = this.db.prepare('SELECT k, v FROM context').all() as { k: string; v: string }[];
+      return rows.length ? Object.fromEntries(rows.map((r) => [r.k, r.v])) : undefined;
+    } catch {
+      return undefined; // no context table yet
     }
   }
 
@@ -187,7 +208,7 @@ export class Ledger {
   committedToday(now = new Date()): bigint {
     const day = now.toISOString().slice(0, 10);
     const rows = this.db
-      .prepare("SELECT amount FROM payments WHERE status IN ('signed','broadcast','stuck','confirmed') AND substr(created_at, 1, 10) = ?")
+      .prepare("SELECT amount FROM payments WHERE status IN ('signed','broadcast','included','stuck','confirmed') AND substr(created_at, 1, 10) = ?")
       .all(day) as { amount: string }[];
     return rows.reduce((sum, r) => sum + BigInt(r.amount), 0n);
   }

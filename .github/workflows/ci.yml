@@ -41,6 +41,8 @@ jobs:
         run: npm test
       - working-directory: packages/invoice-agent
         run: npm run demo
+      - working-directory: packages/invoice-agent
+        run: npm run session -- --rehearse
 
   openapi-spec:
     name: OpenAPI Spec
