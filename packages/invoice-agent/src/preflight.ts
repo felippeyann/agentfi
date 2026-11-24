@@ -13,12 +13,13 @@
  *                              public address (gas coin only). Reads the vault (code, operator, mandate vs agent / vendor /
  *                              payee, paused, expiry, limits, balance) and estimates payInvoice from the agent instead.
  *   --vendor-id vendor-1       the vendor id the vault names [vendor-1]   --invoice ID   the id whose payInvoice is estimated
+ *   --max-priority-fee-gwei G  the operator's cap on the EIP-1559 tip (same rule as the agent's INVOICE_MAX_PRIORITY_FEE_GWEI)
  *
  * Exit 0 when every check passed, 1 otherwise. Every line says what was read and from where.
  */
 import { createPublicClient, formatEther, getAddress, http, type Address, type Hex } from 'viem';
 import { ERC20_ABI, makeChain, planTransfer } from './chain.js';
-import { KNOWN_NETWORKS, parseGasCeiling } from './config.js';
+import { KNOWN_NETWORKS, parseGasCeiling, parsePriorityFeeCap } from './config.js';
 import { formatUnits6, toBaseUnits } from './invoice.js';
 import { readVault, VAULT_ABI, VaultRefusalError, vendorKey } from './vault.js';
 
@@ -36,6 +37,8 @@ export interface PreflightOptions {
   maxFinalizedLagSec?: number;
   /** The operator's gas ceiling per transaction, wei: fail when the transfer could cost more. */
   maxGasCostWei?: bigint;
+  /** The operator's cap on the EIP-1559 tip, wei: the same rule as the agent's (chain.ts feesWithTipCap). */
+  maxPriorityFeeWei?: bigint;
   /**
    * The operator's InvoiceMandate vault: the payment is then `vault.payInvoice` sent by the AGENT (`payer` is the agent's
    * public address, which needs only the gas coin) and the tUSD8 leave the vault. The vault's mandate must name this
@@ -53,6 +56,9 @@ export interface PreflightResult {
   lines: string[];
   head?: bigint;
   gasCostWei?: bigint;
+  /** The fee fields the agent would sign with, as planned at this instant. */
+  maxFeePerGas?: bigint;
+  maxPriorityFeePerGas?: bigint;
 }
 
 const SAFETY = 3n; // the payer should hold at least 3× the estimated gas cost
@@ -159,9 +165,12 @@ export async function preflight(o: PreflightOptions): Promise<PreflightResult> {
       const what = o.vault ? `vault.payInvoice("${invoiceId}", "${vendorId}", ${o.vendor}, ${o.amount} ${symbol}) from the agent` : `transfer(${o.vendor}, ${o.amount} ${symbol}) from the payer`;
       try {
         // The SAME rule the signing path applies (chain.ts planTransfer): estimate + 20% margin, × maxFeePerGas.
-        const plan = await planTransfer({ rpcUrl: o.rpcUrl, chainId: o.chainId, token: o.token, ...(o.vault ? { vault: o.vault, vaultVendorId: vendorId } : {}) }, o.payer, o.vendor, amount, o.vault ? invoiceId : undefined);
+        const plan = await planTransfer({ rpcUrl: o.rpcUrl, chainId: o.chainId, token: o.token, ...(o.maxPriorityFeeWei !== undefined ? { maxPriorityFeeWei: o.maxPriorityFeeWei } : {}), ...(o.vault ? { vault: o.vault, vaultVendorId: vendorId } : {}) }, o.payer, o.vendor, amount, o.vault ? invoiceId : undefined);
         const cost = plan.maxCostWei;
         result.gasCostWei = cost;
+        result.maxFeePerGas = plan.maxFeePerGas;
+        result.maxPriorityFeePerGas = plan.maxPriorityFeePerGas;
+        info(`tip (maxPriorityFeePerGas): node suggests ${plan.suggestedPriorityFeePerGas} wei; applied ${plan.maxPriorityFeePerGas} wei${plan.priorityFeeCapWei !== undefined ? ` (operator's cap ${plan.priorityFeeCapWei} wei${plan.maxPriorityFeePerGas < plan.suggestedPriorityFeePerGas ? ': capped' : ': suggestion within the cap'})` : ' (no cap set)'}; max fee ${plan.maxFeePerGas} wei = base part ${plan.maxFeePerGas - plan.maxPriorityFeePerGas} wei (next base fee × 1.2) + tip [eth_maxPriorityFeePerGas, eth_getBlockByNumber]`);
         info(`gas for ${what}, as the agent will sign it: estimate ${plan.estimatedGas} + 20% = gas limit ${plan.gas} × max fee ${plan.maxFeePerGas} wei = at most ${cost} wei = ${formatEther(cost)} ${o.gasSymbol} [eth_estimateGas, eth_feeHistory]`);
         if (o.maxGasCostWei !== undefined) {
           info(`${o.vault ? 'vault payment' : 'transfer'} maximum ${formatEther(cost)} ${o.gasSymbol} · ceiling ${formatEther(o.maxGasCostWei)} ${o.gasSymbol}${o.vault ? ' (the ceiling is the owner\'s decision; the vault call costs more gas than a direct transfer)' : ''}`);
@@ -213,6 +222,7 @@ function args(argv: string[]) {
     amount: get('amount') ?? '1',
     ...(get('max-finalized-lag-min') ? { maxFinalizedLagSec: Number(get('max-finalized-lag-min')) * 60 } : {}),
     ...((get('max-gas-cost') ?? (known ? DEFAULT_AEVUM_GAS_CEILING : undefined)) ? { maxGasCostWei: parseGasCeiling(get('max-gas-cost') ?? DEFAULT_AEVUM_GAS_CEILING) } : {}),
+    ...(get('max-priority-fee-gwei') ? { maxPriorityFeeWei: parsePriorityFeeCap(get('max-priority-fee-gwei')!) } : {}),
   } satisfies PreflightOptions;
 }
 

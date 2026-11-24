@@ -31,6 +31,8 @@
  *
  * Gas: --max-gas-cost (default 0.0001, native coin) is the ceiling per transaction, checked by the preflight
  * and again by the agent on the prepared transaction right before signing (gas limit × maxFeePerGas).
+ * --max-priority-fee-gwei G caps the EIP-1559 tip (maxFeePerGas is rebuilt as base part + the applied tip), with the
+ * same rule in the preflight and in the agent (INVOICE_MAX_PRIORITY_FEE_GWEI); the ceiling still applies on top.
  * Stop criteria (exit 3, nothing else is sent): preflight fails (including a maximum above the ceiling);
  * the agent refuses on the ceiling (nothing signed); the agent records no payment;
  * the resend answers anything but the ORIGINAL hash; the transaction stays out of a block for
@@ -48,7 +50,7 @@ import { fileURLToPath } from 'node:url';
 import { createPublicClient, createWalletClient, getAddress, http, type Address, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { balanceOf, makeChain, transfersFrom, type ChainConfig } from './chain.js';
-import { isPublicAnvilKey, KNOWN_NETWORKS, parseGasCeiling } from './config.js';
+import { isPublicAnvilKey, KNOWN_NETWORKS, parseGasCeiling, parsePriorityFeeCap } from './config.js';
 import { parseConfirmRule } from './finality.js';
 import { INVOICE_MANDATE_ABI, INVOICE_MANDATE_BYTECODE } from './generated/invoice-mandate.js';
 import { LOCAL_TEST_USD8_ABI, LOCAL_TEST_USD8_BYTECODE } from './generated/local-test-usd8.js';
@@ -71,6 +73,7 @@ const VAULT_ARG = opt('vault')?.startsWith('0x') ? opt('vault') : undefined;
 const VENDOR_ID = 'vendor-1';
 const AMOUNT = opt('amount') ?? '1';
 const GAS_CEILING = opt('max-gas-cost') ?? DEFAULT_AEVUM_GAS_CEILING;
+const TIP_CAP_GWEI = opt('max-priority-fee-gwei');
 const AGENT_PORT = Number(opt('agent-port') ?? 8788);
 const ANVIL_PORT = Number(opt('anvil-port') ?? 8567);
 const MAX_UNMINED_MS = Number(opt('max-unmined-min') ?? 10) * 60_000;
@@ -176,7 +179,8 @@ async function main(): Promise<number> {
   }
   const payer = getAddress(privateKeyToAccount(payerKey).address);
   const ceilingWei = parseGasCeiling(GAS_CEILING);
-  const chain: ChainConfig = { rpcUrl, chainId, token, confirm: parseConfirmRule(confirmation), maxGasCostWei: ceilingWei, ...(explorerUrl ? { explorerUrl } : {}), ...(vault ? { vault, vaultVendorId: VENDOR_ID } : {}) };
+  const tipCapWei = TIP_CAP_GWEI !== undefined ? parsePriorityFeeCap(TIP_CAP_GWEI) : undefined;
+  const chain: ChainConfig = { rpcUrl, chainId, token, confirm: parseConfirmRule(confirmation), maxGasCostWei: ceilingWei, ...(tipCapWei !== undefined ? { maxPriorityFeeWei: tipCapWei } : {}), ...(explorerUrl ? { explorerUrl } : {}), ...(vault ? { vault, vaultVendorId: VENDOR_ID } : {}) };
   /** Where the tUSD8 leave from: the vault, or the payer's own address. */
   const source = vault ?? payer;
   const client = createPublicClient({ chain: makeChain(chain), transport: http(rpcUrl) });
@@ -186,12 +190,12 @@ async function main(): Promise<number> {
 
   out(`AgentFi invoice agent — session (${MODE === 'aevum' ? 'PUBLIC: QDay Aevum Testnet 44005, official tUSD8' : 'REHEARSAL: local Anvil 31337, local test token, nothing public'})`);
   if (vault) out(`Through the InvoiceMandate vault ${vault}: the agent ${payer} signs vault.payInvoice and pays gas; the tUSD8 leave the vault.`);
-  out(`Session dir ${DIR} · invoice ${INVOICE_ID} · ${AMOUNT} tUSD8 · ${vault ? 'agent' : 'payer'} ${payer} → vendor ${vendor} · confirmation rule: ${confirmation} · gas ceiling ${GAS_CEILING} ${MODE === 'aevum' ? 'tQDAY' : 'ETH'} (${ceilingWei} wei) per transaction · counting from block ${startBlock}`);
+  out(`Session dir ${DIR} · invoice ${INVOICE_ID} · ${AMOUNT} tUSD8 · ${vault ? 'agent' : 'payer'} ${payer} → vendor ${vendor} · confirmation rule: ${confirmation} · gas ceiling ${GAS_CEILING} ${MODE === 'aevum' ? 'tQDAY' : 'ETH'} (${ceilingWei} wei) per transaction · tip cap ${tipCapWei !== undefined ? `${TIP_CAP_GWEI} gwei (${tipCapWei} wei)` : 'none (node suggestion)'} · counting from block ${startBlock}`);
   if (MODE === 'rehearse') out('  (on Anvil the node reports finalized = head − 64 blocks; the rehearsal mines blocks to move it. On Aevum it is the last L1-verified block.)');
 
   // ---- 1. Preflight ----------------------------------------------------------------------------
   out('\n1. Preflight (read-only)');
-  const pf = await preflight({ rpcUrl, chainId, token, explorerUrl, gasSymbol: MODE === 'aevum' ? 'tQDAY' : 'ETH', expectedDecimals: 6, payer, vendor, amount: AMOUNT, maxGasCostWei: ceilingWei, ...(confirmation === 'finalized' ? { maxFinalizedLagSec: MAX_WAIT_MS / 1000 } : {}), ...(vault ? { vault, vendorId: VENDOR_ID, invoiceId: INVOICE_ID } : {}) });
+  const pf = await preflight({ rpcUrl, chainId, token, explorerUrl, gasSymbol: MODE === 'aevum' ? 'tQDAY' : 'ETH', expectedDecimals: 6, payer, vendor, amount: AMOUNT, maxGasCostWei: ceilingWei, ...(tipCapWei !== undefined ? { maxPriorityFeeWei: tipCapWei } : {}), ...(confirmation === 'finalized' ? { maxFinalizedLagSec: MAX_WAIT_MS / 1000 } : {}), ...(vault ? { vault, vendorId: VENDOR_ID, invoiceId: INVOICE_ID } : {}) });
   pf.lines.forEach((l) => out(`  ${l}`));
   if (!pf.ok) stop('preflight failed');
 
@@ -204,6 +208,8 @@ async function main(): Promise<number> {
     INVOICE_LOGS_FROM_BLOCK: startBlock.toString(),
     INVOICE_FAIL_AT: '',
     INVOICE_MAX_GAS_COST: GAS_CEILING,
+    // Always set (empty = no cap), so a value left in the shell cannot give the agent a different rule than the preflight's.
+    INVOICE_MAX_PRIORITY_FEE_GWEI: TIP_CAP_GWEI ?? '',
     ...(explorerUrl ? { INVOICE_EXPLORER_URL: explorerUrl } : {}),
   };
   saveMandate(env.INVOICE_MANDATE, {

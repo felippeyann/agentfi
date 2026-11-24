@@ -43,6 +43,12 @@ export interface ChainConfig {
   /** Most one payment transaction may cost in gas, wei (gas limit × maxFeePerGas). Required off 31337. */
   maxGasCostWei?: bigint;
   /**
+   * The operator's cap on the EIP-1559 tip (maxPriorityFeePerGas), wei. When the node suggests more, the tip is cut to
+   * the cap AND maxFeePerGas is rebuilt as (the base-fee part of the estimate) + the applied tip, so the cap lowers the
+   * most the transaction can cost. Unset: the node's suggestion as is (the previous behaviour).
+   */
+  maxPriorityFeeWei?: bigint;
+  /**
    * The operator's InvoiceMandate vault (vault.ts), when the mandate names one: payments are then
    * `vault.payInvoice(invoiceId, vendor, payTo, amount)` and the tokens leave the vault, not the agent's address.
    */
@@ -88,6 +94,11 @@ export interface SignedTransfer {
   nonce: number;
   /** gas × maxFeePerGas of the signed transaction, wei. */
   maxCostWei: bigint;
+  /** The EIP-1559 fee fields in the signed bytes, wei. */
+  maxFeePerGas: bigint;
+  maxPriorityFeePerGas: bigint;
+  /** The tip the node suggested before the operator's cap, wei. */
+  suggestedPriorityFeePerGas: bigint;
 }
 
 /**
@@ -104,7 +115,8 @@ export async function assertNodeChain(cfg: ChainConfig): Promise<void> {
 /**
  * THE gas rule, shared by the preflight and the signing path (so what the operator is shown is what
  * the transaction will authorize): gas limit = the node's estimate + 20% margin (integer division),
- * maxFeePerGas and maxPriorityFeePerGas = viem's `estimateFeesPerGas()` (EIP-1559), and the most the
+ * maxFeePerGas and maxPriorityFeePerGas = viem's `estimateFeesPerGas()` (EIP-1559: base fee × 1.2 + the node's
+ * suggested tip), optionally with the operator's tip cap applied (`feesWithTipCap`), and the most the
  * transaction can ever cost = gas limit × maxFeePerGas, in wei.
  */
 export const GAS_MARGIN_NUM = 12n;
@@ -116,8 +128,25 @@ export interface TransferPlan {
   gas: bigint;
   maxFeePerGas: bigint;
   maxPriorityFeePerGas: bigint;
+  /** The tip the node suggested (before any cap), wei. */
+  suggestedPriorityFeePerGas: bigint;
+  /** The operator's tip cap, wei, when one is set. */
+  priorityFeeCapWei?: bigint;
   /** gas × maxFeePerGas, wei: the most this transaction can cost. */
   maxCostWei: bigint;
+}
+
+/**
+ * The fee fields after the operator's tip cap. viem's estimate is maxFeePerGas = base part + suggested tip, so the base
+ * part (the next block's base fee with viem's 1.2 margin) is maxFeePerGas − maxPriorityFeePerGas; with a cap below the
+ * suggestion the tip becomes the cap and maxFeePerGas = base part + cap. Integer wei throughout. A suggestion at or below
+ * the cap is kept as is.
+ */
+export function feesWithTipCap(est: { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }, capWei?: bigint): { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint } {
+  if (est.maxPriorityFeePerGas < 0n || est.maxFeePerGas < est.maxPriorityFeePerGas) throw new Error(`inconsistent fee estimate: maxFeePerGas ${est.maxFeePerGas} < maxPriorityFeePerGas ${est.maxPriorityFeePerGas}`);
+  if (capWei === undefined || est.maxPriorityFeePerGas <= capWei) return { maxFeePerGas: est.maxFeePerGas, maxPriorityFeePerGas: est.maxPriorityFeePerGas };
+  const basePart = est.maxFeePerGas - est.maxPriorityFeePerGas;
+  return { maxFeePerGas: basePart + capWei, maxPriorityFeePerGas: capWei };
 }
 
 /**
@@ -137,9 +166,17 @@ export async function planTransfer(cfg: ChainConfig, from: string, to: string, a
     if (refusal) throw new VaultRefusalError(refusal.name, refusal.args);
     throw e;
   }
-  const fees = await client.estimateFeesPerGas();
+  const est = await client.estimateFeesPerGas();
+  const fees = feesWithTipCap(est, cfg.maxPriorityFeeWei);
   const gas = (estimatedGas * GAS_MARGIN_NUM) / GAS_MARGIN_DEN;
-  return { data, estimatedGas, gas, maxFeePerGas: fees.maxFeePerGas, maxPriorityFeePerGas: fees.maxPriorityFeePerGas, maxCostWei: gas * fees.maxFeePerGas };
+  return {
+    data, estimatedGas, gas,
+    maxFeePerGas: fees.maxFeePerGas,
+    maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+    suggestedPriorityFeePerGas: est.maxPriorityFeePerGas,
+    ...(cfg.maxPriorityFeeWei !== undefined ? { priorityFeeCapWei: cfg.maxPriorityFeeWei } : {}),
+    maxCostWei: gas * fees.maxFeePerGas,
+  };
 }
 
 /** Thrown BEFORE signing when the prepared transaction could cost more than the operator's ceiling. Nothing was signed or sent. */
@@ -198,7 +235,7 @@ export async function signTransfer(cfg: ChainConfig, payerKey: Hex, to: string, 
   }
   const raw = await account.signTransaction(request as never);
   signingStats.signatures++;
-  return { raw, hash: keccak256(raw), nonce, maxCostWei: maxCost };
+  return { raw, hash: keccak256(raw), nonce, maxCostWei: maxCost, maxFeePerGas: r.maxFeePerGas!, maxPriorityFeePerGas: r.maxPriorityFeePerGas!, suggestedPriorityFeePerGas: plan.suggestedPriorityFeePerGas };
 }
 
 export async function broadcast(cfg: ChainConfig, raw: Hex): Promise<'sent' | 'already-known'> {

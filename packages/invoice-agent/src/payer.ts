@@ -202,7 +202,7 @@ export class InvoicePayer {
       ledger.event(inv.id, 'discarded-duplicate-signature', { txHash: signed.hash });
       return this.answerFor(await this.reconcile(ledger.get(inv.id)!), true);
     }
-    ledger.event(inv.id, 'signed', { txHash: signed.hash, nonce, maxGasCostWei: signed.maxCostWei.toString(), ceilingWei: this.o.chain.maxGasCostWei?.toString() ?? null });
+    ledger.event(inv.id, 'signed', { txHash: signed.hash, nonce, maxGasCostWei: signed.maxCostWei.toString(), ceilingWei: this.o.chain.maxGasCostWei?.toString() ?? null, maxFeePerGas: signed.maxFeePerGas.toString(), maxPriorityFeePerGas: signed.maxPriorityFeePerGas.toString(), suggestedPriorityFeePerGas: signed.suggestedPriorityFeePerGas.toString(), priorityFeeCapWei: this.o.chain.maxPriorityFeeWei?.toString() ?? null });
     this.maybeFail('after-sign');
 
     let stage = 'broadcasting it';
