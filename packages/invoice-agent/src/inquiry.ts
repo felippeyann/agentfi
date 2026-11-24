@@ -40,7 +40,7 @@ export interface VaultCheck {
 }
 
 /** `expect.settled`: a mined payment exists for it, so the vault must have settled it (otherwise "not settled" is just an answer). */
-function checkVault(chain: ChainConfig, mandate: Mandate, invoiceId: string, s: SettlementRecord, ev: SettledEvent | undefined, expect: { settled: boolean; amount?: bigint; payTo?: string; blockNumber?: bigint }): VaultCheck {
+function checkVault(chain: ChainConfig, mandate: Mandate, invoiceId: string, s: SettlementRecord, ev: SettledEvent | undefined, expect: { settled: boolean; amount?: bigint; payTo?: string; blockNumber?: bigint; agent?: string }): VaultCheck {
   const problems: string[] = [];
   if (expect.settled && !s.settled) problems.push('settlementOf says NOT settled');
   if ((expect.settled || s.settled) && !ev) problems.push('no InvoiceSettled event for it');
@@ -52,7 +52,9 @@ function checkVault(chain: ChainConfig, mandate: Mandate, invoiceId: string, s: 
   if (expect.amount !== undefined && s.settled && s.amount !== expect.amount) problems.push(`settled amount ${formatUnits6(s.amount)} ≠ the invoice's ${formatUnits6(expect.amount)} tUSD8`);
   if (expect.payTo && ev && ev.payTo.toLowerCase() !== expect.payTo.toLowerCase()) problems.push(`paid to ${ev.payTo}, the invoice says ${expect.payTo}`);
   if (expect.blockNumber !== undefined && s.settled && s.blockNumber !== expect.blockNumber) problems.push(`settled in block ${s.blockNumber}, the receipt says ${expect.blockNumber}`);
-  if (s.settled && s.agent !== mandate.payer) problems.push(`settled by ${s.agent}, not this agent ${mandate.payer}`);
+  // Only when THIS agent's ledger says it paid: a settlement found from the vault alone may be by an earlier agent key
+  // (the operator rotated it; the contract keeps settlements across agent changes). Its agent must still match the event.
+  if (expect.agent && s.settled && s.agent !== expect.agent) problems.push(`settled by ${s.agent}, not this agent ${expect.agent}`);
   return { address: chain.vault!, settlement: s, ...(ev ? { event: ev } : {}), agrees: problems.length === 0, problems };
 }
 
@@ -91,7 +93,7 @@ export async function verifyInvoice(chain: ChainConfig, mandate: Mandate, ledger
   const match = transfersIn(chain, receipt).filter((t) => t.from === source && t.to === getAddress(row.pay_to) && t.value === BigInt(row.amount));
   const allToPayee = await transfersFrom(chain, source, row.pay_to);
   const vault = settlement
-    ? checkVault(chain, mandate, id, settlement, settledEventsIn(chain, receipt).find((e) => e.invoiceId === id), { settled: receipt.status === 'success', amount: BigInt(row.amount), payTo: row.pay_to, blockNumber: receipt.blockNumber })
+    ? checkVault(chain, mandate, id, settlement, settledEventsIn(chain, receipt).find((e) => e.invoiceId === id), { settled: receipt.status === 'success', amount: BigInt(row.amount), payTo: row.pay_to, blockNumber: receipt.blockNumber, agent: mandate.payer })
     : undefined;
   // The chain is the judge, not the agent's ledger: every transfer to this payee must belong to exactly one paid invoice.
   const known = new Set(ledger.all().filter((r) => r.pay_to.toLowerCase() === row.pay_to.toLowerCase() && r.tx_hash && r.status !== 'refused').map((r) => r.tx_hash!.toLowerCase()));
@@ -142,13 +144,14 @@ async function answerFromVault(chain: ChainConfig, mandate: Mandate, invoiceId: 
     transfer: `${formatUnits6(ev.amount)} tUSD8 ${source} → ${ev.payTo} (log ${transfer[0]!.logIndex})`,
     confirmation: `${fin.detail}${fin.final ? ' → met' : ' → not met'}`, transfersToPayee: 1, unexplained: [],
   };
+  const byAgent = s.agent !== mandate.payer ? ` Settled by agent ${s.agent}, an earlier key than this agent's ${mandate.payer}.` : '';
   const notInLedger = base.ledger ? `This agent's ledger has it as "${base.ledger.status}" without a transaction (a refusal by the vault, or another ledger paid it)` : "It is not in this agent's ledger (another or a lost ledger paid it)";
   if (!fin.final) {
-    return { ...withVault, chain: chainPart, state: 'pending', answer: `Pending: the vault settled invoice ${invoiceId} in block ${receipt.blockNumber} (transaction ${ev.txHash}), NOT confirmed yet (${fin.detail}). ${notInLedger}.`, next: `${DO_NOT_PAY} Ask again later.` };
+    return { ...withVault, chain: chainPart, state: 'pending', answer: `Pending: the vault settled invoice ${invoiceId} in block ${receipt.blockNumber} (transaction ${ev.txHash}), NOT confirmed yet (${fin.detail}). ${notInLedger}.${byAgent}`, next: `${DO_NOT_PAY} Ask again later.` };
   }
   return {
     ...withVault, chain: chainPart, state: 'paid_verified',
-    answer: `Paid and verified on-chain by the vault: ${formatUnits6(ev.amount)} tUSD8 to ${ev.payTo} in transaction ${ev.txHash}, block ${receipt.blockNumber}, confirmed under the rule ${base.network.confirmationRule}. ${notInLedger}; the vault refuses a second settlement.`,
+    answer: `Paid and verified on-chain by the vault: ${formatUnits6(ev.amount)} tUSD8 to ${ev.payTo} in transaction ${ev.txHash}, block ${receipt.blockNumber}, confirmed under the rule ${base.network.confirmationRule}. ${notInLedger}; the vault refuses a second settlement.${byAgent}`,
     next: 'Nothing to pay. Anyone can check the transaction on-chain' + (explorer ? ` at ${explorer}.` : '.'),
     receipt: { invoiceId, chainId: chain.chainId, token: chain.token, from: source, to: ev.payTo, amount: formatUnits6(ev.amount), txHash: ev.txHash, blockNumber: receipt.blockNumber.toString(), logIndex: transfer[0]!.logIndex },
   };
@@ -225,7 +228,7 @@ export async function inquireInvoice(chain: ChainConfig, mandate: Mandate, ledge
     const base = { invoiceId, network, ledger: led, ...(explorer ? { explorer } : {}) };
     // The ledger must belong to this chain, token and payer (as recorded when it was first used).
     const ctx = ledger.readContext();
-    const want = { chainId: String(chain.chainId), token: chain.token.toLowerCase(), payer: mandate.payer.toLowerCase() };
+    const want = { chainId: String(chain.chainId), token: chain.token.toLowerCase(), payer: mandate.payer.toLowerCase(), source: chain.vault ? chain.vault.toLowerCase() : 'direct' };
     const wrong = ctx ? (Object.keys(want) as (keyof typeof want)[]).filter((k) => ctx[k] !== undefined && ctx[k] !== want[k]) : [];
     if (!ctx && row.tx_hash) {
       // A ledger that never recorded its chain, token and payer (older versions): its transactions
@@ -233,7 +236,7 @@ export async function inquireInvoice(chain: ChainConfig, mandate: Mandate, ledge
       return { ...base, state: 'cannot_verify_now', error: 'the ledger has no recorded chain/token/payer context', answer: 'This ledger never recorded which chain, token and payer it was written for, so its transaction cannot be checked against this mandate.', next: `${DO_NOT_PAY} Check the original transaction ${explorer ?? row.tx_hash} by hand, or run the agent or \`ops status\` once on this ledger with the right mandate to record the context.` };
     }
     if (wrong.length) {
-      return { ...base, state: 'cannot_verify_now', error: `ledger context ${wrong.map((k) => `${k} ${ctx![k]}`).join(', ')} ≠ mandate ${wrong.map((k) => `${k} ${want[k]}`).join(', ')}`, answer: 'This ledger was written for another chain, token or payer than the mandate: its answer cannot be checked against this chain.', next: `${DO_NOT_PAY} Point INVOICE_MANDATE and INVOICE_LEDGER at the same agent.` };
+      return { ...base, state: 'cannot_verify_now', error: `ledger context ${wrong.map((k) => `${k} ${ctx![k]}`).join(', ')} ≠ mandate ${wrong.map((k) => `${k} ${want[k]}`).join(', ')}`, answer: 'This ledger was written for another chain, token, payer or vault than the mandate: its answer cannot be checked against this chain.', next: `${DO_NOT_PAY} Point INVOICE_MANDATE and INVOICE_LEDGER at the same agent.` };
     }
     let v: Verification;
     try {

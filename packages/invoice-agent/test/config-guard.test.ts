@@ -73,7 +73,15 @@ test('a ledger is bound to its chain, token and payer; limits may change', () =>
   assert.throws(() => ledger.bindContext({ ...ctx, chainId: 44005 }), /written for chainId 31337/);
   assert.throws(() => ledger.bindContext({ ...ctx, token: '0x5FbDB2315678afecb367f032d93F642f64180aa3' }), /new ledger file/);
   assert.throws(() => ledger.bindContext({ ...ctx, payer: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC' }), /payer/);
+  // The payment source too: a direct ledger cannot be reopened through a vault, nor one vault's ledger through another.
+  assert.throws(() => ledger.bindContext({ ...ctx, vault: '0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3' }), /source direct/);
   ledger.close();
+  const v = new Ledger(join(mkdtempSync(join(tmpdir(), 'invoice-agent-ctx-')), 'ledger.sqlite'));
+  v.bindContext({ ...ctx, vault: '0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3' });
+  v.bindContext({ ...ctx, vault: '0xa0bfd474378bb8f7ee96294313a3832b26f4d7a3' });
+  assert.throws(() => v.bindContext(ctx), /vault/);
+  assert.throws(() => v.bindContext({ ...ctx, vault: '0x5FbDB2315678afecb367f032d93F642f64180aa3' }), /new ledger file/);
+  v.close();
 });
 
 test('simulated crashes (INVOICE_FAIL_AT) are refused off chain 31337', () => {

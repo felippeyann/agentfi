@@ -123,20 +123,23 @@ export class Ledger {
    * from a row plus this context, so a ledger reused under another chain, token or payer would
    * label old payments with the wrong one. Mandate limits, expiry and vendor can still change.
    */
-  bindContext(ctx: { chainId: number; token: string; payer: string }): void {
-    const want = { chainId: String(ctx.chainId), token: ctx.token.toLowerCase(), payer: ctx.payer.toLowerCase() };
+  bindContext(ctx: { chainId: number; token: string; payer: string; vault?: string }): void {
+    // source: where the tokens leave from ("direct" = the payer's own balance, else the vault address). Receipts rebuilt
+    // from this ledger name today's source, so a ledger must never be reused across a switch to (or between) vaults.
+    // A ledger bound before this key existed records the first source it is opened with.
+    const want = { chainId: String(ctx.chainId), token: ctx.token.toLowerCase(), payer: ctx.payer.toLowerCase(), source: ctx.vault ? ctx.vault.toLowerCase() : 'direct' };
     this.db.exec('CREATE TABLE IF NOT EXISTS context (k TEXT PRIMARY KEY, v TEXT NOT NULL)');
     const ins = this.db.prepare('INSERT OR IGNORE INTO context (k, v) VALUES (?, ?)');
     for (const [k, v] of Object.entries(want)) ins.run(k, v);
     const have = Object.fromEntries((this.db.prepare('SELECT k, v FROM context').all() as { k: string; v: string }[]).map((r) => [r.k, r.v]));
     const diff = (Object.keys(want) as (keyof typeof want)[]).filter((k) => have[k] !== want[k]);
     if (diff.length > 0) {
-      throw new Error(`this ledger was written for ${diff.map((k) => `${k} ${have[k]}`).join(', ')}; the mandate now says ${diff.map((k) => `${k} ${want[k]}`).join(', ')}. Use a new ledger file (INVOICE_LEDGER) for a new chain, token or payer.`);
+      throw new Error(`this ledger was written for ${diff.map((k) => `${k} ${have[k]}`).join(', ')}; the mandate now says ${diff.map((k) => `${k} ${want[k]}`).join(', ')}. Use a new ledger file (INVOICE_LEDGER) for a new chain, token, payer or vault.`);
     }
   }
 
   /** The recorded context (chain, token, payer), read-only; undefined when the ledger was never bound. */
-  readContext(): { chainId?: string; token?: string; payer?: string } | undefined {
+  readContext(): { chainId?: string; token?: string; payer?: string; source?: string } | undefined {
     try {
       const rows = this.db.prepare('SELECT k, v FROM context').all() as { k: string; v: string }[];
       return rows.length ? Object.fromEntries(rows.map((r) => [r.k, r.v])) : undefined;

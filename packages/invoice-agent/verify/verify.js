@@ -131,7 +131,11 @@ export async function verifyInvoice(o) {
       agent: wordAddr(m, 0), expiresAt: Number(wordInt(m, 1)), paused: wordInt(m, 2) === 1n, payTo: wordAddr(m, 3),
       maxPerInvoice: units6(wordInt(m, 4)), maxPerDay: units6(wordInt(m, 5)), vendor: bytes32ToAscii('0x' + word(m, 6)),
     };
-    if (chainId === DEFAULTS.chainId && lower(out.mandate.token) !== lower(DEFAULTS.tUSD8)) bad(`the vault's token ${out.mandate.token} is NOT the official tUSD8 ${DEFAULTS.tUSD8}`);
+    if (chainId === DEFAULTS.chainId && lower(out.mandate.token) !== lower(DEFAULTS.tUSD8)) {
+      // Stop here: every later check would match transfers of THAT token and could announce a tUSD8 payment that is not one.
+      bad(`the vault's token ${out.mandate.token} is NOT the official tUSD8 ${DEFAULTS.tUSD8}`);
+      return done('mismatch', `This vault holds ${out.mandate.token}, not the official tUSD8 (${DEFAULTS.tUSD8}): nothing it settles is a tUSD8 payment.`, DO_NOT_PAY + ' Check the vault address; the operator inspects this vault.');
+    }
     // With a vendor id: settlementOf(id, vendor). Without one, or when that vendor has none: findSettlement(id), which
     // looks the id up for EVERY vendor the vault has had, so "not settled" is never an artefact of a vendor change.
     const fromFind = async () => {

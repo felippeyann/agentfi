@@ -67,7 +67,7 @@ async function main(): Promise<number> {
   const m = cfg.mandate;
   // The node first: a mandate pointed at the wrong node must not bind a fresh ledger to it.
   await assertNodeChain(cfg.chain);
-  ledger.bindContext({ chainId: cfg.chain.chainId, token: m.token, payer: m.payer });
+  ledger.bindContext({ chainId: cfg.chain.chainId, token: m.token, payer: m.payer, ...(cfg.chain.vault ? { vault: cfg.chain.vault } : {}) });
 
   if (cmd === 'status') {
     console.log(`Mandate (approved by ${m.approvedBy} at ${m.approvedAt}): pay ${m.vendor.name} (${m.vendor.id}) at ${m.vendor.address}, ≤ ${m.maxPerInvoice} tUSD8 per invoice, ≤ ${m.maxPerDay} per day${m.expiresAt ? `, until ${m.expiresAt}` : ''}`);

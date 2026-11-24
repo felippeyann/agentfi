@@ -197,6 +197,20 @@ describe('vault path: the agent pays through InvoiceMandate.payInvoice', () => {
     assert.equal(ask.receipt?.from, w.vault);
   });
 
+  it("after the operator rotates the agent key, a new agent on a fresh ledger still finds the old agent's payment (paid_verified, not mismatch)", async () => {
+    const w = await world();
+    const first = await w.proc().submit(invoice('INV-ROT', '2'));
+    assert.equal(first.outcome, 'paid');
+    // Anvil account 3 becomes the agent; the settlement of INV-ROT stays the old agent's.
+    const NEW_AGENT = getAddress('0x90F79bf6EB2c4f870365E785982E1f101E93b906');
+    const t = BigInt((await pub().getBlock()).timestamp);
+    await pub().waitForTransactionReceipt({ hash: await operator().writeContract({ address: w.vault, abi: INVOICE_MANDATE_ABI, functionName: 'setMandate', args: [NEW_AGENT, vendorKey('acme'), getAddress(VENDOR), 10_000_000, 50_000_000, Number(t + 86_400n)] }) });
+    const ask = await inquireInvoice(w.cfg, { ...w.mandate, payer: NEW_AGENT }, w.newLedgerPath(), 'INV-ROT');
+    assert.equal(ask.state, 'paid_verified', ask.answer);
+    assert.equal(ask.receipt?.txHash, tx(first));
+    assert.match(ask.answer, /Settled by agent 0x[0-9a-fA-F]{40}, an earlier key/);
+  });
+
   it('operator pause → refused by the vault (nothing signed); unpause → the same invoice is judged again and paid', async () => {
     const w = await world();
     await w.vaultCall('pause');

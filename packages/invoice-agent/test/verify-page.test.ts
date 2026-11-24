@@ -142,6 +142,24 @@ describe('verification page (read-only, in the browser): verify/verify.js agains
 
   });
 
+  it('on Aevum, a vault that holds another token than the official tUSD8 is a mismatch, never paid_verified', async () => {
+    // A JSON-RPC stub: chain 44005, a contract at the vault, token() = another address. Nothing past the token check may run.
+    const other = '0x' + '0'.repeat(24) + '1111111111111111111111111111111111111111';
+    const zero = '0x' + '0'.repeat(64 * 7);
+    const calls: string[] = [];
+    const rpc = async (m: string, p?: unknown[]) => {
+      calls.push(m);
+      if (m === 'eth_chainId') return '0xabe5';
+      if (m === 'eth_getCode') return '0x6080';
+      if (m === 'eth_call') return (p![0] as { data: string }).data.startsWith(SELECTORS.token) ? other : zero;
+      throw new Error('unexpected ' + m);
+    };
+    const v = await verifyInvoice({ rpc, vault: '0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3', invoiceId: 'QDAY-1', chainId: 44005 });
+    assert.equal(v.state, 'mismatch', v.answer);
+    assert.match(v.answer, /not the official tUSD8/);
+    assert.deepEqual([...new Set(calls)], ['eth_chainId', 'eth_getCode', 'eth_call']);
+  });
+
   it('after a vendor change the page still finds the old vendor\'s settlement (never a false "not paid"); with another vendor id it names the settled one', async () => {
     const w = await world();
     await w.agent().submit(inv('INV-9', '2'));
