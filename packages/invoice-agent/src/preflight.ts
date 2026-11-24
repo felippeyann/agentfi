@@ -170,7 +170,13 @@ export async function preflight(o: PreflightOptions): Promise<PreflightResult> {
         result.gasCostWei = cost;
         result.maxFeePerGas = plan.maxFeePerGas;
         result.maxPriorityFeePerGas = plan.maxPriorityFeePerGas;
-        info(`tip (maxPriorityFeePerGas): node suggests ${plan.suggestedPriorityFeePerGas} wei; applied ${plan.maxPriorityFeePerGas} wei${plan.priorityFeeCapWei !== undefined ? ` (operator's cap ${plan.priorityFeeCapWei} wei${plan.maxPriorityFeePerGas < plan.suggestedPriorityFeePerGas ? ': capped' : ': suggestion within the cap'})` : ' (no cap set)'}; max fee ${plan.maxFeePerGas} wei = base part ${plan.maxFeePerGas - plan.maxPriorityFeePerGas} wei (next base fee × 1.2) + tip [eth_maxPriorityFeePerGas, eth_getBlockByNumber]`);
+        info(`tip (maxPriorityFeePerGas): node suggests ${plan.suggestedPriorityFeePerGas} wei; applied ${plan.maxPriorityFeePerGas} wei${plan.priorityFeeCapWei !== undefined ? ` (operator's cap ${plan.priorityFeeCapWei} wei${plan.maxPriorityFeePerGas < plan.suggestedPriorityFeePerGas ? ': capped' : ': suggestion within the cap'})` : ' (no cap set)'}; max fee ${plan.maxFeePerGas} wei = base part ${plan.maxFeePerGas - plan.maxPriorityFeePerGas} wei (latest base fee × 1.2) + tip [eth_maxPriorityFeePerGas, eth_getBlockByNumber]`);
+        if (plan.priorityFeeCapWei !== undefined) {
+          // A capped max fee below the node's own gas price may be accepted into no block: signed with a nonce, it would
+          // stay pending (never re-signed by design) and hold every later nonce. So the cap must not take it below.
+          const nodeGasPrice = await client.getGasPrice();
+          pass(plan.maxFeePerGas >= nodeGasPrice, `with the cap, the max fee per gas ${plan.maxFeePerGas} wei is at least the node's gas price ${nodeGasPrice} wei${plan.maxFeePerGas >= nodeGasPrice ? '' : ': raise the cap (a transaction priced below it may never be mined)'} [eth_gasPrice]`);
+        }
         info(`gas for ${what}, as the agent will sign it: estimate ${plan.estimatedGas} + 20% = gas limit ${plan.gas} × max fee ${plan.maxFeePerGas} wei = at most ${cost} wei = ${formatEther(cost)} ${o.gasSymbol} [eth_estimateGas, eth_feeHistory]`);
         if (o.maxGasCostWei !== undefined) {
           info(`${o.vault ? 'vault payment' : 'transfer'} maximum ${formatEther(cost)} ${o.gasSymbol} · ceiling ${formatEther(o.maxGasCostWei)} ${o.gasSymbol}${o.vault ? ' (the ceiling is the owner\'s decision; the vault call costs more gas than a direct transfer)' : ''}`);
@@ -222,7 +228,7 @@ function args(argv: string[]) {
     amount: get('amount') ?? '1',
     ...(get('max-finalized-lag-min') ? { maxFinalizedLagSec: Number(get('max-finalized-lag-min')) * 60 } : {}),
     ...((get('max-gas-cost') ?? (known ? DEFAULT_AEVUM_GAS_CEILING : undefined)) ? { maxGasCostWei: parseGasCeiling(get('max-gas-cost') ?? DEFAULT_AEVUM_GAS_CEILING) } : {}),
-    ...(get('max-priority-fee-gwei') ? { maxPriorityFeeWei: parsePriorityFeeCap(get('max-priority-fee-gwei')!) } : {}),
+    ...(argv.includes('--max-priority-fee-gwei') ? { maxPriorityFeeWei: parsePriorityFeeCap(get('max-priority-fee-gwei') ?? '') } : {}),
   } satisfies PreflightOptions;
 }
 

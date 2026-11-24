@@ -195,6 +195,18 @@ describe('tip cap on the vault path, against the Aevum reading (base fee 7 wei, 
     assert.equal((await w.sent()).length, 1, 'still one transfer');
   });
 
+  it('a cap that would price the transaction below the node\'s gas price fails the preflight (review P2): it may never be mined', async () => {
+    const w = await world();
+    const gasPrice = (await w.pub.getGasPrice());
+    const tooLow = 8n; // maxFee = base part + 8 wei, far below the node's gas price
+    const pf = await w.pf(tooLow);
+    assert.equal(pf.ok, false);
+    assert.ok(gasPrice > (await w.basePart()) + tooLow, `precondition: node gas price ${gasPrice}`);
+    assert.ok(failed(pf.lines).some((l) => l.includes("at least the node's gas price")), pf.lines.join('\n'));
+    const ok = await w.pf(gasPrice); // tip = the node's gas price: max fee ≥ gas price
+    assert.ok(!failed(ok.lines).some((l) => l.includes("node's gas price")), ok.lines.join('\n'));
+  });
+
   it('a suggestion BELOW the cap is used as is (the cap is a cap, not a floor)', async () => {
     const w = await world();
     suggestedTip = 8n;

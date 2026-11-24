@@ -115,7 +115,7 @@ export async function assertNodeChain(cfg: ChainConfig): Promise<void> {
 /**
  * THE gas rule, shared by the preflight and the signing path (so what the operator is shown is what
  * the transaction will authorize): gas limit = the node's estimate + 20% margin (integer division),
- * maxFeePerGas and maxPriorityFeePerGas = viem's `estimateFeesPerGas()` (EIP-1559: base fee × 1.2 + the node's
+ * maxFeePerGas and maxPriorityFeePerGas = viem's `estimateFeesPerGas()` (EIP-1559: latest base fee × 1.2 + the node's
  * suggested tip), optionally with the operator's tip cap applied (`feesWithTipCap`), and the most the
  * transaction can ever cost = gas limit × maxFeePerGas, in wei.
  */
@@ -138,7 +138,7 @@ export interface TransferPlan {
 
 /**
  * The fee fields after the operator's tip cap. viem's estimate is maxFeePerGas = base part + suggested tip, so the base
- * part (the next block's base fee with viem's 1.2 margin) is maxFeePerGas − maxPriorityFeePerGas; with a cap below the
+ * part (the LATEST block's base fee × viem's 1.2 margin) is maxFeePerGas − maxPriorityFeePerGas; with a cap below the
  * suggestion the tip becomes the cap and maxFeePerGas = base part + cap. Integer wei throughout. A suggestion at or below
  * the cap is kept as is.
  */

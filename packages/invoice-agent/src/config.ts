@@ -88,10 +88,6 @@ export function loadConfig(): Config {
 }
 
 /**
- * The gas ceiling per transaction, in the native coin as a plain decimal ("0.0001"; at most 18
- * decimals, above 0), to wei. Exact integer arithmetic (viem's parseEther).
- */
-/**
  * The operator's cap on the EIP-1559 tip (maxPriorityFeePerGas), in gwei as a plain decimal ("1", "0.5"; at most 9
  * decimals, above 0, at most 1000), to wei. Exact integer arithmetic (viem's parseGwei).
  */
@@ -102,6 +98,10 @@ export function parsePriorityFeeCap(v: string): bigint {
   return wei;
 }
 
+/**
+ * The gas ceiling per transaction, in the native coin as a plain decimal ("0.0001"; at most 18
+ * decimals, above 0), to wei. Exact integer arithmetic (viem's parseEther).
+ */
 export function parseGasCeiling(v: string): bigint {
   if (!/^\d{1,9}(\.\d{1,18})?$/.test(v) || !/[1-9]/.test(v)) throw new Error(`INVOICE_MAX_GAS_COST must be a plain decimal above 0 in the native coin, e.g. 0.0001; got "${v}"`);
   return parseEther(v);
