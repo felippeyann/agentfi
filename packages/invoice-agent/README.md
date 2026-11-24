@@ -2,7 +2,36 @@
 
 **One invoice, one payment, one receipt.** An operator approves an agent in advance to pay a known vendor up to a limit per invoice. Invoices arrive; the agent checks the vendor, the payee address and the limits, pays in tUSD8 with a plain ERC-20 transfer, and returns a receipt the operator can check on-chain. The same invoice id is paid at most once, including when the agent dies after the payment went out and before it could answer (the exact guarantee and its conditions: [What is guaranteed](#what-is-guaranteed-and-under-which-conditions)).
 
-> **Status: local prototype (2026-11-19).** It runs on a **local Anvil chain** (chain id 31337) with a **local test ERC-20** (`tUSD8-LOCAL`: 6 decimals like QDay's tUSD8, open mint, deployed by the demo; *not* QDay's tUSD8) and demo data. Nothing here has run on Aevum Testnet yet; see [What is missing for Aevum Testnet](#what-is-missing-for-aevum-testnet).
+> **Status (2026-11-24).** The demo, the tests and the rehearsals run on a **local Anvil chain** (chain id 31337) with a **local test ERC-20** (`tUSD8-LOCAL`: 6 decimals like QDay's tUSD8, open mint, deployed by the demo; *not* QDay's tUSD8) and demo data. **One public payment has been made on Aevum Testnet** with this code, through the `InvoiceMandate` vault and the official tUSD8: [check it yourself](#the-first-public-payment-on-aevum-check-it-yourself). Testnet only; what is still open: [What is missing for Aevum Testnet](#what-is-missing-for-aevum-testnet).
+
+## The first public payment on Aevum: check it yourself
+
+On 2026-11-24 the owner ran the public vault session (`npm run session -- --aevum --vault …`, tip cap 1 gwei, gas ceiling 0.0002 tQDAY) from this code. Every value below is public; none of the checks needs a key, the agent or its ledger.
+
+| | |
+|---|---|
+| Network | Aevum Testnet, chain 44005, RPC `https://rpc-test.qday.info`, explorer `https://explorer-test.qday.info` |
+| Token | official tUSD8 `0x456569838f1d43009A91ebA4263147Afd7233483` (6 decimals) |
+| Vault | `0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3`: deploy `0x69c123b31bbefe5059352f9271a13ecee54843573f1b0a77c7d1c88be24078d9`, deposit of 1 tUSD8 `0x3282891cfe19b59309ceae59d2cbebff9581355bce905485625a6b22faec03d3`, mandate `0x243a3eb37b49fb464ee4734bc716bea9887768d904d4d00848558bdc9dfbb88f` (signed by the operator) |
+| Invoice | `QDAY-2026-11-24-001`, 1 tUSD8, vendor id `vendor-1`, payee `0x46fbCbbA2b425AdFB958507F5F341FCc4932C530` |
+| Payment | [`0x2567affd1917fed9055e7ad8ed517845e41ed9b356ccb8f954bc458030976d4b`](https://explorer-test.qday.info/tx/0x2567affd1917fed9055e7ad8ed517845e41ed9b356ccb8f954bc458030976d4b), `payInvoice` sent by the agent key `0x7CA8B7704a214b9c129c166c80b5eDB28500DbC8`, block 4,030,463, gas used 118,617 |
+
+Three different claims, checked separately:
+
+1. **Included.** On the explorer page: status success, block 4,030,463, and exactly two logs: the vault's `InvoiceSettled` (this invoice, `vendor-1`, this payee, 1,000,000 units, this agent) and the tUSD8 `Transfer` vault → payee of 1,000,000 units. From a shell, the receipt's block hash must equal the canonical block hash at that height:
+
+   ```bash
+   R=https://rpc-test.qday.info; TX=0x2567affd1917fed9055e7ad8ed517845e41ed9b356ccb8f954bc458030976d4b
+   cast receipt $TX --rpc-url $R                                   # status 1, blockHash, the two logs
+   cast block 4030463 --field hash --rpc-url $R                   # must be the receipt's blockHash
+   cast call 0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3 'settlementOf(string,bytes32)(bool,uint256,uint256,address,bytes32)' \
+     QDAY-2026-11-24-001 $(cast format-bytes32-string vendor-1) --rpc-url $R   # settled, by that agent, in that block
+   ```
+
+2. **Final.** The agent, `ops verify` and the verification page count a payment as paid only once its block is at or below the node's `finalized` block (Aevum's lags the head by an hour or more, and moves in jumps): `cast block finalized --field number --rpc-url $R` must be ≥ 4030463. Until then the honest answer is "included, awaiting finality".
+3. **The operator's `ops verify`.** It checks the agent's own receipt (from its ledger) against the chain and counts the transfers to the payee. The ledger stays on the operator's machine (`.sessions/`, ignored by git), so this output comes from the owner's session; a third party does not need it, the two checks above read only the chain.
+
+The lost-answer step of that session (the agent killed right after the broadcast, the same invoice resent, the **original hash** returned and nothing new signed) is in the session's transcript, also on the owner's machine.
 
 ## Run it
 
@@ -15,7 +44,7 @@ npm ci                 # the whole monorepo, a few minutes: the mandate imports 
 cd packages/invoice-agent
 npm run demo           # 20-40 s: starts anvil and the agent, runs the scenario, checks invariants, stops everything
 npm run demo:vault     # the same scenario paid through the on-chain InvoiceMandate vault, plus a lost ledger and a pause
-npm test               # 65 tests on a local chain: lost response, races, RPC failures, the lock, guards, confirmation rule and reorgs, the vault path, the verification page, 15-40 s
+npm test               # 75 tests on a local chain: lost response, races, RPC failures, the lock, guards, confirmation rule and reorgs, the vault path, the tip cap, the verification page, 15-40 s
 ```
 
 The contract's own tests (Foundry, 45 including 2 fuzz, plus an opt-in fork test against the real tUSD8: `AEVUM_FORK=1 forge test --match-contract AevumForkTest`): `cd contracts && forge test` (forge-std comes from the monorepo's `packages/contracts/lib/forge-std` submodule: `git submodule update --init` once). See [The on-chain vault](#the-on-chain-vault-invoicemandate).
@@ -104,7 +133,7 @@ It checks the chain the node reports (44005), the official tUSD8 (`0x456569838f1
 
 **Gas ceiling per transaction** (separate from the invoice limits; 0.0001 tQDAY proposed for the first session): the preflight and the agent use **one rule** (`planTransfer` in `src/chain.ts`): gas limit = the node's `eth_estimateGas` + 20% (integer division), max fee per gas = viem's `estimateFeesPerGas()`, and the most the transaction can cost = gas limit × maxFeePerGas, in wei. The preflight shows that maximum next to the ceiling. **Immediately before signing**, the agent multiplies the **effective fields of the prepared transaction** (its `gas` and `maxFeePerGas`) and refuses above `INVOICE_MAX_GAS_COST`: nothing is signed or sent, no nonce is used, and the ledger records a refusal (rule `maxGasCost`, no transaction hash) with the maximum and the ceiling in wei, never "sent" or "pending". Resubmitting the same invoice judges it again (paid once fees fall). A payment already signed and sent is never re-signed: if fees rise afterwards it stays `pending` with its hash, and the original receipt is recovered once it is mined. `INVOICE_MAX_GAS_COST` is required for the agent on any chain other than 31337. Read on Aevum on 2026-11-20 (two public tUSD8 holders as samples): 45,503 gas + 20% = 54,603 × 1,000,000,001 wei = at most 0.0000546 tQDAY to a vendor that already holds tUSD8; to an empty address 62,874 + 20% = 75,448 gas, at most 0.0000754 tQDAY. At 0.0001 the agent refuses once the max fee per gas exceeds about 1.32 gwei for an empty vendor (1.83 gwei for one with a balance).
 
-**Tip cap** (optional; `--max-priority-fee-gwei G` on the preflight and the session, `INVOICE_MAX_PRIORITY_FEE_GWEI` for the agent; same rule in both, `feesWithTipCap` in `src/chain.ts`): viem's estimate is maxFeePerGas = latest base fee × 1.2 + the node's suggested tip. When the suggestion is above the cap, the tip becomes the cap **and** maxFeePerGas becomes that base part + the cap, so the cap lowers the maximum the ceiling is checked against; a suggestion at or below the cap is kept. Without the option nothing changes. The ceiling, the 3× balance reserve in the preflight and the check on the prepared transaction still apply on top. Why: on 2026-11-24 the Aevum node suggested a fixed 4,099,999,993 wei tip with a 7 wei base fee and empty blocks, so one `payInvoice` could cost up to 0.000611 tQDAY and the agent (rightly) refused under the 0.0002 ceiling. **Proposed value for the Aevum session: 1 gwei.** It keeps the most one `payInvoice` can cost at about 0.000149 tQDAY (under 0.0002, and its 3× reserve under 0.001), and it equals the max fee per gas (1 gwei, with an 8 wei tip, 15 wei effective) of the owner's three transactions already included on Aevum that day. With the cap the agent really pays about gas used × (base fee + tip) ≈ 0.0001 tQDAY per `payInvoice` (the effective price is min(max fee, base fee + tip)); the owner's own transactions, with an 8 wei tip, cost almost nothing, but a cap cannot express "max fee 1 gwei, tip 8 wei". A cap that would put the max fee per gas below the node's `eth_gasPrice` fails the preflight: such a transaction may never be mined, and a signed, pending payment is never re-signed. An estimate that passes does not prove inclusion.
+**Tip cap** (optional; `--max-priority-fee-gwei G` on the preflight and the session, `INVOICE_MAX_PRIORITY_FEE_GWEI` for the agent; same rule in both, `feesWithTipCap` in `src/chain.ts`): viem's estimate is maxFeePerGas = latest base fee × 1.2 + the node's suggested tip. When the suggestion is above the cap, the tip becomes the cap **and** maxFeePerGas becomes that base part + the cap, so the cap lowers the maximum the ceiling is checked against; a suggestion at or below the cap is kept. Without the option nothing changes. The ceiling, the 3× balance reserve in the preflight and the check on the prepared transaction still apply on top. Why: on 2026-11-24 the Aevum node suggested a fixed 4,099,999,993 wei tip with a 7 wei base fee and empty blocks, so one `payInvoice` could cost up to 0.000611 tQDAY and the agent (rightly) refused under the 0.0002 ceiling. **Value used in the first Aevum session (2026-11-24): 1 gwei.** It keeps the most one `payInvoice` can cost at about 0.000149 tQDAY (under 0.0002, and its 3× reserve under 0.001), and it equals the max fee per gas (1 gwei, with an 8 wei tip, 15 wei effective) of the owner's three transactions already included on Aevum that day. With the cap the agent really pays about gas used × (base fee + tip) ≈ 0.0001 tQDAY per `payInvoice` (the effective price is min(max fee, base fee + tip)); the owner's own transactions, with an 8 wei tip, cost almost nothing, but a cap cannot express "max fee 1 gwei, tip 8 wei". A cap that would put the max fee per gas below the node's `eth_gasPrice` fails the preflight: such a transaction may never be mined, and a signed, pending payment is never re-signed. An estimate that passes does not prove inclusion.
 
 **Rehearsal** of the public sequence, on a local Anvil with one block per second and the `finalized` rule (Anvil reports finalized = head − 64; the rehearsal mines blocks to move it):
 
@@ -188,9 +217,9 @@ The flag is the mandate: `npm run ops -- mandate … --vault 0x<vault>`. With it
 
 The vault adds ~44,000 gas per payment over a direct transfer (mostly the new settlement slot, 22,100). **Both vault cases are above the 0.0001 tQDAY ceiling proposed for the direct transfer at 1 gwei**: with that ceiling the agent refuses (rule `maxGasCost`, nothing signed) and the session stops at the preflight. The ceiling for the vault path is the owner's decision (0.0002 tQDAY covers both cases up to ~1.34 gwei); the preflight prints the vault maximum next to the ceiling. The deploy has its own budget; it is not a payment. (Local Anvil, the local test token: deploy 1,410,726; first `payInvoice` 112,460; steady 78,357.)
 
-### Aevum Testnet: the owner's three transactions (not executed)
+### Aevum Testnet: the owner's three transactions
 
-Nothing below has been run on Aevum. Each step is a **public transaction signed by the owner with his own key**, on his machine, after its own authorization; the script never reads a private key (it uses Foundry's CLI signer: an encrypted keystore via `--account`, or `--ledger`). Without `--broadcast` each command only simulates and prints the gas. Every run checks the chain id (44005; any `EXPECTED_CHAIN_ID` override is printed loudly) and that the token at `0x456569838f1d43009A91ebA4263147Afd7233483` has 6 decimals, and refuses otherwise; on 44005 a `TUSD8` override is refused. `deploy()` requires `EXPECTED_OPERATOR` (the operator's address) and refuses another signer. `deposit` and `setMandate` check the vault holds this token. `setMandate` prints the mandate in tUSD8 before signing, refuses a cap below 0.01 or a cap / daily limit above 1000 tUSD8 unless `ALLOW_UNUSUAL_LIMITS=true`, and refuses to change the vendor id of a vault that has already paid (old invoice ids would become payable again) unless `ALLOW_VENDOR_CHANGE=true`.
+Run on Aevum on 2026-11-24 (the hashes: [the first public payment](#the-first-public-payment-on-aevum-check-it-yourself)). Each step is a **public transaction signed by the owner with the owner's own key**, on the owner's machine, after its own authorization; the script never reads a private key (it uses Foundry's CLI signer: an encrypted keystore via `--account`, or `--ledger`). Without `--broadcast` each command only simulates and prints the gas. Every run checks the chain id (44005; any `EXPECTED_CHAIN_ID` override is printed loudly) and that the token at `0x456569838f1d43009A91ebA4263147Afd7233483` has 6 decimals, and refuses otherwise; on 44005 a `TUSD8` override is refused. `deploy()` requires `EXPECTED_OPERATOR` (the operator's address) and refuses another signer. `deposit` and `setMandate` check the vault holds this token. `setMandate` prints the mandate in tUSD8 before signing, refuses a cap below 0.01 or a cap / daily limit above 1000 tUSD8 unless `ALLOW_UNUSUAL_LIMITS=true`, and refuses to change the vendor id of a vault that has already paid (old invoice ids would become payable again) unless `ALLOW_VENDOR_CHANGE=true`.
 
 **Three keys, three roles** (the direct path needs two; the vault adds the agent):
 
@@ -274,7 +303,7 @@ Step 6 of the vault session counts independently, since the session's first bloc
 
 `verify/` is a static page (`index.html`, `app.js`, `verify.js`, `style.css`; no build, no dependencies, no wallet). It takes a vault address and an invoice id (optionally a vendor id and a transaction hash), reads the chain **from the browser** over plain JSON-RPC (default: the public `https://rpc-test.qday.info`, chain 44005) and shows the on-chain mandate, the settlement (`settlementOf(id, vendor)` for a given vendor id; without one `findSettlement(id)`, which searches every vendor the vault has had, so a vendor change never produces a false "not paid"), the `InvoiceSettled` event (its vendor must match), the tUSD8 `Transfer` in the same transaction, the finality (the block is canonical and at or below the node's `finalized` block) and the explorer link. Its states are the MCP's names: `paid_verified`, `pending`, `failed`, `unknown_invoice` (no settlement in this vault under any of its vendors, or only under another vendor than the one asked, which it names), `mismatch`, `cannot_verify_now` (RPC down, another chain, no contract). It never signs or sends anything; everything from the chain is rendered as text; a strict Content-Security-Policy allows only its own scripts and RPC connections. A link can carry the inputs: `index.html?vault=0x…&invoice=INV-001`.
 
-Try it locally: `npm run verify:fixture` (Anvil, a vault, INV-001 finalized and INV-002 not yet; it serves the page on 127.0.0.1 and prints the links; Ctrl+C stops it). `test/verify-page.test.ts` runs the page's logic against Anvil and checks its states against the agent's own answer and its hand-written selectors against the contract ABI. **Publishing the page (any public host) is a separate decision.**
+Try it locally: `npm run verify:fixture` (Anvil, a vault, INV-001 finalized and INV-002 not yet; it serves the page on 127.0.0.1 and prints the links; Ctrl+C stops it). `test/verify-page.test.ts` runs the page's logic against Anvil and checks its states against the agent's own answer and its hand-written selectors against the contract ABI. **Publishing the page's code (it is in this repository) and putting the page online (any public host) are two separate decisions**; it is not hosted anywhere today.
 
 ## AgentFi before the challenge vs. built for the challenge
 
@@ -288,12 +317,12 @@ The x402 ledger taught the vocabulary used here (money proven on-chain vs. repor
 
 ## What is missing for Aevum Testnet
 
-Ready and rehearsed locally: the network profile (44005, official RPC, explorer, tUSD8, 6 decimals; nothing to deploy), the `finalized` confirmation rule, a starting block for `Transfer` counts (`INVOICE_LOGS_FROM_BLOCK`, read in 50,000-block windows), the read-only preflight, and the session command with a real crash. Read on the public RPC and explorer: chain id, token, decimals, the `finalized` block, a gas estimate. **Not done, and each needs the owner's authorization:**
+Done on 2026-11-24, by the owner: the vault deployed, funded and mandated, and one `payInvoice` through the public session ([the first public payment](#the-first-public-payment-on-aevum-check-it-yourself)). Ready and rehearsed locally: the network profile (44005, official RPC, explorer, tUSD8, 6 decimals), the `finalized` confirmation rule, a starting block for `Transfer` counts (`INVOICE_LOGS_FROM_BLOCK`, read in 50,000-block windows), the read-only preflight, and the session command with a real crash. **Still open:**
 
-- A payer key funded from the faucet (tQDAY for gas, tUSD8 to pay), kept out of the repository, and the vendor's public address.
-- Any signature or transaction on Aevum: nothing has been sent there.
-- Not verified on Aevum until the first session: the RPC's answer to `eth_sendRawTransaction` of an already-known transaction, its "not found" vs. its errors under load, and how often `finalized` advances.
+- The vault's source is not verified on the explorer yet (the `forge verify-contract` command above; an API submission, the owner's call).
+- One public payment is a single observation: the RPC's answer to `eth_sendRawTransaction` of an already-known transaction, its "not found" vs. its errors under load, and the cadence of `finalized` are not characterized beyond it.
 - Fee bumping for a transaction stuck in the mempool: not implemented (the session stops instead).
+- The direct-transfer path (no vault) has not been run on Aevum.
 
 ## Third-party code
 
