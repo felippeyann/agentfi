@@ -74,8 +74,8 @@ async function main() {
   const env = config.mcpServers.invoice.env;
   console.log(`Or from the shell (another terminal, from ${PKG}; same answer as the MCP tool):`);
   // Single-quoted in both shells (a path may hold spaces or a quote: ' becomes '\'' in bash, '' in PowerShell).
-  console.log(`  bash:       export ${Object.entries(env).map(([k, v]) => `${k}='${v.replaceAll("'", "'\\''")}'`).join(' ')}`);
-  console.log(`  PowerShell: ${Object.entries(env).map(([k, v]) => `$env:${k}='${v.replaceAll("'", "''")}'`).join('; ')}`);
+  console.log(`  POSIX shell (bash, zsh, Git Bash): export ${Object.entries(env).map(([k, v]) => `${k}='${v.replaceAll("'", "'\\''")}'`).join(' ')}`);
+  console.log(`  PowerShell:                       ${Object.entries(env).map(([k, v]) => `$env:${k}='${v.replaceAll("'", "''")}'`).join('; ')}`);
   console.log('  then: npm run ops -- ask INV-001   ·   npm run ops -- ask INV-002   ·   npm run ops -- status');
   console.log('READY');
   await new Promise(() => undefined);
