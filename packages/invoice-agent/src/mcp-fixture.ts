@@ -70,6 +70,12 @@ async function main() {
   console.log(`Ask Claude Code (another terminal, from ${PKG}):`);
   console.log(`  claude --mcp-config "${join(DIR, 'mcp.json')}" --allowedTools mcp__invoice__invoice_status mcp__invoice__list_invoices`);
   console.log('  then: "Was invoice INV-001 paid? And INV-002?"   ·   Ctrl+C here stops the chain: ask again.');
+  // The same read-only answers without Claude Code: `ops` needs the same environment as the MCP server.
+  const env = config.mcpServers.invoice.env;
+  console.log(`Or from the shell (another terminal, from ${PKG}; same answer as the MCP tool):`);
+  console.log(`  bash:       export ${Object.entries(env).map(([k, v]) => `${k}='${v}'`).join(' ')}`);
+  console.log(`  PowerShell: ${Object.entries(env).map(([k, v]) => `$env:${k}='${v}'`).join('; ')}`);
+  console.log('  then: npm run ops -- ask INV-001   ·   npm run ops -- ask INV-002   ·   npm run ops -- status');
   console.log('READY');
   await new Promise(() => undefined);
 }
