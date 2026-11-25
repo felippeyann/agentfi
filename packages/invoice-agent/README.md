@@ -66,6 +66,8 @@ The contract's own tests (Foundry, 45 including 2 fuzz, plus an opt-in fork test
 
 A 3-minute walkthrough of the same run: [DEMO-SCRIPT.md](DEMO-SCRIPT.md).
 
+**Tried it? Tell us where it broke or worked.** No key is needed: open the **Alpha feedback** form from [the issue chooser](https://github.com/felippeyann/agentfi/issues/new/choose) (a free GitHub account; no account-free channel yet), answer the install and first-flow questions for the command you ran, pick the mode "Other" and write `invoice-agent`, the command you ran (`npm run demo`, `npm test`, `npm run mcp:fixture`, …), your OS, Node and `anvil --version`, and the last lines of the output. A **Bug report** works too (package "other", say `invoice-agent`). What we ask and never collect: [docs/feedback.md](../../docs/feedback.md); do not paste keys or seeds. Vulnerabilities go to the [private advisory form](https://github.com/felippeyann/agentfi/security/advisories/new), never to a public issue.
+
 ## What the demo shows
 
 1. **The operator authorizes in advance** (`mandate.json`): pay vendor `acme` at its registered address, ≤ 10 tUSD8 per invoice, ≤ 50 per day. The agent reads it and cannot change it.
@@ -173,7 +175,7 @@ Both run the same steps: preflight; a mandate for that vendor, ≤ 1 tUSD8 per i
 | `unknown_invoice` | not in this ledger (ids are case-sensitive) | only that THIS agent never paid it |
 | `cannot_verify_now` | the chain could not be read (or the node serves another chain) | the ledger's last known state and the original transaction to check first; "do NOT pay again" |
 
-The same answer from the shell: `npm run ops -- ask INV-001` (JSON). To try it locally with synthetic invoices (Anvil, local token; INV-001 confirmed, INV-002 pending, INV-003 refused): `npm run mcp:fixture` prints a Claude Code command with the MCP config it writes (`.sessions/mcp-fixture/mcp.json`); Ctrl+C stops the chain, so the next answer is `cannot_verify_now`. Tested by `test/mcp.test.ts` with the MCP SDK client over stdio.
+The same answer from the shell: `npm run ops -- ask INV-001` (JSON). To try it locally with synthetic invoices (Anvil, local token; INV-001 confirmed, INV-002 pending, INV-003 refused): `npm run mcp:fixture` prints a Claude Code command with the MCP config it writes (`.sessions/mcp-fixture/mcp.json`), and the environment to set (`INVOICE_RPC_URL`, `INVOICE_MANDATE`, `INVOICE_LEDGER`, `INVOICE_CONFIRMATION`), printed as one `export` line for a POSIX shell (bash, zsh, Git Bash) and one `$env:` line for PowerShell, to ask the same with `npm run ops -- ask INV-001` without Claude Code (`ops` stops with `INVOICE_MANDATE is not set` without it); Ctrl+C stops the chain, so the next answer is `cannot_verify_now`. Tested by `test/mcp.test.ts` with the MCP SDK client over stdio.
 
 ## The on-chain vault (`InvoiceMandate`)
 
