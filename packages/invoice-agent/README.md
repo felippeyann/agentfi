@@ -66,7 +66,7 @@ The contract's own tests (Foundry, 45 including 2 fuzz, plus an opt-in fork test
 
 A 3-minute walkthrough of the same run: [DEMO-SCRIPT.md](DEMO-SCRIPT.md).
 
-**Tried it? Tell us where it broke or worked.** No key is needed: open the **Alpha feedback** form from [the issue chooser](https://github.com/felippeyann/agentfi/issues/new/choose) (a free GitHub account; no account-free channel yet), pick the mode "Other" and write `invoice-agent`, the command you ran (`npm run demo`, `npm test`, `npm run mcp:fixture`, …), your OS, Node and `anvil --version`, and the last lines of the output. A **Bug report** works too. What we ask and never collect: [docs/feedback.md](../../docs/feedback.md); do not paste keys or seeds. Vulnerabilities go to the [private advisory form](https://github.com/felippeyann/agentfi/security/advisories/new), never to a public issue.
+**Tried it? Tell us where it broke or worked.** No key is needed: open the **Alpha feedback** form from [the issue chooser](https://github.com/felippeyann/agentfi/issues/new/choose) (a free GitHub account; no account-free channel yet), answer the install and first-flow questions for the command you ran, pick the mode "Other" and write `invoice-agent`, the command you ran (`npm run demo`, `npm test`, `npm run mcp:fixture`, …), your OS, Node and `anvil --version`, and the last lines of the output. A **Bug report** works too (package "other", say `invoice-agent`). What we ask and never collect: [docs/feedback.md](../../docs/feedback.md); do not paste keys or seeds. Vulnerabilities go to the [private advisory form](https://github.com/felippeyann/agentfi/security/advisories/new), never to a public issue.
 
 ## What the demo shows
 
