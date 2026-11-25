@@ -71,7 +71,8 @@ function render(v) {
 // Busy state uses aria-disabled, not `disabled`: a disabled button loses focus (it falls to <body>), so a keyboard
 // user who pressed Enter on it would be thrown back to the top of the page. Re-submits while busy are ignored.
 // #status is a role="status" region that is in the DOM from the start (a live region revealed already filled may not
-// be announced); it gets "Reading the chain…" and then a one-line summary, so every check, even a repeat, changes it.
+// be announced). It is emptied when a check starts (the busy button label already says "Reading the chain…") and then
+// gets a one-line summary, so every check, even a repeat with the same result, is a new addition to announce.
 let busy = false;
 
 async function run() {
@@ -80,7 +81,7 @@ async function run() {
   const button = $('go');
   button.setAttribute('aria-disabled', 'true');
   button.textContent = 'Reading the chain…';
-  $('status').textContent = 'Reading the chain…';
+  $('status').textContent = '';
   try {
     const chain = $('chain').value.trim();
     const v = await verifyInvoice({
@@ -96,6 +97,9 @@ async function run() {
     document.body.dataset.state = v.state;
     const label = LABELS[v.state] ?? v.state;
     $('status').textContent = v.answer.startsWith(label) ? v.answer : `${label}: ${v.answer}`;
+  } catch (err) {
+    $('status').textContent = 'The check did not complete. Do not pay again before the original transaction is checked.';
+    throw err;
   } finally {
     busy = false;
     button.removeAttribute('aria-disabled');
