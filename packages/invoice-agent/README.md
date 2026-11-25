@@ -2,11 +2,16 @@
 
 **One invoice, one payment, one receipt.** An operator approves an agent in advance to pay a known vendor up to a limit per invoice. Invoices arrive; the agent checks the vendor, the payee address and the limits, pays in tUSD8 with a plain ERC-20 transfer, and returns a receipt the operator can check on-chain. The same invoice id is paid at most once, including when the agent dies after the payment went out and before it could answer (the exact guarantee and its conditions: [What is guaranteed](#what-is-guaranteed-and-under-which-conditions)).
 
-> **Status (2026-11-24).** The demo, the tests and the rehearsals run on a **local Anvil chain** (chain id 31337) with a **local test ERC-20** (`tUSD8-LOCAL`: 6 decimals like QDay's tUSD8, open mint, deployed by the demo; *not* QDay's tUSD8) and demo data. **One public payment has been made on Aevum Testnet** with this code, through the `InvoiceMandate` vault and the official tUSD8: [check it yourself](#the-first-public-payment-on-aevum-check-it-yourself). Testnet only; what is still open: [What is missing for Aevum Testnet](#what-is-missing-for-aevum-testnet).
+> **Status (2026-11-25).** **One public payment has been made on Aevum Testnet (chain 44005)**, a test network with test tokens, through the `InvoiceMandate` vault and the official tUSD8: [check it yourself](#the-first-public-payment-on-aevum-check-it-yourself). The demo, the tests and the rehearsals run on a **local Anvil chain** (chain id 31337) with a **local test ERC-20** (`tUSD8-LOCAL`: 6 decimals like QDay's tUSD8, open mint, deployed by the demo; *not* QDay's tUSD8) and demo data. What is still open: [What is missing for Aevum Testnet](#what-is-missing-for-aevum-testnet).
 
 ## The first public payment on Aevum: check it yourself
 
-On 2026-11-24 the owner ran the public vault session (`npm run session -- --aevum --vault …`, tip cap 1 gwei, gas ceiling 0.0002 tQDAY) from this code. Every value below is public; none of the checks needs a key, the agent or its ledger.
+On 2026-11-24 the owner ran the public vault session (`npm run session -- --aevum --vault …`, tip cap 1 gwei, gas ceiling 0.0002 tQDAY) from this code, at commit `7382b7f`. **Aevum Testnet only**: test tokens, no real funds. Every value below is public; none of the checks needs a key, the agent or its ledger.
+
+**Three links, no wallet needed:**
+- **The invoice, checked live in your browser:** [agentfi.cc/verify: QDAY-2026-11-24-001](https://www.agentfi.cc/verify/index.html?vault=0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3&invoice=QDAY-2026-11-24-001). It reads the chain over the public RPC and shows "Paid and verified" with the settlement, the event, the transfer and the finalized block.
+- **The vault's source on the explorer:** [InvoiceMandate on Blockscout](https://explorer-test.qday.info/address/0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3?tab=contract), shown as **"Contract Source Code Verified (Partial Match)"**. It is "Partial" because the build omits the metadata hash (`bytecode_hash = "none"`, no CBOR), which Blockscout needs for a full match; the deployed code is the build of this source byte for byte.
+- **The payment transaction:** [0x2567…6d4b on the explorer](https://explorer-test.qday.info/tx/0x2567affd1917fed9055e7ad8ed517845e41ed9b356ccb8f954bc458030976d4b).
 
 | | |
 |---|---|
@@ -29,7 +34,9 @@ Three different claims, checked separately:
    ```
 
 2. **Final.** The agent, `ops verify` and the verification page count a payment as paid only once its block is at or below the node's `finalized` block (Aevum's lags the head by an hour or more, and moves in jumps): `cast block finalized --field number --rpc-url $R` must be ≥ 4030463. Until then the honest answer is "included, awaiting finality".
-3. **The operator's `ops verify`.** It checks the agent's own receipt (from its ledger) against the chain and counts the transfers to the payee. The ledger stays on the operator's machine (`.sessions/`, ignored by git), so this output comes from the owner's session; a third party does not need it, the two checks above read only the chain.
+3. **The operator's `ops verify`.** It checks the agent's own receipt (from its ledger) against the chain and counts every transfer from the vault to the payee since the session's first block. The ledger stays on the operator's machine (`.sessions/`, ignored by git); a third party does not need it, the two checks above read only the chain.
+   - **In the session (`7382b7f`) it stopped:** the Aevum RPC refuses `eth_getLogs` over more than 1,000 blocks, and the count asked for more.
+   - **After the fix (`0b71785`, pages of at most 1,000 blocks)** it was run again, with no key and nothing sent, on a copy of the session's ledger. Result: **VERIFIED**. The block is finalized, the vault's settlement, event and transfer agree, and it found **one transfer to the payee in the window examined**, matched to this invoice.
 
 The lost-answer step of that session (the agent killed right after the broadcast, the same invoice resent, the **original hash** returned and nothing new signed) is in the session's transcript, also on the owner's machine.
 
@@ -44,7 +51,7 @@ npm ci                 # the whole monorepo, a few minutes: the mandate imports 
 cd packages/invoice-agent
 npm run demo           # 20-40 s: starts anvil and the agent, runs the scenario, checks invariants, stops everything
 npm run demo:vault     # the same scenario paid through the on-chain InvoiceMandate vault, plus a lost ledger and a pause
-npm test               # 75 tests on a local chain: lost response, races, RPC failures, the lock, guards, confirmation rule and reorgs, the vault path, the tip cap, the verification page, 15-40 s
+npm test               # 82 tests on a local chain: lost response, races, RPC failures, the lock, guards, confirmation rule and reorgs, the vault path, the tip cap, the verification page, 15-40 s
 ```
 
 The contract's own tests (Foundry, 45 including 2 fuzz, plus an opt-in fork test against the real tUSD8: `AEVUM_FORK=1 forge test --match-contract AevumForkTest`): `cd contracts && forge test` (forge-std comes from the monorepo's `packages/contracts/lib/forge-std` submodule: `git submodule update --init` once). See [The on-chain vault](#the-on-chain-vault-invoicemandate).
@@ -103,7 +110,7 @@ Before signing a new invoice, open rows are reconciled first (one that cannot be
 - **A transaction that stays in the mempool** is reported `pending` with its hash: there is no fee bump or replacement. The operator stops there and checks the payer in the explorer; the session command stops by itself after 10 minutes without a block.
 - **`ops verify` reads the chain**, and it also uses the agent's ledger to know which transaction belongs to which invoice: it fails when the receipt's block or log differ from the ledger, or when a transfer to that payee is not matched to an invoice.
 
-Tested on a local chain (`npm test`, 47 tests): crash after broadcast, after signing, while nothing is mined; a transaction dropped from the mempool is resent with the same bytes; two writers racing on one invoice; RPC failures during the resubmission and right after a new payment is sent; a node serving another chain; the nonce taken by another transaction; refusal, conflict, re-judged refusal; and the confirmation rule: pending until finalized, a block that leaves the canonical chain before the rule is met (dropped, or replaced by a reorg), a depth confirmation withdrawn after a deeper reorg, a receipt inconsistent with the block at its height, the finalized block unreadable; and the gas ceiling: a maximum exactly at the ceiling is paid, 1 wei above is refused, a fee rise after an approved preflight is refused (zero signatures, zero transmissions), a payment already sent stays recoverable when fees rise.
+Tested on a local chain (`npm test`, among its 82 tests): crash after broadcast, after signing, while nothing is mined; a transaction dropped from the mempool is resent with the same bytes; two writers racing on one invoice; RPC failures during the resubmission and right after a new payment is sent; a node serving another chain; the nonce taken by another transaction; refusal, conflict, re-judged refusal; and the confirmation rule: pending until finalized, a block that leaves the canonical chain before the rule is met (dropped, or replaced by a reorg), a depth confirmation withdrawn after a deeper reorg, a receipt inconsistent with the block at its height, the finalized block unreadable; and the gas ceiling: a maximum exactly at the ceiling is paid, 1 wei above is refused, a fee rise after an approved preflight is refused (zero signatures, zero transmissions), a payment already sent stays recoverable when fees rise.
 
 ## When the operator can trust the receipt
 
@@ -273,7 +280,7 @@ cd packages/invoice-agent/contracts
 export EXPECTED_OPERATOR=<operator address>     # the script refuses any other signer
 forge script script/InvoiceMandate.s.sol --sig "deploy()" --rpc-url aevum --account qday-operator            # simulate
 forge script script/InvoiceMandate.s.sol --sig "deploy()" --rpc-url aevum --account qday-operator --broadcast
-# (optional) verify the source on Blockscout (an API submission: also the owner's call)
+# (optional) verify the source on Blockscout (done for the vault below on 2026-11-25: "Partial Match", see above)
 forge verify-contract <vault> src/InvoiceMandate.sol:InvoiceMandate --chain 44005 \
   --verifier blockscout --verifier-url https://explorer-test.qday.info/api \
   --constructor-args $(cast abi-encode "constructor(address)" 0x456569838f1d43009A91ebA4263147Afd7233483)
@@ -299,11 +306,11 @@ npm run session -- --aevum --vault <vault> --vendor <vendor> --by NAME --amount 
 
 Step 6 of the vault session counts independently, since the session's first block: exactly one `InvoiceSettled` of the vault (this invoice, this payee, this amount) and exactly one `Transfer` vault → vendor, both in the original transaction, and `settlementOf` shows it settled by this agent. **The gas ceiling is the owner's decision:** the default stays 0.0001 tQDAY; the preflight prints the vault call's maximum next to it, and with the default the session stops at the preflight when the vault call could cost more (on Anvil, at ~1 gwei, a first payment's maximum is ~0.000134). Rehearse it locally with `npm run session -- --rehearse --vault --max-gas-cost 0.0002` (it deploys a local vault, operator = Anvil's deployer, agent = another Anvil key, vendor `vendor-1`).
 
-### The verification page (static, read-only; not published)
+### The verification page (static, read-only; live at agentfi.cc/verify)
 
 `verify/` is a static page (`index.html`, `app.js`, `verify.js`, `style.css`; no build, no dependencies, no wallet). It takes a vault address and an invoice id (optionally a vendor id and a transaction hash), reads the chain **from the browser** over plain JSON-RPC (default: the public `https://rpc-test.qday.info`, chain 44005) and shows the on-chain mandate, the settlement (`settlementOf(id, vendor)` for a given vendor id; without one `findSettlement(id)`, which searches every vendor the vault has had, so a vendor change never produces a false "not paid"), the `InvoiceSettled` event (its vendor must match), the tUSD8 `Transfer` in the same transaction, the finality (the block is canonical and at or below the node's `finalized` block) and the explorer link. Its states are the MCP's names: `paid_verified`, `pending`, `failed`, `unknown_invoice` (no settlement in this vault under any of its vendors, or only under another vendor than the one asked, which it names), `mismatch`, `cannot_verify_now` (RPC down, another chain, no contract). It never signs or sends anything; everything from the chain is rendered as text; a strict Content-Security-Policy allows only its own scripts and RPC connections. A link can carry the inputs: `index.html?vault=0x…&invoice=INV-001`.
 
-Try it locally: `npm run verify:fixture` (Anvil, a vault, INV-001 finalized and INV-002 not yet; it serves the page on 127.0.0.1 and prints the links; Ctrl+C stops it). `test/verify-page.test.ts` runs the page's logic against Anvil and checks its states against the agent's own answer and its hand-written selectors against the contract ABI. **Publishing the page's code (it is in this repository) and putting the page online (any public host) are two separate decisions**; it is not hosted anywhere today.
+Try it locally: `npm run verify:fixture` (Anvil, a vault, INV-001 finalized and INV-002 not yet; it serves the page on 127.0.0.1 and prints the links; Ctrl+C stops it). `test/verify-page.test.ts` runs the page's logic against Anvil and checks its states against the agent's own answer and its hand-written selectors against the contract ABI. **Live** since 2026-11-25 at https://www.agentfi.cc/verify/index.html, the four files of this folder unchanged. For example, [the first public invoice](https://www.agentfi.cc/verify/index.html?vault=0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3&invoice=QDAY-2026-11-24-001).
 
 ## AgentFi before the challenge vs. built for the challenge
 
@@ -317,9 +324,8 @@ The x402 ledger taught the vocabulary used here (money proven on-chain vs. repor
 
 ## What is missing for Aevum Testnet
 
-Done on 2026-11-24, by the owner: the vault deployed, funded and mandated, and one `payInvoice` through the public session ([the first public payment](#the-first-public-payment-on-aevum-check-it-yourself)). Ready and rehearsed locally: the network profile (44005, official RPC, explorer, tUSD8, 6 decimals), the `finalized` confirmation rule, a starting block for `Transfer` counts (`INVOICE_LOGS_FROM_BLOCK`, read in pages of at most 1,000 blocks, the most the Aevum public RPC accepts per `eth_getLogs`; a page that fails makes the check fail as INCOMPLETE, never verified), the read-only preflight, and the session command with a real crash. **Still open:**
+Done on 2026-11-24, by the owner: the vault deployed, funded and mandated, and one `payInvoice` through the public session ([the first public payment](#the-first-public-payment-on-aevum-check-it-yourself)). Done on 2026-11-25: the vault's source verified on the explorer ("Contract Source Code Verified (Partial Match)") and the verification page put online. Ready and rehearsed locally: the network profile (44005, official RPC, explorer, tUSD8, 6 decimals), the `finalized` confirmation rule, a starting block for `Transfer` counts (`INVOICE_LOGS_FROM_BLOCK`, read in pages of at most 1,000 blocks, the most the Aevum public RPC accepts per `eth_getLogs`; a page that fails makes the check fail as INCOMPLETE, never verified), the read-only preflight, and the session command with a real crash. **Still open:**
 
-- The vault's source is not verified on the explorer yet (the `forge verify-contract` command above; an API submission, the owner's call).
 - One public payment is a single observation: the RPC's answer to `eth_sendRawTransaction` of an already-known transaction, its "not found" vs. its errors under load, and the cadence of `finalized` are not characterized beyond it.
 - Fee bumping for a transaction stuck in the mempool: not implemented (the session stops instead).
 - The direct-transfer path (no vault) has not been run on Aevum.
