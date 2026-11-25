@@ -22,8 +22,17 @@
  *                --vendor 0x… (public address), --by NAME, and the explicit flag
  *                --i-authorize-a-public-transaction. Signs and sends ONE transfer of AMOUNT.
  *
+ *   --vault      (with either mode) pay through the operator's InvoiceMandate vault instead of a direct transfer:
+ *                the agent signs vault.payInvoice and the tUSD8 leave the vault. --rehearse --vault deploys a local
+ *                vault (the deployer is the operator) and funds it; --aevum --vault 0x… uses the owner's vault, and
+ *                INVOICE_PAYER_KEY is then the AGENT's key (gas coin only; never the operator's). The independent
+ *                count in step 6 is then: exactly one InvoiceSettled for this invoice AND one Transfer vault → vendor,
+ *                both in the original transaction.
+ *
  * Gas: --max-gas-cost (default 0.0001, native coin) is the ceiling per transaction, checked by the preflight
  * and again by the agent on the prepared transaction right before signing (gas limit × maxFeePerGas).
+ * --max-priority-fee-gwei G caps the EIP-1559 tip (maxFeePerGas is rebuilt as base part + the applied tip), with the
+ * same rule in the preflight and in the agent (INVOICE_MAX_PRIORITY_FEE_GWEI); the ceiling still applies on top.
  * Stop criteria (exit 3, nothing else is sent): preflight fails (including a maximum above the ceiling);
  * the agent refuses on the ceiling (nothing signed); the agent records no payment;
  * the resend answers anything but the ORIGINAL hash; the transaction stays out of a block for
@@ -41,13 +50,15 @@ import { fileURLToPath } from 'node:url';
 import { createPublicClient, createWalletClient, getAddress, http, type Address, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { balanceOf, makeChain, transfersFrom, type ChainConfig } from './chain.js';
-import { isPublicAnvilKey, KNOWN_NETWORKS, parseGasCeiling } from './config.js';
+import { isPublicAnvilKey, KNOWN_NETWORKS, parseGasCeiling, parsePriorityFeeCap } from './config.js';
 import { parseConfirmRule } from './finality.js';
+import { INVOICE_MANDATE_ABI, INVOICE_MANDATE_BYTECODE } from './generated/invoice-mandate.js';
 import { LOCAL_TEST_USD8_ABI, LOCAL_TEST_USD8_BYTECODE } from './generated/local-test-usd8.js';
 import { formatUnits6, toBaseUnits } from './invoice.js';
 import { Ledger } from './ledger.js';
 import { saveMandate } from './mandate.js';
 import { DEFAULT_AEVUM_GAS_CEILING, preflight } from './preflight.js';
+import { settledEventsSince, settlementOf, vendorKey } from './vault.js';
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -57,8 +68,12 @@ const opt = (n: string) => {
   return i >= 0 ? argv[i + 1] : undefined;
 };
 const MODE = flag('aevum') ? 'aevum' : flag('rehearse') ? 'rehearse' : null;
+const VAULT_MODE = flag('vault');
+const VAULT_ARG = opt('vault')?.startsWith('0x') ? opt('vault') : undefined;
+const VENDOR_ID = 'vendor-1';
 const AMOUNT = opt('amount') ?? '1';
 const GAS_CEILING = opt('max-gas-cost') ?? DEFAULT_AEVUM_GAS_CEILING;
+const TIP_CAP_GWEI = opt('max-priority-fee-gwei');
 const AGENT_PORT = Number(opt('agent-port') ?? 8788);
 const ANVIL_PORT = Number(opt('anvil-port') ?? 8567);
 const MAX_UNMINED_MS = Number(opt('max-unmined-min') ?? 10) * 60_000;
@@ -100,7 +115,7 @@ async function waitFor(fn: () => Promise<boolean>, what: string, ms = 30_000, ev
 
 async function main(): Promise<number> {
   if (!MODE) {
-    console.log('usage: npm run session -- --rehearse   |   npm run session -- --aevum --vendor 0x… --by NAME --i-authorize-a-public-transaction [--amount 1]');
+    console.log('usage: npm run session -- --rehearse [--vault]   |   npm run session -- --aevum --vendor 0x… --by NAME --i-authorize-a-public-transaction [--amount 1] [--vault 0x…]');
     return 2;
   }
   mkdirSync(DIR, { recursive: true });
@@ -110,6 +125,7 @@ async function main(): Promise<number> {
   // ---- Network, keys, token -------------------------------------------------------------------
   let rpcUrl: string, chainId: number, token: Address, payerKey: Hex, vendor: Address, explorerUrl: string | null;
   let rehearsalClient: ReturnType<typeof createPublicClient> | undefined;
+  let vault: Address | undefined;
   const confirmation = opt('confirmation') ?? 'finalized';
   if (confirmation !== 'finalized' && !/^depth:\d+$/.test(confirmation)) stop('--confirmation must be finalized or depth:N');
   if (MODE === 'aevum') {
@@ -124,6 +140,10 @@ async function main(): Promise<number> {
     payerKey = key as Hex;
     if (isPublicAnvilKey(payerKey)) stop("INVOICE_PAYER_KEY is one of Anvil's public development keys: never on a public chain");
     vendor = getAddress(opt('vendor')!);
+    if (VAULT_MODE) {
+      if (!VAULT_ARG) stop('--aevum --vault needs the vault address: --vault 0x… (deployed by the owner with script/InvoiceMandate.s.sol)');
+      vault = getAddress(VAULT_ARG!);
+    }
   } else {
     chainId = 31337;
     rpcUrl = `http://127.0.0.1:${ANVIL_PORT}`;
@@ -143,23 +163,39 @@ async function main(): Promise<number> {
     const deployer = createWalletClient({ account: privateKeyToAccount(ANVIL.deployer), chain, transport: http(rpcUrl) });
     const rc = await rehearsalClient.waitForTransactionReceipt({ hash: await deployer.deployContract({ abi: LOCAL_TEST_USD8_ABI, bytecode: LOCAL_TEST_USD8_BYTECODE }) });
     token = getAddress(rc.contractAddress!);
-    await rehearsalClient.waitForTransactionReceipt({ hash: await deployer.writeContract({ address: token, abi: LOCAL_TEST_USD8_ABI, functionName: 'mint', args: [getAddress(privateKeyToAccount(ANVIL.payer).address), 10_000_000n] }) });
+    const wait = (hash: Hex) => rehearsalClient!.waitForTransactionReceipt({ hash });
+    if (VAULT_MODE) {
+      // The owner's three transactions, rehearsed: deploy (the deployer is the operator), deposit, set the mandate.
+      const operator = getAddress(privateKeyToAccount(ANVIL.deployer).address);
+      vault = getAddress((await wait(await deployer.deployContract({ abi: INVOICE_MANDATE_ABI, bytecode: INVOICE_MANDATE_BYTECODE, args: [token] }))).contractAddress!);
+      await wait(await deployer.writeContract({ address: token, abi: LOCAL_TEST_USD8_ABI, functionName: 'mint', args: [operator, 10_000_000n] }));
+      await wait(await deployer.writeContract({ address: token, abi: LOCAL_TEST_USD8_ABI, functionName: 'transfer', args: [vault, 10_000_000n] }));
+      const units = Number(toBaseUnits(AMOUNT));
+      const now = (await rehearsalClient.getBlock()).timestamp;
+      await wait(await deployer.writeContract({ address: vault, abi: INVOICE_MANDATE_ABI, functionName: 'setMandate', args: [getAddress(privateKeyToAccount(ANVIL.payer).address), vendorKey(VENDOR_ID), ANVIL.vendor, units, units, Number(now + 86_400n)] }));
+    } else {
+      await wait(await deployer.writeContract({ address: token, abi: LOCAL_TEST_USD8_ABI, functionName: 'mint', args: [getAddress(privateKeyToAccount(ANVIL.payer).address), 10_000_000n] }));
+    }
   }
   const payer = getAddress(privateKeyToAccount(payerKey).address);
   const ceilingWei = parseGasCeiling(GAS_CEILING);
-  const chain: ChainConfig = { rpcUrl, chainId, token, confirm: parseConfirmRule(confirmation), maxGasCostWei: ceilingWei, ...(explorerUrl ? { explorerUrl } : {}) };
+  const tipCapWei = TIP_CAP_GWEI !== undefined ? parsePriorityFeeCap(TIP_CAP_GWEI) : undefined;
+  const chain: ChainConfig = { rpcUrl, chainId, token, confirm: parseConfirmRule(confirmation), maxGasCostWei: ceilingWei, ...(tipCapWei !== undefined ? { maxPriorityFeeWei: tipCapWei } : {}), ...(explorerUrl ? { explorerUrl } : {}), ...(vault ? { vault, vaultVendorId: VENDOR_ID } : {}) };
+  /** Where the tUSD8 leave from: the vault, or the payer's own address. */
+  const source = vault ?? payer;
   const client = createPublicClient({ chain: makeChain(chain), transport: http(rpcUrl) });
   const startBlock = await client.getBlockNumber();
   chain.logsFromBlock = startBlock;
   const tx = (h: string) => (explorerUrl ? `${explorerUrl}/tx/${h}` : h);
 
   out(`AgentFi invoice agent — session (${MODE === 'aevum' ? 'PUBLIC: QDay Aevum Testnet 44005, official tUSD8' : 'REHEARSAL: local Anvil 31337, local test token, nothing public'})`);
-  out(`Session dir ${DIR} · invoice ${INVOICE_ID} · ${AMOUNT} tUSD8 · payer ${payer} → vendor ${vendor} · confirmation rule: ${confirmation} · gas ceiling ${GAS_CEILING} ${MODE === 'aevum' ? 'tQDAY' : 'ETH'} (${ceilingWei} wei) per transaction · counting from block ${startBlock}`);
+  if (vault) out(`Through the InvoiceMandate vault ${vault}: the agent ${payer} signs vault.payInvoice and pays gas; the tUSD8 leave the vault.`);
+  out(`Session dir ${DIR} · invoice ${INVOICE_ID} · ${AMOUNT} tUSD8 · ${vault ? 'agent' : 'payer'} ${payer} → vendor ${vendor} · confirmation rule: ${confirmation} · gas ceiling ${GAS_CEILING} ${MODE === 'aevum' ? 'tQDAY' : 'ETH'} (${ceilingWei} wei) per transaction · tip cap ${tipCapWei !== undefined ? `${TIP_CAP_GWEI} gwei (${tipCapWei} wei)` : 'none (node suggestion)'} · counting from block ${startBlock}`);
   if (MODE === 'rehearse') out('  (on Anvil the node reports finalized = head − 64 blocks; the rehearsal mines blocks to move it. On Aevum it is the last L1-verified block.)');
 
   // ---- 1. Preflight ----------------------------------------------------------------------------
   out('\n1. Preflight (read-only)');
-  const pf = await preflight({ rpcUrl, chainId, token, explorerUrl, gasSymbol: MODE === 'aevum' ? 'tQDAY' : 'ETH', expectedDecimals: 6, payer, vendor, amount: AMOUNT, maxGasCostWei: ceilingWei, ...(confirmation === 'finalized' ? { maxFinalizedLagSec: MAX_WAIT_MS / 1000 } : {}) });
+  const pf = await preflight({ rpcUrl, chainId, token, explorerUrl, gasSymbol: MODE === 'aevum' ? 'tQDAY' : 'ETH', expectedDecimals: 6, payer, vendor, amount: AMOUNT, maxGasCostWei: ceilingWei, ...(tipCapWei !== undefined ? { maxPriorityFeeWei: tipCapWei } : {}), ...(confirmation === 'finalized' ? { maxFinalizedLagSec: MAX_WAIT_MS / 1000 } : {}), ...(vault ? { vault, vendorId: VENDOR_ID, invoiceId: INVOICE_ID } : {}) });
   pf.lines.forEach((l) => out(`  ${l}`));
   if (!pf.ok) stop('preflight failed');
 
@@ -172,6 +208,8 @@ async function main(): Promise<number> {
     INVOICE_LOGS_FROM_BLOCK: startBlock.toString(),
     INVOICE_FAIL_AT: '',
     INVOICE_MAX_GAS_COST: GAS_CEILING,
+    // Always set (empty = no cap), so a value left in the shell cannot give the agent a different rule than the preflight's.
+    INVOICE_MAX_PRIORITY_FEE_GWEI: TIP_CAP_GWEI ?? '',
     ...(explorerUrl ? { INVOICE_EXPLORER_URL: explorerUrl } : {}),
   };
   saveMandate(env.INVOICE_MANDATE, {
@@ -179,6 +217,7 @@ async function main(): Promise<number> {
     vendor: { id: 'vendor-1', name: opt('vendor-name') ?? 'Vendor One', address: vendor },
     maxPerInvoice: AMOUNT, maxPerDay: AMOUNT, expiresAt: new Date(Date.now() + 24 * 3600_000).toISOString(),
     approvedBy: opt('by') ?? 'rehearsal', approvedAt: new Date().toISOString(),
+    ...(vault ? { vault } : {}),
   });
   out(`\n2. Mandate: pay ${vendor} (vendor-1), ≤ ${AMOUNT} tUSD8 per invoice and per day, for 24 h (${env.INVOICE_MANDATE})`);
 
@@ -219,7 +258,7 @@ async function main(): Promise<number> {
   });
   req.on('error', () => undefined);
   req.end(JSON.stringify(invoice));
-  const sawBroadcast = await waitFor(async () => ledger.events(INVOICE_ID).some((e) => e.event === 'broadcast' || e.event === 'refused' || e.event === 'refused-gas-ceiling' || e.event === 'rpc-error-after-sign'), 'the broadcast in the ledger', 60_000, 10).then(() => true, () => false);
+  const sawBroadcast = await waitFor(async () => ledger.events(INVOICE_ID).some((e) => e.event === 'broadcast' || e.event === 'refused' || e.event === 'refused-gas-ceiling' || e.event === 'refused-by-vault' || e.event === 'rpc-error-after-sign'), 'the broadcast in the ledger', 60_000, 10).then(() => true, () => false);
   agent.kill('SIGKILL');
   req.destroy();
   await new Promise((r) => (agent.exitCode !== null || agent.signalCode ? r(null) : agent.once('exit', r)));
@@ -301,10 +340,20 @@ async function main(): Promise<number> {
   const v = await ops(env, 'verify', INVOICE_ID);
   for (const l of v.split('\n')) out(`    ${l}`);
   if (!/VERIFIED on chain/.test(v) || /NOT VERIFIED/.test(v)) stop('ops verify did not verify the receipt');
-  const sent = await transfersFrom(chain, payer, vendor);
-  out(`  Transfer logs payer → vendor since block ${startBlock}: ${sent.length} (${sent.map((t) => `${formatUnits6(t.value)} tUSD8 in ${t.txHash}`).join(', ')})`);
+  const label = vault ? 'vault' : 'payer';
+  const sent = await transfersFrom(chain, source, vendor);
+  out(`  Transfer logs ${label} → vendor since block ${startBlock}: ${sent.length} (${sent.map((t) => `${formatUnits6(t.value)} tUSD8 in ${t.txHash}`).join(', ')})`);
   if (sent.length !== 1 || sent[0]!.txHash.toLowerCase() !== original.toLowerCase() || sent[0]!.value !== toBaseUnits(AMOUNT)) stop('not exactly one transfer, the one in the receipt');
-  out(`  vendor balance now ${formatUnits6(await balanceOf(chain, vendor))} tUSD8 · payer ${formatUnits6(await balanceOf(chain, payer))} tUSD8`);
+  if (vault) {
+    const settled = await settledEventsSince(chain);
+    out(`  InvoiceSettled events of the vault since block ${startBlock}: ${settled.length} (${settled.map((s) => `"${s.invoiceId}" ${formatUnits6(s.amount)} tUSD8 → ${s.payTo} in ${s.txHash}`).join(', ')})`);
+    const one = settled.length === 1 && settled[0]!;
+    if (!one || one.txHash.toLowerCase() !== original.toLowerCase() || one.invoiceId !== INVOICE_ID || one.payTo !== vendor || one.amount !== toBaseUnits(AMOUNT)) stop('not exactly one InvoiceSettled, for this invoice, in the original transaction');
+    const s = await settlementOf(chain, INVOICE_ID);
+    out(`  settlementOf("${INVOICE_ID}"): ${s.settled ? `settled, ${formatUnits6(s.amount)} tUSD8, block ${s.blockNumber}, agent ${s.agent}` : 'NOT settled'}`);
+    if (!s.settled || s.agent !== payer) stop('settlementOf does not show this settlement by this agent');
+  }
+  out(`  vendor balance now ${formatUnits6(await balanceOf(chain, vendor))} tUSD8 · ${label} ${formatUnits6(await balanceOf(chain, source))} tUSD8`);
   agent.kill();
   out(`\nOK: one invoice, one transfer, one receipt${explorerUrl ? `: ${tx(original)}` : ` (tx ${original})`}`);
   out(`Transcript: ${transcript}`);

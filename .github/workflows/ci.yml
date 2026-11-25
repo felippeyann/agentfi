@@ -42,7 +42,13 @@ jobs:
       - working-directory: packages/invoice-agent
         run: npm run demo
       - working-directory: packages/invoice-agent
+        run: npm run demo:vault
+      - working-directory: packages/invoice-agent
         run: npm run session -- --rehearse
+      # The same session through the InvoiceMandate vault. The vault call costs more gas than a transfer (Anvil prices
+      # ~1 gwei): an explicit ceiling here; the default (0.0001) and the Aevum value are the owner's decision.
+      - working-directory: packages/invoice-agent
+        run: npm run session -- --rehearse --vault --max-gas-cost 0.0002
 
   openapi-spec:
     name: OpenAPI Spec
@@ -141,6 +147,12 @@ jobs:
         run: forge test -vvv
       - working-directory: packages/contracts
         run: forge coverage --report summary
+      # packages/invoice-agent's InvoiceMandate (QDay Aevum, evm_version shanghai); forge-std from the submodule above.
+      - working-directory: packages/invoice-agent/contracts
+        run: forge fmt --check src test script && forge test -vvv
+      # The ABI and bytecode the agent embeds must be this build's.
+      - working-directory: packages/invoice-agent/contracts
+        run: node ../scripts/gen-token.mjs --check
 
   # Authorization guarantees on REAL local contracts (S8): each `*.anvil.ts`
   # suite starts its own Anvil and deploys the Foundry artifacts; the ones that

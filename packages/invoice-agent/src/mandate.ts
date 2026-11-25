@@ -31,6 +31,12 @@ export interface Mandate {
   expiresAt: string | null;
   approvedBy: string;
   approvedAt: string;
+  /**
+   * The operator's InvoiceMandate vault (contracts/src/InvoiceMandate.sol), optional. When set, the agent pays with
+   * `vault.payInvoice` (the tUSD8 leave the vault; `payer` is the vault's agent key, which only signs and pays gas)
+   * and the chain refuses a second settlement of the same invoice. Absent: the direct `token.transfer` from `payer`.
+   */
+  vault?: string;
 }
 
 const PLAIN_AMOUNT = /^\d{1,12}(\.\d{1,6})?$/;
@@ -60,7 +66,13 @@ export function validateMandate(m: Mandate): Mandate {
       return bad(`${what} ${JSON.stringify(a)} is not an address`);
     }
   };
-  return { ...m, token: addr('token', m.token), payer: addr('payer', m.payer), vendor: { ...m.vendor, address: addr('vendor.address', m.vendor.address) } };
+  if (m.vault !== undefined && !/^[\x21-\x7e]{1,32}$/.test(m.vendor.id)) {
+    bad(`vendor.id ${JSON.stringify(m.vendor.id)} must be 1-32 printable ASCII characters when the mandate names a vault (the vault stores it as bytes32)`);
+  }
+  return {
+    ...m, token: addr('token', m.token), payer: addr('payer', m.payer), vendor: { ...m.vendor, address: addr('vendor.address', m.vendor.address) },
+    ...(m.vault !== undefined ? { vault: addr('vault', m.vault) } : {}),
+  };
 }
 
 export function loadMandate(path: string): Mandate {

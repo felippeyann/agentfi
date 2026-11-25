@@ -10,6 +10,13 @@
  *   6. INV-005: same crash while the chain is not mining: resubmitted → PENDING (not paid again); mined → recovered.
  *   7. INV-006: the agent dies after recording but before broadcasting: resubmitted → the SAME signed bytes are sent.
  *   Then invariants on balances and Transfer logs. Exit 0 only if all hold.
+ *
+ * `npm run demo -- --vault` (or `npm run demo:vault`): the same scenario paid through the operator's InvoiceMandate
+ * vault (contracts/src/InvoiceMandate.sol): the operator deploys it, deposits 100 tUSD8-LOCAL and sets the mandate
+ * on-chain; the agent key holds no tUSD8 and only calls vault.payInvoice. Then:
+ *   8. The agent restarts with a NEW, empty ledger and receives INV-001 again: the VAULT refuses it (AlreadySettled),
+ *      nothing is signed; `ops ask INV-001` on that empty ledger answers paid_verified from the chain.
+ *   9. The operator pauses the vault: INV-007 is refused by the chain; nothing moves.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, writeFileSync, appendFileSync } from 'node:fs';
@@ -19,9 +26,13 @@ import { fileURLToPath } from 'node:url';
 import { createPublicClient, createWalletClient, getAddress, http, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { balanceOf, makeChain, transfersFrom, type ChainConfig } from './chain.js';
+import { INVOICE_MANDATE_ABI, INVOICE_MANDATE_BYTECODE } from './generated/invoice-mandate.js';
 import { LOCAL_TEST_USD8_ABI, LOCAL_TEST_USD8_BYTECODE } from './generated/local-test-usd8.js';
 import { formatUnits6 } from './invoice.js';
 import { saveMandate, type Mandate } from './mandate.js';
+import { vendorKey } from './vault.js';
+
+const VAULT_MODE = process.argv.includes('--vault');
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
 // Anvil's well-known development keys (public; worthless anywhere but a local Anvil).
@@ -128,7 +139,7 @@ const showOps = async (...args: string[]) => {
 
 async function main() {
   writeFileSync(transcript, '');
-  out(`AgentFi × QDay — invoice payment demo (LOCAL: Anvil chain ${CHAIN_ID}, LOCAL TEST token, demo data)`);
+  out(`AgentFi × QDay — invoice payment demo${VAULT_MODE ? " through the InvoiceMandate vault" : ""} (LOCAL: Anvil chain ${CHAIN_ID}, LOCAL TEST token, demo data)`);
   out(`Working dir: ${dir}`);
   const anvil = spawn(findAnvil(), ['--port', String(ANVIL_PORT), '--chain-id', String(CHAIN_ID), '--silent'], { stdio: 'ignore' });
   children.push(anvil);
@@ -139,17 +150,37 @@ async function main() {
   const deployer = createWalletClient({ account: privateKeyToAccount(KEYS.deployer), chain, transport: http(RPC) });
   const deployHash = await deployer.deployContract({ abi: LOCAL_TEST_USD8_ABI, bytecode: LOCAL_TEST_USD8_BYTECODE });
   const token = getAddress((await pub.waitForTransactionReceipt({ hash: deployHash })).contractAddress!);
-  const mint = await deployer.writeContract({ address: token, abi: LOCAL_TEST_USD8_ABI, functionName: 'mint', args: [addr(KEYS.payer), 100_000_000n] });
-  await pub.waitForTransactionReceipt({ hash: mint });
-  const cfg: ChainConfig = { rpcUrl: RPC, chainId: CHAIN_ID, token };
-  const PAYER = addr(KEYS.payer), VENDOR = addr(KEYS.vendor), IMPOSTOR = addr(KEYS.impostor);
-  out(`Token ${token} (tUSD8-LOCAL, 6 decimals) · payer ${PAYER} funded with 100 · vendor "acme" ${VENDOR}`);
+  const PAYER = addr(KEYS.payer), VENDOR = addr(KEYS.vendor), IMPOSTOR = addr(KEYS.impostor), OPERATOR = addr(KEYS.deployer);
+  const wait = (hash: Hex) => pub.waitForTransactionReceipt({ hash });
+  let vault: `0x${string}` | undefined;
+  if (VAULT_MODE) {
+    // The operator's three transactions (on Aevum: the owner's own key): deploy the vault, deposit, set the mandate.
+    const deployed = await wait(await deployer.deployContract({ abi: INVOICE_MANDATE_ABI, bytecode: INVOICE_MANDATE_BYTECODE, args: [token] }));
+    vault = getAddress(deployed.contractAddress!);
+    await wait(await deployer.writeContract({ address: token, abi: LOCAL_TEST_USD8_ABI, functionName: 'mint', args: [OPERATOR, 100_000_000n] }));
+    const deposit = await wait(await deployer.writeContract({ address: token, abi: LOCAL_TEST_USD8_ABI, functionName: 'transfer', args: [vault, 100_000_000n] }));
+    const now = (await pub.getBlock()).timestamp;
+    const set = await wait(await deployer.writeContract({
+      address: vault, abi: INVOICE_MANDATE_ABI, functionName: 'setMandate', args: [PAYER, vendorKey('acme'), VENDOR, 10_000_000, 50_000_000, Number(now + 30n * 86_400n)],
+    }));
+    out(`Token ${token} (tUSD8-LOCAL, 6 decimals) · vendor "acme" ${VENDOR}`);
+    out(`Vault ${vault} (InvoiceMandate) · operator ${OPERATOR} · agent key ${PAYER} (holds no tUSD8, pays gas only)`);
+    out(`  operator transactions: deploy ${deployed.gasUsed} gas · deposit 100 tUSD8 ${deposit.gasUsed} gas · setMandate ${set.gasUsed} gas`);
+  } else {
+    await wait(await deployer.writeContract({ address: token, abi: LOCAL_TEST_USD8_ABI, functionName: 'mint', args: [PAYER, 100_000_000n] }));
+    out(`Token ${token} (tUSD8-LOCAL, 6 decimals) · payer ${PAYER} funded with 100 · vendor "acme" ${VENDOR}`);
+  }
+  const cfg: ChainConfig = { rpcUrl: RPC, chainId: CHAIN_ID, token, ...(vault ? { vault, vaultVendorId: 'acme' } : {}) };
+  /** Where the tUSD8 leave from: the vault, or the payer's own address. */
+  const SOURCE = vault ?? PAYER;
+  const src = vault ? 'vault' : 'payer';
 
-  out('\n1. The operator approves the agent in advance: pay "acme" at its registered address, ≤ 10 tUSD8 per invoice, ≤ 50 per day.');
+  out(`\n1. The operator approves the agent in advance: pay "acme" at its registered address, ≤ 10 tUSD8 per invoice, ≤ 50 per day${vault ? ' (the same limits are in the vault, on-chain)' : ''}.`);
   const mandate: Mandate = {
     chainId: CHAIN_ID, token, payer: PAYER,
     vendor: { id: 'acme', name: 'Acme Data Ltd', address: VENDOR },
     maxPerInvoice: '10', maxPerDay: '50', expiresAt: null, approvedBy: 'operator (demo)', approvedAt: new Date().toISOString(),
+    ...(vault ? { vault } : {}),
   };
   saveMandate(env.INVOICE_MANDATE, mandate);
   out(`  mandate.json written by the operator; the agent reads it and cannot change it.`);
@@ -182,14 +213,14 @@ async function main() {
   const why = /another agent process[^\n]*/.exec(second.text)?.[0] ?? second.text.trim().split('\n').pop();
   out(`  a second agent process on the same ledger → refused to start: ${why}`);
   check(second.code !== 0 && /another agent process/.test(second.text), 'only one agent process may decide on these invoices');
-  let toVendor = await transfersFrom(cfg, PAYER, VENDOR);
-  check(toVendor.length === 1 && toVendor[0]!.value === 8_000_000n, `one transfer payer → acme on-chain (${toVendor.length}), 8 tUSD8`);
-  check((await balanceOf(cfg, PAYER)) === 92_000_000n, 'payer balance 100 → 92');
+  let toVendor = await transfersFrom(cfg, SOURCE, VENDOR);
+  check(toVendor.length === 1 && toVendor[0]!.value === 8_000_000n, `one transfer ${src} → acme on-chain (${toVendor.length}), 8 tUSD8`);
+  check((await balanceOf(cfg, SOURCE)) === 92_000_000n, `${src} balance 100 → 92`);
 
   out('\n4. Invoices the mandate does not cover.');
   show('INV-002, 12 tUSD8', await send(inv('INV-002', '12')));
   show('INV-003, 5 tUSD8, payee changed', await send(inv('INV-003', '5', IMPOSTOR)));
-  check((await transfersFrom(cfg, PAYER)).length === 1, 'still one transfer from the payer: nothing moved for INV-002 / INV-003');
+  check((await transfersFrom(cfg, SOURCE)).length === 1, `still one transfer from the ${src}: nothing moved for INV-002 / INV-003`);
   check((await balanceOf(cfg, IMPOSTOR)) === 0n, 'the changed payee received nothing');
   await showOps('verify', 'INV-003');
 
@@ -199,12 +230,12 @@ async function main() {
   show('INV-004, 3 tUSD8', await send(inv('INV-004', '3')));
   await new Promise((r) => agent.exitCode !== null ? r(null) : agent.once('exit', r));
   out(`  agent process killed (${agent.signalCode ?? `exit ${agent.exitCode}`}): simulated crash right after broadcasting, before answering`);
-  const sentBefore = (await transfersFrom(cfg, PAYER)).length;
-  out(`  on-chain meanwhile: ${sentBefore} transfers from the payer (the payment did go out)`);
+  const sentBefore = (await transfersFrom(cfg, SOURCE)).length;
+  out(`  on-chain meanwhile: ${sentBefore} transfers from the ${src} (the payment did go out)`);
   agent = await startAgent();
   const recovered = await send(inv('INV-004', '3'));
   show('INV-004 resubmitted after restart', recovered);
-  const inv4 = (await transfersFrom(cfg, PAYER, VENDOR)).filter((t) => t.value === 3_000_000n);
+  const inv4 = (await transfersFrom(cfg, SOURCE, VENDOR)).filter((t) => t.value === 3_000_000n);
   check((recovered as { outcome?: string }).outcome === 'recovered' && inv4.length === 1 && inv4[0]!.txHash === (recovered as { receipt?: { txHash: string } }).receipt?.txHash,
     'outcome recovered, and exactly one 3 tUSD8 transfer on-chain, the one in the receipt');
 
@@ -229,14 +260,14 @@ async function main() {
   show('INV-005 resubmitted after the block (the operator\'s reconcile already confirmed it)', done5);
   const pendingTx = (pending as { txHash?: string }).txHash;
   check((done5 as { receipt?: { txHash: string } }).receipt?.txHash === pendingTx, 'the receipt is the transaction reported as pending, not a new one');
-  check((await transfersFrom(cfg, PAYER, VENDOR)).filter((t) => t.value === 2_000_000n).length === 1, 'exactly one 2 tUSD8 transfer on-chain');
+  check((await transfersFrom(cfg, SOURCE, VENDOR)).filter((t) => t.value === 2_000_000n).length === 1, 'exactly one 2 tUSD8 transfer on-chain');
 
   out('\n7. The agent dies after recording the signed payment but before sending it.');
   await stopAgent(agent);
   agent = await startAgent('after-sign');
   show('INV-006, 1 tUSD8', await send(inv('INV-006', '1')));
   await new Promise((r) => agent.exitCode !== null ? r(null) : agent.once('exit', r));
-  check((await transfersFrom(cfg, PAYER)).length === 3, 'nothing reached the chain yet (still 3 transfers)');
+  check((await transfersFrom(cfg, SOURCE)).length === 3, 'nothing reached the chain yet (still 3 transfers)');
   agent = await startAgent();
   const six = await send(inv('INV-006', '1'));
   show('INV-006 resubmitted', six);
@@ -244,18 +275,41 @@ async function main() {
   const signedHash = JSON.parse(events6.events.find((e) => e.event === 'signed')!.detail!).txHash as string;
   out(`  ledger events for INV-006: ${events6.events.map((e) => e.event).join(' → ')}`);
   check((six as { receipt?: { txHash: string } }).receipt?.txHash === signedHash, `receipt tx = the hash recorded when it was signed before the crash (${signedHash.slice(0, 10)}…)`);
-  check((await transfersFrom(cfg, PAYER, VENDOR)).filter((t) => t.value === 1_000_000n).length === 1, 'exactly one 1 tUSD8 transfer: the same signed bytes were sent, not a new payment');
+  check((await transfersFrom(cfg, SOURCE, VENDOR)).filter((t) => t.value === 1_000_000n).length === 1, 'exactly one 1 tUSD8 transfer: the same signed bytes were sent, not a new payment');
 
   out('\nOperator view at the end:');
   await showOps('status');
-  const all = await transfersFrom(cfg, PAYER);
+  const all = await transfersFrom(cfg, SOURCE);
   const total = all.reduce((s, t) => s + t.value, 0n);
-  check(all.length === 4 && total === 14_000_000n, `4 transfers from the payer, 8 + 3 + 2 + 1 = ${formatUnits6(total)} tUSD8`);
-  check((await balanceOf(cfg, PAYER)) === 86_000_000n && (await balanceOf(cfg, VENDOR)) === 14_000_000n, 'payer 86, acme 14, changed payee 0');
+  check(all.length === 4 && total === 14_000_000n, `4 transfers from the ${src}, 8 + 3 + 2 + 1 = ${formatUnits6(total)} tUSD8`);
+  check((await balanceOf(cfg, SOURCE)) === 86_000_000n && (await balanceOf(cfg, VENDOR)) === 14_000_000n, `${src} 86, acme 14, changed payee 0`);
+  const ledgerPath = env.INVOICE_LEDGER;
+
+  if (vault) {
+    check((await balanceOf(cfg, PAYER)) === 0n, 'the agent key never held tUSD8: every payment left the vault');
+
+    out('\n8. The agent loses its memory: it restarts on a NEW, empty ledger and receives INV-001 again.');
+    await stopAgent(agent);
+    env.INVOICE_LEDGER = join(dir, 'fresh-ledger.sqlite');
+    agent = await startAgent();
+    const lost = await send(inv('INV-001', '8'));
+    show('INV-001 on the empty ledger', lost);
+    check((lost as { outcome?: string; rule?: string }).rule === 'vault:AlreadySettled', 'refused by the vault itself (AlreadySettled): the chain remembers what the ledger forgot');
+    const askFresh = await ops('ask', 'INV-001');
+    const answer = JSON.parse(askFresh.text.slice(askFresh.text.indexOf('{'))) as { state: string; answer: string; receipt?: { txHash: string } };
+    out(`  $ npm run ops -- ask INV-001   (on the empty ledger) → ${answer.state}: ${answer.answer}`);
+    check(answer.state === 'paid_verified' && answer.receipt?.txHash === firstTx, '"was it paid?" answered from the vault alone: paid_verified, the original transaction');
+
+    out('\n9. The operator pauses the vault (instant revocation).');
+    await wait(await deployer.writeContract({ address: vault, abi: INVOICE_MANDATE_ABI, functionName: 'pause' }));
+    show('INV-007, 1 tUSD8, while paused', await send(inv('INV-007', '1')));
+    check((await transfersFrom(cfg, SOURCE)).length === 4, 'nothing moved while paused (still 4 transfers from the vault)');
+  }
+
   await stopAgent(agent);
   out(failures === 0 ? '\nOK: every invariant held.' : `\nFAILED: ${failures} invariant(s) broken.`);
   out(`Transcript: ${transcript}`);
-  out(`Ledger (one row per invoice, with its receipt; events): ${env.INVOICE_LEDGER}. Anvil was stopped: the chain itself is gone.`);
+  out(`Ledger (one row per invoice, with its receipt; events): ${ledgerPath}. Anvil was stopped: the chain itself is gone.`);
   return failures === 0 ? 0 : 1;
 }
 

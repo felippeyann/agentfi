@@ -1,5 +1,5 @@
 /** Configuration from the environment, shared by the server and the operator CLI. */
-import { parseEther, type Hex } from 'viem';
+import { parseEther, parseGwei, type Hex } from 'viem';
 import { mnemonicToAccount, privateKeyToAccount } from 'viem/accounts';
 import { parseConfirmRule } from './finality.js';
 import { loadMandate, type Mandate } from './mandate.js';
@@ -60,6 +60,8 @@ export function loadConfig(): Config {
   if (fromEnv && !/^\d+$/.test(fromEnv)) throw new Error('INVOICE_LOGS_FROM_BLOCK must be a block number');
   const ceilingEnv = process.env['INVOICE_MAX_GAS_COST']?.trim();
   const maxGasCostWei = ceilingEnv ? parseGasCeiling(ceilingEnv) : undefined;
+  const tipCapEnv = process.env['INVOICE_MAX_PRIORITY_FEE_GWEI']?.trim();
+  const maxPriorityFeeWei = tipCapEnv ? parsePriorityFeeCap(tipCapEnv) : undefined;
   if (key && mandate.chainId !== ANVIL_CHAIN_ID && maxGasCostWei === undefined) {
     throw new Error(`INVOICE_MAX_GAS_COST is required on chain ${mandate.chainId}: the most one payment may cost in gas, in the native coin (e.g. 0.0001)`);
   }
@@ -79,8 +81,21 @@ export function loadConfig(): Config {
       ...(explorerUrl ? { explorerUrl } : {}),
       ...(fromEnv ? { logsFromBlock: BigInt(fromEnv) } : {}),
       ...(maxGasCostWei !== undefined ? { maxGasCostWei } : {}),
+      ...(maxPriorityFeeWei !== undefined ? { maxPriorityFeeWei } : {}),
+      ...(mandate.vault ? { vault: mandate.vault, vaultVendorId: mandate.vendor.id } : {}),
     },
   };
+}
+
+/**
+ * The operator's cap on the EIP-1559 tip (maxPriorityFeePerGas), in gwei as a plain decimal ("1", "0.5"; at most 9
+ * decimals, above 0, at most 1000), to wei. Exact integer arithmetic (viem's parseGwei).
+ */
+export function parsePriorityFeeCap(v: string): bigint {
+  if (!/^\d{1,4}(\.\d{1,9})?$/.test(v) || !/[1-9]/.test(v)) throw new Error(`the tip cap (INVOICE_MAX_PRIORITY_FEE_GWEI / --max-priority-fee-gwei) must be a plain decimal above 0 in gwei, e.g. 1; got "${v}"`);
+  const wei = parseGwei(v);
+  if (wei > parseGwei('1000')) throw new Error(`the tip cap must be at most 1000 gwei; got "${v}"`);
+  return wei;
 }
 
 /**

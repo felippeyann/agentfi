@@ -18,6 +18,7 @@ import { loadConfig } from './config.js';
 import { InvoiceError, parseInvoice } from './invoice.js';
 import { acquireInstanceLock, Ledger } from './ledger.js';
 import { FailPointError, InvoicePayer } from './payer.js';
+import { compareMandates, readVault } from './vault.js';
 
 let cfg: ReturnType<typeof loadConfig>;
 try {
@@ -83,6 +84,12 @@ const server = createServer(async (req, res) => {
 
 try {
   await assertNodeChain(cfg.chain);
+  if (cfg.chain.vault) {
+    // The mandate file and the vault must agree on token, agent, vendor and payee; the chain enforces the vault's limits.
+    const { mismatches, notes } = compareMandates(cfg.mandate, await readVault(cfg.chain));
+    if (mismatches.length) throw new Error(`the mandate and the vault ${cfg.chain.vault} disagree: ${mismatches.join('; ')}`);
+    console.log(`[agent] paying through the vault ${cfg.chain.vault} (${notes.join('; ')})`);
+  }
 } catch (e) {
   console.error(`[agent] refusing to start: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`);
   process.exit(4);

@@ -7,12 +7,15 @@
   "type": "module",
   "scripts": {
     "demo": "tsx src/demo.ts",
+    "demo:vault": "tsx src/demo.ts --vault",
     "server": "tsx src/server.ts",
     "ops": "tsx src/ops.ts",
     "preflight": "tsx src/preflight.ts",
     "session": "tsx src/session.ts",
     "mcp": "tsx src/mcp.ts",
     "mcp:fixture": "tsx src/mcp-fixture.ts",
+    "verify:fixture": "tsx src/verify-fixture.ts",
+    "gas:aevum-fork": "tsx scripts/aevum-fork-gas.mjs",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit -p .",
     "build:token": "cd contracts && forge build && node ../scripts/gen-token.mjs"

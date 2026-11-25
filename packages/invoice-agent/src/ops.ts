@@ -3,6 +3,7 @@
  *
  *   npm run ops -- mandate --chain-id N --token 0x… --payer 0x… --vendor-id ID --vendor-name NAME
  *                          --vendor-address 0x… --max-per-invoice 10 --max-per-day 50 [--expires ISO] --by NAME
+ *                          [--vault 0x…]   pay through the operator's InvoiceMandate vault (payer = the vault's agent key)
  *   npm run ops -- status            the mandate, every invoice in the ledger, balances and on-chain transfers
  *   npm run ops -- verify <invoiceId>  checks a receipt against the chain, independently of the agent's answer
  *   npm run ops -- reconcile [<invoiceId>]  brings open rows up to what the chain says (never signs)
@@ -11,7 +12,8 @@
  * Environment: INVOICE_RPC_URL, INVOICE_MANDATE, INVOICE_LEDGER (as the agent).
  */
 import { getAddress, type Hex } from 'viem';
-import { assertNodeChain, balanceOf, publicClientFor, receiptOf, transfersFrom, transfersIn } from './chain.js';
+import { assertNodeChain, balanceOf, fundsSource, IncompleteLogScanError, receiptOf, transfersFrom } from './chain.js';
+import { compareMandates, readVault } from './vault.js';
 import { loadConfig } from './config.js';
 import { describeRule, explorerTx, judgeFinality, ruleFor } from './finality.js';
 import { formatUnits6 } from './invoice.js';
@@ -45,6 +47,7 @@ async function main(): Promise<number> {
       expiresAt: flag('expires') ?? null,
       approvedBy: req('by'),
       approvedAt: new Date().toISOString(),
+      ...(flag('vault') ? { vault: getAddress(flag('vault')!) } : {}),
     });
     console.log(`mandate written to ${path}`);
     return 0;
@@ -64,7 +67,7 @@ async function main(): Promise<number> {
   const m = cfg.mandate;
   // The node first: a mandate pointed at the wrong node must not bind a fresh ledger to it.
   await assertNodeChain(cfg.chain);
-  ledger.bindContext({ chainId: cfg.chain.chainId, token: m.token, payer: m.payer });
+  ledger.bindContext({ chainId: cfg.chain.chainId, token: m.token, payer: m.payer, ...(cfg.chain.vault ? { vault: cfg.chain.vault } : {}) });
 
   if (cmd === 'status') {
     console.log(`Mandate (approved by ${m.approvedBy} at ${m.approvedAt}): pay ${m.vendor.name} (${m.vendor.id}) at ${m.vendor.address}, ≤ ${m.maxPerInvoice} tUSD8 per invoice, ≤ ${m.maxPerDay} per day${m.expiresAt ? `, until ${m.expiresAt}` : ''}`);
@@ -74,8 +77,16 @@ async function main(): Promise<number> {
       console.log(`  ${r.invoice_id.padEnd(10)} ${r.status.padEnd(10)} ${amt} → ${r.pay_to}${r.tx_hash ? `  tx ${r.tx_hash}` : ''}${r.block_number ? ` block ${r.block_number}` : ''}`);
       if (r.reason) console.log(`      reason: ${r.reason}`);
     }
-    const [payerBal, vendorBal, sent] = await Promise.all([balanceOf(cfg.chain, m.payer), balanceOf(cfg.chain, m.vendor.address), transfersFrom(cfg.chain, m.payer)]);
-    console.log(`On-chain: payer ${formatUnits6(payerBal)} tUSD8 · ${m.vendor.name} ${formatUnits6(vendorBal)} tUSD8 · transfers from the payer: ${sent.length}`);
+    if (cfg.chain.vault) {
+      const on = await readVault(cfg.chain);
+      const { mismatches, notes } = compareMandates(m, on);
+      console.log(`Vault ${on.vault} (operator ${on.operator}): agent ${on.agent} · vendor "${on.vendorId}" → ${on.payTo} · ${notes.join('; ')}`);
+      for (const x of mismatches) console.log(`  MISMATCH with the mandate file: ${x}`);
+    }
+    const source = fundsSource(cfg.chain, m.payer);
+    const label = cfg.chain.vault ? 'vault' : 'payer';
+    const [payerBal, vendorBal, sent] = await Promise.all([balanceOf(cfg.chain, source), balanceOf(cfg.chain, m.vendor.address), transfersFrom(cfg.chain, source)]);
+    console.log(`On-chain: ${label} ${formatUnits6(payerBal)} tUSD8 · ${m.vendor.name} ${formatUnits6(vendorBal)} tUSD8 · transfers from the ${label}: ${sent.length}`);
     for (const t of sent) console.log(`  - block ${t.blockNumber} tx ${t.txHash} → ${t.to} ${formatUnits6(t.value)} tUSD8`);
     return 0;
   }
@@ -83,17 +94,34 @@ async function main(): Promise<number> {
   if (cmd === 'verify') {
     const id = rest[0];
     // The same check the read-only inquiry (and the MCP tool) uses: inquiry.ts verifyInvoice.
-    const v = id ? await verifyInvoice(cfg.chain, m, ledger, id) : undefined;
+    let v: Awaited<ReturnType<typeof verifyInvoice>>;
+    try {
+      v = id ? await verifyInvoice(cfg.chain, m, ledger, id) : undefined;
+    } catch (e) {
+      // A log page the RPC refused: the duplicate count is unknown, so this is NOT a verification (exit 1).
+      if (e instanceof IncompleteLogScanError) {
+        console.log(`${id}: NOT VERIFIED on chain ${cfg.chain.chainId}: ${e.message}`);
+        return 1;
+      }
+      throw e;
+    }
     if (!v) throw new Error(`unknown invoice ${id}`);
     const row = v.row;
+    const vaultLine = () => {
+      if (!v.vault) return;
+      const s = v.vault.settlement;
+      console.log(`  vault ${v.vault.address} settlementOf(${id}): ${s.settled ? `SETTLED, ${formatUnits6(s.amount)} tUSD8, block ${s.blockNumber}, agent ${s.agent}` : 'not settled'} · InvoiceSettled event: ${v.vault.event ? `tx ${v.vault.event.txHash} log ${v.vault.event.logIndex}` : 'none'}${v.vault.agrees ? '' : ` · DISAGREES: ${v.vault.problems.join('; ')}`}`);
+    };
     if (!row.tx_hash) {
-      console.log(`${id}: ${row.status}, nothing was signed${row.reason ? ` (${row.reason})` : ''}.`);
-      console.log(`  transfers from the payer to ${row.pay_to} on-chain: ${v.allToPayee.length}`);
+      console.log(`${id}: ${row.status}, nothing was signed by this agent${row.reason ? ` (${row.reason})` : ''}.`);
+      console.log(`  transfers from the ${cfg.chain.vault ? 'vault' : 'payer'} to ${row.pay_to} on-chain: ${v.allToPayee.length}`);
+      vaultLine();
       return 0;
     }
     const receipt = v.receipt;
     if (!receipt) {
       console.log(`${id}: NOT on-chain yet (tx ${row.tx_hash}, ledger status ${row.status}). Do not pay again; run reconcile.`);
+      vaultLine();
       return 2;
     }
     const { match, allToPayee: all, unexplained, sameAsLedger } = v;
@@ -105,7 +133,8 @@ async function main(): Promise<number> {
     console.log(`  confirmation rule ${describeRule(ruleFor(cfg.chain))}: ${fin.detail}${fin.final ? ' → met' : ' → not met: do not treat it as paid yet, do not pay again; run verify again later'}`);
     const link = explorerTx(cfg.chain, row.tx_hash);
     if (link) console.log(`  explorer: ${link}`);
-    console.log(`  Transfer ${m.payer} → ${row.pay_to}: ${match.map((t) => `${formatUnits6(t.value)} tUSD8 (log ${t.logIndex})`).join(', ') || 'none matching'}`);
+    vaultLine();
+    console.log(`  Transfer ${fundsSource(cfg.chain, m.payer)} → ${row.pay_to}: ${match.map((t) => `${formatUnits6(t.value)} tUSD8 (log ${t.logIndex})`).join(', ') || 'none matching'}`);
     if (!sameAsLedger) console.log(`  the ledger says block ${row.block_number} log ${row.log_index}; the chain says block ${receipt.blockNumber} log ${match[0]?.logIndex ?? '-'}`);
     console.log(`  all transfers from the payer to this payee: ${all.length} (${all.map((t) => formatUnits6(t.value)).join(' + ') || '-'} tUSD8), each matched to one invoice: ${unexplained.length === 0 ? 'yes' : `NO, ${unexplained.length} unexplained: ${unexplained.map((t) => t.txHash).join(', ')}`}`);
     return ok ? 0 : notFinal ? 2 : 1;

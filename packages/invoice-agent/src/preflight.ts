@@ -9,13 +9,19 @@
  *   --max-finalized-lag-min N  fail if the node's finalized block is more than N minutes behind the head
  *   --max-gas-cost 0.0001      the gas ceiling per transaction (native coin): fail if the transfer could cost more
  *                              [default 0.0001 on --network aevum]
+ *   --vault 0x…                the payment goes through the operator's InvoiceMandate vault: --payer is then the AGENT's
+ *                              public address (gas coin only). Reads the vault (code, operator, mandate vs agent / vendor /
+ *                              payee, paused, expiry, limits, balance) and estimates payInvoice from the agent instead.
+ *   --vendor-id vendor-1       the vendor id the vault names [vendor-1]   --invoice ID   the id whose payInvoice is estimated
+ *   --max-priority-fee-gwei G  the operator's cap on the EIP-1559 tip (same rule as the agent's INVOICE_MAX_PRIORITY_FEE_GWEI)
  *
  * Exit 0 when every check passed, 1 otherwise. Every line says what was read and from where.
  */
 import { createPublicClient, formatEther, getAddress, http, type Address, type Hex } from 'viem';
 import { ERC20_ABI, makeChain, planTransfer } from './chain.js';
-import { KNOWN_NETWORKS, parseGasCeiling } from './config.js';
+import { KNOWN_NETWORKS, parseGasCeiling, parsePriorityFeeCap } from './config.js';
 import { formatUnits6, toBaseUnits } from './invoice.js';
+import { readVault, VAULT_ABI, VaultRefusalError, vendorKey } from './vault.js';
 
 export interface PreflightOptions {
   rpcUrl: string;
@@ -31,6 +37,18 @@ export interface PreflightOptions {
   maxFinalizedLagSec?: number;
   /** The operator's gas ceiling per transaction, wei: fail when the transfer could cost more. */
   maxGasCostWei?: bigint;
+  /** The operator's cap on the EIP-1559 tip, wei: the same rule as the agent's (chain.ts feesWithTipCap). */
+  maxPriorityFeeWei?: bigint;
+  /**
+   * The operator's InvoiceMandate vault: the payment is then `vault.payInvoice` sent by the AGENT (`payer` is the agent's
+   * public address, which needs only the gas coin) and the tUSD8 leave the vault. The vault's mandate must name this
+   * agent, `vendorId` and `vendor` as payee, be unpaused and unexpired, and hold the amount within its limits.
+   */
+  vault?: Address;
+  /** The vendor id as the mandate and the vault name it (default "vendor-1", the session's). */
+  vendorId?: string;
+  /** The invoice id whose payInvoice gas is estimated (an id the vault has settled makes the estimate revert). */
+  invoiceId?: string;
 }
 
 export interface PreflightResult {
@@ -38,6 +56,9 @@ export interface PreflightResult {
   lines: string[];
   head?: bigint;
   gasCostWei?: bigint;
+  /** The fee fields the agent would sign with, as planned at this instant. */
+  maxFeePerGas?: bigint;
+  maxPriorityFeePerGas?: bigint;
 }
 
 const SAFETY = 3n; // the payer should hold at least 3× the estimated gas cost
@@ -98,7 +119,34 @@ export async function preflight(o: PreflightOptions): Promise<PreflightResult> {
     info('no explorer for this network (local chain): receipts are checked with `ops verify` only');
   }
 
-  // 4. The payer and vendor (public addresses only).
+  // 4. The vault (only when the payment goes through one).
+  const amount = toBaseUnits(o.amount);
+  const vendorId = o.vendorId ?? 'vendor-1';
+  if (o.vault) {
+    const vcfg = { rpcUrl: o.rpcUrl, chainId: o.chainId, token: o.token, vault: o.vault, vaultVendorId: vendorId };
+    const vcode = await client.getCode({ address: o.vault });
+    if (pass(!!vcode && vcode.length > 2, `vault ${o.vault} has contract code (${vcode ? (vcode.length - 2) / 2 : 0} bytes) [eth_getCode]`)) {
+      const v = await readVault(vcfg);
+      const [day, spentToday] = await Promise.all([
+        client.readContract({ address: o.vault, abi: VAULT_ABI, functionName: 'day' }) as Promise<number>,
+        client.readContract({ address: o.vault, abi: VAULT_ABI, functionName: 'spentToday' }) as Promise<number>,
+      ]);
+      const today = Number(latest.timestamp / 86_400n);
+      const spent = Number(day) === today ? BigInt(spentToday) : 0n;
+      info(`vault operator ${v.operator}; mandate: agent ${v.agent}, vendor "${v.vendorId}" → ${v.payTo}, ≤ ${formatUnits6(v.maxPerInvoice)} per invoice, ≤ ${formatUnits6(v.maxPerDay)} per UTC day (paid today ${formatUnits6(spent)}), until ${new Date(Number(v.expiresAt) * 1000).toISOString()} [eth_call mandate(), operator(), day(), spentToday()]`);
+      pass(v.token === getAddress(o.token), `the vault's token is ${v.token} (expected ${o.token})`);
+      if (o.payer) pass(v.agent === o.payer, `the vault's agent is ${v.agent}${v.agent === o.payer ? ', this agent' : `, NOT this agent ${o.payer}`}`);
+      if (o.payer) pass(v.operator !== o.payer, 'the operator and the agent are different keys');
+      if (o.vendor) pass(v.payTo === o.vendor, `the vault pays only ${v.payTo}${v.payTo === o.vendor ? ', this vendor' : `, NOT ${o.vendor}`}`);
+      pass(v.vendor === vendorKey(vendorId), `the vault's vendor id is "${v.vendorId}" (the mandate's: "${vendorId}")`);
+      pass(!v.paused, `the vault is ${v.paused ? 'PAUSED' : 'not paused'}`);
+      pass(v.expiresAt > latest.timestamp, `the on-chain mandate ${v.expiresAt > latest.timestamp ? `expires in ${((Number(v.expiresAt) - Number(latest.timestamp)) / 3600).toFixed(1)} h` : 'has EXPIRED'}`);
+      pass(amount <= v.maxPerInvoice && spent + amount <= v.maxPerDay, `${o.amount} ${symbol} is within the vault's cap per invoice and what is left of its daily limit (${formatUnits6(v.maxPerDay - (spent > v.maxPerDay ? v.maxPerDay : spent))})`);
+      pass(v.balance >= amount, `the vault holds ${formatUnits6(v.balance)} ${symbol}, at least the invoice amount ${o.amount}`);
+    }
+  }
+
+  // 5. The payer (the agent, with a vault) and vendor (public addresses only).
   if (o.payer) {
     const [native, units, nLatest, nPending] = await Promise.all([
       client.getBalance({ address: o.payer }),
@@ -106,24 +154,38 @@ export async function preflight(o: PreflightOptions): Promise<PreflightResult> {
       client.getTransactionCount({ address: o.payer, blockTag: 'latest' }),
       client.getTransactionCount({ address: o.payer, blockTag: 'pending' }),
     ]);
-    const amount = toBaseUnits(o.amount);
-    info(`payer ${o.payer}: ${formatEther(native)} ${o.gasSymbol}, ${formatUnits6(units)} ${symbol}, nonce ${nLatest} (pending ${nPending})`);
-    pass(units >= amount, `payer holds at least the invoice amount ${o.amount} ${symbol}`);
-    pass(nPending === nLatest, `payer has no transaction waiting in the node's mempool (nonce latest ${nLatest} = pending ${nPending})`);
+    const who = o.vault ? 'agent' : 'payer';
+    info(`${who} ${o.payer}: ${formatEther(native)} ${o.gasSymbol}, ${formatUnits6(units)} ${symbol}, nonce ${nLatest} (pending ${nPending})`);
+    if (!o.vault) pass(units >= amount, `payer holds at least the invoice amount ${o.amount} ${symbol}`);
+    else info(`the agent needs no ${symbol}: the payment leaves the vault`);
+    pass(nPending === nLatest, `${who} has no transaction waiting in the node's mempool (nonce latest ${nLatest} = pending ${nPending})`);
     if (o.vendor) {
       info(`vendor ${o.vendor}: ${formatUnits6((await client.readContract({ address: o.token, abi: ERC20_ABI, functionName: 'balanceOf', args: [o.vendor] })) as bigint)} ${symbol}`);
+      const invoiceId = o.invoiceId ?? 'PREFLIGHT-PROBE';
+      const what = o.vault ? `vault.payInvoice("${invoiceId}", "${vendorId}", ${o.vendor}, ${o.amount} ${symbol}) from the agent` : `transfer(${o.vendor}, ${o.amount} ${symbol}) from the payer`;
       try {
         // The SAME rule the signing path applies (chain.ts planTransfer): estimate + 20% margin, × maxFeePerGas.
-        const plan = await planTransfer({ rpcUrl: o.rpcUrl, chainId: o.chainId, token: o.token }, o.payer, o.vendor, amount);
+        const plan = await planTransfer({ rpcUrl: o.rpcUrl, chainId: o.chainId, token: o.token, ...(o.maxPriorityFeeWei !== undefined ? { maxPriorityFeeWei: o.maxPriorityFeeWei } : {}), ...(o.vault ? { vault: o.vault, vaultVendorId: vendorId } : {}) }, o.payer, o.vendor, amount, o.vault ? invoiceId : undefined);
         const cost = plan.maxCostWei;
         result.gasCostWei = cost;
-        info(`gas for transfer(${o.vendor}, ${o.amount} ${symbol}) from the payer, as the agent will sign it: estimate ${plan.estimatedGas} + 20% = gas limit ${plan.gas} × max fee ${plan.maxFeePerGas} wei = at most ${cost} wei = ${formatEther(cost)} ${o.gasSymbol} [eth_estimateGas, eth_feeHistory]`);
+        result.maxFeePerGas = plan.maxFeePerGas;
+        result.maxPriorityFeePerGas = plan.maxPriorityFeePerGas;
+        info(`tip (maxPriorityFeePerGas): node suggests ${plan.suggestedPriorityFeePerGas} wei; applied ${plan.maxPriorityFeePerGas} wei${plan.priorityFeeCapWei !== undefined ? ` (operator's cap ${plan.priorityFeeCapWei} wei${plan.maxPriorityFeePerGas < plan.suggestedPriorityFeePerGas ? ': capped' : ': suggestion within the cap'})` : ' (no cap set)'}; max fee ${plan.maxFeePerGas} wei = base part ${plan.maxFeePerGas - plan.maxPriorityFeePerGas} wei (latest base fee × 1.2) + tip [eth_maxPriorityFeePerGas, eth_getBlockByNumber]`);
+        if (plan.priorityFeeCapWei !== undefined) {
+          // A capped max fee below the node's own gas price may be accepted into no block: signed with a nonce, it would
+          // stay pending (never re-signed by design) and hold every later nonce. So the cap must not take it below.
+          const nodeGasPrice = await client.getGasPrice();
+          pass(plan.maxFeePerGas >= nodeGasPrice, `with the cap, the max fee per gas ${plan.maxFeePerGas} wei is at least the node's gas price ${nodeGasPrice} wei${plan.maxFeePerGas >= nodeGasPrice ? '' : ': raise the cap (a transaction priced below it may never be mined)'} [eth_gasPrice]`);
+        }
+        info(`gas for ${what}, as the agent will sign it: estimate ${plan.estimatedGas} + 20% = gas limit ${plan.gas} × max fee ${plan.maxFeePerGas} wei = at most ${cost} wei = ${formatEther(cost)} ${o.gasSymbol} [eth_estimateGas, eth_feeHistory]`);
         if (o.maxGasCostWei !== undefined) {
+          info(`${o.vault ? 'vault payment' : 'transfer'} maximum ${formatEther(cost)} ${o.gasSymbol} · ceiling ${formatEther(o.maxGasCostWei)} ${o.gasSymbol}${o.vault ? ' (the ceiling is the owner\'s decision; the vault call costs more gas than a direct transfer)' : ''}`);
           pass(cost <= o.maxGasCostWei, `that maximum is within the ceiling of ${formatEther(o.maxGasCostWei)} ${o.gasSymbol} (${o.maxGasCostWei} wei) per transaction${cost <= o.maxGasCostWei ? `, ${o.maxGasCostWei - cost} wei to spare` : `: ${cost - o.maxGasCostWei} wei above`}. The agent checks it again on the transaction it signs, and refuses to sign above it`);
         }
-        pass(native >= cost * SAFETY, `payer holds at least ${SAFETY}× that gas (${formatEther(cost * SAFETY)} ${o.gasSymbol})`);
+        pass(native >= cost * SAFETY, `${who} holds at least ${SAFETY}× that gas (${formatEther(cost * SAFETY)} ${o.gasSymbol})`);
       } catch (e) {
-        pass(false, `gas estimate failed (the transfer would revert from this payer?): ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`);
+        if (e instanceof VaultRefusalError) pass(false, `the vault would refuse ${what}: ${e.errorName}${e.args.length ? ` (${e.args.map(String).join(', ')})` : ''} [eth_estimateGas]`);
+        else pass(false, `gas estimate failed (the ${o.vault ? 'vault call' : 'transfer'} would revert from this ${who}?): ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`);
       }
     } else {
       info('add --vendor 0x… to estimate the gas of the payment');
@@ -150,7 +212,11 @@ function args(argv: string[]) {
   const addr = (v: string | undefined) => (v ? getAddress(v) : undefined);
   const payer = addr(get('payer'));
   const vendor = addr(get('vendor'));
+  const vault = addr(get('vault'));
   return {
+    ...(vault ? { vault } : {}),
+    ...(get('vendor-id') ? { vendorId: get('vendor-id')! } : {}),
+    ...(get('invoice') ? { invoiceId: get('invoice')! } : {}),
     rpcUrl,
     chainId,
     token: getAddress(token),
@@ -162,6 +228,7 @@ function args(argv: string[]) {
     amount: get('amount') ?? '1',
     ...(get('max-finalized-lag-min') ? { maxFinalizedLagSec: Number(get('max-finalized-lag-min')) * 60 } : {}),
     ...((get('max-gas-cost') ?? (known ? DEFAULT_AEVUM_GAS_CEILING : undefined)) ? { maxGasCostWei: parseGasCeiling(get('max-gas-cost') ?? DEFAULT_AEVUM_GAS_CEILING) } : {}),
+    ...(argv.includes('--max-priority-fee-gwei') ? { maxPriorityFeeWei: parsePriorityFeeCap(get('max-priority-fee-gwei') ?? '') } : {}),
   } satisfies PreflightOptions;
 }
 
@@ -169,7 +236,7 @@ const isMain = process.argv[1] && /preflight\.ts$/.test(process.argv[1]);
 if (isMain) {
   (async () => {
     const o = args(process.argv.slice(2));
-    console.log(`Preflight (read-only, no key) · chain ${o.chainId} · ${o.rpcUrl} · token ${o.token}${o.payer ? ` · payer ${o.payer}` : ''}${o.vendor ? ` · vendor ${o.vendor}` : ''}`);
+    console.log(`Preflight (read-only, no key) · chain ${o.chainId} · ${o.rpcUrl} · token ${o.token}${o.vault ? ` · vault ${o.vault}` : ''}${o.payer ? ` · ${o.vault ? 'agent' : 'payer'} ${o.payer}` : ''}${o.vendor ? ` · vendor ${o.vendor}` : ''}`);
     const r = await preflight(o);
     for (const l of r.lines) console.log(l);
     console.log(r.ok ? 'PREFLIGHT OK' : 'PREFLIGHT FAILED: do not start the session');

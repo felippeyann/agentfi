@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src https: http://127.0.0.1:* http://localhost:*; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>Invoice receipt check</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>Was this invoice paid?</h1>
+    <p class="lede">Reads the operator's <code>InvoiceMandate</code> vault on QDay Aevum Testnet straight from the chain, in your browser: its settlement record, its <code>InvoiceSettled</code> event, the tUSD8 transfer and the node's finalized block. <strong>Read-only:</strong> no wallet, no key, nothing is signed or sent.</p>
+  </header>
+
+  <form id="form" autocomplete="off">
+    <label>Vault address <input id="vault" name="vault" placeholder="0x…" spellcheck="false" required></label>
+    <label>Invoice id <input id="invoice" name="invoice" placeholder="INV-001" spellcheck="false" required></label>
+    <label>Vendor id (optional: empty searches every vendor this vault has had) <input id="vendor" name="vendor" placeholder="vendor-1" spellcheck="false"></label>
+    <details>
+      <summary>Network and optional transaction hash</summary>
+      <label>Transaction hash (optional: tells "sent, not in a block yet" and "reverted" apart) <input id="tx" name="tx" placeholder="0x…" spellcheck="false"></label>
+      <label>RPC URL <input id="rpc" name="rpc" spellcheck="false"></label>
+      <label>Chain id <input id="chain" name="chain" inputmode="numeric"></label>
+      <label>Explorer <input id="explorer" name="explorer" spellcheck="false"></label>
+    </details>
+    <button id="go" type="submit">Check on-chain</button>
+  </form>
+
+  <section id="result" hidden aria-live="polite">
+    <div id="badge" class="badge"></div>
+    <p id="answer" class="answer"></p>
+    <p id="next" class="next"></p>
+    <p id="explorer-link" hidden><a id="explorer-a" target="_blank" rel="noopener noreferrer">Open the transaction in the explorer</a></p>
+    <div class="grid">
+      <div class="card" id="card-mandate"><h2>Mandate (on-chain)</h2><dl id="mandate"></dl></div>
+      <div class="card" id="card-settlement"><h2>Settlement</h2><dl id="settlement"></dl></div>
+      <div class="card" id="card-transfer"><h2>Event and transfer</h2><dl id="transfer"></dl></div>
+      <div class="card" id="card-finality"><h2>Finality</h2><dl id="finality"></dl></div>
+    </div>
+    <h2>Checks</h2>
+    <ul id="checks" class="checks"></ul>
+  </section>
+
+  <footer>
+    <p>States, as the agent's read-only MCP tool names them: <b>paid_verified</b> (settled, event and transfer agree, block finalized) · <b>pending</b> (not finalized yet, or sent and not in a block) · <b>failed</b> (reverted) · <b>unknown_invoice</b> (no settlement in this vault) · <b>mismatch</b> (the records disagree) · <b>cannot_verify_now</b> (the chain could not be read). Anything but paid_verified: do not pay again before the original transaction is checked.</p>
+    <p>Source: <code>packages/invoice-agent/verify</code> in the AgentFi repository (Apache-2.0).</p>
+  </footer>
+</main>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -17,7 +17,8 @@
  */
 import type { Hex } from 'viem';
 import { formatEther } from 'viem';
-import { broadcast, GasCeilingError, isKnownToNode, nonces, receiptOf, signTransfer, transfersIn, type ChainConfig } from './chain.js';
+import { broadcast, fundsSource, GasCeilingError, isKnownToNode, nonces, receiptOf, signTransfer, transfersIn, type ChainConfig } from './chain.js';
+import { explainVaultRefusal, invoiceKeyOf, settledEventsIn, VaultRefusalError, vendorKey } from './vault.js';
 import { describeRule, explorerTx, judgeFinality, ruleFor } from './finality.js';
 import { formatUnits6, invoiceHash, toBaseUnits, type Invoice } from './invoice.js';
 import { OPEN_STATUSES, type Ledger, type PaymentRow } from './ledger.js';
@@ -48,6 +49,9 @@ export interface Receipt {
   confirmation: string;
   /** `<explorer>/tx/<hash>`, when the chain has a known explorer: anyone can check it there. */
   explorer?: string;
+  /** Paid through the operator's vault (`from` is then the vault) by this agent key. */
+  vault?: string;
+  agent?: string;
 }
 
 export type Outcome =
@@ -94,7 +98,7 @@ export class InvoicePayer {
   constructor(private o: PayerOptions) {
     this.failAt = o.failAt;
     // Receipts are rebuilt from the ledger row plus this context: refuse a ledger written for another one.
-    o.ledger.bindContext({ chainId: o.chain.chainId, token: o.chain.token, payer: o.mandate.payer });
+    o.ledger.bindContext({ chainId: o.chain.chainId, token: o.chain.token, payer: o.mandate.payer, ...(o.chain.vault ? { vault: o.chain.vault } : {}) });
   }
 
   /** Invoices are handled one at a time (one nonce sequence, one ledger). */
@@ -172,8 +176,15 @@ export class InvoicePayer {
     const nonce = await this.nextNonce();
     let signed;
     try {
-      signed = await signTransfer(this.o.chain, this.o.payerKey, inv.payTo, amount, nonce);
+      signed = await signTransfer(this.o.chain, this.o.payerKey, inv.payTo, amount, nonce, inv.id);
     } catch (e) {
+      if (e instanceof VaultRefusalError) {
+        // The vault's own rules refused it at the gas estimate: nothing signed, nothing sent, no nonce used.
+        const r = explainVaultRefusal(e, inv);
+        ledger.insert({ ...base, status: 'refused', rule: r.rule, reason: r.reason, what_to_do: r.whatToDo, nonce: null, raw_tx: null, tx_hash: null, block_number: null, log_index: null });
+        ledger.event(inv.id, 'refused-by-vault', { error: e.errorName, args: e.args.map(String) });
+        return { outcome: 'refused', invoiceId: inv.id, rule: r.rule, reason: r.reason, whatToDo: r.whatToDo };
+      }
       if (!(e instanceof GasCeilingError)) throw e;
       // Refused BEFORE signing: nothing signed, nothing sent, no nonce used. Recorded as a refusal (no tx
       // hash, no raw bytes), so it is never read as sent or pending; a resubmission is judged again.
@@ -191,7 +202,7 @@ export class InvoicePayer {
       ledger.event(inv.id, 'discarded-duplicate-signature', { txHash: signed.hash });
       return this.answerFor(await this.reconcile(ledger.get(inv.id)!), true);
     }
-    ledger.event(inv.id, 'signed', { txHash: signed.hash, nonce, maxGasCostWei: signed.maxCostWei.toString(), ceilingWei: this.o.chain.maxGasCostWei?.toString() ?? null });
+    ledger.event(inv.id, 'signed', { txHash: signed.hash, nonce, maxGasCostWei: signed.maxCostWei.toString(), ceilingWei: this.o.chain.maxGasCostWei?.toString() ?? null, maxFeePerGas: signed.maxFeePerGas.toString(), maxPriorityFeePerGas: signed.maxPriorityFeePerGas.toString(), suggestedPriorityFeePerGas: signed.suggestedPriorityFeePerGas.toString(), priorityFeeCapWei: this.o.chain.maxPriorityFeeWei?.toString() ?? null });
     this.maybeFail('after-sign');
 
     let stage = 'broadcasting it';
@@ -278,11 +289,18 @@ export class InvoicePayer {
       ledger.event(row.invoice_id, 'reverted', { txHash: hash });
       return ledger.get(row.invoice_id)!;
     }
+    const source = fundsSource(chain, this.o.mandate.payer);
     const match = transfersIn(chain, receipt).find(
-      (t) => t.from === this.o.mandate.payer && t.to.toLowerCase() === row.pay_to.toLowerCase() && t.value === BigInt(row.amount),
+      (t) => t.from === source && t.to.toLowerCase() === row.pay_to.toLowerCase() && t.value === BigInt(row.amount),
     );
-    if (!match) {
-      ledger.update(row.invoice_id, { status: 'reverted', reason: `Transaction ${hash} succeeded but has no Transfer of ${row.amount} units to ${row.pay_to}.`, what_to_do: 'Operator: inspect the transaction.' });
+    // Through a vault, the vault's own record must say the same: InvoiceSettled for THIS invoice, payee and amount, under
+    // the vendor the agent judged it for (its vendor topic and its key, keccak256(invoiceId, vendor)).
+    const settledOk = !chain.vault || settledEventsIn(chain, receipt).some(
+      (s) => s.invoiceId === row.invoice_id && s.payTo.toLowerCase() === row.pay_to.toLowerCase() && s.amount === BigInt(row.amount)
+        && s.vendor === vendorKey(chain.vaultVendorId!) && s.invoiceKey === invoiceKeyOf(row.invoice_id, chain.vaultVendorId!),
+    );
+    if (!match || !settledOk) {
+      ledger.update(row.invoice_id, { status: 'reverted', reason: `Transaction ${hash} succeeded but has no ${!match ? `Transfer of ${row.amount} units from ${source} to ${row.pay_to}` : `InvoiceSettled event for ${row.invoice_id}`}.`, what_to_do: 'Operator: inspect the transaction.' });
       ledger.event(row.invoice_id, 'no-matching-transfer', { txHash: hash });
       return ledger.get(row.invoice_id)!;
     }
@@ -372,8 +390,9 @@ export class InvoicePayer {
       invoiceHash: row.invoice_hash,
       chainId: this.o.chain.chainId,
       token: this.o.chain.token,
-      from: this.o.mandate.payer,
+      from: fundsSource(this.o.chain, this.o.mandate.payer),
       to: row.pay_to,
+      ...(this.o.chain.vault ? { vault: this.o.chain.vault, agent: this.o.mandate.payer } : {}),
       amount: formatUnits6(BigInt(row.amount)),
       amountUnits: row.amount,
       txHash: row.tx_hash!,
