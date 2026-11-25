@@ -307,26 +307,66 @@ export function transfersIn(cfg: ChainConfig, receipt: TransactionReceipt): Tran
 }
 
 /**
- * Every token Transfer from `from` (optionally to `to`) since `cfg.logsFromBlock` (block 0 by
- * default; on a public chain, a block before the payer's first payment): the operator's independent
- * count. Read in windows of `LOG_WINDOW` blocks, which public RPCs accept.
+ * The most blocks one `eth_getLogs` may span. The Aevum public RPC refuses more than 1,000
+ * ("block range too large, max range: 1000", read on 2026-11-24 during `ops verify`).
  */
-const LOG_WINDOW = 50_000n;
+export const LOG_PAGE_BLOCKS = 1000n;
+
+/** Inclusive [start, end] pages of at most `size` blocks covering from..to, ascending: no gap, no overlap. */
+export function blockPages(from: bigint, to: bigint, size: bigint = LOG_PAGE_BLOCKS): Array<[bigint, bigint]> {
+  if (size < 1n) throw new Error('page size must be at least 1 block');
+  const pages: Array<[bigint, bigint]> = [];
+  for (let start = from; start <= to; start += size) pages.push([start, start + size - 1n < to ? start + size - 1n : to]);
+  return pages;
+}
+
+/** A log scan that could not read every page: nothing may be concluded from the pages it did read. */
+export class IncompleteLogScanError extends Error {
+  constructor(readonly what: string, readonly from: bigint, readonly to: bigint, readonly failedPage: [bigint, bigint], readonly pagesRead: number, readonly pagesTotal: number, cause: unknown) {
+    const why = (cause instanceof Error ? cause.message : String(cause)).split('\n')[0]!.slice(0, 200);
+    super(`verification INCOMPLETE: ${what} over blocks ${from}–${to} could not be read (page ${failedPage[0]}–${failedPage[1]} failed after ${pagesRead} of ${pagesTotal} pages: ${why}); a partial count proves nothing, so nothing is verified. Run it again.`, { cause });
+    this.name = 'IncompleteLogScanError';
+  }
+}
+
+/**
+ * Reads every page of from..to with `read` (ascending, or newest first with `stopAt`) and returns all results; any page
+ * that fails throws IncompleteLogScanError, never a partial list. `stopAt` ends a search early once it found something.
+ */
+export async function scanPages<T>(what: string, from: bigint, to: bigint, read: (start: bigint, end: bigint) => Promise<T[]>, o: { size?: bigint; newestFirst?: boolean; stopAt?: (found: T[]) => boolean } = {}): Promise<T[]> {
+  const pages = blockPages(from, to, o.size);
+  if (o.newestFirst) pages.reverse();
+  const out: T[] = [];
+  for (let i = 0; i < pages.length; i++) {
+    const [start, end] = pages[i]!;
+    let got: T[];
+    try {
+      got = await read(start, end);
+    } catch (e) {
+      throw new IncompleteLogScanError(what, from, to, [start, end], i, pages.length, e);
+    }
+    out.push(...got);
+    if (o.stopAt?.(got)) break;
+  }
+  return out;
+}
+
+/**
+ * Every token Transfer from `from` (optionally to `to`) since `cfg.logsFromBlock` (block 0 by
+ * default; on a public chain, a block before the payer's first payment) up to the head: the operator's
+ * independent count. Read in pages of LOG_PAGE_BLOCKS; if any page fails the whole count fails.
+ */
 export async function transfersFrom(cfg: ChainConfig, from: string, to?: string): Promise<TransferLog[]> {
   const client = publicClientFor(cfg);
   const head = await client.getBlockNumber({ cacheTime: 0 });
-  const logs = [];
-  for (let start = cfg.logsFromBlock ?? 0n; start <= head; start += LOG_WINDOW) {
-    const end = start + LOG_WINDOW - 1n < head ? start + LOG_WINDOW - 1n : head;
-    logs.push(...(await client.getContractEvents({
-      address: getAddress(cfg.token),
-      abi: ERC20_ABI,
-      eventName: 'Transfer',
-      args: { from: getAddress(from), ...(to ? { to: getAddress(to) } : {}) },
-      fromBlock: start,
-      toBlock: end,
-    })));
-  }
+  const logs = await scanPages(`the Transfer logs from ${from}${to ? ` to ${to}` : ''}`, cfg.logsFromBlock ?? 0n, head, (start, end) => client.getContractEvents({
+    address: getAddress(cfg.token),
+    abi: ERC20_ABI,
+    eventName: 'Transfer',
+    args: { from: getAddress(from), ...(to ? { to: getAddress(to) } : {}) },
+    fromBlock: start,
+    toBlock: end,
+  }));
   return logs.map((l) => ({
     txHash: l.transactionHash!,
     blockNumber: l.blockNumber!,

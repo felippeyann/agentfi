@@ -317,7 +317,7 @@ The x402 ledger taught the vocabulary used here (money proven on-chain vs. repor
 
 ## What is missing for Aevum Testnet
 
-Done on 2026-11-24, by the owner: the vault deployed, funded and mandated, and one `payInvoice` through the public session ([the first public payment](#the-first-public-payment-on-aevum-check-it-yourself)). Ready and rehearsed locally: the network profile (44005, official RPC, explorer, tUSD8, 6 decimals), the `finalized` confirmation rule, a starting block for `Transfer` counts (`INVOICE_LOGS_FROM_BLOCK`, read in 50,000-block windows), the read-only preflight, and the session command with a real crash. **Still open:**
+Done on 2026-11-24, by the owner: the vault deployed, funded and mandated, and one `payInvoice` through the public session ([the first public payment](#the-first-public-payment-on-aevum-check-it-yourself)). Ready and rehearsed locally: the network profile (44005, official RPC, explorer, tUSD8, 6 decimals), the `finalized` confirmation rule, a starting block for `Transfer` counts (`INVOICE_LOGS_FROM_BLOCK`, read in pages of at most 1,000 blocks, the most the Aevum public RPC accepts per `eth_getLogs`; a page that fails makes the check fail as INCOMPLETE, never verified), the read-only preflight, and the session command with a real crash. **Still open:**
 
 - The vault's source is not verified on the explorer yet (the `forge verify-contract` command above; an API submission, the owner's call).
 - One public payment is a single observation: the RPC's answer to `eth_sendRawTransaction` of an already-known transaction, its "not found" vs. its errors under load, and the cadence of `finalized` are not characterized beyond it.

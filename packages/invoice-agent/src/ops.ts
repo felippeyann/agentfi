@@ -12,7 +12,7 @@
  * Environment: INVOICE_RPC_URL, INVOICE_MANDATE, INVOICE_LEDGER (as the agent).
  */
 import { getAddress, type Hex } from 'viem';
-import { assertNodeChain, balanceOf, fundsSource, receiptOf, transfersFrom } from './chain.js';
+import { assertNodeChain, balanceOf, fundsSource, IncompleteLogScanError, receiptOf, transfersFrom } from './chain.js';
 import { compareMandates, readVault } from './vault.js';
 import { loadConfig } from './config.js';
 import { describeRule, explorerTx, judgeFinality, ruleFor } from './finality.js';
@@ -94,7 +94,17 @@ async function main(): Promise<number> {
   if (cmd === 'verify') {
     const id = rest[0];
     // The same check the read-only inquiry (and the MCP tool) uses: inquiry.ts verifyInvoice.
-    const v = id ? await verifyInvoice(cfg.chain, m, ledger, id) : undefined;
+    let v: Awaited<ReturnType<typeof verifyInvoice>>;
+    try {
+      v = id ? await verifyInvoice(cfg.chain, m, ledger, id) : undefined;
+    } catch (e) {
+      // A log page the RPC refused: the duplicate count is unknown, so this is NOT a verification (exit 1).
+      if (e instanceof IncompleteLogScanError) {
+        console.log(`${id}: NOT VERIFIED on chain ${cfg.chain.chainId}: ${e.message}`);
+        return 1;
+      }
+      throw e;
+    }
     if (!v) throw new Error(`unknown invoice ${id}`);
     const row = v.row;
     const vaultLine = () => {

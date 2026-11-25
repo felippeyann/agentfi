@@ -8,7 +8,7 @@
  * Everything here reads; nothing signs.
  */
 import { BaseError, decodeErrorResult, encodeAbiParameters, getAddress, hexToString, keccak256, parseEventLogs, stringToHex, type Hex, type TransactionReceipt } from 'viem';
-import { publicClientFor, type ChainConfig } from './chain.js';
+import { publicClientFor, scanPages, type ChainConfig } from './chain.js';
 import { INVOICE_MANDATE_ABI } from './generated/invoice-mandate.js';
 import { formatUnits6, type Invoice } from './invoice.js';
 import type { Mandate } from './mandate.js';
@@ -135,8 +135,7 @@ export function settledEventsIn(cfg: ChainConfig, receipt: TransactionReceipt): 
   return parseEventLogs({ abi: VAULT_ABI, eventName: 'InvoiceSettled', logs }).map(toSettled);
 }
 
-/** The InvoiceSettled event with this key (its indexed topic), searched from the newest window back to `cfg.logsFromBlock`. */
-const LOG_WINDOW = 50_000n;
+/** The InvoiceSettled event with this key (its indexed topic), searched from the newest page back to `cfg.logsFromBlock`. */
 export async function findSettledEvent(cfg: ChainConfig, key: Hex, atBlock?: bigint): Promise<SettledEvent | undefined> {
   const client = publicClientFor(cfg);
   const address = getAddress(cfg.vault!);
@@ -146,13 +145,8 @@ export async function findSettledEvent(cfg: ChainConfig, key: Hex, atBlock?: big
     return logs[0] ? toSettled(logs[0] as never) : undefined;
   }
   const head = await client.getBlockNumber({ cacheTime: 0 });
-  for (let end = head; end >= from; end -= LOG_WINDOW) {
-    const start = end - LOG_WINDOW + 1n > from ? end - LOG_WINDOW + 1n : from;
-    const logs = await client.getContractEvents({ address, abi: VAULT_ABI, eventName: 'InvoiceSettled', args: { invoiceKey: key }, fromBlock: start, toBlock: end });
-    if (logs.length) return toSettled(logs[logs.length - 1] as never);
-    if (start === from) break;
-  }
-  return undefined;
+  const found = await scanPages('the InvoiceSettled event', from, head, (start, end) => client.getContractEvents({ address, abi: VAULT_ABI, eventName: 'InvoiceSettled', args: { invoiceKey: key }, fromBlock: start, toBlock: end }), { newestFirst: true, stopAt: (got) => got.length > 0 });
+  return found.length ? toSettled(found[found.length - 1] as never) : undefined;
 }
 
 /** Every InvoiceSettled event of the vault since `cfg.logsFromBlock` (the operator's independent count), oldest first. */
@@ -160,13 +154,8 @@ export async function settledEventsSince(cfg: ChainConfig): Promise<SettledEvent
   const client = publicClientFor(cfg);
   const address = getAddress(cfg.vault!);
   const head = await client.getBlockNumber({ cacheTime: 0 });
-  const out: SettledEvent[] = [];
-  for (let start = cfg.logsFromBlock ?? 0n; start <= head; start += LOG_WINDOW) {
-    const end = start + LOG_WINDOW - 1n < head ? start + LOG_WINDOW - 1n : head;
-    const logs = await client.getContractEvents({ address, abi: VAULT_ABI, eventName: 'InvoiceSettled', fromBlock: start, toBlock: end });
-    out.push(...logs.map((l) => toSettled(l as never)));
-  }
-  return out;
+  const logs = await scanPages(`the vault's InvoiceSettled events`, cfg.logsFromBlock ?? 0n, head, (start, end) => client.getContractEvents({ address, abi: VAULT_ABI, eventName: 'InvoiceSettled', fromBlock: start, toBlock: end }));
+  return logs.map((l) => toSettled(l as never));
 }
 
 /** A vault custom error decoded from a failed call or gas estimate, or undefined when it is not one. */
