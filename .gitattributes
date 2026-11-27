@@ -2,3 +2,6 @@
 # Keep LF in every checkout so `npm run spec:check` compares like with like
 # on Windows too (core.autocrlf=true would otherwise check it out as CRLF).
 packages/mcp-server/src/api.generated.ts text eol=lf
+
+# Vendored third-party sources (packages/invoice-agent/erc8004/vendor): byte-for-byte upstream, LF, never normalized.
+packages/invoice-agent/erc8004/vendor/** -text
