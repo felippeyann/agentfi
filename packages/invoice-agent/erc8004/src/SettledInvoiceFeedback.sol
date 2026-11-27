@@ -47,6 +47,10 @@ interface IERC8004Reputation {
     ) external;
     function revokeFeedback(uint256 agentId, uint64 feedbackIndex) external;
     function getLastIndex(uint256 agentId, address clientAddress) external view returns (uint64);
+    function readFeedback(uint256 agentId, address clientAddress, uint64 feedbackIndex)
+        external
+        view
+        returns (int128 value, uint8 valueDecimals, string memory tag1, string memory tag2, bool isRevoked);
 }
 
 /// @title SettledInvoiceFeedback: ERC-8004 feedback about an agent that cannot be written without a settled invoice.
