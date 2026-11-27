@@ -17,8 +17,9 @@ import type { Invoice } from '../src/invoice.js';
 import { Ledger } from '../src/ledger.js';
 import type { Mandate } from '../src/mandate.js';
 import { FailPointError, InvoicePayer, type Outcome } from '../src/payer.js';
+import { freePort } from './fixtures/free-port.js';
 
-const PORT = 9300 + Math.floor(Math.random() * 300);
+const PORT = await freePort();
 const ANVIL = `http://127.0.0.1:${PORT}`;
 const CHAIN_ID = 31337;
 const DEPLOYER = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' as Hex;

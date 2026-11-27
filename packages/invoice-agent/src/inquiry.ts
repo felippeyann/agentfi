@@ -40,7 +40,7 @@ export interface VaultCheck {
 }
 
 /** `expect.settled`: a mined payment exists for it, so the vault must have settled it (otherwise "not settled" is just an answer). */
-function checkVault(chain: ChainConfig, mandate: Mandate, invoiceId: string, s: SettlementRecord, ev: SettledEvent | undefined, expect: { settled: boolean; amount?: bigint; payTo?: string; blockNumber?: bigint; agent?: string }): VaultCheck {
+function checkVault(chain: ChainConfig, invoiceId: string, s: SettlementRecord, ev: SettledEvent | undefined, expect: { settled: boolean; amount?: bigint; payTo?: string; blockNumber?: bigint; agent?: string }): VaultCheck {
   const problems: string[] = [];
   if (expect.settled && !s.settled) problems.push('settlementOf says NOT settled');
   if ((expect.settled || s.settled) && !ev) problems.push('no InvoiceSettled event for it');
@@ -81,19 +81,19 @@ export async function verifyInvoice(chain: ChainConfig, mandate: Mandate, ledger
   const settlement = chain.vault ? await settlementOf(chain, id) : undefined;
   if (!row.tx_hash) {
     const allToPayee = await transfersFrom(chain, source, row.pay_to);
-    const vault = settlement ? checkVault(chain, mandate, id, settlement, settlement.settled ? await findSettledEvent(chain, settlement.key, settlement.blockNumber) : undefined, { settled: false }) : undefined;
+    const vault = settlement ? checkVault(chain, id, settlement, settlement.settled ? await findSettledEvent(chain, settlement.key, settlement.blockNumber) : undefined, { settled: false }) : undefined;
     return { row, receipt: null, match: [], allToPayee, unexplained: [], sameAsLedger: true, verified: false, notFinal: false, ...(vault ? { vault } : {}) };
   }
   const receipt = await receiptOf(chain, row.tx_hash as Hex);
   if (!receipt) {
-    const vault = settlement ? checkVault(chain, mandate, id, settlement, settlement.settled ? await findSettledEvent(chain, settlement.key, settlement.blockNumber) : undefined, { settled: false }) : undefined;
+    const vault = settlement ? checkVault(chain, id, settlement, settlement.settled ? await findSettledEvent(chain, settlement.key, settlement.blockNumber) : undefined, { settled: false }) : undefined;
     return { row, receipt: null, match: [], allToPayee: [], unexplained: [], sameAsLedger: true, verified: false, notFinal: false, ...(vault ? { vault } : {}) };
   }
   const block = await publicClientFor(chain).getBlock({ blockNumber: receipt.blockNumber });
   const match = transfersIn(chain, receipt).filter((t) => t.from === source && t.to === getAddress(row.pay_to) && t.value === BigInt(row.amount));
   const allToPayee = await transfersFrom(chain, source, row.pay_to);
   const vault = settlement
-    ? checkVault(chain, mandate, id, settlement, settledEventsIn(chain, receipt).find((e) => e.invoiceId === id), { settled: receipt.status === 'success', amount: BigInt(row.amount), payTo: row.pay_to, blockNumber: receipt.blockNumber, agent: mandate.payer })
+    ? checkVault(chain, id, settlement, settledEventsIn(chain, receipt).find((e) => e.invoiceId === id), { settled: receipt.status === 'success', amount: BigInt(row.amount), payTo: row.pay_to, blockNumber: receipt.blockNumber, agent: mandate.payer })
     : undefined;
   // The chain is the judge, not the agent's ledger: every transfer to this payee must belong to exactly one paid invoice.
   const known = new Set(ledger.all().filter((r) => r.pay_to.toLowerCase() === row.pay_to.toLowerCase() && r.tx_hash && r.status !== 'refused').map((r) => r.tx_hash!.toLowerCase()));
@@ -130,7 +130,7 @@ async function answerFromVault(chain: ChainConfig, mandate: Mandate, invoiceId: 
   if (!s.settled) return undefined;
   const ev = await findSettledEvent(chain, s.key, s.blockNumber);
   const receipt = ev ? await receiptOf(chain, ev.txHash) : null;
-  const check = checkVault(chain, mandate, invoiceId, s, ev, { settled: true, ...(receipt ? { blockNumber: receipt.blockNumber } : {}) });
+  const check = checkVault(chain, invoiceId, s, ev, { settled: true, ...(receipt ? { blockNumber: receipt.blockNumber } : {}) });
   const explorer = ev ? explorerTx(chain, ev.txHash) : undefined;
   const withVault = { ...base, vault: vaultPart(check), ...(explorer ? { explorer } : {}) };
   const source = fundsSource(chain, mandate.payer);

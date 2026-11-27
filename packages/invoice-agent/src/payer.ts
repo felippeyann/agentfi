@@ -6,8 +6,11 @@
  *   2. New invoice: judge it against the operator's mandate (vendor, payee, per-invoice and daily
  *      limits). A refusal is recorded with its reason; nothing is signed.
  *   3. Sign the transfer locally, RECORD it (raw bytes, hash, nonce) and only then broadcast it.
- *   4. Wait for the receipt and check the Transfer log (payer → payTo, exact amount) before calling
- *      it paid.
+ *      Why this order: a transaction broadcast before it is recorded could be mined while the ledger
+ *      knows nothing of it, and a crash at that moment would make the resend sign a SECOND payment.
+ *      Recorded first, every transaction that can reach the chain is in the ledger, by hash.
+ *   4. Wait for the receipt and check the Transfer log (payer or vault → payTo, exact amount; with a
+ *      vault also its InvoiceSettled) and the confirmation rule (finality.ts) before calling it paid.
  *
  * A crash between 3 and 4 is the "lost response": the money may have moved, the caller saw nothing.
  * On the next submission of the same invoice, step 1 runs `reconcile`, which looks for the recorded

@@ -1,7 +1,9 @@
 /**
- * Everything the agent and the operator read from or send to the chain. The payment is a plain
- * ERC-20 `transfer(payTo, amount)` sent by the payer's own address (an EOA): the token contract moves
- * the balance and emits `Transfer(payer, payTo, amount)`. No escrow, no allowance, no relayer.
+ * Everything the agent and the operator read from or send to the chain. The payment is one transaction
+ * from the agent's key (an EOA): either a plain ERC-20 `transfer(payTo, amount)` from its own balance
+ * (the direct path), or, when the mandate names a vault, `vault.payInvoice(invoiceId, vendor, payTo, amount)`
+ * and the vault transfers its own tUSD8 (vault.ts). Either way the receipt carries a token
+ * `Transfer(source, payTo, amount)`. No allowance, no relayer.
  *
  * The transaction is SIGNED LOCALLY first (`signTransfer`), so its hash is known before anything is
  * sent; broadcasting the same signed bytes again is harmless (same hash, same nonce: it can be mined
@@ -190,7 +192,9 @@ export class GasCeilingError extends Error {
 export const signingStats = { signatures: 0, ceilingRefusals: 0 };
 
 /**
- * Signs `token.transfer(to, amount)` from the payer key with the given nonce; nothing is sent.
+ * Signs the payment call (`paymentCall`: `token.transfer(to, amount)`, or `vault.payInvoice` with a vault) from the
+ * payer key with the given nonce; nothing is sent. The caller (payer.ts) records the signed bytes in the ledger
+ * BEFORE calling `broadcast`.
  * Immediately before signing, the EFFECTIVE fields of the prepared transaction (its gas limit and its
  * maxFeePerGas, or gasPrice for a legacy one) are multiplied and compared with `cfg.maxGasCostWei`:
  * above it, GasCeilingError and no signature.

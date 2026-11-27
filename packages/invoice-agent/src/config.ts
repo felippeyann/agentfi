@@ -1,7 +1,7 @@
 /** Configuration from the environment, shared by the server and the operator CLI. */
 import { parseEther, parseGwei, type Hex } from 'viem';
 import { mnemonicToAccount, privateKeyToAccount } from 'viem/accounts';
-import { parseConfirmRule } from './finality.js';
+import { LOCAL_ANVIL_CHAIN_ID as ANVIL_CHAIN_ID, parseConfirmRule } from './finality.js';
 import { loadMandate, type Mandate } from './mandate.js';
 import type { ChainConfig } from './chain.js';
 import type { FailPoint } from './payer.js';
@@ -23,7 +23,6 @@ export interface Config {
  * demo and the tests use them on a LOCAL chain; anything sent to them on a real network is swept by
  * bots. The agent refuses them (and the simulated crashes) on any chain other than Anvil's 31337.
  */
-export const ANVIL_CHAIN_ID = 31337;
 const ANVIL_MNEMONIC = 'test test test test test test test test test test test junk';
 let anvilAddresses: Set<string> | undefined;
 export function isPublicAnvilKey(key: Hex): boolean {
