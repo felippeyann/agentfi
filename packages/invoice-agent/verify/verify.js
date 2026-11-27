@@ -238,7 +238,7 @@ export async function verifyInvoice(o) {
     const [atHeight, fin, head] = await Promise.all([o.rpc('eth_getBlockByNumber', [receipt.blockNumber, false]), o.rpc('eth_getBlockByNumber', ['finalized', false]), o.rpc('eth_blockNumber')]);
     const n = Number(BigInt(receipt.blockNumber));
     const canonical = atHeight && atHeight.hash === receipt.blockHash;
-    out.finality = { rule: 'finalized', block: n, blockTime: atHeight ? new Date(Number(BigInt(atHeight.timestamp)) * 1000).toISOString() : undefined, finalizedBlock: fin ? Number(BigInt(fin.number)) : undefined, head: Number(BigInt(head)), canonical: !!canonical };
+    out.finality = { rule: 'finalized', block: n, blockHash: receipt.blockHash, blockTime: atHeight ? new Date(Number(BigInt(atHeight.timestamp)) * 1000).toISOString() : undefined, finalizedBlock: fin ? Number(BigInt(fin.number)) : undefined, head: Number(BigInt(head)), canonical: !!canonical };
     if (!canonical) {
       bad(`block ${n} is no longer canonical`);
       return done('pending', `The settlement's block ${n} changed (reorg): not final, ask again.`, DO_NOT_PAY + ' Ask again later.');

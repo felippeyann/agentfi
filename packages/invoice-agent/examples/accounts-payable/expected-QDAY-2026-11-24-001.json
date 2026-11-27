@@ -1,0 +1,9 @@
+{
+  "chainId": 44005,
+  "vault": "0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3",
+  "token": "0x456569838f1d43009A91ebA4263147Afd7233483",
+  "invoiceId": "QDAY-2026-11-24-001",
+  "vendorId": "vendor-1",
+  "payee": "0x46fbCbbA2b425AdFB958507F5F341FCc4932C530",
+  "amountUnits": "1000000"
+}

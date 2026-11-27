@@ -1,6 +1,7 @@
 // The page's UI: reads the form (or the URL: ?vault=…&invoice=…&rpc=…&chain=…&tx=…), runs verify.js, renders the
 // verdict with textContent only (nothing from the chain or the URL is ever parsed as HTML).
 import { DEFAULTS, describeSimCall, rpcClient, simulateResend, units6, verifyInvoice } from './verify.js';
+import { buildReceipt } from './receipt.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -66,6 +67,9 @@ function render(v) {
   $('resend-go').hidden = !offered;
   $('resend-why').hidden = offered;
   $('resend-why').textContent = offered ? '' : `Available once the receipt is paid_verified; this one is ${v.state}, so there is no settlement to try again.`;
+  $('receipt-go').hidden = !offered;
+  $('receipt-why').hidden = offered;
+  $('receipt-why').textContent = offered ? '' : `Available once the invoice is paid_verified; this one is ${v.state}.`;
 }
 
 function checkList(ul, checks) {
@@ -180,6 +184,25 @@ async function resend() {
   }
 }
 
+// The portable receipt: built from the last completed check (paid_verified only), offered as a file download. Nothing
+// is read again and nothing leaves the browser.
+function downloadReceipt() {
+  if (busy || !last || last.verdict.state !== 'paid_verified') return;
+  const receipt = buildReceipt(last.verdict, { rpcUrl: last.rpcUrl });
+  const url = URL.createObjectURL(new Blob([JSON.stringify(receipt, null, 2) + '\n'], { type: 'application/json' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `agentfi-receipt-${receipt.invoice.id}.json`;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  $('status').textContent = `Receipt for ${receipt.invoice.id} downloaded: ${receipt.amount.display} to ${receipt.payee}, transaction ${receipt.payment.txHash}.`;
+}
+
+$('receipt-go').addEventListener('click', () => {
+  downloadReceipt();
+});
 $('resend-go').addEventListener('click', () => {
   resend();
 });

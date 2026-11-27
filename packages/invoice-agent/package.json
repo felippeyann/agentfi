@@ -16,6 +16,9 @@
     "mcp:fixture": "tsx src/mcp-fixture.ts",
     "verify:fixture": "tsx src/verify-fixture.ts",
     "gas:aevum-fork": "tsx scripts/aevum-fork-gas.mjs",
+    "receipt:fetch": "node scripts/fetch-receipt.mjs",
+    "receipt:check": "node scripts/check-receipt.mjs",
+    "ap:demo": "node examples/accounts-payable/demo.mjs",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit -p .",
     "build:token": "cd contracts && forge build && node ../scripts/gen-token.mjs"
