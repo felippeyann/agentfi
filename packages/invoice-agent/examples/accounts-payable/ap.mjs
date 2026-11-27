@@ -50,9 +50,11 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, pid INTEGER NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL);
 `;
 
+// busy_timeout comes first: any statement before it fails at once with SQLITE_BUSY while other processes hold the
+// file. WAL is set once by init (it is persistent in the file), so a normal open never asks for a mode change.
 function open() {
   const db = new DatabaseSync(DB_PATH);
-  db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 30000; PRAGMA foreign_keys = ON;');
+  db.exec('PRAGMA busy_timeout = 30000; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;');
   return db;
 }
 
@@ -83,6 +85,7 @@ function init() {
   const books = JSON.parse(readFileSync(resolve(process.env.AP_BOOKS ?? join(HERE, 'books.json')), 'utf8'));
   const db = open();
   try {
+    db.exec('PRAGMA journal_mode = WAL;');
     db.exec(SCHEMA);
     tx(db, () => {
       const ins = db.prepare('INSERT INTO invoices (ref, description, expected) VALUES (?, ?, ?)');

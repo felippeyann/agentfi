@@ -3,6 +3,7 @@ import type { PageVerdict, Rpc } from './verify.js';
 
 export const RECEIPT_FORMAT: 'agentfi.invoice-receipt';
 export const RECEIPT_VERSION: 1;
+export const MAX_NODE_LAG: number;
 
 export interface Receipt {
   format: 'agentfi.invoice-receipt';

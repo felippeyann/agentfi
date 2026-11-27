@@ -416,7 +416,7 @@ The page's answer is for a person. A business system (accounts payable, an ERP) 
 | `not_paid` | reject | your vault has no settlement of your invoice: the receipt is not backed by the chain |
 | `mismatch` | reject | the chain's records disagree, or the receipt names another transaction or event |
 | `pending` | retry | paid, not finalized yet (about an hour on Aevum) |
-| `inconclusive` | retry | the chain could not be read, or the node answered in a degraded way (another chain, an empty `eth_call`, no event or no receipt for a settlement it reports, a head below the receipt's block): nothing concluded, try again |
+| `inconclusive` | retry | the chain could not be read, or the node answered in a degraded way (another chain, an empty `eth_call`, no event or no receipt for a settlement it reports, a head up to 1000 blocks below the receipt's block; a block further ahead is `not_paid`): nothing concluded, try again |
 | `invalid` | reject | the receipt or your record is malformed |
 
 **For a juror: download, check, try.** Work in `packages/invoice-agent`, after `npm ci` at the root. All three steps read the public Aevum RPC (the third one for its positive case).
@@ -448,7 +448,7 @@ The page's answer is for a person. A business system (accounts payable, an ERP) 
      5. a local copy claims another vault: `divergent` (`vault`);
      6. a local copy is edited to claim `-002`, so it matches the books but not the chain: `not_paid`;
      7. on a fresh state, two processes deliver the same receipt at the same time: one `settled`, one `already_settled`, one mark.
-   - **The end:** "Every step behaved as expected", then the books (`AP-2026-0001: paid`, `AP-2026-0002: open`). The audit log is the `events` table of that file; `node examples/accounts-payable/ap.mjs status` shows the books, the marks and the inbox.
+   - **The end:** "Every step behaved as expected", then the books (`AP-2026-0001: paid`, `AP-2026-0002: open`). The audit log is the `events` table of that file; `node examples/accounts-payable/ap.mjs status` shows the books, the marks and the inbox (run directly, `ap.mjs` prints Node's `ExperimentalWarning` for `node:sqlite` on stderr; the demo hides it).
    - **If the public RPC does not answer:** a step that needs it is retried a few times; if the RPC still does not answer, the demo stops with exit 3 ("run the demo again later") and nothing is marked.
 
 **How the example keeps one mark per payment.**

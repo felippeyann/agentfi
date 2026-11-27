@@ -14,6 +14,8 @@ import { isAddress, units6, verifyInvoice } from './verify.js';
 
 export const RECEIPT_FORMAT = 'agentfi.invoice-receipt';
 export const RECEIPT_VERSION = 1;
+/** How far behind a receipt's block a node may be and still be read as lagging (inconclusive) rather than not_paid. */
+export const MAX_NODE_LAG = 1000;
 
 const lower = (a) => String(a).toLowerCase();
 const isHash = (h) => typeof h === 'string' && /^0x[0-9a-fA-F]{64}$/.test(h);
@@ -166,9 +168,16 @@ export async function checkReceipt(o) {
     } catch (e) {
       return done('inconclusive', `Inconclusive: the vault reports no settlement, and the node's head could not be read (${String(e?.message ?? e).slice(0, 160)}). Try again.`, { verdict: v });
     }
-    if (head < r.payment.blockNumber) {
+    // The receipt's block number is the receipt's claim: only a SMALL lead over the head is read as a lagging node. A
+    // block far beyond the head is a block the chain has not produced: not_paid, so a forged receipt cannot stay in a
+    // retry loop by claiming a block in the future.
+    if (head < r.payment.blockNumber && r.payment.blockNumber - head <= MAX_NODE_LAG) {
       bad(`the node's head ${head} is below the receipt's block ${r.payment.blockNumber}`);
       return done('inconclusive', `Inconclusive: this node is at block ${head}, behind the receipt's block ${r.payment.blockNumber}; it cannot know that payment yet. Try again, or use another RPC.`, { verdict: v });
+    }
+    if (head < r.payment.blockNumber) {
+      bad(`the receipt's block ${r.payment.blockNumber} is more than ${MAX_NODE_LAG} blocks beyond the node's head ${head}`);
+      return done('not_paid', `The chain does not back this receipt: it names block ${r.payment.blockNumber}, more than ${MAX_NODE_LAG} blocks beyond the chain's head ${head}, and ${why[0].toLowerCase()}${why.slice(1)}`, { verdict: v });
     }
     return done('not_paid', `The chain does not back this receipt: ${why}`, { verdict: v });
   }

@@ -232,6 +232,14 @@ describe('degraded RPC answers are inconclusive, never a reject', () => {
     };
     const b = await checkReceipt({ rpc: behind, receipt: r, expected: x });
     assert.equal(b.state, 'inconclusive', b.answer);
+
+    // ... but a forged receipt that claims a block far in the future cannot keep itself in the retry loop.
+    const future = structuredClone(r);
+    future.invoice.id = 'INV-NEVER-PAID';
+    future.payment.blockNumber = Number.MAX_SAFE_INTEGER;
+    const f = await checkReceipt({ rpc: rpcClient(RPC), receipt: future, expected: w.expected(a.vault, 'INV-NEVER-PAID') });
+    assert.equal(f.state, 'not_paid', f.answer);
+    assert.equal(f.decision, 'reject');
   });
 });
 
@@ -304,7 +312,7 @@ describe('accounts-payable example', () => {
     assert.equal(after.inbox?.length, 0);
   });
 
-  it('six deliveries and two retries at the same time, plus the same payment for another invoice: one mark', async () => {
+  it('six deliveries, two retries and eight status reads at the same time, plus the same payment for another invoice: one mark, no exit 1', async () => {
     const { dir, receipt, books, vault } = await setup();
     // A duplicate entry in the books (same expected data under another reference): one payment settles one invoice.
     const dupBooks = join(dir, 'books-dup.json');
@@ -313,7 +321,9 @@ describe('accounts-payable example', () => {
     writeFileSync(dupBooks, JSON.stringify(b));
     const state = join(dir, 'many');
     assert.equal((await apAsync(state, ['init'], { AP_BOOKS: dupBooks })).code, 0);
+    // Readers too: every process opens the same file (a "status" that fails with "database is locked" is exit 1).
     const runs = await Promise.all([
+      ...Array.from({ length: 8 }, () => apAsync(state, ['status'])),
       ...Array.from({ length: 6 }, () => apAsync(state, ['deliver', 'AP-2026-0001', receipt])),
       apAsync(state, ['retry']), apAsync(state, ['retry']),
       apAsync(state, ['deliver', 'AP-2026-0003', receipt]),

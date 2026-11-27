@@ -8,3 +8,4 @@ contracts/cache/
 examples/accounts-payable/.state/
 examples/accounts-payable/.state-concurrency/
 examples/accounts-payable/.state-copies/
+/receipt.json
