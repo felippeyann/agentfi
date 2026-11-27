@@ -382,9 +382,25 @@ For a `paid_verified` receipt the page also offers **"Simulate a resend after th
 
 Try it locally: `npm run verify:fixture` (Anvil, a vault, INV-001 finalized and INV-002 not yet; it serves the page on 127.0.0.1 and prints the links; Ctrl+C stops it). `test/verify-page.test.ts` runs the page's logic against Anvil and checks its states against the agent's own answer and its hand-written selectors against the contract ABI. **Live** since 2026-11-25 at https://www.agentfi.cc/verify/index.html. The live copy is this folder as of commit `31d1c1a` (PR #220); the resend simulation goes live with the next deploy of the page. For example, [the first public invoice](https://www.agentfi.cc/verify/index.html?vault=0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3&invoice=QDAY-2026-11-24-001).
 
-<!-- PLACEHOLDER (improvement D, ERC-8004 contracts): a short "## ERC-8004 …" section goes here (what it adds, what
-     it does not change in the payment path, its tests, whether anything is deployed). To be merged by the
-     orchestrator; remove this comment then. -->
+## ERC-8004: a rating that needs a settled invoice (local; not deployed)
+
+[ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) (draft) gives an agent an on-chain identity (Identity Registry, an ERC-721 per agent) and lets others rate it (Reputation Registry). Its known weakness is that anyone may rate anyone, with no proof that they ever dealt with the agent. `erc8004/` adds that proof for this vault:
+
+- `erc8004/src/SettledInvoiceFeedback.sol` is the only rater the reputation readers count (filter on its address and the tag `agentfi.settledInvoice`). `giveSettledFeedback(agentId, vault, invoiceId, vendor, …)` writes a rating only if:
+  - the agent's owner declared that vault in the Identity Registry;
+  - the vault's `settlementOf` shows the invoice settled, by the key that is the agent's proven `agentWallet` (an EIP-712 signature by that key);
+  - the rater is a counterparty of that vault (its operator, or the mandate's payee), and is not the agent's owner, an approved operator or its wallet (the spec's self-rating rule, applied to the real rater);
+  - this rater has not rated that settlement before.
+
+  The rating carries the invoice key (tag2) and `eip155:<chainId>:<vault>` (endpoint). `linkOf(agentId, invoiceId, vendor)` returns the owner, the agent wallet, the vault, the settlement (agent, amount, block) and whether they link.
+- **Verifiable on-chain:** the identity's owner and URI; that the agent wallet is controlled by the agent key; the vault declaration; who settled, how much and in which block; that a rating cannot exist without a settlement.
+- **Not proven, declared at most:** the registration file's content, that the parties are real businesses, the quality behind the score (the rater's opinion), and independence between the parties. Identity alone proves nothing about quality or commercial reputation. In a demo where one person runs the operator, the vendor and the agent, a rating is a self-assessment anchored to a real settlement, not reputation.
+- **The payment path is unchanged:** the adapter only reads `InvoiceMandate` (imported read-only from `contracts/src`); the agent, the vault and the verification page do not depend on it.
+- **On Aevum:** no official ERC-8004 registry is open. The starter kit's docs say QDay's registry "is still in internal testing and isn't open for this challenge", and the official `0x8004…` addresses have no code on chain 44005 (read 2026-11-26). The official addresses cannot be reproduced by us (they need the ERC-8004 team's pre-signed deployment). Publishing this on Aevum would mean deploying the reference registries at our own, non-official addresses. Nothing is deployed.
+- **Vendored code:** the reference registries at erc-8004/erc-8004-contracts `b9e466c` and the OpenZeppelin 5.4.0 files they compile against, byte for byte, with blob ids and sha256 in `erc8004/vendor/PROVENANCE.md`.
+- **Run it:**
+  - `cd erc8004 && forge test` (forge-std as in "Run it" above);
+  - end to end on a local Anvil: `anvil --port 8745 --hardfork shanghai`, then `forge script script/E2E8004.s.sol --rpc-url http://127.0.0.1:8745 --broadcast` (token, vault, registries, one settled invoice, a registered agent with a proven wallet, one anchored rating, read back).
 
 ## AgentFi before the challenge vs. built for the challenge
 
@@ -426,7 +442,7 @@ Done on 2026-11-24, by the owner: the vault deployed, funded and mandated, and o
 
 ## Third-party code
 
-Runtime: [viem](https://github.com/wevm/viem) (MIT), [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk) (MIT, the read-only MCP server). Development: [tsx](https://github.com/privatenumber/tsx) (MIT), [TypeScript](https://github.com/microsoft/TypeScript) (Apache-2.0), `@types/node` (MIT). Contract tests and the deploy script: [forge-std](https://github.com/foundry-rs/forge-std) (MIT or Apache-2.0), the monorepo's submodule; not part of the deployed vault. Tooling, not redistributed: [Foundry](https://github.com/foundry-rs/foundry) (MIT or Apache-2.0) and solc 0.8.24. SQLite through Node's built-in `node:sqlite`.
+Runtime: [viem](https://github.com/wevm/viem) (MIT), [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk) (MIT, the read-only MCP server). Development: [tsx](https://github.com/privatenumber/tsx) (MIT), [TypeScript](https://github.com/microsoft/TypeScript) (Apache-2.0), `@types/node` (MIT). Contract tests and the deploy script: [forge-std](https://github.com/foundry-rs/forge-std) (MIT or Apache-2.0), the monorepo's submodule; not part of the deployed vault. Tooling, not redistributed: [Foundry](https://github.com/foundry-rs/foundry) (MIT or Apache-2.0) and solc 0.8.24. SQLite through Node's built-in `node:sqlite`. `erc8004/` (local, not deployed) vendors the ERC-8004 reference registries ([erc-8004/erc-8004-contracts](https://github.com/erc-8004/erc-8004-contracts) at `b9e466c`; SPDX MIT in every source file) and the [OpenZeppelin Contracts](https://github.com/OpenZeppelin/openzeppelin-contracts) and Contracts Upgradeable 5.4.0 files they compile against (MIT); provenance per file in `erc8004/vendor/PROVENANCE.md`.
 
 ## Files
 
@@ -440,12 +456,13 @@ The invoice's path through the code, in order:
 - `src/preflight.ts` the read-only checks · `src/session.ts` the rehearsal and the public session · `src/demo.ts` the scenario
 - `src/mcp-fixture.ts`, `src/verify-fixture.ts` local synthetic worlds for the MCP server and the verification page · `src/generated/` ABI and bytecode (generated, see above)
 - `contracts/src/InvoiceMandate.sol` the on-chain vault · `contracts/src/LocalTestUSD8.sol` the local test token · `contracts/script/InvoiceMandate.s.sol` the owner's three transactions · `contracts/test/` the Foundry tests (`InvoiceMandateReview.t.sol`: the security review's adversarial cases; `InvoiceMandateScript.t.sol`: the script's guards; `AevumFork.t.sol`: opt-in, the real tUSD8 on a local fork)
-- `scripts/gen-token.mjs` writes or checks `src/generated/` · `scripts/aevum-fork-gas.mjs` the vault's gas on a local fork of Aevum (`npm run gas:aevum-fork`)
-- `verify/` the read-only verification page (static, live at agentfi.cc/verify)
+- `scripts/gen-token.mjs` writes or checks `src/generated/` · `scripts/aevum-fork-gas.mjs` the vault's gas on a local fork of Aevum (`npm run gas:aevum-fork`) · `scripts/aevum-fork-renewal.mjs` a mandate renewal and a second payment rehearsed on a local fork of the real vault (read-only toward Aevum)
+- `verify/` the read-only verification page (static, live at agentfi.cc/verify), with the resend simulation
+- `erc8004/` ERC-8004 ratings anchored in settled invoices (local, not deployed): `src/SettledInvoiceFeedback.sol` the adapter, `test/` its Foundry tests, `script/` a local end-to-end run and a read-only reader, `vendor/` the pinned reference registries and OpenZeppelin (see `vendor/PROVENANCE.md`)
 
 Tests (`npm test` runs `test/*.test.ts`; each file starts its own Anvil on a free port):
 
 - `test/lost-response.test.ts` the crash cases, refusals, conflict · `test/review-fixes.test.ts` races, the lock, RPC failures, nonce taken, re-judged refusal, operator resolve (from the independent review)
 - `test/finality.test.ts` the confirmation rule, reorgs before confirmation, inconsistent receipts, an unreadable finalized block · `test/config-guard.test.ts` keys, mandate, ledger binding, confirmation settings
 - `test/gas-ceiling.test.ts` the gas ceiling and the signed fields · `test/tip-cap.test.ts` the tip cap, against the Aevum reading of 2026-11-24 · `test/log-pages.test.ts` paged `eth_getLogs`, INCOMPLETE on a failed page
-- `test/vault.test.ts` the agent through the vault · `test/mcp.test.ts` the MCP server over stdio · `test/verify-page.test.ts` the verification page's logic · `test/fixtures/` helpers (the lock holder, a free port)
+- `test/vault.test.ts` the agent through the vault · `test/session-probe.test.ts` the session's `--probe-paid` step · `test/mcp.test.ts` the MCP server over stdio · `test/verify-page.test.ts` the verification page's logic and its resend simulation · `test/fixtures/` helpers (the lock holder, a free port)
