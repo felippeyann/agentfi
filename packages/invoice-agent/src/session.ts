@@ -190,7 +190,8 @@ async function main(): Promise<number> {
         await wait(await deployer.writeContract({ address: vault!, abi: INVOICE_MANDATE_ABI, functionName: 'setMandate', args: [agentAddr, vendorKey(VENDOR_ID), ANVIL.vendor, units, units, Number(now + 86_400n)] }));
       };
       await setMandate();
-      if (PROBE_ID && VAULT_MODE) {
+      // (Tests only, rehearsal only: SESSION_REHEARSE_SKIP_PROBE_HISTORY=1 leaves the probe unsettled, to check the guard.)
+      if (PROBE_ID && VAULT_MODE && process.env['SESSION_REHEARSE_SKIP_PROBE_HISTORY'] !== '1') {
         // The public history, replayed: the agent pays PROBE_ID, a UTC day passes (the old mandate expires), the operator
         // deposits again and renews the mandate (same agent, vendor, payee and limits).
         const agentWallet = createWalletClient({ account: privateKeyToAccount(ANVIL.payer), chain, transport: http(rpcUrl) });
