@@ -81,11 +81,13 @@ export function validateReceipt(r) {
   if (!isHash(r.payment?.txHash)) p.push('payment.txHash');
   if (!isIndex(r.payment?.blockNumber)) p.push('payment.blockNumber');
   if (!isHash(r.payment?.blockHash)) p.push('payment.blockHash');
+  // Exactly the two events, each an object with a name and a log index: no null or extra entries, no duplicates.
   const ev = Array.isArray(r.payment?.events) ? r.payment.events : [];
-  const settled = ev.find((x) => x?.name === 'InvoiceSettled');
-  const transfer = ev.find((x) => x?.name === 'Transfer');
-  if (!settled || !isIndex(settled.logIndex)) p.push('payment.events InvoiceSettled.logIndex');
-  if (!transfer || !isIndex(transfer.logIndex)) p.push('payment.events Transfer.logIndex');
+  if (ev.length !== 2 || ev.some((x) => !x || typeof x !== 'object' || Array.isArray(x))) p.push('payment.events (exactly two event objects)');
+  const named = (name) => ev.filter((x) => x && typeof x === 'object' && x.name === name);
+  const settled = named('InvoiceSettled'), transfer = named('Transfer');
+  if (settled.length !== 1 || !isIndex(settled[0].logIndex)) p.push('payment.events InvoiceSettled.logIndex');
+  if (transfer.length !== 1 || !isIndex(transfer[0].logIndex)) p.push('payment.events Transfer.logIndex');
   return { ok: p.length === 0, problems: p };
 }
 
@@ -227,8 +229,8 @@ export async function checkReceipt(o) {
   ok('the settlement on chain matches the expected record');
 
   // The receipt against the payment on chain.
-  const settledEv = r.payment.events.find((e) => e.name === 'InvoiceSettled');
-  const transferEv = r.payment.events.find((e) => e.name === 'Transfer');
+  const settledEv = r.payment.events.find((e) => e?.name === 'InvoiceSettled');
+  const transferEv = r.payment.events.find((e) => e?.name === 'Transfer');
   const vsChain = [
     lower(r.payment.txHash) !== lower(v.event.txHash) && `transaction ${r.payment.txHash}, on chain ${v.event.txHash}`,
     r.payment.blockNumber !== v.finality.block && `block ${r.payment.blockNumber}, on chain ${v.finality.block}`,

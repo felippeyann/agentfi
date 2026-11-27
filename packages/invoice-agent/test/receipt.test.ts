@@ -172,6 +172,18 @@ describe('portable receipt', () => {
 
     const malformed = await checkReceipt({ rpc: rpcClient(RPC), receipt: { ...r, version: 2 }, expected: w.expected(a.vault, 'INV-E') });
     assert.equal(malformed.state, 'invalid');
+
+    // Regression (PR #222 review): a null, an extra or a duplicate entry in payment.events is invalid (a final
+    // reject), never an exception from the check.
+    const withNull = structuredClone(r) as unknown as { payment: { events: unknown[] } };
+    withNull.payment.events.unshift(null);
+    const duplicate = structuredClone(r);
+    duplicate.payment.events = [duplicate.payment.events[0]!, duplicate.payment.events[0]!];
+    for (const bad of [withNull, duplicate]) {
+      const c = await checkReceipt({ rpc: rpcClient(RPC), receipt: bad, expected: w.expected(a.vault, 'INV-E') });
+      assert.equal(c.state, 'invalid', c.answer);
+      assert.equal(c.decision, 'reject');
+    }
   });
 
   it('an RPC outage is inconclusive (retry), and the same check settles once the RPC answers', async () => {

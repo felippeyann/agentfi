@@ -152,7 +152,11 @@ async function deliver(db, ref, receiptText, deliveryId) {
   }
 
   // The check reads the chain outside any transaction: it only decides whether a mark is ALLOWED.
-  const r = await checkReceipt({ rpc: rpc(), receipt, expected });
+  // An exception inside the check is no evidence either way: it follows the retry policy (and is parked after the cap),
+  // so it can neither mark the invoice nor block the deliveries behind it.
+  const r = await checkReceipt({ rpc: rpc(), receipt, expected }).catch((e) => ({
+    state: 'inconclusive', decision: 'retry', conclusive: false, answer: `Inconclusive: the check failed (${String(e?.message ?? e).slice(0, 160)}). Nothing is concluded.`,
+  }));
 
   if (r.decision === 'retry') {
     // No evidence either way: the invoice stays open. The policy decides when (and whether) to check again.
@@ -199,7 +203,14 @@ async function deliver(db, ref, receiptText, deliveryId) {
 async function retry(db) {
   const rows = db.prepare('SELECT delivery_id, ref, receipt FROM inbox WHERE parked = 0 AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY received_at, delivery_id').all(now());
   const results = [];
-  for (const q of rows) results.push(await deliver(db, q.ref, q.receipt, q.delivery_id));
+  // One failing delivery never stops the others behind it.
+  for (const q of rows) {
+    try {
+      results.push(await deliver(db, q.ref, q.receipt, q.delivery_id));
+    } catch (e) {
+      results.push({ ref: q.ref, deliveryId: q.delivery_id, outcome: 'queued', state: 'error', answer: `error: ${String(e?.message ?? e).slice(0, 160)}` });
+    }
+  }
   return { outcome: 'retried', count: results.length, results };
 }
 
