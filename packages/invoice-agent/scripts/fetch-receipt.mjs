@@ -25,8 +25,7 @@ if (v.state !== 'paid_verified') {
   console.error(`${v.state}: ${v.answer}`);
   process.exitCode = v.state === 'cannot_verify_now' || v.state === 'pending' ? 3 : 2; // not process.exit(): see ap.mjs
 } else {
-  const json = JSON.stringify(buildReceipt(v, { rpcUrl }), null, 2) + '
-';
+  const json = `${JSON.stringify(buildReceipt(v, { rpcUrl }), null, 2)}\n`;
   const out = arg('out');
   if (out) {
     writeFileSync(out, json);

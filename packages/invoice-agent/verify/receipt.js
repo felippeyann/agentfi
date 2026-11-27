@@ -80,6 +80,7 @@ export function validateReceipt(r) {
   if (!isUnits(r.amount?.units)) p.push('amount.units (a decimal string of base units)');
   if (!isHash(r.payment?.txHash)) p.push('payment.txHash');
   if (!isIndex(r.payment?.blockNumber)) p.push('payment.blockNumber');
+  if (!isHash(r.payment?.blockHash)) p.push('payment.blockHash');
   const ev = Array.isArray(r.payment?.events) ? r.payment.events : [];
   const settled = ev.find((x) => x?.name === 'InvoiceSettled');
   const transfer = ev.find((x) => x?.name === 'Transfer');
@@ -157,7 +158,20 @@ export async function checkReceipt(o) {
   const why = v.answer;
   if (v.state === 'cannot_verify_now') return done('inconclusive', `Inconclusive: ${why} Nothing is concluded; try again.`, { verdict: v });
   if (v.state === 'pending') return done('pending', `${why} Try again later.`, { verdict: v });
-  if (v.state === 'unknown_invoice' || v.state === 'failed') return done('not_paid', `The chain does not back this receipt: ${why}`, { verdict: v });
+  if (v.state === 'unknown_invoice' || v.state === 'failed') {
+    // A node behind the receipt's block cannot know the payment yet: that is not "not paid".
+    let head;
+    try {
+      head = Number(BigInt(await o.rpc('eth_blockNumber')));
+    } catch (e) {
+      return done('inconclusive', `Inconclusive: the vault reports no settlement, and the node's head could not be read (${String(e?.message ?? e).slice(0, 160)}). Try again.`, { verdict: v });
+    }
+    if (head < r.payment.blockNumber) {
+      bad(`the node's head ${head} is below the receipt's block ${r.payment.blockNumber}`);
+      return done('inconclusive', `Inconclusive: this node is at block ${head}, behind the receipt's block ${r.payment.blockNumber}; it cannot know that payment yet. Try again, or use another RPC.`, { verdict: v });
+    }
+    return done('not_paid', `The chain does not back this receipt: ${why}`, { verdict: v });
+  }
   if (v.state !== 'paid_verified') return done('mismatch', `The chain's records disagree: ${why}`, { verdict: v });
 
   // The payment on chain against the expected record (the vault settled this id, but was it this payment?).
@@ -179,7 +193,7 @@ export async function checkReceipt(o) {
   const vsChain = [
     lower(r.payment.txHash) !== lower(v.event.txHash) && `transaction ${r.payment.txHash}, on chain ${v.event.txHash}`,
     r.payment.blockNumber !== v.finality.block && `block ${r.payment.blockNumber}, on chain ${v.finality.block}`,
-    r.payment.blockHash !== undefined && v.finality.blockHash && lower(r.payment.blockHash) !== lower(v.finality.blockHash) && `block hash ${r.payment.blockHash}, on chain ${v.finality.blockHash}`,
+    lower(r.payment.blockHash) !== lower(v.finality.blockHash) && `block hash ${r.payment.blockHash}, on chain ${v.finality.blockHash}`,
     lower(r.invoice.invoiceKey) !== lower(v.settlement.invoiceKey) && `invoice key ${r.invoice.invoiceKey}, on chain ${v.settlement.invoiceKey}`,
     settledEv.logIndex !== v.event.logIndex && `InvoiceSettled log ${settledEv.logIndex}, on chain ${v.event.logIndex}`,
     transferEv.logIndex !== v.transfer.logIndex && `Transfer log ${transferEv.logIndex}, on chain ${v.transfer.logIndex}`,

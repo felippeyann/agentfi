@@ -205,8 +205,52 @@ describe('portable receipt', () => {
   });
 });
 
+/** An RPC that answers like the real one except for one method, whose answer is replaced (a degraded node). */
+function degraded(method: string, answer: unknown): Rpc {
+  const real = rpcClient(RPC);
+  return async (m, params) => (m === method ? answer : real(m, params));
+}
+
+describe('degraded RPC answers are inconclusive, never a reject', () => {
+  it('no logs, no transaction receipt, an empty eth_call, a node behind the receipt\'s block', async () => {
+    const w = await world();
+    const a = await w.deployVault();
+    await a.pay('INV-D', '2');
+    await w.finalize();
+    const r = await w.receiptFor(a.vault, 'INV-D');
+    const x = w.expected(a.vault, 'INV-D');
+    for (const [method, answer] of [['eth_getLogs', []], ['eth_getTransactionReceipt', null], ['eth_call', '0x']] as const) {
+      const c = await checkReceipt({ rpc: degraded(method, answer), receipt: r, expected: x });
+      assert.equal(c.state, 'inconclusive', `${method} -> ${JSON.stringify(answer)}: ${c.answer}`);
+      assert.equal(c.decision, 'retry');
+    }
+    // A node whose state is behind (it does not know the settlement yet) and whose head is below the receipt's block.
+    const behind: Rpc = async (m, params) => {
+      if (m === 'eth_blockNumber') return '0x1';
+      if (m === 'eth_call') return '0x' + '0'.repeat(64 * 6);
+      return rpcClient(RPC)(m, params);
+    };
+    const b = await checkReceipt({ rpc: behind, receipt: r, expected: x });
+    assert.equal(b.state, 'inconclusive', b.answer);
+  });
+});
+
+const AP = join(PKG, 'examples', 'accounts-payable', 'ap.mjs');
+type ApRun = { code: number | null; result?: { outcome: string; state?: string; invoices?: Record<string, { status: string }>; settlements?: number; settledEvents?: number; inbox?: unknown[]; results?: { outcome: string }[] } };
+function apAsync(state: string, args: string[], env: Record<string, string> = {}): Promise<ApRun> {
+  return new Promise((done) => {
+    const p = spawn(process.execPath, ['--no-warnings=ExperimentalWarning', AP, ...args], { env: { ...process.env, AP_STATE: state, AP_RPC: RPC, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    p.stdout.on('data', (d) => (out += d));
+    p.on('close', (code) => {
+      const line = out.split('\n').find((l) => l.startsWith('RESULT '));
+      done({ code, ...(line ? { result: JSON.parse(line.slice(7)) } : {}) });
+    });
+  });
+}
+
 describe('accounts-payable example', () => {
-  it('npm run ap:demo against a local chain: outage then one mark, restart, divergent copies, concurrent deliveries', async () => {
+  async function setup() {
     const w = await world();
     const a = await w.deployVault();
     await a.pay('QDAY-2026-11-24-001', '1');
@@ -214,22 +258,91 @@ describe('accounts-payable example', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ap-demo-'));
     const receipt = join(dir, 'receipt.json');
     writeFileSync(receipt, JSON.stringify(await w.receiptFor(a.vault, 'QDAY-2026-11-24-001'), null, 2));
-    const exp = (invoiceId: string) => ({ ...w.expected(a.vault, invoiceId, '1000000') });
+    const exp = (invoiceId: string) => w.expected(a.vault, invoiceId, '1000000');
     const books = join(dir, 'books.json');
     writeFileSync(books, JSON.stringify({ invoices: { 'AP-2026-0001': { expected: exp('QDAY-2026-11-24-001') }, 'AP-2026-0002': { expected: exp('QDAY-2026-11-24-002') } } }));
-    // The demo's vendor id is the receipt's; the local books use "acme" as the local vault does.
+    return { dir, receipt, books, vault: a.vault };
+  }
+
+  it('npm run ap:demo against a local chain: outage then one mark, restart, divergent copies, concurrent deliveries', async () => {
+    const { dir, receipt, books } = await setup();
     const run = spawnSync(process.execPath, [join(PKG, 'examples', 'accounts-payable', 'demo.mjs')], {
       env: { ...process.env, AP_RPC: RPC, AP_BOOKS: books, AP_RECEIPT: receipt, AP_DEMO_DIR: dir }, encoding: 'utf8', timeout: 120_000,
     });
     assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
     assert.match(run.stdout, /Every step behaved as expected/);
+    // The books on disk, read by a new process: one mark for the expected invoice, an empty inbox.
+    const s = (await apAsync(join(dir, '.state'), ['status'])).result as unknown as { invoices: Record<string, { status: string }>; settlements: number; inbox: unknown[] };
+    assert.deepEqual(Object.fromEntries(Object.entries(s.invoices).map(([k, v]) => [k, v.status])), { 'AP-2026-0001': 'paid', 'AP-2026-0002': 'open' });
+    assert.equal(s.inbox.length, 0);
+  });
 
-    // The ledger on disk: one mark, for the expected invoice, by the receipt's payment.
-    const ledger = JSON.parse(readFileSync(join(dir, '.state', 'ledger.json'), 'utf8'));
-    assert.deepEqual(Object.keys(ledger.settlements), ['AP-2026-0001']);
-    const conc = JSON.parse(readFileSync(join(dir, '.state-concurrency', 'ledger.json'), 'utf8'));
-    assert.equal(Object.keys(conc.settlements).length, 1);
-    const events = readFileSync(join(dir, '.state-concurrency', 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-    assert.deepEqual(events.filter((e) => e.type === 'settled' || e.type === 'already_settled').map((e) => e.type).sort(), ['already_settled', 'settled']);
+  it('a process killed during the check leaves the delivery in the inbox; retry marks it once', async () => {
+    const { dir, receipt, books } = await setup();
+    const state = join(dir, 'killed');
+    assert.equal((await apAsync(state, ['init'], { AP_BOOKS: books })).code, 0);
+    // An RPC that accepts the connection and never answers: the check hangs, then the process is killed.
+    const { createServer } = await import('node:net');
+    const sockets: import('node:net').Socket[] = [];
+    const hang = createServer((sock) => { sock.on('error', () => undefined); sockets.push(sock); }).listen(0, '127.0.0.1');
+    await new Promise((r) => hang.once('listening', r));
+    const port = (hang.address() as import('node:net').AddressInfo).port;
+    const p = spawn(process.execPath, ['--no-warnings=ExperimentalWarning', AP, 'deliver', 'AP-2026-0001', receipt], { env: { ...process.env, AP_STATE: state, AP_RPC: `http://127.0.0.1:${port}` }, stdio: 'ignore' });
+    await new Promise((r) => setTimeout(r, 1500));
+    p.kill('SIGKILL');
+    await new Promise((r) => p.once('close', r));
+    for (const s of sockets) s.destroy();
+    hang.close();
+    const before = (await apAsync(state, ['status'])).result!;
+    assert.equal(before.settlements, 0);
+    assert.equal(before.inbox?.length, 1, 'the delivery was written down on arrival');
+    const r = await apAsync(state, ['retry']);
+    assert.equal(r.code, 0);
+    assert.equal(r.result?.results?.[0]?.outcome, 'settled');
+    const after = (await apAsync(state, ['status'])).result!;
+    assert.equal(after.settlements, 1);
+    assert.equal(after.inbox?.length, 0);
+  });
+
+  it('six deliveries and two retries at the same time, plus the same payment for another invoice: one mark', async () => {
+    const { dir, receipt, books, vault } = await setup();
+    // A duplicate entry in the books (same expected data under another reference): one payment settles one invoice.
+    const dupBooks = join(dir, 'books-dup.json');
+    const b = JSON.parse(readFileSync(books, 'utf8'));
+    b.invoices['AP-2026-0003'] = b.invoices['AP-2026-0001'];
+    writeFileSync(dupBooks, JSON.stringify(b));
+    const state = join(dir, 'many');
+    assert.equal((await apAsync(state, ['init'], { AP_BOOKS: dupBooks })).code, 0);
+    const runs = await Promise.all([
+      ...Array.from({ length: 6 }, () => apAsync(state, ['deliver', 'AP-2026-0001', receipt])),
+      apAsync(state, ['retry']), apAsync(state, ['retry']),
+      apAsync(state, ['deliver', 'AP-2026-0003', receipt]),
+    ]);
+    for (const r of runs) assert.notEqual(r.code, 1, JSON.stringify(r));
+    const s = (await apAsync(state, ['status'])).result as unknown as { invoices: Record<string, { status: string }>; settlements: number; settledEvents: number; inbox: unknown[] };
+    assert.equal(s.settlements, 1);
+    assert.equal(s.settledEvents, 1);
+    assert.equal(s.inbox.length, 0);
+    assert.equal(Object.values(s.invoices).filter((v) => v.status === 'paid').length, 1);
+    assert.ok(vault);
+  });
+
+  it('the CLI scripts: receipt:fetch writes the receipt, receipt:check settles it and rejects an edited record', async () => {
+    const { dir, vault } = await setup();
+    const out = join(dir, 'fetched.json');
+    const f = spawnSync(process.execPath, [join(PKG, 'scripts', 'fetch-receipt.mjs'), '--vault', vault, '--invoice', 'QDAY-2026-11-24-001', '--vendor', 'acme', '--rpc', RPC, '--chain', '31337', '--out', out], { encoding: 'utf8' });
+    assert.equal(f.status, 0, f.stderr);
+    const fetched = JSON.parse(readFileSync(out, 'utf8'));
+    assert.equal(fetched.format, 'agentfi.invoice-receipt');
+    const books = JSON.parse(readFileSync(join(dir, 'books.json'), 'utf8'));
+    const expect = join(dir, 'expected.json');
+    writeFileSync(expect, JSON.stringify(books.invoices['AP-2026-0001'].expected));
+    const ok = spawnSync(process.execPath, [join(PKG, 'scripts', 'check-receipt.mjs'), '--receipt', out, '--expect', expect, '--rpc', RPC], { encoding: 'utf8' });
+    assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+    assert.match(ok.stdout, /^SETTLE \(decision: settle\)/);
+    writeFileSync(expect, JSON.stringify({ ...books.invoices['AP-2026-0001'].expected, amountUnits: '2000000' }));
+    const bad = spawnSync(process.execPath, [join(PKG, 'scripts', 'check-receipt.mjs'), '--receipt', out, '--expect', expect, '--rpc', RPC], { encoding: 'utf8' });
+    assert.equal(bad.status, 2, bad.stdout + bad.stderr);
+    assert.match(bad.stdout, /^DIVERGENT/);
   });
 });

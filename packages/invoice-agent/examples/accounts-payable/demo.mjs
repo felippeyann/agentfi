@@ -2,6 +2,7 @@
 // The positive case is the real public payment of invoice QDAY-2026-11-24-001 on QDay Aevum Testnet, checked
 // read-only against the public RPC. The negative cases are local copies of the receipt and a simulated outage.
 // Nothing is signed or sent. State: examples/accounts-payable/.state (and .state-concurrency), recreated each run.
+// If the public RPC does not answer (a real outage, not the simulated one), the demo stops with exit 3: run it again.
 //
 // Environment: AP_RPC overrides the RPC, AP_BOOKS the books, AP_RECEIPT the receipt file, AP_DEMO_DIR where the two
 // state directories go (the tests run the same demo against a local chain).
@@ -16,12 +17,12 @@ const BASE = process.env.AP_DEMO_DIR ?? HERE;
 const STATE = join(BASE, '.state');
 const STATE2 = join(BASE, '.state-concurrency');
 const RECEIPT = process.env.AP_RECEIPT ?? join(HERE, 'receipts', 'QDAY-2026-11-24-001.json');
-const COPIES = join(STATE, 'copies');
+const COPIES = join(BASE, '.state-copies');
 
 /** Runs `node ap.mjs …` as its own process; resolves with its exit code and parsed RESULT line. */
 function ap(args, env = {}, state = STATE) {
   return new Promise((done) => {
-    const p = spawn(process.execPath, [join(HERE, 'ap.mjs'), ...args], { env: { ...process.env, AP_STATE: state, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawn(process.execPath, ['--no-warnings=ExperimentalWarning', join(HERE, 'ap.mjs'), ...args], { env: { ...process.env, AP_STATE: state, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     p.stdout.on('data', (d) => (out += d));
     p.stderr.on('data', (d) => (err += d));
@@ -30,6 +31,23 @@ function ap(args, env = {}, state = STATE) {
       done({ code, result: line ? JSON.parse(line.slice(7)) : undefined, err: err.trim(), pid: p.pid });
     });
   });
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function rpcGaveUp() {
+  console.error('\nThe RPC did not answer after several tries: nothing is concluded (the delivery stays in the inbox). Run the demo again later.');
+  process.exit(3);
+}
+/** A step that needs the RPC: exit 3 (left in the inbox) is a real outage, not the demo's; try `retry` a few times. */
+async function withRpc(first, state = STATE) {
+  let r = first;
+  for (let i = 0; r.code === 3 && i < 3; i++) {
+    await sleep(3000);
+    const again = await ap(['retry'], {}, state);
+    r = { ...again, result: again.result?.results?.[0] ?? again.result };
+  }
+  if (r.code === 3) rpcGaveUp();
+  return r;
 }
 
 const failures = [];
@@ -46,10 +64,9 @@ function step(title, r, expect) {
   if (!okay) failures.push(title);
   return got;
 }
-const paidCount = async (state = STATE) => (await ap(['status'], {}, state)).result?.settlements;
+const status = async (state = STATE) => (await ap(['status'], {}, state)).result;
 
-rmSync(STATE, { recursive: true, force: true });
-rmSync(STATE2, { recursive: true, force: true });
+for (const d of [STATE, STATE2, COPIES]) rmSync(d, { recursive: true, force: true });
 console.log('Accounts-payable example: can this system mark its own invoice paid from a receipt?');
 console.log(`Receipt: ${RECEIPT}`);
 console.log(`Books (the system's own expected data): ${process.env.AP_BOOKS ?? join(HERE, 'books.json')}`);
@@ -81,18 +98,20 @@ const forged = copy('forged-invoice-id.json', (r) => {
 
 step('The network is down when the receipt arrives (simulated outage)', await ap(['deliver', 'AP-2026-0001', RECEIPT], { AP_RPC_DOWN: '1' }),
   (r) => r.code === 3 && r.result?.outcome === 'queued' && r.result.state === 'inconclusive');
-const duringOutage = await paidCount();
-console.log(`   Marks in the ledger during the outage: ${duringOutage} (expected 0); the delivery waits in the queue.`);
-if (duringOutage !== 0) failures.push('an invoice was marked paid during the outage');
+const during = await status();
+console.log(`   Marks during the outage: ${during.settlements} (expected 0); deliveries waiting in the inbox: ${during.inbox.length}.`);
+if (during.settlements !== 0 || during.inbox.length !== 1) failures.push('outage: expected 0 marks and 1 delivery in the inbox');
 
-const first = step('The network is back: retry the queued delivery (first and only mark)', await ap(['retry']),
-  (r) => r.code === 0 && r.result?.results?.[0]?.outcome === 'settled');
-if (first.results?.[0]?.outcome === 'queued') {
-  console.error('\nThe RPC did not answer: nothing is concluded. Run the demo again later.');
-  process.exit(3);
+let retried = await ap(['retry']);
+for (let i = 0; retried.code === 3 && i < 3; i++) {
+  await sleep(3000);
+  retried = await ap(['retry']);
 }
+if (retried.code === 3) rpcGaveUp();
+step('The network is back: retry the delivery in the inbox (first and only mark)', retried,
+  (r) => r.code === 0 && r.result?.results?.length === 1 && r.result.results[0].outcome === 'settled');
 
-step('Restart, then the same receipt is delivered again', await ap(['deliver', 'AP-2026-0001', RECEIPT]),
+step('Restart, then the same receipt is delivered again (answered from the books)', await ap(['deliver', 'AP-2026-0001', RECEIPT]),
   (r) => r.code === 0 && r.result?.outcome === 'already_settled');
 
 step('The valid receipt of invoice -001 delivered for invoice AP-2026-0002 (-002)', await ap(['deliver', 'AP-2026-0002', RECEIPT]),
@@ -101,30 +120,37 @@ step('The valid receipt of invoice -001 delivered for invoice AP-2026-0002 (-002
 step('A copy that claims another vault (and invoice -002)', await ap(['deliver', 'AP-2026-0002', otherVault]),
   (r) => r.code === 2 && r.result?.state === 'divergent' && r.result.differences?.some((d) => d.field === 'vault'));
 
-step('A copy edited to claim invoice -002 (matches the books, not the chain)', await ap(['deliver', 'AP-2026-0002', forged]),
+step('A copy edited to claim invoice -002 (matches the books, not the chain)', await withRpc(await ap(['deliver', 'AP-2026-0002', forged])),
   (r) => r.code === 2 && r.result?.state === 'not_paid');
 
-const paid = await paidCount();
-console.log(`\n   Marks in the ledger: ${paid} (expected 1)`);
-if (paid !== 1) failures.push(`expected 1 mark, found ${paid}`);
+const end = await status();
+console.log(`\n   Marks in the ledger: ${end.settlements} (expected 1); inbox: ${end.inbox.length} (expected 0)`);
+if (end.settlements !== 1 || end.inbox.length !== 0) failures.push(`expected 1 mark and an empty inbox, found ${end.settlements} and ${end.inbox.length}`);
 
 // Two processes deliver the same receipt at the same time, on a fresh state.
 await ap(['init'], {}, STATE2);
 const [a, b] = await Promise.all([ap(['deliver', 'AP-2026-0001', RECEIPT], {}, STATE2), ap(['deliver', 'AP-2026-0001', RECEIPT], {}, STATE2)]);
-const outcomes = [a.result?.outcome, b.result?.outcome].sort();
 n++;
 console.log(`\n${n}. Two processes deliver the same receipt at the same time (fresh state)`);
 console.log(`   process ${a.pid}: ${a.result?.outcome}; process ${b.pid}: ${b.result?.outcome}`);
-const paid2 = await paidCount(STATE2);
-console.log(`   Marks in that ledger: ${paid2} (expected 1)`);
-const concOk = outcomes[0] === 'already_settled' && outcomes[1] === 'settled' && paid2 === 1;
+if (a.code === 3 || b.code === 3) {
+  let again = await ap(['retry'], {}, STATE2);
+  for (let i = 0; again.code === 3 && i < 3; i++) {
+    await sleep(3000);
+    again = await ap(['retry'], {}, STATE2);
+  }
+  if (again.code === 3) rpcGaveUp();
+  console.log(`   (the RPC did not answer one of them; retry: ${again.result?.results?.map((x) => x.outcome).join(', ')})`);
+}
+const s2 = await status(STATE2);
+console.log(`   Marks in that ledger: ${s2.settlements}, "settled" events: ${s2.settledEvents} (expected 1 and 1)`);
+const concOk = s2.settlements === 1 && s2.settledEvents === 1 && s2.inbox.length === 0 && [a, b].every((x) => ['settled', 'already_settled', 'queued'].includes(x.result?.outcome));
 console.log(`   ${concOk ? 'as expected' : 'NOT AS EXPECTED'}`);
 if (!concOk) failures.push('concurrent deliveries');
 
-const s = (await ap(['status'])).result;
-console.log(`\nFinal books (${STATE}):`);
-for (const [ref, v] of Object.entries(s.invoices)) console.log(`   ${ref}: ${v.status}${v.txHash ? ` (tx ${v.txHash}, block ${v.blockNumber})` : ''}`);
-console.log(`   Audit log: ${join(STATE, 'events.jsonl')}`);
+console.log(`\nFinal books (${join(STATE, 'ap.sqlite')}):`);
+for (const [ref, v] of Object.entries(end.invoices)) console.log(`   ${ref}: ${v.status}${v.txHash ? ` (tx ${v.txHash}, block ${v.blockNumber})` : ''}`);
+console.log('   Audit log: the "events" table of that file (node ap.mjs status shows the books, the marks and the inbox).');
 
 if (failures.length) {
   console.error(`\nFAILED: ${failures.join('; ')}`);

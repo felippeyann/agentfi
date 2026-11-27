@@ -416,7 +416,7 @@ The page's answer is for a person. A business system (accounts payable, an ERP) 
 | `not_paid` | reject | your vault has no settlement of your invoice: the receipt is not backed by the chain |
 | `mismatch` | reject | the chain's records disagree, or the receipt names another transaction or event |
 | `pending` | retry | paid, not finalized yet (about an hour on Aevum) |
-| `inconclusive` | retry | the chain could not be read (or another chain answered): nothing concluded, try again |
+| `inconclusive` | retry | the chain could not be read, or the node answered in a degraded way (another chain, an empty `eth_call`, no event or no receipt for a settlement it reports, a head below the receipt's block): nothing concluded, try again |
 | `invalid` | reject | the receipt or your record is malformed |
 
 **For a juror: download, check, try.** Work in `packages/invoice-agent`, after `npm ci` at the root. All three steps read the public Aevum RPC (the third one for its positive case).
@@ -439,38 +439,41 @@ The page's answer is for a person. A business system (accounts payable, an ERP) 
    - Exit code: 0 settle, 2 reject, 3 retry.
 3. **Try the example** with `npm run ap:demo`.
    - **What it is:** a small accounts-payable system (`examples/accounts-payable/ap.mjs`) with two invoices in its own books (`books.json`). `AP-2026-0001` is the public invoice; `AP-2026-0002` was never paid.
-   - **How it runs:** each step is a separate process, so every step is a restart. The state lives in `examples/accounts-payable/.state`.
+   - **How it runs:** each step is a separate process, so every step is a restart. The state is one SQLite file, `examples/accounts-payable/.state/ap.sqlite`.
    - **The steps:**
-     1. the receipt arrives while the network is down (simulated): `queued (inconclusive)`, nothing is marked;
+     1. the receipt arrives while the network is down (simulated): `queued (inconclusive)`, nothing is marked, the delivery waits in the inbox;
      2. the network is back and `retry` runs: `settled`, the first and only mark;
-     3. after a restart, the same receipt arrives again: `already_settled`, nothing changes;
+     3. after a restart, the same receipt arrives again: `already_settled`, answered from the books without reading the chain; nothing changes;
      4. the valid receipt of `-001` is delivered for `AP-2026-0002`: `divergent` (`invoice.id`);
      5. a local copy claims another vault: `divergent` (`vault`);
      6. a local copy is edited to claim `-002`, so it matches the books but not the chain: `not_paid`;
      7. on a fresh state, two processes deliver the same receipt at the same time: one `settled`, one `already_settled`, one mark.
-   - **The end:** "Every step behaved as expected", then the books (`AP-2026-0001: paid`, `AP-2026-0002: open`). The audit log is `.state/events.jsonl`.
-   - **If the public RPC does not answer:** step 2 stays queued and the demo stops with exit 3 ("run the demo again later").
+   - **The end:** "Every step behaved as expected", then the books (`AP-2026-0001: paid`, `AP-2026-0002: open`). The audit log is the `events` table of that file; `node examples/accounts-payable/ap.mjs status` shows the books, the marks and the inbox.
+   - **If the public RPC does not answer:** a step that needs it is retried a few times; if the RPC still does not answer, the demo stops with exit 3 ("run the demo again later") and nothing is marked.
 
 **How the example keeps one mark per payment.**
 - The expected data come from the books, never from the receipt.
-- The chain check runs without a lock: it only decides whether a mark is allowed.
-- The mark itself is written under an exclusive lock file (`O_EXCL`), after re-reading the ledger, with write-then-rename and `fsync`.
-- A second delivery, whether after a restart or at the same moment from another process, finds the invoice already marked by the same `settlementId` and changes nothing.
+- A delivery is written to the inbox when it arrives and leaves it only with a final answer. `retry` outcomes, and a process killed during the check, are picked up by `retry`.
+- The chain check runs outside any transaction: it only decides whether a mark is allowed.
+- The mark, its audit event and the inbox removal are one SQLite transaction (`BEGIN IMMEDIATE`, WAL, `synchronous = FULL`) that re-reads the books first. `UNIQUE` constraints on the invoice and on the payment (`settlementId`) are the last guard.
+- A second delivery, whether after a restart or at the same moment from another process, finds the invoice already marked by the same payment and changes nothing.
 - One payment can settle only one invoice of the books. An invoice already marked by *another* payment is refused as a conflict.
-- Deliveries that end in `retry` wait in `.state/queue/` until `retry` runs.
 
 **Limits.**
 - The check trusts one RPC, as the page does: use the official one, or your own node.
 - The receipt is a claim. Without your own record, it proves only that *some* invoice was paid.
-- The example's lock is a file on one machine's disk. A system that runs on several machines needs its database's own uniqueness constraint on `settlementId`.
+- The example keeps its books in one SQLite file on one machine. A real system keeps the same two rules in its own database: a uniqueness constraint on `settlementId`, and the mark in the same transaction as its audit record.
 
 **Tests.** `test/receipt.test.ts` runs against Anvil and covers:
 - the historical payee after a `setMandate`;
 - another invoice and another vault;
 - edited copies;
-- an outage, then a retry;
+- an outage, then a retry, and degraded RPC answers (no event, no receipt, an empty `eth_call`, a node behind the receipt);
 - a payment not yet finalized;
-- the whole `ap:demo`, with its ledger checked on disk.
+- the whole `ap:demo`;
+- a process killed during the check;
+- six deliveries and two retries at once, plus the same payment delivered for a second invoice;
+- the two CLI scripts.
 
 ## ERC-8004: a rating that needs a settled invoice (local; not deployed)
 
@@ -533,7 +536,7 @@ Done on 2026-11-24, by the owner: the vault deployed, funded and mandated, and o
 
 | What | Version / source | Used for |
 |---|---|---|
-| Node.js | ≥ 22.13 (`engines`; CI uses Node 22) | everything; `node:sqlite` for the ledger and its lock |
+| Node.js | ≥ 22.13 (`engines`; CI uses Node 22) | everything; `node:sqlite` for the ledger and its lock, and for the accounts-payable example's books |
 | `viem`, `@modelcontextprotocol/sdk` | `package.json` ranges, resolved in the **root** `package-lock.json` (npm workspaces: this package has no lockfile of its own) | chain reads and signing; the read-only MCP server |
 | `tsx`, `typescript`, `@types/node` | same | running `src/*.ts` directly, `npm run typecheck` |
 | `evaluateUsdcSpend` | `packages/backend/src/services/policy/` (imported by relative path from `src/mandate.ts`) | the spend rules; [provenance above](#agentfi-before-the-challenge-vs-built-for-the-challenge) |
@@ -571,4 +574,4 @@ Tests (`npm test` runs `test/*.test.ts`; each file starts its own Anvil on a fre
 - `test/lost-response.test.ts` the crash cases, refusals, conflict · `test/review-fixes.test.ts` races, the lock, RPC failures, nonce taken, re-judged refusal, operator resolve (from the independent review)
 - `test/finality.test.ts` the confirmation rule, reorgs before confirmation, inconsistent receipts, an unreadable finalized block · `test/config-guard.test.ts` keys, mandate, ledger binding, confirmation settings
 - `test/gas-ceiling.test.ts` the gas ceiling and the signed fields · `test/tip-cap.test.ts` the tip cap, against the Aevum reading of 2026-11-24 · `test/log-pages.test.ts` paged `eth_getLogs`, INCOMPLETE on a failed page
-- `test/vault.test.ts` the agent through the vault · `test/session-probe.test.ts` the session's `--probe-paid` step · `test/mcp.test.ts` the MCP server over stdio · `test/verify-page.test.ts` the verification page's logic and its resend simulation · `test/receipt.test.ts` the portable receipt, its check and `ap:demo` on Anvil · `test/fixtures/` helpers (the lock holder, a free port)
+- `test/vault.test.ts` the agent through the vault · `test/session-probe.test.ts` the session's `--probe-paid` step · `test/mcp.test.ts` the MCP server over stdio · `test/verify-page.test.ts` the verification page's logic and its resend simulation · `test/receipt.test.ts` the portable receipt, its check, the CLI scripts and the accounts-payable example on Anvil · `test/fixtures/` helpers (the lock holder, a free port)

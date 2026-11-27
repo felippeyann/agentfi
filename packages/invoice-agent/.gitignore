@@ -7,3 +7,4 @@ contracts/cache/
 .sessions/
 examples/accounts-payable/.state/
 examples/accounts-payable/.state-concurrency/
+examples/accounts-payable/.state-copies/

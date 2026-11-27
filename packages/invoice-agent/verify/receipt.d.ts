@@ -17,7 +17,7 @@ export interface Receipt {
   payment: {
     txHash: string;
     blockNumber: number;
-    blockHash?: string;
+    blockHash: string;
     blockTime?: string;
     agent: string;
     events: (
