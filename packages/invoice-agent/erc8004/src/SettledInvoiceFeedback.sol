@@ -191,7 +191,17 @@ contract SettledInvoiceFeedback {
             invoiceId: invoiceId
         });
         emit AnchoredFeedback(
-            agentId, feedbackIndex, address(vault), key, invoiceId, vendor, settledBy, msg.sender, role, blockNumber, amount
+            agentId,
+            feedbackIndex,
+            address(vault),
+            key,
+            invoiceId,
+            vendor,
+            settledBy,
+            msg.sender,
+            role,
+            blockNumber,
+            amount
         );
     }
 

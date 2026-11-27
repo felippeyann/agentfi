@@ -21,9 +21,13 @@ library Deploy8004 {
     /// @dev Step 1 (any sender): the placeholder and three proxies initialized with `owner`.
     function deployProxies(address owner) internal returns (address identity, address reputation, address validation) {
         LocalBootstrapUUPS boot = new LocalBootstrapUUPS();
-        identity = address(new ERC1967Proxy(address(boot), abi.encodeCall(LocalBootstrapUUPS.initialize, (owner, address(0)))));
-        reputation = address(new ERC1967Proxy(address(boot), abi.encodeCall(LocalBootstrapUUPS.initialize, (owner, identity))));
-        validation = address(new ERC1967Proxy(address(boot), abi.encodeCall(LocalBootstrapUUPS.initialize, (owner, identity))));
+        identity = address(
+            new ERC1967Proxy(address(boot), abi.encodeCall(LocalBootstrapUUPS.initialize, (owner, address(0))))
+        );
+        reputation =
+            address(new ERC1967Proxy(address(boot), abi.encodeCall(LocalBootstrapUUPS.initialize, (owner, identity))));
+        validation =
+            address(new ERC1967Proxy(address(boot), abi.encodeCall(LocalBootstrapUUPS.initialize, (owner, identity))));
     }
 
     /// @dev Step 2 (sender must be `owner`): the real implementations, then upgradeToAndCall(impl, initialize).
@@ -31,13 +35,12 @@ library Deploy8004 {
         IdentityRegistryUpgradeable idImpl = new IdentityRegistryUpgradeable();
         ReputationRegistryUpgradeable repImpl = new ReputationRegistryUpgradeable();
         ValidationRegistryUpgradeable valImpl = new ValidationRegistryUpgradeable();
-        LocalBootstrapUUPS(identity).upgradeToAndCall(address(idImpl), abi.encodeCall(IdentityRegistryUpgradeable.initialize, ()));
-        LocalBootstrapUUPS(reputation).upgradeToAndCall(
-            address(repImpl), abi.encodeCall(ReputationRegistryUpgradeable.initialize, (identity))
-        );
-        LocalBootstrapUUPS(validation).upgradeToAndCall(
-            address(valImpl), abi.encodeCall(ValidationRegistryUpgradeable.initialize, (identity))
-        );
+        LocalBootstrapUUPS(identity)
+            .upgradeToAndCall(address(idImpl), abi.encodeCall(IdentityRegistryUpgradeable.initialize, ()));
+        LocalBootstrapUUPS(reputation)
+            .upgradeToAndCall(address(repImpl), abi.encodeCall(ReputationRegistryUpgradeable.initialize, (identity)));
+        LocalBootstrapUUPS(validation)
+            .upgradeToAndCall(address(valImpl), abi.encodeCall(ValidationRegistryUpgradeable.initialize, (identity)));
         r.identity = IdentityRegistryUpgradeable(identity);
         r.reputation = ReputationRegistryUpgradeable(reputation);
         r.validation = ValidationRegistryUpgradeable(validation);

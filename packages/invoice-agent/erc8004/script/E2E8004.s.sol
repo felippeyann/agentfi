@@ -93,7 +93,8 @@ contract E2E8004 is Script {
                 deadline
             )
         );
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(AGENT_PK, keccak256(abi.encodePacked("\x19\x01", domainSep, structHash)));
+        (uint8 v, bytes32 r, bytes32 s) =
+            vm.sign(AGENT_PK, keccak256(abi.encodePacked("\x19\x01", domainSep, structHash)));
         return abi.encodePacked(r, s, v);
     }
 }
