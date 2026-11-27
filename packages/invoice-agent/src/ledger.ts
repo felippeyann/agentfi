@@ -11,7 +11,8 @@
  *   broadcast  handed to the node; no receipt seen yet
  *   included   mined in a block, Transfer matches, but the block does not satisfy the confirmation rule yet
  *              (finality.ts): still OPEN, re-checked (it can leave the canonical chain)
- *   confirmed  mined, success, and the Transfer log matches (payer → payTo, exact amount)
+ *   confirmed  mined, success, the Transfer log matches (source → payTo, exact amount; with a vault, also its
+ *              InvoiceSettled), and the block satisfies the confirmation rule and is canonical
  *   stuck      the payer's nonce is used on-chain but this transaction was not found: either another
  *              transaction took the nonce (no money moved) or the node has not indexed ours. Stays
  *              OPEN: re-checked on every resubmission and reconcile; never read as "no money moved"
