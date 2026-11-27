@@ -45,6 +45,13 @@
     <h2>Checks</h2>
     <ul id="checks" class="checks"></ul>
 
+    <section id="portable" class="resend" aria-labelledby="portable-h">
+      <h2 id="portable-h">Receipt for your own system</h2>
+      <p class="next">A JSON file (<code>agentfi.invoice-receipt</code>, version 1) with the network, the vault, the token, the invoice, the payee and the amount in base units, and the transaction and the two events that carry the payment. The payee is the one in the payment's own event, not the vault's current mandate. The file is a claim: your system checks it against its own invoice record and the chain (read-only) before marking the invoice paid.</p>
+      <button id="receipt-go" type="button">Download receipt (JSON)</button>
+      <p id="receipt-why" class="next" hidden></p>
+    </section>
+
     <section id="resend" class="resend" aria-labelledby="resend-h">
       <h2 id="resend-h">What if the agent pays it again?</h2>
       <p class="next">Asks the vault what it would answer if the agent that settled this invoice sent the same payment again: the same <code>payInvoice</code> (invoice id, vendor, payee, amount from the receipt above), simulated with a read-only <code>eth_call</code> at a block after the settlement. No wallet, nothing is signed or sent.</p>

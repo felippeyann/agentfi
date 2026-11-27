@@ -15,6 +15,7 @@
 | What if the agent crashes after broadcasting? | The signed transaction was recorded in the ledger before it was sent, so the resend finds it by hash and answers with the original transaction; nothing new is signed. | [How it works](#how-it-works), `src/payer.ts`, `test/lost-response.test.ts`, `test/vault.test.ts` |
 | Where do I see there was a single transfer? | On-chain: the vault's `settlementOf` and the transaction's two logs. Locally: `ops verify` counts every transfer to the payee since the session's first block, in pages; a page that fails makes the check INCOMPLETE, never verified. | [Check it yourself](#the-first-public-payment-on-aevum-check-it-yourself), `test/log-pages.test.ts` |
 | How do I check the proof without a wallet? | Open the verification page link, or run the three `cast` reads below: public RPC, no key. | [Check it yourself](#the-first-public-payment-on-aevum-check-it-yourself) |
+| Can another system mark its invoice paid from this? | A versioned JSON receipt and a read-only check against your own invoice record and the chain; `npm run ap:demo` shows an accounts-payable system doing it once, across restarts, outages and concurrent deliveries. | [Portable receipt](#portable-receipt-can-another-system-mark-its-invoice-paid) |
 
 The path of one invoice, from the mandate to the receipt:
 
@@ -380,7 +381,119 @@ Step 6 of the vault session counts independently, since the session's first bloc
 
 For a `paid_verified` receipt the page also offers **"Simulate a resend after the payment"**: a read-only `eth_call` of the same `payInvoice` (id, vendor, payee, amount from the receipt) from the settling agent, at the latest block if the mandate is still valid there, otherwise a few blocks after the settlement block and before the mandate's expiry (`payInvoice` checks the expiry before the duplicate). It counts as shown only if the vault reverts `AlreadySettled` with the receipt's invoice key and settlement block; a control call one block before the settlement is shown alongside: it is expected to pass, a control that already reverts `AlreadySettled` makes the result inconclusive, and a control the node does not answer is reported as such. An RPC without that block's state, or any other answer, is reported as unavailable or inconclusive. Why the block matters: [the order of the vault's checks](#the-on-chain-vault-invoicemandate). Tested in `test/verify-page.test.ts` (valid mandate, mandate expired at the latest block, expiry inside the offset, RPC down, no historical state, unexpected answers).
 
-Try it locally: `npm run verify:fixture` (Anvil, a vault, INV-001 finalized and INV-002 not yet; it serves the page on 127.0.0.1 and prints the links; Ctrl+C stops it; ports 8571 and 8572 by default, or `FIXTURE_ANVIL_PORT` / `FIXTURE_PAGE_PORT`). `test/verify-page.test.ts` runs the page's logic against Anvil and checks its states against the agent's own answer and its hand-written selectors against the contract ABI. **Live** since 2026-11-25 at https://www.agentfi.cc/verify/index.html. The live copy is this folder as of commit `31d1c1a` (PR #220); the resend simulation goes live with the next deploy of the page. For example, [the first public invoice](https://www.agentfi.cc/verify/index.html?vault=0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3&invoice=QDAY-2026-11-24-001).
+Try it locally: `npm run verify:fixture` (Anvil, a vault, INV-001 finalized and INV-002 not yet; it serves the page on 127.0.0.1 and prints the links; Ctrl+C stops it; ports 8571 and 8572 by default, or `FIXTURE_ANVIL_PORT` / `FIXTURE_PAGE_PORT`). `test/verify-page.test.ts` runs the page's logic against Anvil and checks its states against the agent's own answer and its hand-written selectors against the contract ABI. **Live** since 2026-11-25 at https://www.agentfi.cc/verify/index.html. The live copy is this folder as of commit `31d1c1a` (PR #220); the resend simulation and the receipt download go live with the next deploy of the page. For example, [the first public invoice](https://www.agentfi.cc/verify/index.html?vault=0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3&invoice=QDAY-2026-11-24-001).
+
+## Portable receipt: can another system mark its invoice paid?
+
+The page's answer is for a person. A business system (accounts payable, an ERP) needs a file it can keep and a rule it can run. This adds both: a versioned **receipt**, and a **read-only check** that decides whether *your* invoice can be marked paid. It is local for now: the page's download button goes live with the next deploy of the page, but the scripts below already work against the public chain.
+
+**The receipt** (`agentfi.invoice-receipt`, version 1). `verify/receipt.js` builds it from a `paid_verified` check:
+
+| Field | Content | Source |
+|---|---|---|
+| `network` | `chainId` and `caip2` (`eip155:44005`) | the node, checked against the expected chain |
+| `vault`, `token` | the `InvoiceMandate` vault and the token it pays in | the request; `token()` of the vault |
+| `invoice` | `id`, `vendorId` (and its `bytes32`), `invoiceKey` | the `InvoiceSettled` event and `settlementOf` |
+| `payee` | who was paid | the payment's own `InvoiceSettled` event (and its `Transfer`), **not** the vault's current mandate: a later `setMandate` changes nothing |
+| `amount` | `units` (a decimal string of base units), `decimals` 6, `display` | the event |
+| `payment` | `txHash`, `blockNumber`, `blockHash`, `blockTime`, `agent`, and the two `events` with their `logIndex` (`InvoiceSettled` from the vault, `Transfer` vault → payee) | the transaction receipt |
+| `finality`, `issued`, `explorer` | the rule (`finalized`) and the finalized block when the receipt was issued; when, and from which RPC | informative only |
+
+**The check** is `checkReceipt({ rpc, receipt, expected })`: read-only, no wallet. `expected` is **your own record** of the invoice: network, vault, token, invoice id, vendor id, payee, and amount in base units. It is never copied from the receipt. The check runs in this order:
+1. **The receipt against your record.** Its claims must equal your record, otherwise the result is `divergent` and the chain is not read. A valid receipt of another invoice or another vault stops here.
+2. **The chain against your record.** The chain is read for **your** vault and invoice, with the same checks as the page:
+   - `settlementOf` and the event;
+   - exactly one `Transfer` vault → payee;
+   - a canonical block at or below `finalized`.
+
+   The payment on chain must also equal your record.
+3. **The receipt against the chain.** The receipt must name that payment: transaction, block, block hash, invoice key and both log indexes.
+
+| Result | Decision | Meaning |
+|---|---|---|
+| `settle` | settle | mark the invoice paid; `settlementId` (`eip155:<chain>:<vault>:<invoiceKey>`) identifies the payment |
+| `divergent` | reject | the receipt, or the payment on chain, is for another invoice, vault, token, vendor, payee or amount |
+| `not_paid` | reject | your vault has no settlement of your invoice, and the node shows the receipt's transaction in the declared block: it is not the payment of this invoice |
+| `mismatch` | reject | a proven divergence: the chain's records disagree, the receipt names another transaction or event, or the node places the receipt's transaction (or the declared block height) in another block than the file says |
+| `pending` | retry | paid, not finalized yet (about an hour on Aevum) |
+| `inconclusive` | retry | no evidence either way: the chain could not be read, the node answered in a degraded way (another chain, an empty `eth_call`, no event or no receipt for a settlement it reports), or it does not know the receipt's transaction (see below) |
+| `invalid` | reject | the receipt or your record is malformed |
+
+Every result also says `conclusive` (false exactly for `retry`). A reject always rests on evidence: a difference with your record, or a fact the node reports. A `retry` means the node gave none; it is never a reason to reject, and when to check again is **your** policy (the check itself never loops).
+
+**When your vault has no settlement of your invoice**, the check asks the node about the receipt's own transaction (`eth_getTransactionReceipt` by its hash) and, if needed, the declared block (`eth_getBlockByNumber`). The node's height alone never decides anything:
+
+| Situation | Result |
+|---|---|
+| The node knows the transaction, in another block (number or hash) than the file declares | `mismatch`: proven divergence |
+| The node knows the transaction, in the declared block, but it settled nothing of yours | `not_paid` |
+| The node does not know the transaction, but has the declared block height with another hash | `mismatch`: proven divergence |
+| The node does not know the transaction and is below the declared block: a genuine receipt and a node that is behind, or a receipt naming a transaction that does not exist (for instance in a future block) | `inconclusive`, `uncertainty: node_behind_or_receipt_invalid`. One source cannot tell these apart: keep the invoice open, check with another RPC or later. |
+| The node has the declared block with the receipt's hash but not the transaction | `inconclusive`: this node cannot answer |
+
+**For a juror: download, check, try.** Work in `packages/invoice-agent`, after `npm ci` at the root. All three steps read the public Aevum RPC (the third one for its positive case).
+
+1. **Get the receipt** of the public invoice. Once the page is redeployed, the page offers "Download receipt (JSON)" under a `paid_verified` result. Today you can get the same file from the terminal:
+
+   ```
+   npm run receipt:fetch -- --vault 0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3 --invoice QDAY-2026-11-24-001 --vendor vendor-1 --out receipt.json
+   ```
+
+   A copy made this way on 27 Nov is in `examples/accounts-payable/receipts/QDAY-2026-11-24-001.json`.
+2. **Check it** against an expected record. Use your own; the example's is `examples/accounts-payable/expected-QDAY-2026-11-24-001.json`:
+
+   ```
+   npm run receipt:check -- --receipt receipt.json --expect examples/accounts-payable/expected-QDAY-2026-11-24-001.json
+   ```
+
+   - The expected output is `SETTLE (decision: settle)` followed by nine `ok` lines.
+   - Edit one field of the expected file (the amount, the invoice id or the vault) and run it again: the result is `DIVERGENT`.
+   - Exit code: 0 settle, 2 reject, 3 retry (no evidence either way).
+3. **Try the example** with `npm run ap:demo`.
+   - **What it is:** a small accounts-payable system (`examples/accounts-payable/ap.mjs`) with two invoices in its own books (`books.json`). `AP-2026-0001` is the public invoice; `AP-2026-0002` was never paid.
+   - **How it runs:** each step is a separate process, so every step is a restart. The state is one SQLite file, `examples/accounts-payable/.state/ap.sqlite`.
+   - **The steps:**
+     1. the receipt arrives while the network is down (simulated): `queued (inconclusive)`, nothing is marked, the delivery waits in the inbox;
+     2. the network is back and `retry` runs: `settled`, the first and only mark;
+     3. after a restart, the same receipt arrives again: `already_settled`, answered from the books without reading the chain; nothing changes;
+     4. the valid receipt of `-001` is delivered for `AP-2026-0002`: `divergent` (`invoice.id`);
+     5. a local copy claims another vault: `divergent` (`vault`);
+     6. a local copy is edited to claim `-002`; its transaction exists in the declared block but settled `-001`: `not_paid`;
+     7. the same copy with another block number: the node knows the transaction in its real block, a proven divergence: `mismatch`;
+     8. a copy claiming `-002` with an unknown transaction in a future block: `queued (inconclusive)` with the uncertainty spelled out, no reject, the invoice stays open;
+     9. `retry` (the demo caps the attempts at 2): still no evidence, so the delivery is parked for review (`needs_review`, exit 4);
+     10. `retry` again: the parked delivery is not checked again;
+     11. on a fresh state, two processes deliver the same receipt at the same time: one `settled`, one `already_settled`, one mark.
+   - **The end:** "Every step behaved as expected", then the books (`AP-2026-0001: paid`, `AP-2026-0002: open`, one delivery parked for review). The audit log is the `events` table of that file; `node examples/accounts-payable/ap.mjs status` shows the books, the marks and the inbox (run directly, `ap.mjs` prints Node's `ExperimentalWarning` for `node:sqlite` on stderr; the demo hides it).
+   - **If the public RPC does not answer:** a step that needs it is retried a few times; if the RPC still does not answer, the demo stops with exit 3 ("run the demo again later") and nothing is marked.
+
+**How the example keeps one mark per payment.**
+- The expected data come from the books, never from the receipt.
+- A delivery is written to the inbox when it arrives and leaves it only with a final answer. `retry` outcomes, and a process killed during the check, are picked up by `retry`.
+- The chain check runs outside any transaction: it only decides whether a mark is allowed.
+- The mark, its audit event and the inbox removal are one SQLite transaction (`BEGIN IMMEDIATE`, WAL, `synchronous = FULL`) that re-reads the books first. `UNIQUE` constraints on the invoice and on the payment (`settlementId`) are the last guard.
+- A second delivery, whether after a restart or at the same moment from another process, finds the invoice already marked by the same payment and changes nothing.
+- One payment can settle only one invoice of the books. An invoice already marked by *another* payment is refused as a conflict.
+
+**The example's retry policy** (separate from the check). A `retry` result leaves the invoice open and the delivery in the inbox, due again after a backoff (`AP_RETRY_BASE_S`, default 30 s, doubling per attempt, at most an hour). After `AP_MAX_ATTEMPTS` checks without evidence (default 5) the delivery is **parked**: it stays in the inbox, the invoice stays open, `retry` no longer checks it, and a `needs_review` event asks a person to look (for instance against another RPC). Delivering the receipt again is that person's explicit re-check. So a receipt that no node can confirm is neither marked, nor rejected on a guess, nor retried for ever.
+
+**Limits.**
+- The check trusts one RPC, as the page does: use the official one, or your own node.
+- The receipt is a claim. Without your own record, it proves only that *some* invoice was paid.
+- The example keeps its books in one SQLite file on one machine. A real system keeps the same two rules in its own database: a uniqueness constraint on `settlementId`, and the mark in the same transaction as its audit record.
+
+**Tests.** `test/receipt.test.ts` runs against Anvil and covers:
+- the historical payee after a `setMandate`;
+- another invoice and another vault;
+- edited copies;
+- an outage, then a retry, and degraded RPC answers (no event, no receipt, an empty `eth_call`);
+- the receipt's block: a known transaction in another block (proven divergence), a known transaction in the declared block (`not_paid`), the declared height with another hash (proven divergence), a genuine receipt and a node that is behind (no reject, however far; settled once it catches up), an unknown transaction in a future block (inconclusive with the uncertainty);
+- the same in the books, through an RPC proxy that lags then catches up: the invoice stays open, then one mark; the unconfirmable receipt is parked after the attempt cap and left alone by `retry`;
+- a payment not yet finalized;
+- the whole `ap:demo`;
+- a process killed during the check;
+- six deliveries and two retries at once, plus the same payment delivered for a second invoice;
+- the two CLI scripts.
 
 ## ERC-8004: a rating that needs a settled invoice (local; not deployed)
 
@@ -443,7 +556,7 @@ Done on 2026-11-24, by the owner: the vault deployed, funded and mandated, and o
 
 | What | Version / source | Used for |
 |---|---|---|
-| Node.js | ≥ 22.13 (`engines`; CI uses Node 22) | everything; `node:sqlite` for the ledger and its lock |
+| Node.js | ≥ 22.13 (`engines`; CI uses Node 22) | everything; `node:sqlite` for the ledger and its lock, and for the accounts-payable example's books |
 | `viem`, `@modelcontextprotocol/sdk` | `package.json` ranges, resolved in the **root** `package-lock.json` (npm workspaces: this package has no lockfile of its own) | chain reads and signing; the read-only MCP server |
 | `tsx`, `typescript`, `@types/node` | same | running `src/*.ts` directly, `npm run typecheck` |
 | `evaluateUsdcSpend` | `packages/backend/src/services/policy/` (imported by relative path from `src/mandate.ts`) | the spend rules; [provenance above](#agentfi-before-the-challenge-vs-built-for-the-challenge) |
@@ -472,7 +585,8 @@ The invoice's path through the code, in order:
 - `src/mcp-fixture.ts`, `src/verify-fixture.ts` local synthetic worlds for the MCP server and the verification page · `src/generated/` ABI and bytecode (generated, see above)
 - `contracts/src/InvoiceMandate.sol` the on-chain vault · `contracts/src/LocalTestUSD8.sol` the local test token · `contracts/script/InvoiceMandate.s.sol` the owner's three transactions · `contracts/test/` the Foundry tests (`InvoiceMandateReview.t.sol`: the security review's adversarial cases; `InvoiceMandateScript.t.sol`: the script's guards; `AevumFork.t.sol`: opt-in, the real tUSD8 on a local fork)
 - `scripts/gen-token.mjs` writes or checks `src/generated/` · `scripts/aevum-fork-gas.mjs` the vault's gas on a local fork of Aevum (`npm run gas:aevum-fork`) · `scripts/aevum-fork-renewal.mjs` a mandate renewal and a second payment rehearsed on a local fork of the real vault (read-only toward Aevum)
-- `verify/` the read-only verification page (static, live at agentfi.cc/verify), with the resend simulation
+- `verify/` the read-only verification page (static, live at agentfi.cc/verify), with the resend simulation; `verify/receipt.js` the portable receipt and its check
+- `scripts/fetch-receipt.mjs`, `scripts/check-receipt.mjs` the receipt from the terminal (`npm run receipt:fetch`, `npm run receipt:check`) · `examples/accounts-payable/` the accounts-payable example (`ap.mjs`, `demo.mjs`, its `books.json`, the public receipt and its expected record)
 - `erc8004/` ERC-8004 ratings anchored in settled invoices (local, not deployed): `src/SettledInvoiceFeedback.sol` the adapter, `test/` its Foundry tests, `script/` a local end-to-end run and a read-only reader, `vendor/` the pinned reference registries and OpenZeppelin (see `vendor/PROVENANCE.md`)
 
 Tests (`npm test` runs `test/*.test.ts`; each file starts its own Anvil on a free port):
@@ -480,4 +594,4 @@ Tests (`npm test` runs `test/*.test.ts`; each file starts its own Anvil on a fre
 - `test/lost-response.test.ts` the crash cases, refusals, conflict · `test/review-fixes.test.ts` races, the lock, RPC failures, nonce taken, re-judged refusal, operator resolve (from the independent review)
 - `test/finality.test.ts` the confirmation rule, reorgs before confirmation, inconsistent receipts, an unreadable finalized block · `test/config-guard.test.ts` keys, mandate, ledger binding, confirmation settings
 - `test/gas-ceiling.test.ts` the gas ceiling and the signed fields · `test/tip-cap.test.ts` the tip cap, against the Aevum reading of 2026-11-24 · `test/log-pages.test.ts` paged `eth_getLogs`, INCOMPLETE on a failed page
-- `test/vault.test.ts` the agent through the vault · `test/session-probe.test.ts` the session's `--probe-paid` step · `test/mcp.test.ts` the MCP server over stdio · `test/verify-page.test.ts` the verification page's logic and its resend simulation · `test/fixtures/` helpers (the lock holder, a free port)
+- `test/vault.test.ts` the agent through the vault · `test/session-probe.test.ts` the session's `--probe-paid` step · `test/mcp.test.ts` the MCP server over stdio · `test/verify-page.test.ts` the verification page's logic and its resend simulation · `test/receipt.test.ts` the portable receipt, its check, the CLI scripts and the accounts-payable example on Anvil · `test/fixtures/` helpers (the lock holder, a free port)

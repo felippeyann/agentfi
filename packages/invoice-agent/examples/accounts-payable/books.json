@@ -1,0 +1,29 @@
+{
+  "note": "The accounts-payable system's OWN records of the invoices it owes. The expected data of each invoice (network, vault, token, invoice id, vendor, payee, amount) comes from here, never from a receipt.",
+  "invoices": {
+    "AP-2026-0001": {
+      "description": "QDay demo: vendor-1, invoice QDAY-2026-11-24-001, 1 tUSD8 (the public payment of 24 Nov 2026)",
+      "expected": {
+        "chainId": 44005,
+        "vault": "0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3",
+        "token": "0x456569838f1d43009A91ebA4263147Afd7233483",
+        "invoiceId": "QDAY-2026-11-24-001",
+        "vendorId": "vendor-1",
+        "payee": "0x46fbCbbA2b425AdFB958507F5F341FCc4932C530",
+        "amountUnits": "1000000"
+      }
+    },
+    "AP-2026-0002": {
+      "description": "A second invoice from the same vendor, NOT paid on chain: a receipt for another invoice must not settle it",
+      "expected": {
+        "chainId": 44005,
+        "vault": "0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3",
+        "token": "0x456569838f1d43009A91ebA4263147Afd7233483",
+        "invoiceId": "QDAY-2026-11-24-002",
+        "vendorId": "vendor-1",
+        "payee": "0x46fbCbbA2b425AdFB958507F5F341FCc4932C530",
+        "amountUnits": "1000000"
+      }
+    }
+  }
+}

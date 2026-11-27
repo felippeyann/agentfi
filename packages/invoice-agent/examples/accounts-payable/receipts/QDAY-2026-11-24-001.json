@@ -1,0 +1,55 @@
+{
+  "format": "agentfi.invoice-receipt",
+  "version": 1,
+  "note": "A claim, not a proof: check it against your own invoice record and the chain (checkReceipt, read-only) before marking the invoice paid.",
+  "network": {
+    "chainId": 44005,
+    "caip2": "eip155:44005"
+  },
+  "vault": "0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3",
+  "token": "0x456569838f1d43009a91eba4263147afd7233483",
+  "invoice": {
+    "id": "QDAY-2026-11-24-001",
+    "vendorId": "vendor-1",
+    "vendorBytes32": "0x76656e646f722d31000000000000000000000000000000000000000000000000",
+    "invoiceKey": "0x1b3e65d01a7c882b099676c0d5dedc06efab585f22547f38ba8ade9cf6ee6f34"
+  },
+  "payee": "0x46fbcbba2b425adfb958507f5f341fcc4932c530",
+  "amount": {
+    "units": "1000000",
+    "decimals": 6,
+    "display": "1"
+  },
+  "payment": {
+    "txHash": "0x2567affd1917fed9055e7ad8ed517845e41ed9b356ccb8f954bc458030976d4b",
+    "blockNumber": 4030463,
+    "blockHash": "0x2e54e60beccf35d262fdb2e4c004868361f7850b45709d56d1295d5650185d90",
+    "blockTime": "2026-11-24T20:10:50.000Z",
+    "agent": "0x7ca8b7704a214b9c129c166c80b5edb28500dbc8",
+    "events": [
+      {
+        "name": "InvoiceSettled",
+        "address": "0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3",
+        "logIndex": 0
+      },
+      {
+        "name": "Transfer",
+        "address": "0x456569838f1d43009a91eba4263147afd7233483",
+        "logIndex": 1,
+        "from": "0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3",
+        "to": "0x46fbcbba2b425adfb958507f5f341fcc4932c530",
+        "value": "1000000"
+      }
+    ]
+  },
+  "finality": {
+    "rule": "finalized",
+    "finalizedBlockAtIssue": 4259548
+  },
+  "issued": {
+    "at": "2026-11-27T14:03:21.919Z",
+    "by": "AgentFi invoice verification (read-only)",
+    "rpc": "https://rpc-test.qday.info"
+  },
+  "explorer": "https://explorer-test.qday.info/tx/0x2567affd1917fed9055e7ad8ed517845e41ed9b356ccb8f954bc458030976d4b"
+}

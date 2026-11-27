@@ -16,7 +16,7 @@ export interface PageVerdict {
   settlement?: { settled: boolean; vendor: string; amount: string; amountUnits: string; blockNumber: number; agent: string; invoiceKey: string };
   event?: { txHash: string; logIndex: number; blockNumber: number; invoiceId: string; amountUnits: string; agent: string; vendor: string; vendorRaw: string; payTo: string };
   transfer?: { from: string; to: string; amount: string; logIndex: number; token: string };
-  finality?: { rule: 'finalized'; block: number; blockTime?: string; finalizedBlock?: number; head: number; canonical: boolean };
+  finality?: { rule: 'finalized'; block: number; blockHash?: string; blockTime?: string; finalizedBlock?: number; head: number; canonical: boolean };
 }
 
 export const DEFAULTS: { readonly rpcUrl: string; readonly chainId: number; readonly explorerUrl: string; readonly tUSD8: string };

@@ -5,3 +5,7 @@ contracts/cache/
 *.sqlite-wal
 *.sqlite.lock
 .sessions/
+examples/accounts-payable/.state/
+examples/accounts-payable/.state-concurrency/
+examples/accounts-payable/.state-copies/
+/receipt.json

@@ -117,7 +117,13 @@ export function rpcClient(url, fetchImpl = globalThis.fetch) {
   };
 }
 
-const call = (rpc, to, data) => rpc('eth_call', [{ to, data }, 'latest']);
+// Every view this file calls returns at least one 32-byte word. An empty answer ("0x") from a contract that has code is
+// a node problem (not synced, a broken proxy), not "not settled": it is thrown, so it ends in cannot_verify_now.
+const call = async (rpc, to, data) => {
+  const r = await rpc('eth_call', [{ to, data }, 'latest']);
+  if (typeof r !== 'string' || strip(r).length < 64) throw new Error(`eth_call returned no data (${String(r).slice(0, 20)}): the node may not be synced`);
+  return r;
+};
 
 /**
  * The verdict for one invoice id of one vault. States (the same names as the agent's MCP `invoice_status`):
@@ -197,8 +203,10 @@ export async function verifyInvoice(o) {
     const logs = await o.rpc('eth_getLogs', [{ address: o.vault, topics: [TOPICS.invoiceSettled, out.settlement.invoiceKey], fromBlock: block, toBlock: block }]);
     const log = logs[0];
     if (!log) {
-      bad('no InvoiceSettled event at that block');
-      return done('mismatch', `The vault says ${o.invoiceId} is settled in block ${out.settlement.blockNumber}, but no InvoiceSettled event for it is there.`, DO_NOT_PAY);
+      // The vault emits InvoiceSettled in the same call that records the settlement: a node that reports the record but
+      // not the event is lagging (or limits eth_getLogs). Nothing is concluded from it.
+      bad('no InvoiceSettled event at that block on this node');
+      return done('cannot_verify_now', `The vault says ${o.invoiceId} is settled in block ${out.settlement.blockNumber}, but this node returns no InvoiceSettled event for it there: its logs may lag. Nothing is concluded.`, DO_NOT_PAY + ' Ask again later, or use another RPC.');
     }
     const body = strip(log.data);
     const ev = {
@@ -221,7 +229,12 @@ export async function verifyInvoice(o) {
     ok(`InvoiceSettled in tx ${ev.txHash} (log ${ev.logIndex}): ${units6(BigInt(ev.amountUnits))} tUSD8 to ${ev.payTo}`);
 
     const receipt = await o.rpc('eth_getTransactionReceipt', [ev.txHash]);
-    if (!receipt || receipt.status !== '0x1') {
+    if (!receipt) {
+      // The node just returned this transaction's log: no receipt for it is a node problem, not a verdict.
+      bad('the node returns no receipt for the settling transaction');
+      return done('cannot_verify_now', `This node returns no receipt for the settling transaction ${ev.txHash}, whose event it just returned. Nothing is concluded.`, DO_NOT_PAY + ' Ask again later, or use another RPC.');
+    }
+    if (receipt.status !== '0x1') {
       bad('the settling transaction has no successful receipt');
       return done('mismatch', `The settling transaction ${ev.txHash} has no successful receipt on this node.`, DO_NOT_PAY);
     }
@@ -238,7 +251,7 @@ export async function verifyInvoice(o) {
     const [atHeight, fin, head] = await Promise.all([o.rpc('eth_getBlockByNumber', [receipt.blockNumber, false]), o.rpc('eth_getBlockByNumber', ['finalized', false]), o.rpc('eth_blockNumber')]);
     const n = Number(BigInt(receipt.blockNumber));
     const canonical = atHeight && atHeight.hash === receipt.blockHash;
-    out.finality = { rule: 'finalized', block: n, blockTime: atHeight ? new Date(Number(BigInt(atHeight.timestamp)) * 1000).toISOString() : undefined, finalizedBlock: fin ? Number(BigInt(fin.number)) : undefined, head: Number(BigInt(head)), canonical: !!canonical };
+    out.finality = { rule: 'finalized', block: n, blockHash: receipt.blockHash, blockTime: atHeight ? new Date(Number(BigInt(atHeight.timestamp)) * 1000).toISOString() : undefined, finalizedBlock: fin ? Number(BigInt(fin.number)) : undefined, head: Number(BigInt(head)), canonical: !!canonical };
     if (!canonical) {
       bad(`block ${n} is no longer canonical`);
       return done('pending', `The settlement's block ${n} changed (reorg): not final, ask again.`, DO_NOT_PAY + ' Ask again later.');
