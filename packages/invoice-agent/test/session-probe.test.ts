@@ -12,9 +12,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
+import { freePort } from './fixtures/free-port.js';
 
 const PKG = join(dirname(fileURLToPath(import.meta.url)), '..');
-const base = 9700 + Math.floor(Math.random() * 200) * 2;
+// Ports the OS reports free (test files run in parallel, each with its own Anvil): see fixtures/free-port.ts.
+const base = await freePort();
+const agentPort = await freePort();
 
 function session(args: string[], extraEnv: Record<string, string> = {}): Promise<{ code: number | null; out: string }> {
   return new Promise((res) => {
@@ -29,17 +32,17 @@ function session(args: string[], extraEnv: Record<string, string> = {}): Promise
 describe('session --probe-paid', () => {
   it('is refused without --vault, and when it names the session invoice, before any chain is started', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'probe-guard-'));
-    const a = await session(['--rehearse', '--probe-paid', 'QDAY-OLD', '--anvil-port', String(base), '--agent-port', String(base + 1), '--dir', join(dir, 'a')]);
+    const a = await session(['--rehearse', '--probe-paid', 'QDAY-OLD', '--anvil-port', String(base), '--agent-port', String(agentPort), '--dir', join(dir, 'a')]);
     assert.equal(a.code, 3);
     assert.match(a.out, /--probe-paid needs --vault/);
-    const b = await session(['--rehearse', '--vault', '--invoice', 'QDAY-X', '--probe-paid', 'QDAY-X', '--anvil-port', String(base), '--agent-port', String(base + 1), '--dir', join(dir, 'b')]);
+    const b = await session(['--rehearse', '--vault', '--invoice', 'QDAY-X', '--probe-paid', 'QDAY-X', '--anvil-port', String(base), '--agent-port', String(agentPort), '--dir', join(dir, 'b')]);
     assert.equal(b.code, 3);
     assert.match(b.out, /other than this session's QDAY-X/);
   });
 
   it('never sends a probe the vault has not settled (it would be paid): stops before the agent starts, nothing signed', { timeout: 120_000 }, async () => {
     const dir = join(mkdtempSync(join(tmpdir(), 'probe-unsettled-')), 's');
-    const r = await session(['--rehearse', '--vault', '--max-gas-cost', '0.0002', '--probe-paid', 'QDAY-TYPO-001', '--invoice', 'QDAY-2026-11-27-001', '--anvil-port', String(base), '--agent-port', String(base + 1), '--dir', dir], { SESSION_REHEARSE_SKIP_PROBE_HISTORY: '1' });
+    const r = await session(['--rehearse', '--vault', '--max-gas-cost', '0.0002', '--probe-paid', 'QDAY-TYPO-001', '--invoice', 'QDAY-2026-11-27-001', '--anvil-port', String(base), '--agent-port', String(agentPort), '--dir', dir], { SESSION_REHEARSE_SKIP_PROBE_HISTORY: '1' });
     const t = readFileSync(join(dir, 'transcript.txt'), 'utf8');
     assert.equal(r.code, 3, t);
     assert.match(t, /STOP: the vault shows QDAY-TYPO-001 as NOT settled under vendor-1: no probe is sent/);
@@ -49,7 +52,7 @@ describe('session --probe-paid', () => {
 
   it('rehearses the second session: the old invoice refused by the vault with nothing signed, then the new one paid once', { timeout: 240_000 }, async () => {
     const dir = join(mkdtempSync(join(tmpdir(), 'probe-run-')), 's');
-    const r = await session(['--rehearse', '--vault', '--max-gas-cost', '0.0002', '--max-priority-fee-gwei', '1', '--probe-paid', 'QDAY-2026-11-24-001', '--invoice', 'QDAY-2026-11-27-001', '--anvil-port', String(base), '--agent-port', String(base + 1), '--dir', dir]);
+    const r = await session(['--rehearse', '--vault', '--max-gas-cost', '0.0002', '--max-priority-fee-gwei', '1', '--probe-paid', 'QDAY-2026-11-24-001', '--invoice', 'QDAY-2026-11-27-001', '--anvil-port', String(base), '--agent-port', String(agentPort), '--dir', dir]);
     const t = readFileSync(join(dir, 'transcript.txt'), 'utf8');
     assert.equal(r.code, 0, t);
     assert.match(t, /settlementOf\("QDAY-2026-11-24-001"\): settled, 1 tUSD8/);

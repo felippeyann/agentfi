@@ -23,6 +23,9 @@ contract E2E8004 is Script {
 
     function run() external {
         require(block.chainid == 31337, "E2E8004: local Anvil only");
+        // InvoiceMandate stores a settlement's block number and reads 0 as "not settled": on a fresh Anvil (block 0) the
+        // simulated payInvoice would record block 0 and the adapter would then see the invoice as unsettled.
+        require(block.number > 0, "E2E8004: mine one block first (cast rpc anvil_mine 1)");
         address operator = vm.addr(OPERATOR_PK);
         address agent = vm.addr(AGENT_PK);
         address payTo = vm.addr(PAYEE_PK);

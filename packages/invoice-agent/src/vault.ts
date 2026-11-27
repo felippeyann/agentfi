@@ -196,9 +196,10 @@ export class VaultRefusalError extends Error {
 
 /**
  * The refusal in plain language, with what to do. payInvoice checks, in this order: NotAgent, MandatePaused,
- * MandateExpired, MandateChanged, the id and the amount, then AlreadySettled, then AboveDailyLimit. A refusal
- * raised BEFORE AlreadySettled does not tell whether the invoice was already paid, so its text sends the
- * operator to `ops ask`, which reads the settlement directly.
+ * MandateExpired, MandateChanged, the id and the amount (InvalidInvoiceId, ZeroAmount, AboveInvoiceCap), then
+ * AlreadySettled, then AboveDailyLimit. A refusal raised BEFORE AlreadySettled does not tell whether the invoice was
+ * already paid, so its text sends the operator to `ops ask`, which reads the settlement directly. (InvalidInvoiceId
+ * and ZeroAmount cannot come from an invoice the agent accepted; AboveInvoiceCap can, if the cap was lowered.)
  */
 export function explainVaultRefusal(e: VaultRefusalError, inv: Invoice): { rule: string; reason: string; whatToDo: string } {
   const a = e.args;
@@ -224,7 +225,7 @@ export function explainVaultRefusal(e: VaultRefusalError, inv: Invoice): { rule:
     case 'MandateExpired':
       return { rule: 'vault:MandateExpired', reason: `The on-chain mandate has expired.${paidUnknown}`, whatToDo: `Check first: npm run ops -- ask ${inv.id}. If it is not settled, ask the operator to renew the mandate (setMandate with a new expiry); a renewed mandate still refuses an invoice already settled (AlreadySettled).` };
     case 'AboveInvoiceCap':
-      return { rule: 'vault:AboveInvoiceCap', reason: `The vault caps one invoice at ${units(a[1])} tUSD8; this one is ${units(a[0])}.`, whatToDo: 'Ask the operator to raise the on-chain cap; the agent will not pay part of it.' };
+      return { rule: 'vault:AboveInvoiceCap', reason: `The vault caps one invoice at ${units(a[1])} tUSD8; this one is ${units(a[0])}.${paidUnknown}`, whatToDo: 'Ask the operator to raise the on-chain cap; the agent will not pay part of it.' };
     case 'AboveDailyLimit':
       return { rule: 'vault:AboveDailyLimit', reason: `The vault's daily limit is ${units(a[2])} tUSD8 and ${units(a[0])} was already paid today (UTC); this invoice is ${units(a[1])}.`, whatToDo: 'Resubmit the same invoice on another UTC day (it is judged again), or ask the operator to raise the limit.' };
     default:

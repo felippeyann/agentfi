@@ -22,8 +22,10 @@ import type { Mandate } from '../src/mandate.js';
 import { FailPointError, InvoicePayer } from '../src/payer.js';
 import { vendorKey } from '../src/vault.js';
 import { decodeRevert, encodePayInvoice, encodeStringAndBytes32, encodeStringArg, ERRORS, rpcClient, SELECTORS, simulateResend, TOPICS, vendorBytes32, verifyInvoice, type Rpc } from '../verify/verify.js';
+import { freePort } from './fixtures/free-port.js';
 
-const PORT = Number(process.env['VERIFY_PAGE_ANVIL_PORT'] ?? 9500 + Math.floor(Math.random() * 300));
+// VERIFY_PAGE_ANVIL_PORT pins the port (e.g. to inspect the chain); otherwise one the OS reports free.
+const PORT = Number(process.env['VERIFY_PAGE_ANVIL_PORT'] ?? (await freePort()));
 const RPC = `http://127.0.0.1:${PORT}`;
 const OPERATOR_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' as Hex;
 const AGENT_KEY = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d' as Hex;
