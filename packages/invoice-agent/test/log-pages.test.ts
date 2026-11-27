@@ -21,6 +21,7 @@ import { inquireInvoice, verifyInvoice } from '../src/inquiry.js';
 import { Ledger } from '../src/ledger.js';
 import type { Mandate } from '../src/mandate.js';
 import { InvoicePayer } from '../src/payer.js';
+import { freePort } from './fixtures/free-port.js';
 
 describe('log pages: the rule', () => {
   it('1,000 blocks are one page; 1,001 are two; the page size is 1,000', () => {
@@ -88,7 +89,7 @@ describe('log pages: the rule', () => {
 
 // ---- Against a node that enforces the Aevum limit: Anvil behind a proxy that refuses ranges above 1,000 blocks ----
 
-const PORT = 9800 + Math.floor(Math.random() * 90);
+const PORT = await freePort();
 const ANVIL = `http://127.0.0.1:${PORT}`;
 const CHAIN_ID = 31337;
 const PAYER_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' as Hex;
