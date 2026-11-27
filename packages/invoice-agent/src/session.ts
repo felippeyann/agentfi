@@ -28,6 +28,12 @@
  *                INVOICE_PAYER_KEY is then the AGENT's key (gas coin only; never the operator's). The independent
  *                count in step 6 is then: exactly one InvoiceSettled for this invoice AND one Transfer vault → vendor,
  *                both in the original transaction.
+ *   --probe-paid ID  (with --vault) before step 3, the agent, on this session's EMPTY ledger, receives invoice ID, which
+ *                the vault has already settled (e.g. QDAY-2026-11-24-001): it must answer refused, rule
+ *                vault:AlreadySettled, with nothing signed (no hash, the agent's nonce unchanged). The session first
+ *                reads settlementOf(ID) and stops unless the vault shows it settled, so a typo can never pay a probe.
+ *                --rehearse --vault --probe-paid ID replays the public history locally: ID is paid by the agent,
+ *                one UTC day passes, the operator deposits again and renews the mandate.
  *
  * Gas: --max-gas-cost (default 0.0001, native coin) is the ceiling per transaction, checked by the preflight
  * and again by the agent on the prepared transaction right before signing (gas limit × maxFeePerGas).
@@ -82,6 +88,8 @@ const POLL_MS = MODE === 'aevum' ? 30_000 : 500;
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const DIR = resolve(opt('dir') ?? join(PKG, '.sessions', `${MODE ?? 'none'}-${stamp}`));
 const INVOICE_ID = opt('invoice') ?? `QDAY-${stamp.slice(0, 10)}-001`;
+/** --probe-paid ID (vault only): before the new invoice, resend an invoice the vault has ALREADY settled to the agent. */
+const PROBE_ID = opt('probe-paid');
 
 // Anvil's public development accounts (rehearsal only; the config refuses them on any other chain).
 const ANVIL = {
@@ -128,6 +136,10 @@ async function main(): Promise<number> {
   let vault: Address | undefined;
   const confirmation = opt('confirmation') ?? 'finalized';
   if (confirmation !== 'finalized' && !/^depth:\d+$/.test(confirmation)) stop('--confirmation must be finalized or depth:N');
+  if (PROBE_ID !== undefined) {
+    if (!VAULT_MODE) stop('--probe-paid needs --vault: only the vault can refuse an invoice this ledger does not know');
+    if (!PROBE_ID || PROBE_ID.startsWith('--') || PROBE_ID === INVOICE_ID) stop(`--probe-paid needs an invoice id the vault has already settled, other than this session's ${INVOICE_ID}`);
+  }
   if (MODE === 'aevum') {
     if (!flag('i-authorize-a-public-transaction')) stop('--aevum signs and sends a public transaction: pass --i-authorize-a-public-transaction');
     const key = process.env['INVOICE_PAYER_KEY']?.trim();
@@ -169,10 +181,27 @@ async function main(): Promise<number> {
       const operator = getAddress(privateKeyToAccount(ANVIL.deployer).address);
       vault = getAddress((await wait(await deployer.deployContract({ abi: INVOICE_MANDATE_ABI, bytecode: INVOICE_MANDATE_BYTECODE, args: [token] }))).contractAddress!);
       await wait(await deployer.writeContract({ address: token, abi: LOCAL_TEST_USD8_ABI, functionName: 'mint', args: [operator, 10_000_000n] }));
-      await wait(await deployer.writeContract({ address: token, abi: LOCAL_TEST_USD8_ABI, functionName: 'transfer', args: [vault, 10_000_000n] }));
+      // With --probe-paid the vault holds what each payment needs, like the public one (1 deposit per invoice).
+      await wait(await deployer.writeContract({ address: token, abi: LOCAL_TEST_USD8_ABI, functionName: 'transfer', args: [vault, PROBE_ID ? toBaseUnits(AMOUNT) : 10_000_000n] }));
       const units = Number(toBaseUnits(AMOUNT));
-      const now = (await rehearsalClient.getBlock()).timestamp;
-      await wait(await deployer.writeContract({ address: vault, abi: INVOICE_MANDATE_ABI, functionName: 'setMandate', args: [getAddress(privateKeyToAccount(ANVIL.payer).address), vendorKey(VENDOR_ID), ANVIL.vendor, units, units, Number(now + 86_400n)] }));
+      const agentAddr = getAddress(privateKeyToAccount(ANVIL.payer).address);
+      const setMandate = async () => {
+        const now = (await rehearsalClient!.getBlock()).timestamp;
+        await wait(await deployer.writeContract({ address: vault!, abi: INVOICE_MANDATE_ABI, functionName: 'setMandate', args: [agentAddr, vendorKey(VENDOR_ID), ANVIL.vendor, units, units, Number(now + 86_400n)] }));
+      };
+      await setMandate();
+      // (Tests only, rehearsal only: SESSION_REHEARSE_SKIP_PROBE_HISTORY=1 leaves the probe unsettled, to check the guard.)
+      if (PROBE_ID && VAULT_MODE && process.env['SESSION_REHEARSE_SKIP_PROBE_HISTORY'] !== '1') {
+        // The public history, replayed: the agent pays PROBE_ID, a UTC day passes (the old mandate expires), the operator
+        // deposits again and renews the mandate (same agent, vendor, payee and limits).
+        const agentWallet = createWalletClient({ account: privateKeyToAccount(ANVIL.payer), chain, transport: http(rpcUrl) });
+        await wait(await agentWallet.writeContract({ address: vault, abi: INVOICE_MANDATE_ABI, functionName: 'payInvoice', args: [PROBE_ID, vendorKey(VENDOR_ID), ANVIL.vendor, BigInt(units)] }));
+        await rehearsalClient.request({ method: 'evm_increaseTime' as never, params: [86_400 + 60] as never });
+        // 72 blocks after the jump: Anvil's finalized (head − 64) is then past it, as on a chain that kept running.
+        await rehearsalClient.request({ method: 'anvil_mine' as never, params: ['0x48'] as never });
+        await wait(await deployer.writeContract({ address: token, abi: LOCAL_TEST_USD8_ABI, functionName: 'transfer', args: [vault, BigInt(units)] }));
+        await setMandate();
+      }
     } else {
       await wait(await deployer.writeContract({ address: token, abi: LOCAL_TEST_USD8_ABI, functionName: 'mint', args: [getAddress(privateKeyToAccount(ANVIL.payer).address), 10_000_000n] }));
     }
@@ -246,6 +275,29 @@ async function main(): Promise<number> {
     }
   };
   const ledger = new Ledger(env.INVOICE_LEDGER);
+
+  // ---- 2b. (--probe-paid) An already-paid invoice, resent to an agent whose ledger does not know it -------------
+  if (PROBE_ID) {
+    out(`\n2b. Invoice ${PROBE_ID}, already settled by the vault, is resent to the agent (this session's ledger is empty).`);
+    const before = await settlementOf(chain, PROBE_ID);
+    // Never send a probe the vault has not settled: the agent would pay it.
+    if (!before.settled) stop(`the vault shows ${PROBE_ID} as NOT settled under ${VENDOR_ID}: no probe is sent (it would be paid). Check the id.`);
+    out(`  vault settlementOf("${PROBE_ID}"): settled, ${formatUnits6(before.amount)} tUSD8, block ${before.blockNumber}, agent ${before.agent}`);
+    const nonceBefore = await client.getTransactionCount({ address: payer, blockTag: 'pending' });
+    const probeAgent = await startAgent();
+    const res = await fetch(`http://127.0.0.1:${AGENT_PORT}/invoices`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...invoice, id: PROBE_ID }) })
+      .then(async (x) => (await x.json()) as Record<string, unknown>, (e) => ({ outcome: 'agent-error', note: e instanceof Error ? e.message : String(e) }) as Record<string, unknown>);
+    probeAgent.kill();
+    await new Promise((r) => (probeAgent.exitCode !== null || probeAgent.signalCode ? r(null) : probeAgent.once('exit', r)));
+    const nonceAfter = await client.getTransactionCount({ address: payer, blockTag: 'pending' });
+    const prow = ledger.get(PROBE_ID);
+    out(`  agent → ${String(res['outcome']).toUpperCase()}${res['rule'] ? ` [${res['rule']}]` : ''}: ${String(res['reason'] ?? res['note'] ?? '')}`);
+    out(`  ledger row: ${prow ? `${prow.status}, tx hash ${prow.tx_hash ?? 'none'}` : 'none'} · events ${ledger.events(PROBE_ID).map((e) => e.event).join(' → ') || '-'} · agent nonce (pending) ${nonceBefore} → ${nonceAfter}`);
+    if (res['outcome'] !== 'refused' || res['rule'] !== 'vault:AlreadySettled' || prow?.tx_hash || nonceAfter !== nonceBefore) {
+      stop(`the resend of ${PROBE_ID} was not refused by the vault with nothing signed: stop before the new invoice; check ${MODE === 'aevum' ? `${explorerUrl}/address/${payer}` : 'the ledger'}`);
+    }
+    out('  ✓ refused by the chain (vault:AlreadySettled at the gas estimate): nothing signed, nothing sent, no nonce used.');
+  }
 
   // ---- 3. The payment, and the lost response ------------------------------------------------------
   out(`\n3. Invoice ${INVOICE_ID} for ${AMOUNT} tUSD8 is sent to the agent.`);
