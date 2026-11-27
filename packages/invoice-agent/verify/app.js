@@ -1,6 +1,6 @@
 // The page's UI: reads the form (or the URL: ?vault=…&invoice=…&rpc=…&chain=…&tx=…), runs verify.js, renders the
 // verdict with textContent only (nothing from the chain or the URL is ever parsed as HTML).
-import { DEFAULTS, rpcClient, verifyInvoice } from './verify.js';
+import { DEFAULTS, describeSimCall, rpcClient, simulateResend, units6, verifyInvoice } from './verify.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -59,13 +59,48 @@ function render(v) {
   ]);
   const f = v.finality;
   rows($('finality'), f ? [['rule', 'finalized (the block is at or below the node\'s finalized block)'], ['block', f.block], ['block time', f.blockTime], ['finalized block', f.finalizedBlock], ['head', f.head], ['canonical', f.canonical ? 'yes' : 'NO']] : []);
-  const ul = $('checks');
-  ul.replaceChildren(...v.checks.map((c) => {
+  checkList($('checks'), v.checks);
+  // A new receipt: any earlier simulation is cleared; the button is offered only for a paid_verified receipt.
+  $('resend-result').hidden = true;
+  const offered = v.state === 'paid_verified';
+  $('resend-go').hidden = !offered;
+  $('resend-why').hidden = offered;
+  $('resend-why').textContent = offered ? '' : `Available once the receipt is paid_verified; this one is ${v.state}, so there is no settlement to try again.`;
+}
+
+function checkList(ul, checks) {
+  ul.replaceChildren(...checks.map((c) => {
     const li = document.createElement('li');
     li.className = c.ok ? 'ok' : 'bad';
     li.textContent = `${c.ok ? '✓' : '✗'} ${c.what}`;
     return li;
   }));
+}
+
+const RESEND_LABELS = {
+  proven: 'Second payment refused by the vault',
+  inconclusive: 'Inconclusive: not a proof',
+  unavailable: 'Simulation unavailable',
+  not_available: 'Not available',
+};
+
+function renderResend(s, rpcUrl) {
+  $('resend-result').hidden = false;
+  const badge = $('resend-badge');
+  badge.textContent = RESEND_LABELS[s.state] ?? s.state;
+  badge.dataset.state = `resend_${s.state}`;
+  $('resend-answer').textContent = s.answer;
+  const c = s.call, q = s.query, ctl = s.control;
+  rows($('resend-facts'), [
+    ['settlement block', s.settlementBlock !== undefined ? `${s.settlementBlock} (from the verified receipt above)` : undefined],
+    ['simulated call', c ? `payInvoice("${c.args.invoiceId}", vendor "${c.args.vendorId}", payee ${c.args.payTo}, ${units6(BigInt(c.args.amountUnits))} tUSD8) from the agent ${c.from}` : undefined],
+    ['queried block', q ? `${q.block} (${q.blockTime})` : undefined],
+    ['why this block', q?.chosenBecause],
+    ['answer from', q ? `eth_call to the vault ${c.to} on ${rpcUrl} at block ${q.block}: read-only, simulated, nothing sent` : undefined],
+    ['vault\'s answer', s.result ? `the call ${describeSimCall(s.result)}` : undefined],
+    ['control', ctl ? `${ctl.summary}${ctl.blockTime ? ` (block time ${ctl.blockTime})` : ''}` : undefined],
+  ]);
+  checkList($('resend-checks'), s.checks);
 }
 
 // Busy state uses aria-disabled, not `disabled`: a disabled button loses focus (it falls to <body>), so a keyboard
@@ -74,18 +109,27 @@ function render(v) {
 // be announced). It is emptied when a check starts (the busy button label already says "Reading the chain…") and then
 // gets a one-line summary, so every check, even a repeat with the same result, is a new addition to announce.
 let busy = false;
+// The receipt the resend simulation runs against: the last completed check and the RPC it was read from (not the
+// form's current values, which may have been edited since). `generation` drops a simulation that finishes after a
+// newer check started.
+let last;
+let generation = 0;
 
 async function run() {
   if (busy) return;
   busy = true;
+  generation++;
+  last = undefined;
+  $('resend-result').hidden = true;
   const button = $('go');
   button.setAttribute('aria-disabled', 'true');
   button.textContent = 'Reading the chain…';
   $('status').textContent = '';
   try {
     const chain = $('chain').value.trim();
+    const rpcUrl = $('rpc').value.trim();
     const v = await verifyInvoice({
-      rpc: rpcClient($('rpc').value.trim()),
+      rpc: rpcClient(rpcUrl),
       vault: $('vault').value.trim(),
       invoiceId: $('invoice').value.trim(),
       ...($('vendor').value.trim() ? { vendorId: $('vendor').value.trim() } : {}),
@@ -94,6 +138,7 @@ async function run() {
       ...($('tx').value.trim() ? { txHash: $('tx').value.trim() } : {}),
     });
     render(v);
+    last = { verdict: v, rpcUrl };
     document.body.dataset.state = v.state;
     const label = LABELS[v.state] ?? v.state;
     $('status').textContent = v.answer.startsWith(label) ? v.answer : `${label}: ${v.answer}`;
@@ -107,6 +152,37 @@ async function run() {
   }
 }
 
+// The resend simulation: the same busy pattern as the check (aria-disabled, focus stays on the button, #status
+// emptied then given a one-line summary). Ignored while a check or another simulation runs.
+let simulating = false;
+
+async function resend() {
+  if (simulating || busy || !last || last.verdict.state !== 'paid_verified') return;
+  simulating = true;
+  const gen = generation;
+  const { verdict, rpcUrl } = last;
+  const button = $('resend-go');
+  button.setAttribute('aria-disabled', 'true');
+  button.textContent = 'Simulating…';
+  $('status').textContent = '';
+  try {
+    const s = await simulateResend({ rpc: rpcClient(rpcUrl), verdict });
+    if (gen !== generation) return; // a newer check replaced the receipt
+    renderResend(s, rpcUrl);
+    $('status').textContent = `${RESEND_LABELS[s.state] ?? s.state}: ${s.answer}`;
+  } catch (err) {
+    if (gen === generation) $('status').textContent = 'The simulation did not complete: this says nothing either way.';
+    throw err;
+  } finally {
+    simulating = false;
+    button.removeAttribute('aria-disabled');
+    button.textContent = 'Simulate a resend after the payment';
+  }
+}
+
+$('resend-go').addEventListener('click', () => {
+  resend();
+});
 $('form').addEventListener('submit', (ev) => {
   ev.preventDefault();
   run();

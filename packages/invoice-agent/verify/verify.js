@@ -1,7 +1,8 @@
 // "Was this invoice paid?" read straight from the chain, in the browser: the InvoiceMandate vault's settlementOf,
 // its InvoiceSettled event, the tUSD8 Transfer in the same transaction and the node's finalized block.
 // READ-ONLY: plain JSON-RPC reads (eth_chainId, eth_getCode, eth_call, eth_getLogs, eth_getTransactionReceipt,
-// eth_getBlockByNumber, eth_getTransactionByHash). No wallet, no key, no signing, nothing is sent.
+// eth_getBlockByNumber, eth_getTransactionByHash). No wallet, no key, no signing, nothing is sent. The "simulate a
+// resend" check (simulateResend, at the end) is one more eth_call: the same payInvoice, simulated, never sent.
 // No dependencies: the few ABI encodings and decodings it needs are written out below (their selectors and topics
 // are checked against the contract's ABI by test/verify-page.test.ts).
 
@@ -18,6 +19,22 @@ export const SELECTORS = Object.freeze({
   mandate: '0x39b1b96d', // mandate()
   token: '0xfc0c546a', // token()
   operator: '0x570ca735', // operator()
+  payInvoice: '0x3a765838', // payInvoice(string,bytes32,address,uint256)
+});
+// The vault's custom errors that payInvoice can revert with (selector → name and argument types), for the
+// "simulate a resend" check below. Checked against the ABI by the tests like the selectors above.
+export const ERRORS = Object.freeze({
+  '0x6fd708b6': { name: 'AlreadySettled', args: ['bytes32', 'uint256'] }, // AlreadySettled(bytes32 invoiceKey, uint256 blockNumber)
+  '0x27267dfd': { name: 'MandateExpired', args: [] },
+  '0x0d9ab13f': { name: 'NotAgent', args: [] },
+  '0x089ee7df': { name: 'MandatePaused', args: [] },
+  '0x4061a3da': { name: 'MandateChanged', args: ['bytes32', 'address'] }, // (vendor, payTo) the mandate has now
+  '0x72fabe82': { name: 'AboveInvoiceCap', args: ['uint256', 'uint256'] }, // (amount, cap)
+  '0xd440abf0': { name: 'AboveDailyLimit', args: ['uint256', 'uint256', 'uint256'] }, // (spentToday, amount, limit)
+  '0x2611416a': { name: 'NoAgent', args: [] },
+  '0x15a6bc43': { name: 'InvalidInvoiceId', args: [] },
+  '0x1f2a2005': { name: 'ZeroAmount', args: [] },
+  '0x90b8ec18': { name: 'TransferFailed', args: [] },
 });
 export const TOPICS = Object.freeze({
   // InvoiceSettled(bytes32,string,bytes32,address,uint256,address)
@@ -89,7 +106,13 @@ export function rpcClient(url, fetchImpl = globalThis.fetch) {
     const r = await fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }) });
     if (!r.ok) throw new Error(`${method}: HTTP ${r.status}`);
     const j = await r.json();
-    if (j.error) throw new Error(`${method}: ${j.error.message ?? JSON.stringify(j.error)}`);
+    if (j.error) {
+      const err = new Error(`${method}: ${j.error.message ?? JSON.stringify(j.error)}`);
+      // A revert (eth_call): the node gives the revert data next to the message. Kept as data, never shown as markup.
+      err.rpcCode = j.error.code;
+      err.rpcData = j.error.data;
+      throw err;
+    }
     return j.result;
   };
 }
@@ -231,3 +254,206 @@ export async function verifyInvoice(o) {
   }
 }
 
+
+// ---------------------------------------------------------------------------------------------------------------
+// "Simulate a resend after the payment": what the vault answers if the agent that settled the invoice sends the SAME
+// payInvoice again. READ-ONLY: one eth_call (plus a control one block before the settlement), no wallet, no key,
+// nothing is signed or sent. The settlement block comes from the verified receipt; the refusal comes from the
+// simulation. Anything but the exact expected refusal is reported as inconclusive or unavailable, never as a proof.
+// ---------------------------------------------------------------------------------------------------------------
+
+/** How many blocks after the settlement block the historical simulation aims for (capped below the mandate's expiry). */
+export const RESEND_OFFSET = 10;
+
+// What nodes say when they no longer keep the state of an old block (geth, erigon, reth, nethermind, besu wordings).
+const NO_HISTORY = /missing trie node|header not found|pruned|historical state|state (is )?not available|state histor|unknown block|not available|old data not available|no state/i;
+
+/** ABI encoding of payInvoice(string invoiceId, bytes32 vendor, address payTo, uint256 amount), selector included. */
+export function encodePayInvoice(invoiceId, vendorB32, payTo, amountUnits) {
+  const tail = encodeStringArg(invoiceId).slice(64); // length + padded bytes
+  return SELECTORS.payInvoice + '0'.repeat(62) + '80' + strip(vendorB32).padEnd(64, '0')
+    + strip(payTo).toLowerCase().padStart(64, '0') + BigInt(amountUnits).toString(16).padStart(64, '0') + tail;
+}
+
+/**
+ * Decodes revert data against the vault's errors. `{ name, selector, args }`; name null for a selector it does not
+ * know (or data too short for the error's arguments: then `malformed` is set).
+ */
+export function decodeRevert(data) {
+  if (typeof data !== 'string' || !/^0x([0-9a-fA-F]{2})*$/.test(data)) return { name: null, selector: null, args: [] };
+  const selector = data.slice(0, 10).toLowerCase();
+  const spec = ERRORS[selector];
+  if (!spec) return { name: null, selector: selector.length === 10 ? selector : null, args: [] };
+  const body = '0x' + data.slice(10);
+  if (strip(body).length < spec.args.length * 64) return { name: null, selector, args: [], malformed: true };
+  const args = spec.args.map((t, i) => (t === 'bytes32' ? '0x' + word(body, i) : t === 'address' ? wordAddr(body, i) : wordInt(body, i).toString()));
+  return { name: spec.name, selector, args };
+}
+
+const errText = (e) => String(e?.message ?? e).split('\n')[0].slice(0, 200);
+const hexBlock = (n) => '0x' + n.toString(16);
+
+/** One eth_call, classified: success, revert (with its decoded error), or the node could not answer. */
+async function simCall(rpc, tx, blockNumber) {
+  try {
+    const returned = await rpc('eth_call', [tx, hexBlock(blockNumber)]);
+    return { kind: 'success', returned };
+  } catch (e) {
+    const d = typeof e?.rpcData === 'string' ? e.rpcData : typeof e?.rpcData?.data === 'string' ? e.rpcData.data : undefined;
+    if (d !== undefined && (e?.rpcCode === 3 || /revert/i.test(String(e?.message)))) return { kind: 'revert', data: d, error: decodeRevert(d) };
+    return { kind: 'error', message: errText(e), noHistory: NO_HISTORY.test(String(e?.message ?? '')) };
+  }
+}
+
+async function blockAt(rpc, tag) {
+  const b = await rpc('eth_getBlockByNumber', [typeof tag === 'number' ? hexBlock(tag) : tag, false]);
+  if (!b || b.number == null || b.timestamp == null) throw new Error(`eth_getBlockByNumber: no block ${tag}`);
+  const timestamp = Number(BigInt(b.timestamp));
+  return { number: Number(BigInt(b.number)), timestamp, time: new Date(timestamp * 1000).toISOString() };
+}
+
+/** One line for a simulated call's outcome: "succeeds (would settle)", "reverts AlreadySettled(0x…, 4030463)", … */
+export const describeSimCall = (r) => {
+  if (r.kind === 'success') return 'succeeds (would settle)';
+  if (r.kind === 'error') return `no answer (${r.message})`;
+  if (!r.error.name) return `reverts with ${r.error.selector ? `an unknown error ${r.error.selector}` : 'no error data'}`;
+  return `reverts ${r.error.name}${r.error.args.length ? `(${r.error.args.join(', ')})` : ''}`;
+};
+
+/**
+ * Simulates the agent sending the same payInvoice again, for a verdict that is paid_verified.
+ * States: proven (AlreadySettled with the receipt's invoice key and settlement block), inconclusive (the node answered
+ * something else), unavailable (the node could not answer, e.g. no historical state), not_available (no paid_verified
+ * receipt to simulate against).
+ *
+ * @param {{ rpc: (m: string, p?: unknown[]) => Promise<any>, verdict: any, offset?: number }} o
+ */
+export async function simulateResend(o) {
+  const v = o.verdict;
+  const offset = o.offset ?? RESEND_OFFSET;
+  const checks = [];
+  const ok = (what) => checks.push({ ok: true, what });
+  const bad = (what) => checks.push({ ok: false, what });
+  if (!v || v.state !== 'paid_verified' || !v.settlement?.settled || !v.event) {
+    return { state: 'not_available', answer: `The resend simulation needs a receipt that is paid_verified; this one is ${v?.state ?? 'not checked'}.`, checks };
+  }
+  const S = v.settlement.blockNumber;
+  const key = v.settlement.invoiceKey;
+  const call = {
+    function: 'payInvoice', to: v.vault, from: v.settlement.agent,
+    args: { invoiceId: v.event.invoiceId, vendor: v.event.vendorRaw, vendorId: v.event.vendor, payTo: v.event.payTo, amountUnits: v.settlement.amountUnits },
+  };
+  const tx = { from: call.from, to: call.to, data: encodePayInvoice(call.args.invoiceId, call.args.vendor, call.args.payTo, call.args.amountUnits) };
+  const out = { settlementBlock: S, invoiceKey: key, call, checks };
+  const unavailable = (answer) => ({ ...out, state: 'unavailable', answer });
+  let latest, m;
+  try {
+    latest = await blockAt(o.rpc, 'latest');
+    const raw = await o.rpc('eth_call', [{ to: v.vault, data: SELECTORS.mandate }, hexBlock(latest.number)]);
+    m = { agent: wordAddr(raw, 0), expiresAt: Number(wordInt(raw, 1)), paused: wordInt(raw, 2) === 1n, payTo: wordAddr(raw, 3), vendorRaw: '0x' + word(raw, 6) };
+  } catch (e) {
+    return unavailable(`Simulation unavailable: the RPC did not answer (${errText(e)}). This says nothing either way.`);
+  }
+  const notNow = [
+    latest.timestamp >= m.expiresAt && `the mandate expired at ${new Date(m.expiresAt * 1000).toISOString()}`,
+    m.paused && 'the mandate is paused',
+    lower(m.agent) !== lower(call.from) && 'the mandate has another agent now',
+    (lower(m.vendorRaw) !== lower(call.args.vendor) || lower(m.payTo) !== lower(call.args.payTo)) && 'the mandate has another vendor or payee now',
+  ].filter(Boolean);
+
+  // Which block: the latest one if the mandate still lets this agent pay this vendor there; otherwise a block shortly
+  // after the settlement, before the expiry (block timestamps read from the node), so the vault reaches its duplicate
+  // check instead of refusing earlier (payInvoice checks the expiry before the duplicate).
+  let target, chosenBecause;
+  try {
+    if (notNow.length === 0) {
+      target = latest;
+      chosenBecause = `the latest block: the mandate is still valid there (expires ${new Date(m.expiresAt * 1000).toISOString()})`;
+    } else {
+      const hi = Math.min(S + offset, latest.number);
+      const atHi = hi > S ? await blockAt(o.rpc, hi) : undefined;
+      if (!atHi) {
+        target = await blockAt(o.rpc, S);
+        chosenBecause = `the settlement block itself (its state includes the settlement): no later block exists yet, and at the latest block ${notNow.join(', ')}`;
+      } else if (atHi.timestamp < m.expiresAt) {
+        target = atHi;
+        chosenBecause = `${hi - S} block${hi - S === 1 ? '' : 's'} after the settlement block, before the mandate's expiry (${new Date(m.expiresAt * 1000).toISOString()}): at the latest block ${notNow.join(', ')}`;
+      } else {
+        // The expiry falls within the offset: the last block after the settlement whose timestamp is before it.
+        const first = await blockAt(o.rpc, S + 1);
+        if (first.timestamp < m.expiresAt) {
+          // Invariant: block `best` is before the expiry, block `top` is at or after it.
+          let best = first, top = hi;
+          while (top - best.number > 1) {
+            const b = await blockAt(o.rpc, Math.floor((best.number + top) / 2));
+            if (b.timestamp < m.expiresAt) best = b; else top = b.number;
+          }
+          target = best;
+          chosenBecause = `the last block before the mandate's expiry (${new Date(m.expiresAt * 1000).toISOString()}), ${best.number - S} block${best.number - S === 1 ? '' : 's'} after the settlement`;
+        } else {
+          target = await blockAt(o.rpc, S);
+          chosenBecause = `the settlement block itself (its state includes the settlement): the mandate expired (${new Date(m.expiresAt * 1000).toISOString()}) before the next block`;
+        }
+      }
+    }
+  } catch (e) {
+    return unavailable(`Simulation unavailable: the RPC did not give the block headers needed to choose a block (${errText(e)}). This says nothing either way.`);
+  }
+  out.query = { block: target.number, blockTime: target.time, chosenBecause, latestBlock: latest.number };
+
+  const [main, control] = await Promise.all([
+    simCall(o.rpc, tx, target.number),
+    S > 0 ? simCall(o.rpc, tx, S - 1).then(async (r) => ({ r, b: await blockAt(o.rpc, S - 1).catch(() => undefined) })) : Promise.resolve(undefined),
+  ]);
+  out.result = main;
+  if (control) {
+    const c = control.r;
+    out.control = {
+      block: S - 1, blockTime: control.b?.time, result: c,
+      summary: c.kind === 'success'
+        ? `At block ${S - 1}, one block before the settlement, the same call succeeds: it would have settled then.`
+        : c.kind === 'error'
+          ? `At block ${S - 1} the node did not answer (${c.message}): no control.`
+          : `At block ${S - 1} the same call ${describeSimCall(c)}: the control does not show "it would have passed".`,
+    };
+  }
+
+  if (main.kind === 'error') {
+    bad(`eth_call at block ${target.number}: ${main.message}`);
+    return unavailable(main.noHistory
+      ? `Simulation unavailable: the node does not serve the state of block ${target.number} (${main.message}); it may not keep that much history. This says nothing either way.`
+      : `Simulation unavailable: the RPC did not answer the simulated call at block ${target.number} (${main.message}). This says nothing either way.`);
+  }
+  const inconclusive = (answer) => ({ ...out, state: 'inconclusive', answer });
+  if (main.kind === 'success') {
+    bad(`the simulated resend at block ${target.number} did not revert`);
+    return inconclusive(`Inconclusive: the simulated resend at block ${target.number} did NOT revert, where a refusal was expected. This is not a proof of anything; do not pay again before the original transaction is checked.`);
+  }
+  const e = main.error;
+  if (e.name !== 'AlreadySettled') {
+    bad(`the simulated resend at block ${target.number} ${describeSimCall(main)}`);
+    const why = {
+      MandateExpired: 'the mandate had expired there, so the vault refused before reaching its duplicate check',
+      MandatePaused: 'the mandate was paused there, so the vault refused before reaching its duplicate check',
+      NotAgent: 'the settling agent was not the mandate\'s agent there, so the vault refused before reaching its duplicate check',
+      MandateChanged: 'the mandate had another vendor or payee there, so the vault refused before reaching its duplicate check',
+      AboveInvoiceCap: 'the amount was above the per-invoice cap there, so the vault refused before reaching its duplicate check',
+      AboveDailyLimit: 'the vault reached its daily-limit check, which comes AFTER its duplicate check: it did not see this invoice as settled there',
+    }[e.name];
+    return inconclusive(`Inconclusive: the simulated resend at block ${target.number} ${describeSimCall(main)}${why ? `: ${why}` : ''}. It does not show the duplicate refusal.`);
+  }
+  const [gotKey, gotBlock] = e.args;
+  const problems = [
+    lower(gotKey) !== lower(key) && `the refusal names invoice key ${gotKey}, not the receipt's ${key}`,
+    gotBlock !== String(S) && `the refusal names block ${gotBlock}, not the receipt's settlement block ${S}`,
+    control?.r.kind === 'revert' && control.r.error.name === 'AlreadySettled' && `the call already reverted AlreadySettled at block ${S - 1}, before the settlement block`,
+  ].filter(Boolean);
+  if (problems.length) {
+    bad(`AlreadySettled, but ${problems.join('; ')}`);
+    return inconclusive(`Inconclusive: the simulated resend at block ${target.number} reverts AlreadySettled, but ${problems.join('; ')}. This is not the expected proof; do not pay again before the original transaction is checked.`);
+  }
+  ok(`simulated resend at block ${target.number} reverts AlreadySettled(${gotKey}, ${gotBlock})`);
+  ok(`its invoice key is the receipt's invoice key and its block is the receipt's settlement block ${S}`);
+  if (control?.r.kind === 'success') ok(`control: at block ${S - 1} the same call succeeds`);
+  return { ...out, state: 'proven', answer: `The vault refuses a second settlement of this invoice: the simulated resend at block ${target.number} reverts AlreadySettled. The original settlement in block ${S} stands.` };
+}
