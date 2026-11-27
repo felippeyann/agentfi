@@ -38,6 +38,7 @@ export type SimCallResult =
   | { kind: 'success'; returned: string }
   | { kind: 'revert'; data: string; error: DecodedRevert }
   | { kind: 'error'; message: string; noHistory: boolean };
+export function describeSimCall(r: SimCallResult): string;
 export type ResendState = 'proven' | 'inconclusive' | 'unavailable' | 'not_available';
 export interface ResendSimulation {
   state: ResendState;

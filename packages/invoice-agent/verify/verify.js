@@ -312,7 +312,8 @@ async function blockAt(rpc, tag) {
   return { number: Number(BigInt(b.number)), timestamp, time: new Date(timestamp * 1000).toISOString() };
 }
 
-const describeError = (r) => {
+/** One line for a simulated call's outcome: "succeeds (would settle)", "reverts AlreadySettled(0x…, 4030463)", … */
+export const describeSimCall = (r) => {
   if (r.kind === 'success') return 'succeeds (would settle)';
   if (r.kind === 'error') return `no answer (${r.message})`;
   if (!r.error.name) return `reverts with ${r.error.selector ? `an unknown error ${r.error.selector}` : 'no error data'}`;
@@ -413,7 +414,7 @@ export async function simulateResend(o) {
         ? `At block ${S - 1}, one block before the settlement, the same call succeeds: it would have settled then.`
         : c.kind === 'error'
           ? `At block ${S - 1} the node did not answer (${c.message}): no control.`
-          : `At block ${S - 1} the same call ${describeError(c)}: the control does not show "it would have passed".`,
+          : `At block ${S - 1} the same call ${describeSimCall(c)}: the control does not show "it would have passed".`,
     };
   }
 
@@ -430,7 +431,7 @@ export async function simulateResend(o) {
   }
   const e = main.error;
   if (e.name !== 'AlreadySettled') {
-    bad(`the simulated resend at block ${target.number} ${describeError(main)}`);
+    bad(`the simulated resend at block ${target.number} ${describeSimCall(main)}`);
     const why = {
       MandateExpired: 'the mandate had expired there, so the vault refused before reaching its duplicate check',
       MandatePaused: 'the mandate was paused there, so the vault refused before reaching its duplicate check',
@@ -439,7 +440,7 @@ export async function simulateResend(o) {
       AboveInvoiceCap: 'the amount was above the per-invoice cap there, so the vault refused before reaching its duplicate check',
       AboveDailyLimit: 'the vault reached its daily-limit check, which comes AFTER its duplicate check: it did not see this invoice as settled there',
     }[e.name];
-    return inconclusive(`Inconclusive: the simulated resend at block ${target.number} ${describeError(main)}${why ? `: ${why}` : ''}. It does not show the duplicate refusal.`);
+    return inconclusive(`Inconclusive: the simulated resend at block ${target.number} ${describeSimCall(main)}${why ? `: ${why}` : ''}. It does not show the duplicate refusal.`);
   }
   const [gotKey, gotBlock] = e.args;
   const problems = [
