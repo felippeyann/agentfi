@@ -5,8 +5,10 @@ import {Script, console} from "forge-std/Script.sol";
 import {SettledInvoiceFeedback, IInvoiceMandateView} from "../src/SettledInvoiceFeedback.sol";
 
 /// @title ReadAgentLink: read-only. Given the adapter and an agentId, prints every anchored feedback entry and, for
-///        each, the live chain links: identity owner, agentWallet, declared vault, vault.mandate().agent, and the
-///        vault's settlement (agent, amount, block). No broadcast; works against any RPC.
+///        each, the live chain links: identity owner, agentWallet, the adapter's bound vault and the vault the owner
+///        declared, vault.mandate().agent, and the bound vault's settlement (agent, amount, block). No broadcast;
+///        works against any RPC. `linked now true` needs: declared vault == bound vault, the invoice settled there,
+///        and the settling key == the identity's agentWallet.
 /// @dev ADAPTER=0x.. AGENT_ID=0 forge script script/ReadAgentLink.s.sol --rpc-url <rpc>
 contract ReadAgentLink is Script {
     function run() external view {
@@ -16,6 +18,8 @@ contract ReadAgentLink is Script {
         console.log("agentId", agentId);
         console.log("identity registry", address(adapter.identity()));
         console.log("reputation registry", address(adapter.reputation()));
+        console.log("vault (bound to the adapter)", address(adapter.vault()));
+        console.log("vault (declared by the owner)", adapter.declaredVault(agentId));
         console.log("anchored entries", uint256(n));
         for (uint64 i = 1; i <= n; i++) {
             SettledInvoiceFeedback.Anchor memory a = adapter.anchorOf(agentId, i);
@@ -27,7 +31,7 @@ contract ReadAgentLink is Script {
             console.logBytes32(a.invoiceKey);
             console.log("tag2 (invoiceKey)", tag2);
             console.log("vault (anchored)", a.vault);
-            console.log("vault (declared now)", l.vault);
+            console.log("vault (declared now)", l.declaredVault);
             console.log("identity owner", l.owner);
             console.log("agentWallet", l.agentWallet);
             console.log("vault.mandate().agent", l.mandateAgent);

@@ -38,6 +38,21 @@ contract SettledInvoiceFeedbackTest is Test {
     string internal constant KEY = "agentfi.invoiceMandateVault";
     string internal constant TAG1 = "agentfi.settledInvoice";
 
+    /// @dev Mirror of the Reputation Registry event, for vm.expectEmit.
+    event NewFeedback(
+        uint256 indexed agentId,
+        address indexed clientAddress,
+        uint64 feedbackIndex,
+        int128 value,
+        uint8 valueDecimals,
+        string indexed indexedTag1,
+        string tag1,
+        string tag2,
+        string endpoint,
+        string feedbackURI,
+        bytes32 feedbackHash
+    );
+
     LocalTestUSD8 internal token;
     InvoiceMandate internal vault;
     IdentityRegistryUpgradeable internal identity;
@@ -60,8 +75,6 @@ contract SettledInvoiceFeedbackTest is Test {
         Deploy8004.Registries memory r = Deploy8004.upgrade(id, rep, val);
         identity = r.identity;
         reputation = r.reputation;
-        adapter = new SettledInvoiceFeedback(IERC8004Reputation(address(reputation)));
-
         vm.startPrank(operator);
         token = new LocalTestUSD8();
         vault = new InvoiceMandate(ITUSD8(address(token)));
@@ -69,6 +82,9 @@ contract SettledInvoiceFeedbackTest is Test {
         token.transfer(address(vault), 10e6);
         vault.setMandate(agent, VENDOR, payTo, 1e6, 1e6, uint40(block.timestamp + 1 days));
         vm.stopPrank();
+
+        adapter =
+            new SettledInvoiceFeedback(IERC8004Reputation(address(reputation)), IInvoiceMandateView(address(vault)));
     }
 
     // ------------------------------------------------------------ helpers
@@ -112,9 +128,19 @@ contract SettledInvoiceFeedbackTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    function _give(address rater, IInvoiceMandateView v, string memory invoiceId) internal returns (uint64) {
+    function _give(address rater, string memory invoiceId) internal returns (uint64) {
         vm.prank(rater);
-        return adapter.giveSettledFeedback(agentId, v, invoiceId, VENDOR, 100, 0, "ipfs://feedback", bytes32(0));
+        return adapter.giveSettledFeedback(agentId, invoiceId, VENDOR, 100, 0, "ipfs://feedback", bytes32(0));
+    }
+
+    /// @dev Nothing was written for `agentId` through the bound adapter.
+    function _assertNoEntry() internal view {
+        assertEq(adapter.anchorCount(agentId), 0, "no anchored entry");
+        assertEq(reputation.getLastIndex(agentId, address(adapter)), 0, "no registry entry from the adapter");
+        address[] memory clients = new address[](1);
+        clients[0] = address(adapter);
+        (uint64 count,,) = reputation.getSummary(agentId, clients, TAG1, "");
+        assertEq(count, 0, "summary over the adapter is empty");
     }
 
     // ------------------------------------------------------------ identity
@@ -154,13 +180,30 @@ contract SettledInvoiceFeedbackTest is Test {
         assertEq(adapter.declaredVault(id), address(vault));
     }
 
+    // ------------------------------------------------------------ binding
+
+    function test_adapter_isBoundToOneVault() public view {
+        assertEq(address(adapter.vault()), address(vault));
+        assertEq(address(adapter.reputation()), address(reputation));
+        assertEq(address(adapter.identity()), address(identity));
+    }
+
+    function test_constructor_refusesAVaultWithoutCode() public {
+        vm.expectRevert(abi.encodeWithSelector(SettledInvoiceFeedback.BadVault.selector, stranger));
+        new SettledInvoiceFeedback(IERC8004Reputation(address(reputation)), IInvoiceMandateView(stranger));
+        vm.expectRevert(abi.encodeWithSelector(SettledInvoiceFeedback.BadVault.selector, address(0)));
+        new SettledInvoiceFeedback(IERC8004Reputation(address(reputation)), IInvoiceMandateView(address(0)));
+    }
+
     // ------------------------------------------------------------ refusals
 
     function test_refuses_unsettledInvoice() public {
         agentId = _registerWithProvenWallet(address(vault));
         bytes32 key = vault.invoiceKey(INVOICE, VENDOR);
         vm.expectRevert(abi.encodeWithSelector(SettledInvoiceFeedback.NotSettled.selector, key));
-        _give(operator, IInvoiceMandateView(address(vault)), INVOICE);
+        _give(operator, INVOICE);
+        _assertNoEntry();
+        assertFalse(adapter.linkOf(agentId, INVOICE, VENDOR).linked);
     }
 
     function test_refuses_settlementByAnotherAgent() public {
@@ -172,7 +215,7 @@ contract SettledInvoiceFeedbackTest is Test {
 
         agentId = _registerWithProvenWallet(address(vault)); // identity's wallet = `agent`, not `other`
         vm.expectRevert(abi.encodeWithSelector(SettledInvoiceFeedback.AgentMismatch.selector, other, agent));
-        _give(operator, IInvoiceMandateView(address(vault)), INVOICE);
+        _give(operator, INVOICE);
     }
 
     function test_refuses_differentVault() public {
@@ -182,22 +225,45 @@ contract SettledInvoiceFeedbackTest is Test {
         token.transfer(address(vault2), 1e6);
         vault2.setMandate(agent, VENDOR, payTo, 1e6, 1e6, uint40(block.timestamp + 1 days));
         vm.stopPrank();
-        _settle(vault2, INVOICE); // a real settlement by the right agent, but in a vault the owner did not declare
+        _settle(vault2, INVOICE); // a real settlement by the right agent, but in another vault
 
-        agentId = _registerWithProvenWallet(address(vault));
+        // The owner declares vault2: the adapter is bound to `vault`, where the invoice is not settled.
+        agentId = _registerWithProvenWallet(address(vault2));
         vm.expectRevert(
-            abi.encodeWithSelector(SettledInvoiceFeedback.VaultNotBound.selector, address(vault), address(vault2))
+            abi.encodeWithSelector(SettledInvoiceFeedback.VaultNotBound.selector, address(vault2), address(vault))
         );
-        _give(operator, IInvoiceMandateView(address(vault2)), INVOICE);
+        _give(operator, INVOICE);
+        _assertNoEntry();
+        assertFalse(adapter.linkOf(agentId, INVOICE, VENDOR).linked);
     }
 
-    function test_refuses_fakeVaultNotDeclared() public {
+    /// @dev Regression (PR #221 review): the owner declares a contract that claims every invoice is settled, and a
+    ///      second key of its own plays that contract's operator. No invoice was ever paid.
+    function test_refuses_declarationPointingToAFakeVault() public {
         FakeVault fake = new FakeVault(stranger, agent);
-        agentId = _registerWithProvenWallet(address(vault));
+        agentId = _registerWithProvenWallet(address(fake));
+        (bool fakeSettled,,,,) = fake.settlementOf(INVOICE, VENDOR);
+        assertTrue(fakeSettled, "the fake claims a settlement");
+
         vm.expectRevert(
-            abi.encodeWithSelector(SettledInvoiceFeedback.VaultNotBound.selector, address(vault), address(fake))
+            abi.encodeWithSelector(SettledInvoiceFeedback.VaultNotBound.selector, address(fake), address(vault))
         );
-        _give(stranger, IInvoiceMandateView(address(fake)), INVOICE);
+        _give(stranger, INVOICE);
+        vm.expectRevert(
+            abi.encodeWithSelector(SettledInvoiceFeedback.VaultNotBound.selector, address(fake), address(vault))
+        );
+        _give(operator, INVOICE);
+        _assertNoEntry();
+
+        // An instance bound to the fake can write, but under its own address: a reader that counts only the
+        // expected adapter sees nothing, and the other instance names the fake as its vault.
+        SettledInvoiceFeedback fakeAdapter =
+            new SettledInvoiceFeedback(IERC8004Reputation(address(reputation)), IInvoiceMandateView(address(fake)));
+        vm.prank(stranger);
+        fakeAdapter.giveSettledFeedback(agentId, INVOICE, VENDOR, 100, 0, "", bytes32(0));
+        assertEq(address(fakeAdapter.vault()), address(fake));
+        assertEq(reputation.getLastIndex(agentId, address(fakeAdapter)), 1);
+        _assertNoEntry();
     }
 
     function test_refuses_noVaultDeclared() public {
@@ -207,7 +273,8 @@ contract SettledInvoiceFeedbackTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(SettledInvoiceFeedback.VaultNotBound.selector, address(0), address(vault))
         );
-        _give(operator, IInvoiceMandateView(address(vault)), INVOICE);
+        _give(operator, INVOICE);
+        _assertNoEntry();
     }
 
     function test_refuses_unprovenWallet() public {
@@ -217,7 +284,7 @@ contract SettledInvoiceFeedbackTest is Test {
         identity.setMetadata(agentId, KEY, abi.encode(address(vault)));
         vm.stopPrank();
         vm.expectRevert(abi.encodeWithSelector(SettledInvoiceFeedback.AgentMismatch.selector, agent, identityOwner));
-        _give(operator, IInvoiceMandateView(address(vault)), INVOICE);
+        _give(operator, INVOICE);
     }
 
     function test_refuses_walletClearedByTransfer() public {
@@ -227,14 +294,14 @@ contract SettledInvoiceFeedbackTest is Test {
         identity.transferFrom(identityOwner, stranger, agentId);
         assertEq(identity.getAgentWallet(agentId), address(0));
         vm.expectRevert(abi.encodeWithSelector(SettledInvoiceFeedback.AgentMismatch.selector, agent, address(0)));
-        _give(operator, IInvoiceMandateView(address(vault)), INVOICE);
+        _give(operator, INVOICE);
     }
 
     function test_refuses_nonCounterparty() public {
         _settle(vault, INVOICE);
         agentId = _registerWithProvenWallet(address(vault));
         vm.expectRevert(abi.encodeWithSelector(SettledInvoiceFeedback.NotACounterparty.selector, stranger));
-        _give(stranger, IInvoiceMandateView(address(vault)), INVOICE);
+        _give(stranger, INVOICE);
     }
 
     function test_refuses_selfFeedbackByIdentityOwner() public {
@@ -250,19 +317,19 @@ contract SettledInvoiceFeedbackTest is Test {
         identity.setAgentWallet(agentId, agent, deadline, sig);
 
         vm.expectRevert(abi.encodeWithSelector(SettledInvoiceFeedback.SelfFeedback.selector, operator));
-        _give(operator, IInvoiceMandateView(address(vault)), INVOICE);
+        _give(operator, INVOICE);
         // ... but the vendor's payee may.
-        uint64 idx = _give(payTo, IInvoiceMandateView(address(vault)), INVOICE);
+        uint64 idx = _give(payTo, INVOICE);
         assertEq(idx, 1);
     }
 
     function test_refuses_secondRatingOfSameSettlement() public {
         _settle(vault, INVOICE);
         agentId = _registerWithProvenWallet(address(vault));
-        _give(operator, IInvoiceMandateView(address(vault)), INVOICE);
+        _give(operator, INVOICE);
         bytes32 key = vault.invoiceKey(INVOICE, VENDOR);
         vm.expectRevert(abi.encodeWithSelector(SettledInvoiceFeedback.AlreadyRated.selector, key, operator));
-        _give(operator, IInvoiceMandateView(address(vault)), INVOICE);
+        _give(operator, INVOICE);
     }
 
     function test_registry_stillRefusesDirectSelfFeedback() public {
@@ -280,7 +347,23 @@ contract SettledInvoiceFeedbackTest is Test {
         agentId = _registerWithProvenWallet(address(vault));
         bytes32 key = vault.invoiceKey(INVOICE, VENDOR);
 
-        uint64 idx = _give(operator, IInvoiceMandateView(address(vault)), INVOICE);
+        bytes32 fileHash = keccak256("feedback file");
+        vm.expectEmit(true, true, true, true, address(reputation));
+        emit NewFeedback(
+            agentId,
+            address(adapter),
+            1,
+            100,
+            0,
+            TAG1,
+            TAG1,
+            vm.toString(key),
+            string.concat("eip155:", vm.toString(block.chainid), ":", vm.toLowercase(vm.toString(address(vault)))),
+            "ipfs://feedback",
+            fileHash
+        );
+        vm.prank(operator);
+        uint64 idx = adapter.giveSettledFeedback(agentId, INVOICE, VENDOR, 100, 0, "ipfs://feedback", fileHash);
         assertEq(idx, 1);
 
         (int128 value, uint8 dec, string memory tag1, string memory tag2, bool revoked) =
@@ -299,6 +382,7 @@ contract SettledInvoiceFeedbackTest is Test {
         SettledInvoiceFeedback.Anchor memory a = adapter.anchorOf(agentId, idx);
         assertEq(a.vault, address(vault));
         assertEq(a.invoiceKey, key);
+        assertEq(a.vendor, VENDOR);
         assertEq(a.agent, agent);
         assertEq(a.rater, operator);
         assertEq(uint8(a.role), uint8(SettledInvoiceFeedback.Role.Operator));
@@ -311,6 +395,9 @@ contract SettledInvoiceFeedbackTest is Test {
         assertEq(l.owner, identityOwner);
         assertEq(l.agentWallet, agent);
         assertEq(l.vault, address(vault));
+        assertEq(l.declaredVault, address(vault));
+        assertEq(l.invoiceKey, key);
+        assertEq(l.amount, 1e6);
         (address mandateAgent,,,,,,) = vault.mandate();
         assertEq(l.mandateAgent, mandateAgent);
         assertTrue(l.settled);
@@ -319,7 +406,7 @@ contract SettledInvoiceFeedbackTest is Test {
         assertTrue(l.linked);
 
         // Operator and payee may each rate the settlement once.
-        uint64 idx2 = _give(payTo, IInvoiceMandateView(address(vault)), INVOICE);
+        uint64 idx2 = _give(payTo, INVOICE);
         assertEq(idx2, 2);
         assertEq(uint8(adapter.anchorOf(agentId, idx2).role), uint8(SettledInvoiceFeedback.Role.Payee));
     }
@@ -331,7 +418,7 @@ contract SettledInvoiceFeedbackTest is Test {
         vm.warp(block.timestamp + 2 days);
         vm.prank(operator);
         vault.revokeAgent();
-        uint64 idx = _give(operator, IInvoiceMandateView(address(vault)), INVOICE);
+        uint64 idx = _give(operator, INVOICE);
         SettledInvoiceFeedback.Link memory l = adapter.linkOf(agentId, INVOICE, VENDOR);
         assertEq(l.mandateAgent, address(0));
         assertTrue(l.linked);
@@ -341,7 +428,7 @@ contract SettledInvoiceFeedbackTest is Test {
     function test_revoke_onlyByRater() public {
         _settle(vault, INVOICE);
         agentId = _registerWithProvenWallet(address(vault));
-        uint64 idx = _give(operator, IInvoiceMandateView(address(vault)), INVOICE);
+        uint64 idx = _give(operator, INVOICE);
         vm.prank(payTo);
         vm.expectRevert(abi.encodeWithSelector(SettledInvoiceFeedback.NotRater.selector, payTo));
         adapter.revokeSettledFeedback(agentId, idx);
@@ -352,12 +439,12 @@ contract SettledInvoiceFeedbackTest is Test {
         // A revoked rating does not reopen the settlement for a new one.
         bytes32 key = vault.invoiceKey(INVOICE, VENDOR);
         vm.expectRevert(abi.encodeWithSelector(SettledInvoiceFeedback.AlreadyRated.selector, key, operator));
-        _give(operator, IInvoiceMandateView(address(vault)), INVOICE);
+        _give(operator, INVOICE);
     }
 
     function test_vaultRef_isCaip10() public view {
         assertEq(
-            adapter.vaultRef(address(vault)),
+            adapter.vaultRef(),
             string.concat("eip155:", vm.toString(block.chainid), ":", vm.toLowercase(vm.toString(address(vault))))
         );
     }

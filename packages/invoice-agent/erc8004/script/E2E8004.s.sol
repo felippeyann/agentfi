@@ -35,9 +35,11 @@ contract E2E8004 is Script {
         vm.startBroadcast(OPERATOR_PK);
         (address id, address rep, address val) = Deploy8004.deployProxies(operator);
         Deploy8004.Registries memory r = Deploy8004.upgrade(id, rep, val);
-        SettledInvoiceFeedback adapter = new SettledInvoiceFeedback(IERC8004Reputation(rep));
         LocalTestUSD8 token = new LocalTestUSD8();
         InvoiceMandate vault = new InvoiceMandate(ITUSD8(address(token)));
+        // The adapter is bound to this one vault for good (adapter.vault()).
+        SettledInvoiceFeedback adapter =
+            new SettledInvoiceFeedback(IERC8004Reputation(rep), IInvoiceMandateView(address(vault)));
         token.mint(operator, 10e6);
         token.transfer(address(vault), 5e6);
         vault.setMandate(agent, VENDOR, payTo, 1e6, 1e6, uint40(block.timestamp + 1 days));
@@ -58,9 +60,7 @@ contract E2E8004 is Script {
 
         // 4. Operator (a counterparty, not the identity owner): the anchored feedback.
         vm.startBroadcast(OPERATOR_PK);
-        uint64 idx = adapter.giveSettledFeedback(
-            agentId, IInvoiceMandateView(address(vault)), INVOICE, VENDOR, 100, 0, "", bytes32(0)
-        );
+        uint64 idx = adapter.giveSettledFeedback(agentId, INVOICE, VENDOR, 100, 0, "", bytes32(0));
         vm.stopBroadcast();
 
         console.log("IDENTITY", id);
@@ -71,6 +71,16 @@ contract E2E8004 is Script {
         console.log("VAULT", address(vault));
         console.log("AGENT_ID", agentId);
         console.log("FEEDBACK_INDEX", uint256(idx));
+        console.log("Read it back (read-only):");
+        console.log(
+            string.concat(
+                "ADAPTER=",
+                vm.toString(address(adapter)),
+                " AGENT_ID=",
+                vm.toString(agentId),
+                " forge script script/ReadAgentLink.s.sol --rpc-url <same rpc>"
+            )
+        );
     }
 
     function _walletSig(address identity, uint256 agentId, address wallet, address owner, uint256 deadline)

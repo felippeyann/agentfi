@@ -54,18 +54,27 @@ interface IERC8004Reputation {
 }
 
 /// @title SettledInvoiceFeedback: ERC-8004 feedback about an agent that cannot be written without a settled invoice.
-/// @notice A counterparty of an InvoiceMandate vault (its operator, or the vendor's registered payee) rates the agent
-///         that settled one of the vault's invoices. The adapter is the ERC-8004 `clientAddress`, so every entry it
-///         writes is anchored: before calling `giveFeedback` it checks, on-chain, that
-///           1. the agent's owner declared this vault in the Identity Registry (metadata key VAULT_KEY);
-///           2. the vault records the invoice as settled (`settlementOf`);
+/// @notice Each adapter instance is bound, at deployment and for good, to ONE InvoiceMandate vault (`vault()`, an
+///         immutable; there is no owner and no setter). A counterparty of that vault (its operator, or the vendor's
+///         registered payee) rates the agent that settled one of the vault's invoices. The adapter is the ERC-8004
+///         `clientAddress`, so every entry it writes is anchored: the only write path, `giveSettledFeedback`, checks
+///         on-chain, before calling `giveFeedback`, that
+///           1. the agent's owner declared this same vault in the Identity Registry (metadata key VAULT_KEY): a
+///              declaration that points anywhere else is refused, so an owner cannot substitute a contract of its
+///              choosing for the bound vault;
+///           2. the bound vault records the invoice as settled (`settlementOf`);
 ///           3. the settling key is the agent's verified `agentWallet` (ERC-8004: the owner's address, or a wallet the
 ///              owner proved control of with an EIP-712 / ERC-1271 signature);
 ///           4. the rater is the vault's operator or the mandate's payee for that vendor, and is NOT the agent's owner,
 ///              an approved operator of it, or the agent wallet (the spec's self-feedback rule, applied to the real
 ///              rater, since the registry only sees this adapter);
 ///           5. this rater has not already rated this settlement.
-///         Reading `getSummary(agentId, [adapter], TAG1, "")` therefore aggregates only settlement-anchored feedback.
+///         Reading `getSummary(agentId, [adapter], TAG1, "")` therefore aggregates only feedback anchored in a
+///         settlement of `vault()`. The trust root is the adapter's address: anyone can deploy another instance bound
+///         to a contract of their choosing (even a fake vault), and its entries carry that other instance as
+///         `clientAddress`. A reader must therefore (a) take the adapter address from a source it trusts, (b) check
+///         that its code is this contract (verified source) and (c) check that `vault()` is the expected
+///         InvoiceMandate (verified source; on Aevum, the vault of the public proof).
 ///         What it does NOT prove: the quality of the work, that operator / vendor / agent owner are independent
 ///         parties, or that any of them is a real business. Those stay declarations.
 contract SettledInvoiceFeedback {
@@ -94,6 +103,8 @@ contract SettledInvoiceFeedback {
 
     IERC8004Identity public immutable identity;
     IERC8004Reputation public immutable reputation;
+    /// @notice The one InvoiceMandate vault whose settlements this instance accepts, fixed at deployment.
+    IInvoiceMandateView public immutable vault;
 
     /// @notice agentId => feedbackIndex (the Reputation Registry's, for clientAddress = this adapter) => anchor.
     mapping(uint256 agentId => mapping(uint64 feedbackIndex => Anchor)) internal _anchors;
@@ -115,7 +126,7 @@ contract SettledInvoiceFeedback {
     );
     event AnchoredFeedbackRevoked(uint256 indexed agentId, uint64 indexed feedbackIndex, address indexed rater);
 
-    error VaultNotBound(address declared, address given);
+    error VaultNotBound(address declared, address bound);
     error NotSettled(bytes32 invoiceKey);
     error AgentMismatch(address settledBy, address agentWallet);
     error NotACounterparty(address rater);
@@ -124,21 +135,26 @@ contract SettledInvoiceFeedback {
     error NotRater(address caller);
     error UnknownFeedback(uint256 agentId, uint64 feedbackIndex);
     error BadRegistry();
+    error BadVault(address vault);
 
-    constructor(IERC8004Reputation reputation_) {
+    constructor(IERC8004Reputation reputation_, IInvoiceMandateView vault_) {
         address id = reputation_.getIdentityRegistry();
         if (id == address(0)) revert BadRegistry();
+        // A sanity check, not an authentication: it refuses an EOA or an empty address, not a look-alike contract.
+        // Which vault is genuine is for the reader to check (see the contract notice).
+        if (address(vault_).code.length == 0) revert BadVault(address(vault_));
         reputation = reputation_;
         identity = IERC8004Identity(id);
+        vault = vault_;
     }
 
-    /// @notice Rate `agentId` for the settlement of `vendor`'s invoice `invoiceId` in `vault`. Reverts unless every
-    ///         check in the contract notice holds. `feedbackURI`/`feedbackHash` are the optional ERC-8004 off-chain
-    ///         file (e.g. JSON naming the settlement tx hash) and its keccak256; neither is checked here.
+    /// @notice Rate `agentId` for the settlement of `vendor`'s invoice `invoiceId` in the bound `vault()`. Reverts
+    ///         unless every check in the contract notice holds. `feedbackURI`/`feedbackHash` are the optional ERC-8004
+    ///         off-chain file (e.g. JSON naming the settlement tx hash) and its keccak256; neither is checked here.
+    ///         This is the only function that writes a rating.
     /// @return feedbackIndex The Reputation Registry index of the entry (clientAddress = this adapter).
     function giveSettledFeedback(
         uint256 agentId,
-        IInvoiceMandateView vault,
         string calldata invoiceId,
         bytes32 vendor,
         int128 value,
@@ -156,7 +172,7 @@ contract SettledInvoiceFeedback {
         address wallet = identity.getAgentWallet(agentId);
         if (wallet == address(0) || settledBy != wallet) revert AgentMismatch(settledBy, wallet);
 
-        Role role = roleOf(vault, vendor, msg.sender);
+        Role role = roleOf(vendor, msg.sender);
         if (role == Role.None) revert NotACounterparty(msg.sender);
         if (msg.sender == wallet || identity.isAuthorizedOrOwner(msg.sender, agentId)) revert SelfFeedback(msg.sender);
 
@@ -170,7 +186,7 @@ contract SettledInvoiceFeedback {
             valueDecimals,
             TAG1,
             Strings.toHexString(uint256(key), 32),
-            vaultRef(address(vault)),
+            vaultRef(),
             feedbackURI,
             feedbackHash
         );
@@ -224,8 +240,9 @@ contract SettledInvoiceFeedback {
         return abi.decode(v, (address));
     }
 
-    /// @notice How a would-be rater relates to the vault: its operator, the mandate's payee for `vendor`, or neither.
-    function roleOf(IInvoiceMandateView vault, bytes32 vendor, address who) public view returns (Role) {
+    /// @notice How a would-be rater relates to the bound vault: its operator, the current mandate's payee for
+    ///         `vendor`, or neither.
+    function roleOf(bytes32 vendor, address who) public view returns (Role) {
         if (who == vault.operator()) return Role.Operator;
         (,,, address payTo,,, bytes32 mVendor) = vault.mandate();
         if (mVendor == vendor && who == payTo) return Role.Payee;
@@ -246,32 +263,33 @@ contract SettledInvoiceFeedback {
     struct Link {
         address owner; // ERC-721 owner of agentId
         address agentWallet; // ERC-8004 verified agent wallet
-        address vault; // declared by the owner (VAULT_KEY)
+        address vault; // the bound vault, vault() (the only one this instance reads)
+        address declaredVault; // declared by the owner (VAULT_KEY); must equal `vault` for a link
         address mandateAgent; // vault.mandate().agent now (address(0) if revoked)
         bool settled;
         address settledBy; // settlement.agent
         uint256 amount;
         uint256 settlementBlock;
         bytes32 invoiceKey;
-        bool linked; // settled && settledBy == agentWallet != 0 && vault declared
+        bool linked; // declaredVault == vault && settled && settledBy == agentWallet != 0
     }
 
-    /// @notice Live check, no feedback needed: agentId -> owner, agentWallet, declared vault, mandate agent, and the
-    ///         settlement of (`invoiceId`, `vendor`) in that vault. The settlement tx is found with eth_getLogs for
-    ///         InvoiceSettled(invoiceKey) at `settlementBlock` on the vault.
+    /// @notice Live check, no feedback needed: agentId -> owner, agentWallet, the declared vault, and, in the BOUND
+    ///         vault, the mandate agent and the settlement of (`invoiceId`, `vendor`). The settlement tx is found with
+    ///         eth_getLogs for InvoiceSettled(invoiceKey) at `settlementBlock` on the vault.
     function linkOf(uint256 agentId, string calldata invoiceId, bytes32 vendor) external view returns (Link memory l) {
         l.owner = identity.ownerOf(agentId);
         l.agentWallet = identity.getAgentWallet(agentId);
-        l.vault = declaredVault(agentId);
-        if (l.vault == address(0)) return l;
-        IInvoiceMandateView v = IInvoiceMandateView(l.vault);
-        (l.mandateAgent,,,,,,) = v.mandate();
-        (l.settled, l.amount, l.settlementBlock, l.settledBy, l.invoiceKey) = v.settlementOf(invoiceId, vendor);
-        l.linked = l.settled && l.agentWallet != address(0) && l.settledBy == l.agentWallet;
+        l.vault = address(vault);
+        l.declaredVault = declaredVault(agentId);
+        (l.mandateAgent,,,,,,) = vault.mandate();
+        (l.settled, l.amount, l.settlementBlock, l.settledBy, l.invoiceKey) = vault.settlementOf(invoiceId, vendor);
+        l.linked =
+            l.declaredVault == l.vault && l.settled && l.agentWallet != address(0) && l.settledBy == l.agentWallet;
     }
 
-    /// @notice The ERC-8004 `endpoint` written with each entry: "eip155:<chainId>:<vault>".
-    function vaultRef(address vault) public view returns (string memory) {
-        return string.concat("eip155:", Strings.toString(block.chainid), ":", Strings.toHexString(vault));
+    /// @notice The ERC-8004 `endpoint` written with each entry: "eip155:<chainId>:<bound vault>".
+    function vaultRef() public view returns (string memory) {
+        return string.concat("eip155:", Strings.toString(block.chainid), ":", Strings.toHexString(address(vault)));
     }
 }

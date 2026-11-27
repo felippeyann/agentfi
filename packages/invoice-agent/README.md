@@ -384,23 +384,38 @@ Try it locally: `npm run verify:fixture` (Anvil, a vault, INV-001 finalized and 
 
 ## ERC-8004: a rating that needs a settled invoice (local; not deployed)
 
-[ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) (draft) gives an agent an on-chain identity (Identity Registry, an ERC-721 per agent) and lets others rate it (Reputation Registry). Its known weakness is that anyone may rate anyone, with no proof that they ever dealt with the agent. `erc8004/` adds that proof for this vault:
+[ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) (draft) gives an agent an on-chain identity (Identity Registry, an ERC-721 per agent) and lets others rate it (Reputation Registry). Its known weakness is that anyone may rate anyone, with no proof that they ever dealt with the agent. `erc8004/` adds that proof for one vault:
 
-- `erc8004/src/SettledInvoiceFeedback.sol` is the only rater the reputation readers count (filter on its address and the tag `agentfi.settledInvoice`). `giveSettledFeedback(agentId, vault, invoiceId, vendor, …)` writes a rating only if:
-  - the agent's owner declared that vault in the Identity Registry;
-  - the vault's `settlementOf` shows the invoice settled, by the key that is the agent's `agentWallet` (the identity's owner, or a wallet proven by an EIP-712 or ERC-1271 signature);
-  - the rater is a counterparty of that vault (its operator, or the payee of the vault's current mandate), and is not the agent's owner, an approved operator or its wallet (the spec's self-rating rule, applied to the real rater);
+- `erc8004/src/SettledInvoiceFeedback.sol` (the adapter) is deployed **bound to one `InvoiceMandate` vault for good**: the vault is a constructor argument stored as an immutable, readable by anyone as `vault()`. The adapter has no owner and no setter, so the binding cannot change. It is the ERC-8004 `clientAddress` of every rating it writes. Its only write path, `giveSettledFeedback(agentId, invoiceId, vendor, …)`, writes a rating only if:
+  - the agent's owner declared that same vault in the Identity Registry (metadata `agentfi.invoiceMandateVault`). A declaration that points to any other contract is refused (`VaultNotBound`) and nothing is written;
+  - the bound vault's `settlementOf` shows the invoice settled, by the key that is the agent's `agentWallet` (the identity's owner, or a wallet proven by an EIP-712 or ERC-1271 signature);
+  - the rater is a counterparty of the bound vault (its operator, or the payee of its current mandate), and is not the agent's owner, an approved operator or its wallet (the spec's self-rating rule, applied to the real rater);
   - this rater has not rated that settlement before.
 
-  The rating carries the invoice key (tag2) and `eip155:<chainId>:<vault>` (endpoint). `linkOf(agentId, invoiceId, vendor)` returns the owner, the agent wallet, the vault, the settlement (agent, amount, block) and whether they link.
-- **Verifiable on-chain:** the identity's owner and URI; that the agent wallet is controlled by the agent key; the vault declaration; who settled, how much and in which block; that a rating written through the adapter cannot exist without a settlement (readers must count only the adapter's entries).
+  The rating carries the invoice key (tag2) and `eip155:<chainId>:<vault>` (endpoint). `anchorOf(agentId, index)` returns the invoice id, vendor, settling agent, amount, settlement block and rater of each rating. `linkOf(agentId, invoiceId, vendor)` returns the owner, the agent wallet, the bound vault, the declared vault, the settlement and whether they link.
+- **How a third party identifies the adapter and the vault.** The trust root is the adapter's address. Anyone can deploy another instance bound to a contract of their choosing, even a fake vault that reports every invoice as settled. Its ratings then carry that other instance as `clientAddress`, so a reader that counts only the expected adapter does not see them (test `test_refuses_declarationPointingToAFakeVault`). A reader therefore:
+  1. takes the adapter's address from the project's own record (this README, once deployed), never from the rating itself;
+  2. checks that the code at that address is this contract (verified source on the explorer, or the same bytecode compiled from `erc8004/`);
+  3. checks that its `vault()` is the expected `InvoiceMandate`. On Aevum that is `0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3`, the vault of the 24 Nov public payment, whose source is in `contracts/src`;
+  4. counts only entries with that `clientAddress` and the tag `agentfi.settledInvoice`.
+- **What the proof guarantees** (on-chain, given the four checks above): every rating from that adapter names an invoice that the bound vault records as settled, by the key that is the rated agent's `agentWallet`, written by a counterparty of that vault that is not the agent's owner, once per rater and settlement. Also verifiable: the identity's owner and URI, that the agent wallet is controlled by the agent key, the vault declaration, and who settled, how much and in which block.
 - **Not proven, declared at most:** the registration file's content, that the parties are real businesses, the quality behind the score (the rater's opinion), and independence between the parties. Identity alone proves nothing about quality or commercial reputation. In a demo where one person runs the operator, the vendor and the agent, a rating is a self-assessment anchored to a real settlement, not reputation.
 - **The payment path is unchanged:** the adapter only reads `InvoiceMandate` (imported read-only from `contracts/src`); the agent, the vault and the verification page do not depend on it.
-- **On Aevum:** no official ERC-8004 registry is open. The starter kit's docs say QDay's registry "is still in internal testing and isn't open for this challenge", and the official `0x8004…` addresses have no code on chain 44005 (read 2026-11-26). The official addresses cannot be reproduced by us (they need the ERC-8004 team's pre-signed deployment). Publishing this on Aevum would mean deploying the reference registries at our own, non-official addresses. Nothing is deployed.
+- **On Aevum:** no official ERC-8004 registry is open. The starter kit's docs say QDay's registry "is still in internal testing and isn't open for this challenge", and the official `0x8004…` addresses have no code on chain 44005 (read 2026-11-26). The official addresses cannot be reproduced by us (they need the ERC-8004 team's pre-signed deployment). Publishing this on Aevum would mean deploying the reference registries at our own, non-official addresses, with the adapter bound to the vault above (`VAULT=… forge script script/Deploy8004Registries.s.sol`). Nothing is deployed.
 - **Vendored code:** the reference registries at erc-8004/erc-8004-contracts `b9e466c` and the OpenZeppelin 5.4.0 files they compile against, byte for byte, with blob ids and sha256 in `erc8004/vendor/PROVENANCE.md`.
-- **Run it:**
-  - `cd erc8004 && forge test` (needs forge-std: `git submodule update --init packages/contracts/lib/forge-std`, as in "Run it" above);
-  - end to end on a local Anvil (any free port; 8745 here): `anvil --port 8745 --hardfork shanghai`, then `cast rpc anvil_mine 1 --rpc-url http://127.0.0.1:8745` (the vault reads a settlement in block 0 as "not settled", so the script refuses to start at block 0), then `forge script script/E2E8004.s.sol --rpc-url http://127.0.0.1:8745 --broadcast` (token, vault, registries, one settled invoice, a registered agent with a proven wallet, one anchored rating, read back).
+- **Run it** (Foundry as in "Run it" above). From the repository root:
+  1. `git submodule update --init packages/contracts/lib/forge-std` (once);
+  2. `cd packages/invoice-agent/erc8004 && forge test` (20 tests; the first compile takes up to a minute);
+  3. in a second terminal, a fresh local Anvil on any free port (8745 here): `anvil --port 8745 --hardfork shanghai`;
+  4. `cast rpc anvil_mine 1 --rpc-url http://127.0.0.1:8745` (the vault reads a settlement in block 0 as "not settled", so the script refuses to start at block 0);
+  5. `forge script script/E2E8004.s.sol --rpc-url http://127.0.0.1:8745 --broadcast`. It deploys the token, the vault, the registries and the adapter bound to that vault. Then it settles one invoice, registers an agent with a proven wallet and writes one anchored rating. It ends by printing `ADAPTER`, `VAULT`, `AGENT_ID` (0 on a fresh Anvil) and `FEEDBACK_INDEX 1`;
+  6. read the result back (read-only), with the `ADAPTER` printed in step 5: `ADAPTER=<ADAPTER from step 5> AGENT_ID=0 forge script script/ReadAgentLink.s.sol --rpc-url http://127.0.0.1:8745`. The proof is `anchored entries 1`, then:
+     - `vault (bound to the adapter)` and `vault (declared by the owner)` both equal the `VAULT` from step 5;
+     - `invoiceId QDAY-2026-11-24-001`;
+     - `agentWallet` equal to `settlement.agent`;
+     - `settlement amount 1000000`;
+     - `role (1 operator, 2 payee) 1`;
+     - `linked now true`.
 
 ## AgentFi before the challenge vs. built for the challenge
 
