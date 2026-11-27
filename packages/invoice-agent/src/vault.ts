@@ -1,9 +1,15 @@
 /**
  * The on-chain vault (contracts/src/InvoiceMandate.sol), used when the operator's mandate names one
- * (`mandate.vault`). The agent then pays with `vault.payInvoice(invoiceId, amount)` instead of
+ * (`mandate.vault`). The agent then pays with `vault.payInvoice(invoiceId, vendor, payTo, amount)` instead of
  * `token.transfer(payTo, amount)`: the money leaves the VAULT (funded by the operator), the agent key only
  * signs and pays gas, and the chain itself refuses a second settlement of the same invoice
  * (`AlreadySettled`), whatever the ledger says.
+ *
+ * The ORDER of payInvoice's checks matters when reading a refusal: caller, pause and EXPIRY come before the
+ * duplicate check (see explainVaultRefusal). After the mandate expires, a resend of an invoice that WAS paid
+ * reverts `MandateExpired`, not `AlreadySettled`: such a refusal says nothing about whether the invoice was
+ * paid. "Was it paid?" is always answered by `settlementOf` / `findSettlement` (`ops ask`, the MCP tool, the
+ * verification page), which do not depend on the mandate being current.
  *
  * Everything here reads; nothing signs.
  */
@@ -188,10 +194,16 @@ export class VaultRefusalError extends Error {
   }
 }
 
-/** The refusal in plain language, with what to do. */
+/**
+ * The refusal in plain language, with what to do. payInvoice checks, in this order: NotAgent, MandatePaused,
+ * MandateExpired, MandateChanged, the id and the amount, then AlreadySettled, then AboveDailyLimit. A refusal
+ * raised BEFORE AlreadySettled does not tell whether the invoice was already paid, so its text sends the
+ * operator to `ops ask`, which reads the settlement directly.
+ */
 export function explainVaultRefusal(e: VaultRefusalError, inv: Invoice): { rule: string; reason: string; whatToDo: string } {
   const a = e.args;
   const units = (v: unknown) => formatUnits6(BigInt(v as bigint));
+  const paidUnknown = ` This check comes before the vault's duplicate check, so it does not tell whether invoice ${inv.id} was already paid: npm run ops -- ask ${inv.id} reads the settlement.`;
   switch (e.errorName) {
     case 'AlreadySettled':
       return {
@@ -200,17 +212,17 @@ export function explainVaultRefusal(e: VaultRefusalError, inv: Invoice): { rule:
         whatToDo: `Do NOT pay this invoice again, under this id or another. Check it with: npm run ops -- ask ${inv.id} (it reads settlementOf on the vault).`,
       };
     case 'MandatePaused':
-      return { rule: 'vault:MandatePaused', reason: 'The operator has paused the vault: it pays nothing until unpaused.', whatToDo: 'Ask the operator; resubmit the same invoice once the vault is unpaused (it is judged again).' };
+      return { rule: 'vault:MandatePaused', reason: `The operator has paused the vault: it pays nothing until unpaused.${paidUnknown}`, whatToDo: 'Ask the operator; resubmit the same invoice once the vault is unpaused (it is judged again).' };
     case 'NotAgent':
-      return { rule: 'vault:NotAgent', reason: "This agent's key is not the vault's agent (revoked, or another key was named).", whatToDo: 'Ask the operator to name this agent in the vault (setMandate) or to use the agent it names.' };
+      return { rule: 'vault:NotAgent', reason: `This agent's key is not the vault's agent (revoked, or another key was named).${paidUnknown}`, whatToDo: 'Ask the operator to name this agent in the vault (setMandate) or to use the agent it names.' };
     case 'MandateChanged':
       return {
         rule: 'vault:MandateChanged',
-        reason: `The vault's mandate now names vendor "${vendorIdOf(a[0] as Hex)}" paid at ${String(a[1])}; this agent judged the invoice for vendor "${inv.vendorId}" paid at ${inv.payTo}. The vault refuses to pay a vendor the agent did not judge.`,
+        reason: `The vault's mandate now names vendor "${vendorIdOf(a[0] as Hex)}" paid at ${String(a[1])}; this agent judged the invoice for vendor "${inv.vendorId}" paid at ${inv.payTo}. The vault refuses to pay a vendor the agent did not judge.${paidUnknown}`,
         whatToDo: "The operator changed the on-chain mandate: update the agent's mandate file to match the vault (the agent refuses to start while they differ), then resubmit.",
       };
     case 'MandateExpired':
-      return { rule: 'vault:MandateExpired', reason: 'The on-chain mandate has expired.', whatToDo: 'Ask the operator to renew it (setMandate with a new expiry).' };
+      return { rule: 'vault:MandateExpired', reason: `The on-chain mandate has expired.${paidUnknown}`, whatToDo: `Check first: npm run ops -- ask ${inv.id}. If it is not settled, ask the operator to renew the mandate (setMandate with a new expiry); a renewed mandate still refuses an invoice already settled (AlreadySettled).` };
     case 'AboveInvoiceCap':
       return { rule: 'vault:AboveInvoiceCap', reason: `The vault caps one invoice at ${units(a[1])} tUSD8; this one is ${units(a[0])}.`, whatToDo: 'Ask the operator to raise the on-chain cap; the agent will not pay part of it.' };
     case 'AboveDailyLimit':
