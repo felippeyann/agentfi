@@ -138,7 +138,8 @@ export function judgeInvoice(m: Mandate, inv: Invoice, spentTodayUnits: bigint, 
         whatToDo: 'Resubmit the same invoice on another day (it is judged again), or ask the operator to raise the daily limit.',
       };
     case 'policyExpired':
-      return { allowed: false, rule: 'expired', reason: `The operator's mandate expired at ${m.expiresAt}.`, whatToDo: 'Ask the operator to renew the mandate.' };
+      // Reached only for an id this ledger does not hold as paid or in flight (those are answered from the ledger first).
+      return { allowed: false, rule: 'expired', reason: `The operator's mandate expired at ${m.expiresAt}.`, whatToDo: 'Ask the operator to renew the mandate. This refusal does not tell whether the invoice was paid elsewhere (another ledger; with a vault, npm run ops -- ask <id> reads the settlement).' };
     default:
       return { allowed: false, rule: v.rule, reason: v.reason, whatToDo: 'Ask the operator.' };
   }

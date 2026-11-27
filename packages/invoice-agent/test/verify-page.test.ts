@@ -11,7 +11,7 @@ import { existsSync, mkdtempSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { createPublicClient, createWalletClient, encodeAbiParameters, getAddress, http, toEventSelector, toFunctionSelector, type AbiEvent, type AbiFunction, type Hex } from 'viem';
+import { createPublicClient, createWalletClient, encodeAbiParameters, encodeErrorResult, encodeFunctionData, getAddress, http, toEventSelector, toFunctionSelector, type AbiEvent, type AbiFunction, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { makeChain, type ChainConfig } from '../src/chain.js';
 import { INVOICE_MANDATE_ABI, INVOICE_MANDATE_BYTECODE } from '../src/generated/invoice-mandate.js';
@@ -21,9 +21,11 @@ import { Ledger } from '../src/ledger.js';
 import type { Mandate } from '../src/mandate.js';
 import { FailPointError, InvoicePayer } from '../src/payer.js';
 import { vendorKey } from '../src/vault.js';
-import { encodeStringAndBytes32, encodeStringArg, rpcClient, SELECTORS, TOPICS, vendorBytes32, verifyInvoice } from '../verify/verify.js';
+import { decodeRevert, encodePayInvoice, encodeStringAndBytes32, encodeStringArg, ERRORS, rpcClient, SELECTORS, simulateResend, TOPICS, vendorBytes32, verifyInvoice, type Rpc } from '../verify/verify.js';
+import { freePort } from './fixtures/free-port.js';
 
-const PORT = 9500 + Math.floor(Math.random() * 300);
+// VERIFY_PAGE_ANVIL_PORT pins the port (e.g. to inspect the chain); otherwise one the OS reports free.
+const PORT = Number(process.env['VERIFY_PAGE_ANVIL_PORT'] ?? (await freePort()));
 const RPC = `http://127.0.0.1:${PORT}`;
 const OPERATOR_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' as Hex;
 const AGENT_KEY = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d' as Hex;
@@ -69,7 +71,13 @@ async function world() {
     await wait(await op.writeContract({ address: vault, abi: INVOICE_MANDATE_ABI, functionName: 'setMandate', args: [AGENT, vendorKey(id), getAddress(payTo), 10_000_000, 50_000_000, Number(t + 86_400n)] }));
   };
   const mcp = (invoiceId: string) => inquireInvoice(cfg, mandate, ledgerPath, invoiceId);
-  return { cfg, token, vault, agent, page, mcp, setVendor };
+  // Re-sets the mandate (same agent, vendor and payee) to expire `seconds` after the current block.
+  const setExpiry = async (seconds: number) => {
+    const t = BigInt((await p.getBlock()).timestamp);
+    await wait(await op.writeContract({ address: vault, abi: INVOICE_MANDATE_ABI, functionName: 'setMandate', args: [AGENT, vendorKey('acme'), VENDOR, 10_000_000, 50_000_000, Number(t + BigInt(seconds))] }));
+    return Number(t) + seconds;
+  };
+  return { cfg, token, vault, agent, page, mcp, setVendor, setExpiry };
 }
 
 const inv = (id: string, amount: string) => ({ id, vendorId: 'acme', payTo: VENDOR, amount, currency: 'tUSD8' as const });
@@ -178,5 +186,169 @@ describe('verification page (read-only, in the browser): verify/verify.js agains
     assert.match(never.answer, /under any vendor it has had/);
     // The MCP answers for the agent's vendor (acme) and still finds it.
     assert.equal((await w.mcp('INV-9')).state, 'paid_verified');
+  });
+});
+
+describe('verification page: "Simulate a resend after the payment" (read-only eth_call of the same payInvoice)', () => {
+  const real = rpcClient(RPC);
+  /** An RPC that answers `hook` where it returns something, the real Anvil otherwise. */
+  const tamper = (hook: (m: string, p: any[]) => Promise<unknown> | undefined): Rpc => async (m, p = []) => (hook(m, p as any[]) ?? real(m, p));
+  const isPay = (m: string, p: any[]) => m === 'eth_call' && String(p[0]?.data).startsWith(SELECTORS.payInvoice);
+  const reverts = (data: Hex) => Promise.reject(Object.assign(new Error('eth_call: execution reverted'), { rpcCode: 3, rpcData: data }));
+  const errAbi = INVOICE_MANDATE_ABI.filter((x) => x.type === 'error');
+  const blockTime = async (n: number) => Number(BigInt(((await raw('eth_getBlockByNumber', ['0x' + n.toString(16), false])) as { timestamp: string }).timestamp));
+
+  /** A finalized paid invoice and its page verdict. */
+  async function paid(id: string) {
+    const w = await world();
+    await w.agent().submit(inv(id, '1'));
+    await raw('anvil_mine', ['0x50']);
+    const verdict = await w.page(id);
+    assert.equal(verdict.state, 'paid_verified', verdict.answer);
+    return { w, verdict, S: verdict.settlement!.blockNumber };
+  }
+
+  it('its payInvoice selector, its encoding and its error selectors and decoding match the contract ABI', () => {
+    const fn = INVOICE_MANDATE_ABI.find((x) => x.type === 'function' && x.name === 'payInvoice') as AbiFunction;
+    assert.equal(SELECTORS.payInvoice, toFunctionSelector(fn));
+    for (const id of ['QDAY-2026-11-24-001', 'x'.repeat(64), 'é']) {
+      assert.equal(encodePayInvoice(id, vendorBytes32('vendor-1'), VENDOR, '1000000'),
+        encodeFunctionData({ abi: INVOICE_MANDATE_ABI, functionName: 'payInvoice', args: [id, vendorKey('vendor-1'), VENDOR, 1_000_000n] }));
+    }
+    for (const [selector, spec] of Object.entries(ERRORS)) {
+      const e = errAbi.find((x) => x.name === spec.name);
+      assert.ok(e, `${spec.name} is in the ABI`);
+      assert.equal(selector, toFunctionSelector(`${e.name}(${e.inputs.map((i) => i.type).join(',')})`), spec.name);
+      assert.deepEqual(spec.args, e.inputs.map((i) => i.type), spec.name);
+    }
+    for (const name of ['AlreadySettled', 'MandateExpired', 'NotAgent', 'MandatePaused', 'MandateChanged', 'AboveInvoiceCap', 'AboveDailyLimit']) {
+      assert.ok(Object.values(ERRORS).some((s) => s.name === name), `${name} is decoded`);
+    }
+    const key = ('0x' + 'ab'.repeat(32)) as Hex;
+    assert.deepEqual(decodeRevert(encodeErrorResult({ abi: INVOICE_MANDATE_ABI, errorName: 'AlreadySettled', args: [key, 4030463n] })), { name: 'AlreadySettled', selector: '0x6fd708b6', args: [key, '4030463'] });
+    assert.deepEqual(decodeRevert(encodeErrorResult({ abi: INVOICE_MANDATE_ABI, errorName: 'MandateChanged', args: [vendorKey('beta'), VENDOR] })).args, [vendorKey('beta'), VENDOR.toLowerCase()]);
+    assert.deepEqual(decodeRevert(encodeErrorResult({ abi: INVOICE_MANDATE_ABI, errorName: 'AboveDailyLimit', args: [1n, 2n, 3n] })).args, ['1', '2', '3']);
+    assert.equal(decodeRevert('0x27267dfd').name, 'MandateExpired');
+    assert.equal(decodeRevert('0xdeadbeef').name, null);
+    assert.equal(decodeRevert('0x6fd708b6').name, null, 'AlreadySettled without its arguments is not decoded');
+    assert.equal(decodeRevert('<b>x</b>').name, null);
+  });
+
+  it('mandate valid: at the latest block the vault reverts AlreadySettled with the receipt\'s key and block; one block before the settlement the same call passes', async () => {
+    const { w, verdict, S } = await paid('INV-R1');
+    const s = await simulateResend({ rpc: real, verdict });
+    assert.equal(s.state, 'proven', s.answer);
+    const head = Number(BigInt((await raw('eth_blockNumber')) as string));
+    assert.equal(s.query?.block, head, 'the mandate is valid: simulated at the latest block');
+    assert.ok(s.query!.block > S);
+    assert.match(s.query!.chosenBecause, /latest block: the mandate is still valid/);
+    assert.equal(s.settlementBlock, S);
+    assert.equal(s.result?.kind, 'revert');
+    assert.deepEqual(s.result?.kind === 'revert' && s.result.error, { name: 'AlreadySettled', selector: '0x6fd708b6', args: [verdict.settlement!.invoiceKey, String(S)] });
+    assert.equal(s.call?.from.toLowerCase(), AGENT.toLowerCase());
+    assert.equal(s.call?.to, w.vault);
+    assert.equal(s.call?.args.amountUnits, '1000000');
+    assert.equal(s.control?.block, S - 1);
+    assert.equal(s.control?.result.kind, 'success', s.control?.summary);
+    assert.match(s.answer, new RegExp(`original settlement in block ${S} stands`));
+    assert.ok(s.checks.every((c) => c.ok));
+  });
+
+  it('not offered for a receipt that is not paid_verified', async () => {
+    const w = await world();
+    await w.agent().submit(inv('INV-R2', '1')); // settled, not finalized
+    const pending = await w.page('INV-R2');
+    assert.equal(pending.state, 'pending');
+    const calls: string[] = [];
+    const s = await simulateResend({ rpc: async (m) => { calls.push(m); throw new Error('no call expected'); }, verdict: pending });
+    assert.equal(s.state, 'not_available');
+    assert.match(s.answer, /paid_verified; this one is pending/);
+    assert.deepEqual(calls, []);
+  });
+
+  it('mandate expired at the latest block (the vault answers MandateExpired there): the historical simulation a few blocks after the settlement still proves it', async () => {
+    const { w, verdict, S } = await paid('INV-R3');
+    await raw('evm_increaseTime', [2 * 86_400]);
+    await raw('evm_mine');
+    const data = encodePayInvoice('INV-R3', vendorBytes32('acme'), VENDOR, '1000000');
+    // The scenario: at the latest block the vault refuses for the expiry, before its duplicate check.
+    await assert.rejects(real('eth_call', [{ from: AGENT, to: w.vault, data }, 'latest']), (e: { rpcData?: string }) => e.rpcData === '0x27267dfd');
+    const s = await simulateResend({ rpc: real, verdict });
+    assert.equal(s.state, 'proven', s.answer);
+    assert.equal(s.query?.block, S + 10);
+    assert.ok(s.query!.block < s.query!.latestBlock);
+    assert.match(s.query!.chosenBecause, /10 blocks after the settlement block, before the mandate's expiry .*: at the latest block the mandate expired/);
+    assert.equal(s.control?.result.kind, 'success');
+  });
+
+  it('expiry within the offset: the last block before the expiry is used; expiry right after the settlement block: the settlement block itself', async () => {
+    // Blocks 30 s apart after the payment, a mandate that expires 120 s after it was set: the expiry falls 3–4 blocks later.
+    {
+      const w = await world();
+      const expiresAt = await w.setExpiry(120);
+      await w.agent().submit(inv('INV-R4', '1'));
+      await raw('anvil_mine', ['0x50', '0x1e']);
+      const verdict = await w.page('INV-R4');
+      assert.equal(verdict.state, 'paid_verified', verdict.answer);
+      const S = verdict.settlement!.blockNumber;
+      const s = await simulateResend({ rpc: real, verdict });
+      assert.equal(s.state, 'proven', s.answer);
+      const b = s.query!.block;
+      assert.ok(b > S && b < S + 10, `block ${b}, settlement ${S}`);
+      assert.ok((await blockTime(b)) < expiresAt);
+      assert.ok((await blockTime(b + 1)) >= expiresAt, 'it is the LAST block before the expiry');
+      assert.match(s.query!.chosenBecause, /the last block before the mandate's expiry/);
+    }
+    {
+      const w = await world();
+      await w.setExpiry(100);
+      await w.agent().submit(inv('INV-R5', '1'));
+      await raw('anvil_mine', ['0x50', '0xc8']); // the next block is 200 s later: past the expiry
+      const verdict = await w.page('INV-R5');
+      const S = verdict.settlement!.blockNumber;
+      const s = await simulateResend({ rpc: real, verdict });
+      assert.equal(s.state, 'proven', s.answer);
+      assert.equal(s.query?.block, S);
+      assert.match(s.query!.chosenBecause, /the settlement block itself/);
+    }
+  });
+
+  it('an RPC that does not answer, or no longer keeps the historical state ("missing trie node", "header not found"): unavailable, never a proof', async () => {
+    const { verdict, S } = await paid('INV-R6');
+    const down = await simulateResend({ rpc: rpcClient('http://127.0.0.1:1'), verdict });
+    assert.equal(down.state, 'unavailable', down.answer);
+    assert.match(down.answer, /RPC did not answer/);
+
+    const pruned = await simulateResend({ rpc: tamper((m, p) => (isPay(m, p) ? Promise.reject(new Error('eth_call: missing trie node 3c1f… (path ) state 0xabc is not available')) : undefined)), verdict });
+    assert.equal(pruned.state, 'unavailable', pruned.answer);
+    assert.match(pruned.answer, /does not serve the state of block \d+.*says nothing either way/);
+    assert.equal(pruned.result?.kind === 'error' && pruned.result.noHistory, true);
+    assert.equal(pruned.control?.result.kind, 'error');
+
+    const noHeader = await simulateResend({ rpc: tamper((m, p) => (m === 'eth_getBlockByNumber' && p[0] !== 'latest' ? Promise.reject(new Error('eth_getBlockByNumber: header not found')) : isPay(m, p) && p[1] !== '0x' + (S - 1).toString(16) ? Promise.reject(new Error('eth_call: header not found')) : undefined)), verdict });
+    assert.equal(noHeader.state, 'unavailable', noHeader.answer);
+  });
+
+  it('unexpected answers are inconclusive: a success where a refusal was expected, an unknown error, another refusal, AlreadySettled with another key or block, or already refused before the settlement', async () => {
+    const { verdict, S } = await paid('INV-R7');
+    const key = verdict.settlement!.invoiceKey as Hex;
+    const atTarget = (answer: () => Promise<unknown>) => tamper((m, p) => (isPay(m, p) && p[1] !== '0x' + (S - 1).toString(16) ? answer() : undefined));
+    const cases: [string, Rpc, RegExp][] = [
+      ['success', atTarget(async () => '0x'), /did NOT revert/],
+      ['unknown selector', atTarget(() => reverts('0xdeadbeef')), /unknown error 0xdeadbeef/],
+      ['no revert data', atTarget(() => reverts('0x')), /no error data/],
+      ['MandateExpired', atTarget(() => reverts('0x27267dfd')), /MandateExpired: the mandate had expired there/],
+      ['NotAgent', atTarget(() => reverts(encodeErrorResult({ abi: INVOICE_MANDATE_ABI, errorName: 'NotAgent' }))), /NotAgent/],
+      ['another key', atTarget(() => reverts(encodeErrorResult({ abi: INVOICE_MANDATE_ABI, errorName: 'AlreadySettled', args: [('0x' + '11'.repeat(32)) as Hex, BigInt(S)] }))), /names invoice key 0x1111/],
+      ['another block', atTarget(() => reverts(encodeErrorResult({ abi: INVOICE_MANDATE_ABI, errorName: 'AlreadySettled', args: [key, BigInt(S + 1)] }))), new RegExp(`names block ${S + 1}, not the receipt's settlement block ${S}`)],
+      ['refused before the settlement', tamper((m, p) => (isPay(m, p) ? reverts(encodeErrorResult({ abi: INVOICE_MANDATE_ABI, errorName: 'AlreadySettled', args: [key, BigInt(S)] })) : undefined)), new RegExp(`already reverted AlreadySettled at block ${S - 1}`)],
+    ];
+    for (const [what, rpc, re] of cases) {
+      const s = await simulateResend({ rpc, verdict });
+      assert.equal(s.state, 'inconclusive', `${what}: ${s.answer}`);
+      assert.match(s.answer, re, what);
+      assert.match(s.answer, /^Inconclusive/, what);
+      assert.ok(s.checks.some((c) => !c.ok), what);
+    }
   });
 });

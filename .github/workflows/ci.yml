@@ -153,6 +153,9 @@ jobs:
       # The ABI and bytecode the agent embeds must be this build's.
       - working-directory: packages/invoice-agent/contracts
         run: node ../scripts/gen-token.mjs --check
+      # ERC-8004 feedback anchored in settled invoices (vendored reference registries; our adapter and its tests).
+      - working-directory: packages/invoice-agent/erc8004
+        run: forge fmt --check src test script && forge test -vvv
 
   # Authorization guarantees on REAL local contracts (S8): each `*.anvil.ts`
   # suite starts its own Anvil and deploys the Foundry artifacts; the ones that

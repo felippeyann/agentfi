@@ -7,7 +7,9 @@ Website: [agentfi.cc](https://agentfi.cc) · [Run the local demo](docs/alpha/qui
 
 **Spend controls and a payment ledger for AI agents that buy paid APIs and services.** AgentFi is a self-hosted, headless API and [MCP](packages/mcp-server/README.md) layer: your agent pays an [x402](https://www.x402.org) (HTTP 402) resource under rules you set, the budget is enforced before anything is signed, payment and delivery are recorded separately, and payments whose outcome is uncertain are reconciled against the chain.
 
-> **Developer alpha.** It runs locally, on your machine. We do not offer a hosted service. This alpha deploys and uses no contracts on a public network (legacy contracts from earlier versions exist on Base mainnet; do not use them), and everything x402 was demonstrated on a **local Anvil fork of Base Sepolia**, not on a public testnet and not on mainnet. Do not point it at funds you care about.
+> **QDay Aevum Builder Challenge.** The challenge entry is the invoice agent in [`packages/invoice-agent`](packages/invoice-agent/README.md): an agent pays a vendor's invoice in tUSD8 under an operator's mandate, at most once per invoice id, through an on-chain vault, with a receipt anyone can check without a wallet. One public payment was made on Aevum Testnet (chain 44005, test tokens). Start at [its README](packages/invoice-agent/README.md#for-a-reviewer-where-each-answer-is). From the rest of this repository it reuses one function, AgentFi's spend-policy evaluator `evaluateUsdcSpend` (and, for its contract tests only, the forge-std submodule).
+
+> **Developer alpha.** It runs locally, on your machine. We do not offer a hosted service. Apart from the QDay vault above (Aevum Testnet only), this alpha deploys and uses no contracts on a public network (legacy contracts from earlier versions exist on Base mainnet; do not use them), and everything x402 was demonstrated on a **local Anvil fork of Base Sepolia**, not on a public testnet and not on mainnet. Do not point it at funds you care about.
 
 ## Who it is for
 
@@ -80,7 +82,7 @@ HTTP/OpenAPI and MCP first; framework examples are tracked in the **[compatibili
 |---|---|
 | **Works locally** (tests and local-fork demo; not a public network) | x402 `exact` buyer with a job budget · agent policy caps (per payment, daily volume, token and recipient allowlists, pause) · payment ledger with idempotent retries · automatic reconciliation of unknown payments (worker) · outbound target policy (no private hosts, no redirects) · MCP tools in source, incl. `pay_for_resource` · OpenAPI contract |
 | **Experimental** | ERC-8183 job escrow and ERC-8004 reputation (local fork only) · A2A jobs · DeFi tools (swaps, Aave, Compound, ERC-4626, Curve) and GMX · ENS names · admin dashboard |
-| **Not available** | Safe mode (does not work; refused in production and staging) · AgentFi contracts on any public network (the maintainer's Base mainnet pair is legacy: do not use it) · hosted service · mainnet use · `upto` / auth-capture payments · multi-tenant SaaS |
+| **Not available** | Safe mode (does not work; refused in production and staging) · AgentFi contracts on any public network (the maintainer's Base mainnet pair is legacy: do not use it; the QDay invoice vault on Aevum Testnet is the one exception, see above) · hosted service · mainnet use · `upto` / auth-capture payments · multi-tenant SaaS |
 
 ## Status and limits
 

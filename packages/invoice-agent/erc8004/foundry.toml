@@ -1,0 +1,32 @@
+# ERC-8004 "with proof" (QDay round, improvement D): the official ERC-8004 reference registries (vendored, pinned) plus
+# an adapter that only lets a counterparty rate an agent with a settled invoice of its InvoiceMandate vault.
+# The deployed InvoiceMandate is imported read-only from ../contracts/src; nothing here changes it.
+[profile.default]
+src = "src"
+out = "out"
+test = "test"
+script = "script"
+libs = ["../../contracts/lib", "vendor"]
+remappings = [
+  "forge-std/=../../contracts/lib/forge-std/src/",
+  "@openzeppelin/contracts/=vendor/openzeppelin-contracts-5.4.0/",
+  "@openzeppelin/contracts-upgradeable/=vendor/openzeppelin-contracts-upgradeable-5.4.0/",
+  "erc8004/=vendor/erc8004-contracts/",
+  "invoice-mandate/=../contracts/src/",
+]
+# Same compiler settings as the reference repo's hardhat.config.ts (0.8.24, shanghai, optimizer 200, viaIR) and as
+# ../contracts: QDay Aevum Testnet is Shanghai-level (no TSTORE/MCOPY/BLOBBASEFEE).
+solc = "0.8.24"
+evm_version = "shanghai"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+bytecode_hash = "none"
+cbor_metadata = false
+allow_paths = ["../contracts"]
+
+[profile.default.fuzz]
+runs = 256
+
+[rpc_endpoints]
+aevum = "https://rpc-test.qday.info"

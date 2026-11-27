@@ -2,7 +2,40 @@
 
 **One invoice, one payment, one receipt.** An operator approves an agent in advance to pay a known vendor up to a limit per invoice. Invoices arrive; the agent checks the vendor, the payee address and the limits, pays in tUSD8 with a plain ERC-20 transfer, and returns a receipt the operator can check on-chain. The same invoice id is paid at most once, including when the agent dies after the payment went out and before it could answer (the exact guarantee and its conditions: [What is guaranteed](#what-is-guaranteed-and-under-which-conditions)).
 
-> **Status (2026-11-25).** **One public payment has been made on Aevum Testnet (chain 44005)**, a test network with test tokens, through the `InvoiceMandate` vault and the official tUSD8: [check it yourself](#the-first-public-payment-on-aevum-check-it-yourself). The demo, the tests and the rehearsals run on a **local Anvil chain** (chain id 31337) with a **local test ERC-20** (`tUSD8-LOCAL`: 6 decimals like QDay's tUSD8, open mint, deployed by the demo; *not* QDay's tUSD8) and demo data. What is still open: [What is missing for Aevum Testnet](#what-is-missing-for-aevum-testnet).
+> **Status (2026-11-26).** **One public payment has been made on Aevum Testnet (chain 44005)**, a test network with test tokens, through the `InvoiceMandate` vault and the official tUSD8: [check it yourself](#the-first-public-payment-on-aevum-check-it-yourself). The demo, the tests and the rehearsals run on a **local Anvil chain** (chain id 31337) with a **local test ERC-20** (`tUSD8-LOCAL`: 6 decimals like QDay's tUSD8, open mint, deployed by the demo; *not* QDay's tUSD8) and demo data. What is still open: [What is missing for Aevum Testnet](#what-is-missing-for-aevum-testnet).
+
+## For a reviewer: where each answer is
+
+| Question | Short answer | Where to look |
+|---|---|---|
+| What was built for the challenge? | This package (19–26 Nov 2026): the invoice agent, its write-ahead ledger, the `InvoiceMandate` vault, the operator CLI, the read-only MCP tools, the preflight and session, the verification page (with its resend simulation), and `erc8004/` (ratings anchored in settled invoices, local, not deployed). One pre-existing AgentFi function is reused. | [Before the challenge vs. built for the challenge](#agentfi-before-the-challenge-vs-built-for-the-challenge) |
+| How do I run the demo? | `npm ci` at the repository root, then `npm run demo` (and `npm run demo:vault`) in this folder. Local chain, no key, no network. | [Run it](#run-it) |
+| Where does the operator set the mandate? | Off-chain: `npm run ops -- mandate …` writes the file the agent reads. On-chain: `setMandate` on the vault (`contracts/script/InvoiceMandate.s.sol`). The agent refuses to start when the two disagree. | [The on-chain vault](#the-on-chain-vault-invoicemandate), `src/mandate.ts`, `src/ops.ts` |
+| Who signs what? | The agent key signs only the payment (`payInvoice`, or a direct `transfer`). The operator's key signs deploy, deposit, `setMandate`, pause, withdraw. The vendor signs nothing. | [Three keys, three roles](#aevum-testnet-the-owners-three-transactions) |
+| What if the agent crashes after broadcasting? | The signed transaction was recorded in the ledger before it was sent, so the resend finds it by hash and answers with the original transaction; nothing new is signed. | [How it works](#how-it-works), `src/payer.ts`, `test/lost-response.test.ts`, `test/vault.test.ts` |
+| Where do I see there was a single transfer? | On-chain: the vault's `settlementOf` and the transaction's two logs. Locally: `ops verify` counts every transfer to the payee since the session's first block, in pages; a page that fails makes the check INCOMPLETE, never verified. | [Check it yourself](#the-first-public-payment-on-aevum-check-it-yourself), `test/log-pages.test.ts` |
+| How do I check the proof without a wallet? | Open the verification page link, or run the three `cast` reads below: public RPC, no key. | [Check it yourself](#the-first-public-payment-on-aevum-check-it-yourself) |
+
+The path of one invoice, from the mandate to the receipt:
+
+```mermaid
+flowchart TD
+  INV["POST /invoices (invoice id = idempotency key)"] --> J{"Same id in the ledger?"}
+  OP["Operator: mandate file (ops mandate) and, with a vault, setMandate on-chain"] --> MAN
+  J -- "yes: same content" --> REC["Reconcile that row against the chain (never sign again)"]
+  J -- "yes: other content" --> CON["conflict, not paid"]
+  J -- "no" --> MAN{"Mandate: vendor, payee, per-invoice and daily limits, expiry"}
+  MAN -- "refused" --> REF["refused with a reason; nothing signed"]
+  MAN -- "allowed" --> SIGN["Sign locally (gas ceiling checked first): the hash is known"]
+  SIGN --> WAL["Ledger row: signed bytes, hash, nonce (write-ahead)"]
+  WAL --> BC["Broadcast"]
+  BC --> RCPT["Receipt: Transfer to the payee (+ InvoiceSettled with a vault)"]
+  REC --> RCPT
+  RCPT --> FIN{"Confirmation rule met and block canonical?"}
+  FIN -- "not yet" --> PEN["pending + the original tx hash"]
+  FIN -- "yes" --> OK["receipt"]
+  OK --> VER["ops verify / ops ask / MCP invoice_status / verify page: read the chain"]
+```
 
 ## The first public payment on Aevum: check it yourself
 
@@ -20,6 +53,8 @@ On 2026-11-24 the owner ran the public vault session (`npm run session -- --aevu
 | Vault | `0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3`: deploy `0x69c123b31bbefe5059352f9271a13ecee54843573f1b0a77c7d1c88be24078d9`, deposit of 1 tUSD8 `0x3282891cfe19b59309ceae59d2cbebff9581355bce905485625a6b22faec03d3`, mandate `0x243a3eb37b49fb464ee4734bc716bea9887768d904d4d00848558bdc9dfbb88f` (signed by the operator) |
 | Invoice | `QDAY-2026-11-24-001`, 1 tUSD8, vendor id `vendor-1`, payee `0x46fbCbbA2b425AdFB958507F5F341FCc4932C530` |
 | Payment | [`0x2567affd1917fed9055e7ad8ed517845e41ed9b356ccb8f954bc458030976d4b`](https://explorer-test.qday.info/tx/0x2567affd1917fed9055e7ad8ed517845e41ed9b356ccb8f954bc458030976d4b), `payInvoice` sent by the agent key `0x7CA8B7704a214b9c129c166c80b5eDB28500DbC8`, block 4,030,463, gas used 118,617 |
+
+The mandate was set for one day and expired on 2026-11-25 17:16:30 UTC: the verification page shows a past expiry, the settlement and the receipt stay verifiable, and simulating the same payment today reverts `MandateExpired` rather than `AlreadySettled` (why: [the order of the vault's checks](#the-on-chain-vault-invoicemandate)).
 
 Three different claims, checked separately:
 
@@ -42,23 +77,33 @@ The lost-answer step of that session (the agent killed right after the broadcast
 
 ## Run it
 
-Needs Node 22.13+ and Foundry's `anvil` ([install Foundry](https://book.getfoundry.sh/getting-started/installation): `curl -L https://foundry.paradigm.xyz | bash`, then `foundryup`; on `PATH` or in `~/.foundry/bin`). No wallet, key, faucet or public network is needed: everything runs on your machine.
+Needs **Node 22.13+** (the ledger uses the built-in `node:sqlite`) and Foundry's **`anvil`** ([install Foundry](https://book.getfoundry.sh/getting-started/installation): `curl -L https://foundry.paradigm.xyz | bash`, then `foundryup`; found on `PATH` or in `~/.foundry/bin`). `forge` is needed only for the contract tests and `npm run build:token`. No wallet, key, faucet or public network is needed: everything runs on your machine (checked on Linux in CI and on Windows 11 with Git Bash and PowerShell 7).
 
 ```bash
 git clone https://github.com/felippeyann/agentfi.git
 cd agentfi
-npm ci                 # the whole monorepo, a few minutes: the mandate imports AgentFi's policy evaluator from packages/backend
+npm ci                 # at the repository root (npm workspaces, one lockfile): installs the whole monorepo, a few minutes
 cd packages/invoice-agent
 npm run demo           # 20-40 s: starts anvil and the agent, runs the scenario, checks invariants, stops everything
 npm run demo:vault     # the same scenario paid through the on-chain InvoiceMandate vault, plus a lost ledger and a pause
-npm test               # 82 tests on a local chain: lost response, races, RPC failures, the lock, guards, confirmation rule and reorgs, the vault path, the tip cap, the verification page, 15-40 s
+npm test               # every test file on a local chain (lost response, races, RPC failures, the lock, guards, confirmation rule and reorgs, the vault path, the tip cap, the verification page and its resend simulation, the session's `--probe-paid`), about 1 to 2 minutes; it prints the count
+npm run typecheck      # tsc --noEmit over src/ and test/
 ```
 
-The contract's own tests (Foundry, 45 including 2 fuzz, plus an opt-in fork test against the real tUSD8: `AEVUM_FORK=1 forge test --match-contract AevumForkTest`): `cd contracts && forge test` (forge-std comes from the monorepo's `packages/contracts/lib/forge-std` submodule: `git submodule update --init` once). See [The on-chain vault](#the-on-chain-vault-invoicemandate).
+The contract's own tests (Foundry; forge-std is the monorepo's submodule `packages/contracts/lib/forge-std`, so fetch it once from the repository root, or clone with `--recurse-submodules`):
+
+```bash
+git submodule update --init packages/contracts/lib/forge-std    # from the repository root
+cd packages/invoice-agent/contracts
+forge test                                                      # unit, review and fuzz tests; the fork test is skipped
+AEVUM_FORK=1 forge test --match-contract AevumForkTest           # opt-in: a local fork of Aevum with the real tUSD8 (reads the public RPC)
+```
+
+See [The on-chain vault](#the-on-chain-vault-invoicemandate). Versions, generated files and CI: [Dependencies, toolchain and CI](#dependencies-toolchain-and-ci).
 
 **What to expect.** The demo prints each step (below) with the agent's answer, the operator's `ops verify` / `ops status` output and a `✓` per invariant, and ends with `OK: every invariant held.` and exit code 0 (a broken invariant prints `✗ INVARIANT BROKEN` and exits 1). `npm test` may print `ExperimentalWarning: SQLite is an experimental feature`: the ledger uses Node's built-in `node:sqlite`; the warning is expected.
 
-**Where the receipt is.** The agent answers `POST /invoices` with JSON; when paid, `receipt` holds `invoiceId`, `invoiceHash`, `chainId`, `token`, `from`, `to`, `amount` (and `amountUnits`, 6 decimals), `txHash`, `blockNumber`, `logIndex`. The demo prints INV-001's receipt in full and checks it with `npm run ops -- verify INV-001`, which reads the transaction and its `Transfer` log from the chain. The same receipt is kept in the ledger (a SQLite file, one row per invoice, plus an event log). The transcript, ledger and mandate go to a temporary folder printed at the start and at the end (`DEMO_TRANSCRIPT=<file>` chooses the transcript path). Anvil is stopped at the end, so the chain itself does not outlive the run. Ports: Anvil 8566, agent 8787 (`DEMO_ANVIL_PORT`, `DEMO_AGENT_PORT`).
+**Where the receipt is.** The agent answers `POST /invoices` with JSON; when paid, `receipt` holds `invoiceId`, `invoiceHash`, `chainId`, `token`, `from`, `to`, `amount` (and `amountUnits`, 6 decimals), `txHash`, `blockNumber`, `logIndex`. The demo prints INV-001's receipt in full and checks it with `npm run ops -- verify INV-001`, which reads the transaction and its `Transfer` log from the chain. The same receipt is kept in the ledger (a SQLite file, one row per invoice, plus an event log). The transcript, ledger and mandate go to a temporary folder printed at the start and at the end (`DEMO_TRANSCRIPT=<file>` chooses the transcript path). Anvil is stopped at the end, so the chain itself does not outlive the run. Ports: Anvil 8566, agent 8787, and the next port (8788) for the second agent that must refuse to start (`DEMO_ANVIL_PORT`, `DEMO_AGENT_PORT`; the session takes `--anvil-port` / `--agent-port`, default 8567 / 8788).
 
 **The keys are Anvil's public development keys** (from Foundry's published `test … junk` mnemonic): fine on a local chain, swept within seconds on any real one. The agent refuses them, and the simulated crashes (`INVOICE_FAIL_AT`), when the mandate names any chain other than Anvil's 31337; and the agent and `ops` refuse to run, and the agent to sign, when the node behind `INVOICE_RPC_URL` serves another chain than the mandate's (`eth_chainId`), so a 31337 mandate pointed at a public RPC stops before anything is signed.
 
@@ -112,7 +157,24 @@ Before signing a new invoice, open rows are reconciled first (one that cannot be
 - **A transaction that stays in the mempool** is reported `pending` with its hash: there is no fee bump or replacement. The operator stops there and checks the payer in the explorer; the session command stops by itself after 10 minutes without a block.
 - **`ops verify` reads the chain**, and it also uses the agent's ledger to know which transaction belongs to which invoice: it fails when the receipt's block or log differ from the ledger, or when a transfer to that payee is not matched to an invoice.
 
-Tested on a local chain (`npm test`, among its 82 tests): crash after broadcast, after signing, while nothing is mined; a transaction dropped from the mempool is resent with the same bytes; two writers racing on one invoice; RPC failures during the resubmission and right after a new payment is sent; a node serving another chain; the nonce taken by another transaction; refusal, conflict, re-judged refusal; and the confirmation rule: pending until finalized, a block that leaves the canonical chain before the rule is met (dropped, or replaced by a reorg), a depth confirmation withdrawn after a deeper reorg, a receipt inconsistent with the block at its height, the finalized block unreadable; and the gas ceiling: a maximum exactly at the ceiling is paid, 1 wei above is refused, a fee rise after an approved preflight is refused (zero signatures, zero transmissions), a payment already sent stays recoverable when fees rise.
+Tested on a local chain (`npm test`; which file covers what: [Files](#files)): crash after broadcast, after signing, while nothing is mined; a transaction dropped from the mempool is resent with the same bytes; two writers racing on one invoice; RPC failures during the resubmission and right after a new payment is sent; a node serving another chain; the nonce taken by another transaction; refusal, conflict, re-judged refusal; and the confirmation rule: pending until finalized, a block that leaves the canonical chain before the rule is met (dropped, or replaced by a reorg), a depth confirmation withdrawn after a deeper reorg, a receipt inconsistent with the block at its height, the finalized block unreadable; and the gas ceiling: a maximum exactly at the ceiling is paid, 1 wei above is refused, a fee rise after an approved preflight is refused (zero signatures, zero transmissions), a payment already sent stays recoverable when fees rise.
+
+### Threat model, in short
+
+| | What | Backed by |
+|---|---|---|
+| **Guarantee** | One payment per invoice id: per ledger without a vault, per (invoice id, vendor) on-chain with one | `test/lost-response.test.ts`, `test/review-fixes.test.ts`; `contracts/test/InvoiceMandate.t.sol`, `test/vault.test.ts` ("a NEW ledger …") |
+| **Guarantee** | A crash at any point (after signing, after broadcasting, while nothing is mined) never produces a second signed payment | `test/lost-response.test.ts`, `test/vault.test.ts`; the public session's resend returned the original hash (owner's transcript) |
+| **Guarantee** | "Paid" only once the block meets the confirmation rule and is canonical; `finalized` on Aevum | `test/finality.test.ts`; the public payment's block is at or below `finalized` (`cast` reads above) |
+| **Guarantee** | A transfer count that could not read every log page is never "verified" | `test/log-pages.test.ts` |
+| **Guarantee** | A stolen agent key pays only the registered payee, within the vault's cap and daily limit, until the expiry | `contracts/test/InvoiceMandate.t.sol` (`test_compromisedAgentKey_cannotPayAnyoneElse_norExceedLimits`) |
+| **Assumption** | The operator is trusted (it names the agent and the payee, and can withdraw) | by design: [its limits](#the-on-chain-vault-invoicemandate) |
+| **Assumption** | One RPC is trusted for receipts, the head and `finalized`; the explorer link lets anyone check independently | [Limits of the rule](#when-the-operator-can-trust-the-receipt) |
+| **Assumption** | One agent process per ledger file (enforced by a lock); whoever submits invoices keeps the vendor's invoice number stable | `test/review-fixes.test.ts` (the lock) |
+| **Assumption** | tUSD8 behaves as an ERC-20 (it can blacklist or pause: the payment then reverts, nothing recorded) | `contracts/test/AevumFork.t.sol` (opt-in fork test) |
+| **Limit** | No fee bumping: a transaction stuck in the mempool stays `pending` and the session stops | [Stop criteria](#aevum-testnet-preflight-and-the-public-session) |
+| **Limit** | The daily limit is per calendar UTC day (up to 2× around midnight); a stolen key can dust-settle future ids | `contracts/test/InvoiceMandateReview.t.sol` (the two `_documented` tests) |
+| **Limit** | One public payment is a single observation of the Aevum RPC's behaviour; not audited | [What is missing](#what-is-missing-for-aevum-testnet) |
 
 ## When the operator can trust the receipt
 
@@ -188,6 +250,8 @@ The same answer from the shell: `npm run ops -- ask INV-001` (JSON). To try it l
 | **Anyone** | read `mandate()`, `settlementOf(invoiceId, vendor)`, `findSettlement(invoiceId)` (every vendor the vault has had), `vendors(i)` / `vendorCount()`, `remainingToday()`, the events | anything else |
 
 **`payInvoice(invoiceId, vendor, payTo, amount)`** checks, in order: caller is the agent (`NotAgent`), not paused (`MandatePaused`), before the expiry (`MandateExpired`), `vendor` and `payTo` are still the mandate's (`MandateChanged`: the agent's signed call names what it judged, so an old signed call landing after the operator switched vendor or payee reverts instead of paying the new one), id of 1–64 bytes (`InvalidInvoiceId`), amount above 0 and at most the cap (`ZeroAmount`, `AboveInvoiceCap`), the invoice not settled yet (`AlreadySettled(key, block)`), today's total within the daily limit (`AboveDailyLimit`). It then records `settlements[keccak256(abi.encode(invoiceId, vendor))] = {agent, amount, block}`, adds to today's total, emits `InvoiceSettled(invoiceKey, invoiceId, vendor, payTo, amount, agent)` and only then calls `tUSD8.transfer(payTo, amount)` (effects before the external call; the call must succeed and return `true` or nothing, else `TransferFailed` and the whole payment reverts). The vault keeps the list of every vendor it has been mandated for, so `findSettlement(invoiceId)` answers "was it paid?" across a vendor change.
+
+**Why the order of the checks matters for a resend after the expiry.** The expiry (and the pause, and the caller) are checked *before* the duplicate check. So once a mandate has expired, a resend of an invoice that was paid reverts `MandateExpired`, not `AlreadySettled`: nothing can be paid either way, but the revert alone does not say whether the invoice was paid. The public invoice shows it, with read-only `eth_call`s of `payInvoice` from the agent's address: at block 4,030,462 (before the payment) it would succeed; at block 4,100,000 it reverts `AlreadySettled`; at the latest block, after the 2026-11-25 17:16:30 UTC expiry, it reverts `MandateExpired`. The agent answers a resend from its ledger first (the original receipt, without asking the vault); on a fresh ledger its refusal says that it does not tell whether the invoice was paid and points to `ops ask`, which reads `settlementOf` like the verification page (tested: `test/vault.test.ts`, "after the on-chain mandate expires").
 
 **What it guarantees** (tested in `contracts/test/InvoiceMandate.t.sol` and `InvoiceMandateReview.t.sol`):
 - **One settlement per (invoice id, vendor), enforced by the chain.** A second `payInvoice` for the same invoice reverts, whatever the amount, the nonce, the day, the agent process or its ledger; also after the operator rotates the agent key or changes the vendor's payee. Ids are exact (case-sensitive), like the ledger's; the vendor is part of the key, so two vendors' `INV-001` are two invoices.
@@ -308,21 +372,64 @@ npm run session -- --aevum --vault <vault> --vendor <vendor> --by NAME --amount 
 
 Step 6 of the vault session counts independently, since the session's first block: exactly one `InvoiceSettled` of the vault (this invoice, this payee, this amount) and exactly one `Transfer` vault → vendor, both in the original transaction, and `settlementOf` shows it settled by this agent. **The gas ceiling is the owner's decision:** the default stays 0.0001 tQDAY; the preflight prints the vault call's maximum next to it, and with the default the session stops at the preflight when the vault call could cost more (on Anvil, at ~1 gwei, a first payment's maximum is ~0.000134). Rehearse it locally with `npm run session -- --rehearse --vault --max-gas-cost 0.0002` (it deploys a local vault, operator = Anvil's deployer, agent = another Anvil key, vendor `vendor-1`).
 
+`--probe-paid <id>` (vault mode only) adds one step before the new invoice: the session resends an invoice the vault has **already settled** to the agent, started on an empty ledger. The agent must refuse with `vault:AlreadySettled`, sign nothing and keep its nonce; any other answer stops the session (exit 3). The session first reads `settlementOf(id)` and stops unless that id is settled, so a typo can never pay the probe. It runs before the new payment because the agent's own daily limit is checked before the vault. With `--rehearse` it replays a paid invoice locally first. Tested in `test/session-probe.test.ts`.
+
 ### The verification page (static, read-only; live at agentfi.cc/verify)
 
 `verify/` is a static page (`index.html`, `app.js`, `verify.js`, `style.css`; no build, no dependencies, no wallet). It takes a vault address and an invoice id (optionally a vendor id and a transaction hash), reads the chain **from the browser** over plain JSON-RPC (default: the public `https://rpc-test.qday.info`, chain 44005) and shows the on-chain mandate, the settlement (`settlementOf(id, vendor)` for a given vendor id; without one `findSettlement(id)`, which searches every vendor the vault has had, so a vendor change never produces a false "not paid"), the `InvoiceSettled` event (its vendor must match), the tUSD8 `Transfer` in the same transaction, the finality (the block is canonical and at or below the node's `finalized` block) and the explorer link. Its states are the MCP's names: `paid_verified`, `pending`, `failed`, `unknown_invoice` (no settlement in this vault under any of its vendors, or only under another vendor than the one asked, which it names), `mismatch`, `cannot_verify_now` (RPC down, another chain, no contract). It never signs or sends anything; everything from the chain is rendered as text; a strict Content-Security-Policy allows only its own scripts and RPC connections. A link can carry the inputs: `index.html?vault=0x…&invoice=INV-001`.
 
-Try it locally: `npm run verify:fixture` (Anvil, a vault, INV-001 finalized and INV-002 not yet; it serves the page on 127.0.0.1 and prints the links; Ctrl+C stops it). `test/verify-page.test.ts` runs the page's logic against Anvil and checks its states against the agent's own answer and its hand-written selectors against the contract ABI. **Live** since 2026-11-25 at https://www.agentfi.cc/verify/index.html, the four files of this folder unchanged. For example, [the first public invoice](https://www.agentfi.cc/verify/index.html?vault=0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3&invoice=QDAY-2026-11-24-001).
+For a `paid_verified` receipt the page also offers **"Simulate a resend after the payment"**: a read-only `eth_call` of the same `payInvoice` (id, vendor, payee, amount from the receipt) from the settling agent, at the latest block if the mandate is still valid there, otherwise a few blocks after the settlement block and before the mandate's expiry (`payInvoice` checks the expiry before the duplicate). It counts as shown only if the vault reverts `AlreadySettled` with the receipt's invoice key and settlement block; a control call one block before the settlement is shown alongside: it is expected to pass, a control that already reverts `AlreadySettled` makes the result inconclusive, and a control the node does not answer is reported as such. An RPC without that block's state, or any other answer, is reported as unavailable or inconclusive. Why the block matters: [the order of the vault's checks](#the-on-chain-vault-invoicemandate). Tested in `test/verify-page.test.ts` (valid mandate, mandate expired at the latest block, expiry inside the offset, RPC down, no historical state, unexpected answers).
+
+Try it locally: `npm run verify:fixture` (Anvil, a vault, INV-001 finalized and INV-002 not yet; it serves the page on 127.0.0.1 and prints the links; Ctrl+C stops it; ports 8571 and 8572 by default, or `FIXTURE_ANVIL_PORT` / `FIXTURE_PAGE_PORT`). `test/verify-page.test.ts` runs the page's logic against Anvil and checks its states against the agent's own answer and its hand-written selectors against the contract ABI. **Live** since 2026-11-25 at https://www.agentfi.cc/verify/index.html. The live copy is this folder as of commit `31d1c1a` (PR #220); the resend simulation goes live with the next deploy of the page. For example, [the first public invoice](https://www.agentfi.cc/verify/index.html?vault=0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3&invoice=QDAY-2026-11-24-001).
+
+## ERC-8004: a rating that needs a settled invoice (local; not deployed)
+
+[ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) (draft) gives an agent an on-chain identity (Identity Registry, an ERC-721 per agent) and lets others rate it (Reputation Registry). Its known weakness is that anyone may rate anyone, with no proof that they ever dealt with the agent. `erc8004/` adds that proof for one vault:
+
+- `erc8004/src/SettledInvoiceFeedback.sol` (the adapter) is deployed **bound to one `InvoiceMandate` vault for good**: the vault is a constructor argument stored as an immutable, readable by anyone as `vault()`. The adapter has no owner and no setter, so the binding cannot change. It is the ERC-8004 `clientAddress` of every rating it writes. Its only write path, `giveSettledFeedback(agentId, invoiceId, vendor, …)`, writes a rating only if:
+  - the agent's owner declared that same vault in the Identity Registry (metadata `agentfi.invoiceMandateVault`). A declaration that points to any other contract is refused (`VaultNotBound`) and nothing is written;
+  - the bound vault's `settlementOf` shows the invoice settled, by the key that is the agent's `agentWallet` (the identity's owner, or a wallet proven by an EIP-712 or ERC-1271 signature);
+  - the rater is a counterparty of the bound vault (its operator, or the payee of its current mandate), and is not the agent's owner, an approved operator or its wallet (the spec's self-rating rule, applied to the real rater);
+  - that role has not rated that settlement before: **at most two ratings per settlement**, one from the operator and one from a payee. The vault does not expose a settlement's own payee, so "payee" means the one the operator currently names; the cap per role keeps a re-pointed payee from turning one payment into more ratings (test `test_refuses_moreRatingsByRotatingThePayee`).
+
+  The rating carries the invoice key (tag2) and `eip155:<chainId>:<vault>` (endpoint). `anchorOf(agentId, index)` returns the invoice id, vendor, settling agent, amount, settlement block and rater of each rating. `linkOf(agentId, invoiceId, vendor)` returns the owner, the agent wallet, the bound vault, the declared vault, the settlement and whether they link.
+- **How a third party identifies the adapter and the vault.** The trust root is the adapter's address. Anyone can deploy another instance bound to a contract of their choosing, even a fake vault that reports every invoice as settled. Its ratings then carry that other instance as `clientAddress`, so a reader that counts only the expected adapter does not see them (test `test_refuses_declarationPointingToAFakeVault`). A reader therefore:
+  1. takes the adapter's address from the project's own record (this README, once deployed), never from the rating itself;
+  2. checks that the code at that address is this contract: verified source on the explorer, or the runtime bytecode compiled from `erc8004/`, compared with the three immutables (`vault`, `identity`, `reputation`) masked out;
+  3. checks that its `reputation()` is the registry being queried, and that its `vault()` is the expected `InvoiceMandate`. On Aevum that is `0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3`, the vault of the 24 Nov public payment, whose source is in `contracts/src`;
+  4. counts only entries with that `clientAddress` and the tag `agentfi.settledInvoice`.
+- **What the proof guarantees** (on-chain, given the four checks above): every rating from that adapter names an invoice that the bound vault records as settled, by the key that is the rated agent's `agentWallet`, written by a counterparty of that vault that is not the agent's owner, at most one rating per role (operator, payee) and settlement. Also verifiable: the identity's owner and URI, that the agent wallet is controlled by the agent key, the vault declaration, and who settled, how much and in which block.
+- **Not proven, declared at most:** the registration file's content, that the parties are real businesses, the quality behind the score (the rater's opinion), and independence between the parties. Identity alone proves nothing about quality or commercial reputation. In a demo where one person runs the operator, the vendor and the agent, a rating is a self-assessment anchored to a real settlement, not reputation.
+- **The payment path is unchanged:** the adapter only reads `InvoiceMandate` (imported read-only from `contracts/src`); the agent, the vault and the verification page do not depend on it.
+- **On Aevum:** no official ERC-8004 registry is open. The starter kit's docs say QDay's registry "is still in internal testing and isn't open for this challenge", and the official `0x8004…` addresses have no code on chain 44005 (read 2026-11-26). The official addresses cannot be reproduced by us (they need the ERC-8004 team's pre-signed deployment). Publishing this on Aevum would mean deploying the reference registries at our own, non-official addresses, with the adapter bound to the vault above (`VAULT=… forge script script/Deploy8004Registries.s.sol`). Nothing is deployed.
+- **Vendored code:** the reference registries at erc-8004/erc-8004-contracts `b9e466c` and the OpenZeppelin 5.4.0 files they compile against, byte for byte, with blob ids and sha256 in `erc8004/vendor/PROVENANCE.md`.
+- **Run it** (Foundry as in "Run it" above). From the repository root:
+  1. `git submodule update --init packages/contracts/lib/forge-std` (once);
+  2. `cd packages/invoice-agent/erc8004 && forge test` (21 tests; the first compile takes up to a minute);
+  3. in a second terminal, a fresh local Anvil on any free port (8745 here): `anvil --port 8745 --hardfork shanghai`;
+  4. `cast rpc anvil_mine 1 --rpc-url http://127.0.0.1:8745` (the vault reads a settlement in block 0 as "not settled", so the script refuses to start at block 0);
+  5. `forge script script/E2E8004.s.sol --rpc-url http://127.0.0.1:8745 --broadcast`. It deploys the token, the vault, the registries and the adapter bound to that vault. Then it settles one invoice, registers an agent with a proven wallet and writes one anchored rating. It ends by printing `ADAPTER`, `VAULT`, `AGENT_ID` (0 on a fresh Anvil) and `FEEDBACK_INDEX 1`;
+  6. read the result back (read-only), with the `ADAPTER` printed in step 5: `ADAPTER=<ADAPTER from step 5> AGENT_ID=0 forge script script/ReadAgentLink.s.sol --rpc-url http://127.0.0.1:8745`. The proof is `anchored entries 1`, then:
+     - `vault (bound to the adapter)` and `vault (declared by the owner)` both equal the `VAULT` from step 5;
+     - `invoiceId QDAY-2026-11-24-001`;
+     - `agentWallet` equal to `settlement.agent`;
+     - `settlement amount 1000000`;
+     - `role (1 operator, 2 payee) 1` and `value 100`;
+     - `linked now true`.
 
 ## AgentFi before the challenge vs. built for the challenge
 
 | | Before the challenge (AgentFi open source, Apache-2.0) | Built during the challenge (this package) |
 |---|---|---|
 | Spend rules | `evaluateUsdcSpend` (`packages/backend/src/services/policy/usdc-spend-policy.ts`): per-payment cap, daily limit, allowed recipients, allowed tokens, expiry. **Reused as is**, imported by `src/mandate.ts`. | The mandate (one vendor, its registered address, per-invoice and daily limits), its mapping to an AgentFi policy, the vendor identity check, plain-language refusals with "what to do" |
-| Payments | x402 purchases of HTTP resources (EIP-3009 authorizations settled by the seller's facilitator), with a Postgres ledger and on-chain reconciliation of `transferWithAuthorization` | Direct ERC-20 invoice payment from the payer's own key; the write-ahead ledger; the reconciliation by transaction hash and nonce; receipts and `ops verify`; the lost-response handling and its tests |
+| Payments | x402 purchases of HTTP resources (EIP-3009 authorizations settled by the seller's facilitator), with a Postgres ledger and on-chain reconciliation of `transferWithAuthorization` | Direct ERC-20 invoice payment from the payer's own key; the write-ahead ledger; the reconciliation by transaction hash and nonce; receipts and `ops verify`; the lost-response handling and its tests; the `InvoiceMandate` vault and its Foundry tests; the confirmation rule; the preflight and the session; the read-only MCP tools; the verification page |
 | Not used here | the AgentFi API, worker, MCP server, Postgres/Redis, Turnkey/Safe wallets | — |
 
 The x402 ledger taught the vocabulary used here (money proven on-chain vs. reported, a block refused before anything is signed, "do not retry with a new id"), but its code is EIP-3009-specific and was not reused.
+
+**Dates, from the git history.** `evaluateUsdcSpend` was first committed on 8 Oct 2026 (`9d7e022`) and last changed on 14 Oct 2026 (`1179e10`); it and its one import (`policy-numbers.ts`, same folder) are pure functions with no package dependency. Everything in `packages/invoice-agent` was written for the challenge, from its first commit on 19 Nov 2026 (`f63ae87`) to 26 Nov 2026 (the resend simulation, `--probe-paid` and `erc8004/` are from 26 Nov). The public payment was made by commit `7382b7f`; its receipt was verified later by `0b71785` (paged log reads; no new payment).
+
+**Official materials consulted.** The QDay Builder Challenge page (https://qday.io/builder-challenge) and its "Add QDay Aevum" wiki page (read 19 Nov: chain id, RPC, explorer, tUSD8 address and decimals, faucet; `src/config.ts` cites them), the public RPC itself (what `finalized` means there, read 19 Nov, [above](#when-the-operator-can-trust-the-receipt)), and the faucet. We read the official Aevum starter kit on 24 Nov. No reuse of its code was identified in the files and history examined.
 
 ## What is missing for Aevum Testnet
 
@@ -332,17 +439,45 @@ Done on 2026-11-24, by the owner: the vault deployed, funded and mandated, and o
 - Fee bumping for a transaction stuck in the mempool: not implemented (the session stops instead).
 - The direct-transfer path (no vault) has not been run on Aevum.
 
+## Dependencies, toolchain and CI
+
+| What | Version / source | Used for |
+|---|---|---|
+| Node.js | ≥ 22.13 (`engines`; CI uses Node 22) | everything; `node:sqlite` for the ledger and its lock |
+| `viem`, `@modelcontextprotocol/sdk` | `package.json` ranges, resolved in the **root** `package-lock.json` (npm workspaces: this package has no lockfile of its own) | chain reads and signing; the read-only MCP server |
+| `tsx`, `typescript`, `@types/node` | same | running `src/*.ts` directly, `npm run typecheck` |
+| `evaluateUsdcSpend` | `packages/backend/src/services/policy/` (imported by relative path from `src/mandate.ts`) | the spend rules; [provenance above](#agentfi-before-the-challenge-vs-built-for-the-challenge) |
+| Foundry (`anvil`, `forge`, `cast`) | CI: `foundry-toolchain` `stable` for this package's job, `nightly` for the contract job; developed locally with 1.7.1 | `anvil` for the demo and every test; `forge` for the contract tests and the build; `cast` only for the manual checks above |
+| forge-std | git submodule `packages/contracts/lib/forge-std`, pinned at `0844d7e` (v1.15.0), shared with the monorepo's own contracts (`contracts/foundry.toml`: `libs`, `remappings`) | contract tests and `script/InvoiceMandate.s.sol` only; `InvoiceMandate.sol` imports nothing |
+| solc | 0.8.24, `evm_version = shanghai`, optimizer 200 runs, no metadata hash (`contracts/foundry.toml`) | the vault and the local test token |
+
+**Generated files.** `src/generated/invoice-mandate.ts` and `src/generated/local-test-usd8.ts` hold the ABI and bytecode the agent, the demo and the tests deploy and call. `npm run build:token` (`forge build`, then `scripts/gen-token.mjs`) regenerates them; CI runs `node ../scripts/gen-token.mjs --check` after `forge test` and fails if they differ from the build. `verify/verify.js` keeps hand-written selectors; `test/verify-page.test.ts` checks them against the ABI.
+
+**CI** (`.github/workflows/ci.yml`): the job *Invoice agent (QDay demo)* runs `npm ci`, `npm test`, `npm run demo`, `npm run demo:vault`, `npm run session -- --rehearse` and the same rehearsal with `--vault --max-gas-cost 0.0002`; *Lint & Type Check* runs `npm run typecheck` in every workspace, this one included; *Foundry Tests* runs `forge fmt --check src test script`, `forge test` and the generated-files check in `contracts/`. The same job runs `forge fmt --check src test script` and `forge test` in `erc8004/`. `.gitattributes` keeps `.sol` files LF in every checkout, so `forge fmt --check` also passes on Windows; a checkout made before that rule may still have CRLF copies (delete them and `git checkout -- .`).
+
 ## Third-party code
 
-Runtime: [viem](https://github.com/wevm/viem) (MIT), [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk) (MIT, the read-only MCP server). Development: [tsx](https://github.com/privatenumber/tsx) (MIT), [TypeScript](https://github.com/microsoft/TypeScript) (Apache-2.0), `@types/node` (MIT). SQLite through Node's built-in `node:sqlite`. The test token is compiled with Foundry (`npm run build:token`; solc 0.8.24).
+Runtime: [viem](https://github.com/wevm/viem) (MIT), [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk) (MIT, the read-only MCP server). Development: [tsx](https://github.com/privatenumber/tsx) (MIT), [TypeScript](https://github.com/microsoft/TypeScript) (Apache-2.0), `@types/node` (MIT). Contract tests and the deploy script: [forge-std](https://github.com/foundry-rs/forge-std) (MIT or Apache-2.0), the monorepo's submodule; not part of the deployed vault. Tooling, not redistributed: [Foundry](https://github.com/foundry-rs/foundry) (MIT or Apache-2.0) and solc 0.8.24. SQLite through Node's built-in `node:sqlite`. `erc8004/` (local, not deployed) vendors the ERC-8004 reference registries ([erc-8004/erc-8004-contracts](https://github.com/erc-8004/erc-8004-contracts) at `b9e466c`; SPDX MIT in every source file) and the [OpenZeppelin Contracts](https://github.com/OpenZeppelin/openzeppelin-contracts) and Contracts Upgradeable 5.4.0 files they compile against (MIT); provenance per file in `erc8004/vendor/PROVENANCE.md`.
 
 ## Files
 
-- `src/invoice.ts` invoice shape, amounts, content hash · `src/mandate.ts` the operator's mandate and the verdict (uses AgentFi's evaluator)
-- `src/ledger.ts` the write-ahead ledger · `src/chain.ts` sign / broadcast / receipts / Transfer logs · `src/payer.ts` the decision and the reconciliation
-- `src/server.ts` the headless agent (HTTP) · `src/ops.ts` the operator CLI · `src/demo.ts` the scenario
-- `src/inquiry.ts` "was it paid?" (shared by `ops verify`, `ops ask` and the MCP tool) · `src/mcp.ts` the read-only MCP server · `src/mcp-fixture.ts` a local synthetic world to ask it
-- `src/finality.ts` the confirmation rule · `src/preflight.ts` the read-only checks · `src/session.ts` the rehearsal and the public session · `src/config.ts` environment and the Aevum profile
+The invoice's path through the code, in order:
+
+- `src/server.ts` the headless agent (HTTP `POST /invoices`; takes the ledger lock, checks the node's chain and the vault at start) → `src/invoice.ts` invoice shape, amounts, content hash
+- `src/payer.ts` the decision and the reconciliation (ledger first, then the mandate; sign → record → broadcast) → `src/mandate.ts` the operator's mandate and the verdict (uses AgentFi's evaluator)
+- `src/ledger.ts` the write-ahead ledger and its lock · `src/chain.ts` the gas rule, signing, broadcast, receipts, `Transfer` logs read in pages · `src/vault.ts` the vault call, its records and its refusals in plain language
+- `src/finality.ts` the confirmation rule (inclusion / finalized / depth, canonical check) · `src/config.ts` environment, guards and the Aevum profile
+- `src/inquiry.ts` "was it paid?" (shared by `ops verify`, `ops ask` and the MCP tool) · `src/ops.ts` the operator CLI · `src/mcp.ts` the read-only MCP server
+- `src/preflight.ts` the read-only checks · `src/session.ts` the rehearsal and the public session · `src/demo.ts` the scenario
+- `src/mcp-fixture.ts`, `src/verify-fixture.ts` local synthetic worlds for the MCP server and the verification page · `src/generated/` ABI and bytecode (generated, see above)
+- `contracts/src/InvoiceMandate.sol` the on-chain vault · `contracts/src/LocalTestUSD8.sol` the local test token · `contracts/script/InvoiceMandate.s.sol` the owner's three transactions · `contracts/test/` the Foundry tests (`InvoiceMandateReview.t.sol`: the security review's adversarial cases; `InvoiceMandateScript.t.sol`: the script's guards; `AevumFork.t.sol`: opt-in, the real tUSD8 on a local fork)
+- `scripts/gen-token.mjs` writes or checks `src/generated/` · `scripts/aevum-fork-gas.mjs` the vault's gas on a local fork of Aevum (`npm run gas:aevum-fork`) · `scripts/aevum-fork-renewal.mjs` a mandate renewal and a second payment rehearsed on a local fork of the real vault (read-only toward Aevum)
+- `verify/` the read-only verification page (static, live at agentfi.cc/verify), with the resend simulation
+- `erc8004/` ERC-8004 ratings anchored in settled invoices (local, not deployed): `src/SettledInvoiceFeedback.sol` the adapter, `test/` its Foundry tests, `script/` a local end-to-end run and a read-only reader, `vendor/` the pinned reference registries and OpenZeppelin (see `vendor/PROVENANCE.md`)
+
+Tests (`npm test` runs `test/*.test.ts`; each file starts its own Anvil on a free port):
+
+- `test/lost-response.test.ts` the crash cases, refusals, conflict · `test/review-fixes.test.ts` races, the lock, RPC failures, nonce taken, re-judged refusal, operator resolve (from the independent review)
 - `test/finality.test.ts` the confirmation rule, reorgs before confirmation, inconsistent receipts, an unreadable finalized block · `test/config-guard.test.ts` keys, mandate, ledger binding, confirmation settings
-- `test/lost-response.test.ts` the crash cases · `test/review-fixes.test.ts` races, the lock, RPC failures, nonce taken, re-judged refusal, operator resolve (from the independent review) · `contracts/src/LocalTestUSD8.sol` the local test token
-- `contracts/src/InvoiceMandate.sol` the on-chain vault · `contracts/test/` its Foundry tests (`InvoiceMandateReview.t.sol`: the security review's adversarial cases) · `scripts/aevum-fork-gas.mjs` its gas on a local fork of Aevum · `contracts/script/InvoiceMandate.s.sol` the owner's three transactions · `src/vault.ts` reading the vault, decoding its refusals · `test/vault.test.ts` the agent through the vault · `verify/` the read-only verification page · `src/verify-fixture.ts` its local fixture · `test/verify-page.test.ts` its tests
+- `test/gas-ceiling.test.ts` the gas ceiling and the signed fields · `test/tip-cap.test.ts` the tip cap, against the Aevum reading of 2026-11-24 · `test/log-pages.test.ts` paged `eth_getLogs`, INCOMPLETE on a failed page
+- `test/vault.test.ts` the agent through the vault · `test/session-probe.test.ts` the session's `--probe-paid` step · `test/mcp.test.ts` the MCP server over stdio · `test/verify-page.test.ts` the verification page's logic and its resend simulation · `test/fixtures/` helpers (the lock holder, a free port)

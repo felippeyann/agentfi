@@ -44,6 +44,19 @@
     </div>
     <h2>Checks</h2>
     <ul id="checks" class="checks"></ul>
+
+    <section id="resend" class="resend" aria-labelledby="resend-h">
+      <h2 id="resend-h">What if the agent pays it again?</h2>
+      <p class="next">Asks the vault what it would answer if the agent that settled this invoice sent the same payment again: the same <code>payInvoice</code> (invoice id, vendor, payee, amount from the receipt above), simulated with a read-only <code>eth_call</code> at a block after the settlement. No wallet, nothing is signed or sent.</p>
+      <button id="resend-go" type="button">Simulate a resend after the payment</button>
+      <p id="resend-why" class="next" hidden></p>
+      <div id="resend-result" hidden>
+        <div id="resend-badge" class="badge"></div>
+        <p id="resend-answer" class="answer"></p>
+        <div class="card"><dl id="resend-facts"></dl></div>
+        <ul id="resend-checks" class="checks"></ul>
+      </div>
+    </section>
   </section>
 
   <footer>

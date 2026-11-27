@@ -3,7 +3,7 @@
  * sends nothing: only `eth_*` reads on the RPC and GETs on the explorer.
  *
  *   --network aevum            QDay Aevum Testnet defaults (chain 44005, official RPC, explorer, tUSD8) [default]
- *   --rpc URL --chain-id N --token 0x… --explorer URL|none   override or describe another network
+ *   --rpc URL --chain-id N --token 0x… --explorer URL|none [--decimals 6]   override or describe another network
  *   --payer 0x…                the payer's PUBLIC address: tQDAY and tUSD8 balances, nonces
  *   --vendor 0x… --amount 1    with --payer: gas estimate of transfer(vendor, amount) and its cost in tQDAY
  *   --max-finalized-lag-min N  fail if the node's finalized block is more than N minutes behind the head
@@ -17,7 +17,7 @@
  *
  * Exit 0 when every check passed, 1 otherwise. Every line says what was read and from where.
  */
-import { createPublicClient, formatEther, getAddress, http, type Address, type Hex } from 'viem';
+import { createPublicClient, formatEther, getAddress, http, type Address } from 'viem';
 import { ERC20_ABI, makeChain, planTransfer } from './chain.js';
 import { KNOWN_NETWORKS, parseGasCeiling, parsePriorityFeeCap } from './config.js';
 import { formatUnits6, toBaseUnits } from './invoice.js';
@@ -246,5 +246,3 @@ if (isMain) {
     process.exitCode = 1;
   });
 }
-
-export type { Hex };

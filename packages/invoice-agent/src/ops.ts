@@ -8,6 +8,8 @@
  *   npm run ops -- verify <invoiceId>  checks a receipt against the chain, independently of the agent's answer
  *   npm run ops -- reconcile [<invoiceId>]  brings open rows up to what the chain says (never signs)
  *   npm run ops -- ask <invoiceId>   "was it paid?": the read-only answer the MCP tool gives, as JSON
+ *   npm run ops -- resolve <invoiceId> --not-paid --by NAME --note TEXT   closes a STUCK row after the operator checked
+ *                                    the payer's transaction at that nonce (refused if our transaction has appeared)
  *
  * Environment: INVOICE_RPC_URL, INVOICE_MANDATE, INVOICE_LEDGER (as the agent).
  */
@@ -174,7 +176,7 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  console.log('usage: npm run ops -- <mandate|status|verify <invoiceId>|reconcile [<invoiceId>]|resolve <invoiceId> --not-paid --by NAME --note TEXT>');
+  console.log('usage: npm run ops -- <mandate …|status|verify <invoiceId>|reconcile [<invoiceId>]|ask <invoiceId>|resolve <invoiceId> --not-paid --by NAME --note TEXT>');
   return 2;
 }
 

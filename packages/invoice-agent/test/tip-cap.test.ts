@@ -27,8 +27,9 @@ import type { Mandate } from '../src/mandate.js';
 import { FailPointError, InvoicePayer } from '../src/payer.js';
 import { preflight } from '../src/preflight.js';
 import { vendorKey } from '../src/vault.js';
+import { freePort } from './fixtures/free-port.js';
 
-const PORT = 9900 + Math.floor(Math.random() * 90);
+const PORT = await freePort();
 const ANVIL = `http://127.0.0.1:${PORT}`;
 const CHAIN_ID = 31337;
 const OPERATOR_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' as Hex;

@@ -24,8 +24,9 @@ import type { Mandate } from '../src/mandate.js';
 import { FailPointError, InvoicePayer, type FailPoint, type Outcome } from '../src/payer.js';
 import { preflight } from '../src/preflight.js';
 import { assertVaultMatches, settlementOf, vendorKey } from '../src/vault.js';
+import { freePort } from './fixtures/free-port.js';
 
-const PORT = 9100 + Math.floor(Math.random() * 300);
+const PORT = await freePort();
 const RPC = `http://127.0.0.1:${PORT}`;
 const CHAIN_ID = 31337;
 const OPERATOR_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' as Hex; // deploys and owns the vault
@@ -303,5 +304,27 @@ describe('vault path: the agent pays through InvoiceMandate.payInvoice', () => {
     t.diagnostic(`payInvoice: first payment to an empty vendor ${holderVault}, to a vendor holding tUSD8 ${holderVault2}; plan for the next: estimate ${plan.estimatedGas}, limit ${plan.gas}`);
     t.diagnostic(`direct transfer (local token): to a holder ${directHolder}, to an empty address ${directEmpty}; vault overhead ≈ ${holderVault2 - directHolder}`);
     assert.ok(holderVault2 > directHolder);
+  });
+
+  // Last in this file: it moves the chain's clock past the mandate (the worlds above build their expiry from the block time).
+  it('after the on-chain mandate expires: the original ledger replays the receipt; a fresh ledger is refused MandateExpired (expiry is checked BEFORE the duplicate check), which does not claim "not paid"; "was it paid?" still answers paid_verified', async () => {
+    const w = await world();
+    const first = await w.proc().submit(invoice('INV-EXP', '1'));
+    assert.equal(first.outcome, 'paid');
+    await rpc('evm_increaseTime', [31 * 86_400]); // the world's mandate runs 30 days
+    await rpc('evm_mine');
+    const replay = await w.proc().submit(invoice('INV-EXP', '1'));
+    assert.equal(replay.outcome, 'replayed', 'answered from the ledger: the vault is not asked again');
+    assert.equal(tx(replay), tx(first));
+    const before = signingStats.signatures;
+    const fresh = w.newLedgerPath();
+    const r = await w.proc({ ledger: fresh }).submit(invoice('INV-EXP', '1'));
+    assert.equal((r as { rule: string }).rule, 'vault:MandateExpired', 'not AlreadySettled: the expiry check comes first');
+    assert.match((r as { reason: string }).reason, /does not tell whether invoice INV-EXP was already paid/);
+    assert.equal(signingStats.signatures, before, 'nothing was signed');
+    const ask = await inquireInvoice(w.cfg, w.mandate, fresh, 'INV-EXP');
+    assert.equal(ask.state, 'paid_verified', ask.answer);
+    assert.equal(ask.receipt?.txHash, tx(first));
+    assert.equal((await w.sent()).length, 1, 'still one payment');
   });
 });
