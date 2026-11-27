@@ -28,7 +28,6 @@ contract ReadAgentLink is Script {
                 adapter.reputation().readFeedback(agentId, address(adapter), i);
             console.log("--- feedbackIndex", uint256(i));
             console.log("invoiceId", a.invoiceId);
-            console.logBytes32(a.invoiceKey);
             console.log("tag2 (invoiceKey)", tag2);
             console.log("vault (anchored)", a.vault);
             console.log("vault (declared now)", l.declaredVault);
@@ -40,7 +39,7 @@ contract ReadAgentLink is Script {
             console.log("settlement block", l.settlementBlock);
             console.log("rater", a.rater);
             console.log("role (1 operator, 2 payee)", uint256(uint8(a.role)));
-            console.logInt(int256(value));
+            console.log(string.concat("value ", vm.toString(int256(value))));
             console.log("valueDecimals", uint256(dec));
             console.log("revoked", revoked);
             console.log("linked now", l.linked);

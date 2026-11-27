@@ -328,8 +328,39 @@ contract SettledInvoiceFeedbackTest is Test {
         agentId = _registerWithProvenWallet(address(vault));
         _give(operator, INVOICE);
         bytes32 key = vault.invoiceKey(INVOICE, VENDOR);
-        vm.expectRevert(abi.encodeWithSelector(SettledInvoiceFeedback.AlreadyRated.selector, key, operator));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SettledInvoiceFeedback.AlreadyRated.selector, key, SettledInvoiceFeedback.Role.Operator
+            )
+        );
         _give(operator, INVOICE);
+    }
+
+    /// @dev Regression (PR #221 review of 78b295e): the operator re-points the mandate's payee after the settlement.
+    ///      Without a per-role cap, each new payee could rate the same payment once more.
+    function test_refuses_moreRatingsByRotatingThePayee() public {
+        _settle(vault, INVOICE);
+        agentId = _registerWithProvenWallet(address(vault));
+        _give(operator, INVOICE);
+        _give(payTo, INVOICE);
+        bytes32 key = vault.invoiceKey(INVOICE, VENDOR);
+        for (uint256 i = 1; i <= 3; i++) {
+            address sock = address(uint160(0xB0B0 + i));
+            vm.prank(operator);
+            vault.setMandate(agent, VENDOR, sock, 1e6, 1e6, uint40(block.timestamp + 1 days));
+            assertEq(uint8(adapter.roleOf(VENDOR, sock)), uint8(SettledInvoiceFeedback.Role.Payee));
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    SettledInvoiceFeedback.AlreadyRated.selector, key, SettledInvoiceFeedback.Role.Payee
+                )
+            );
+            _give(sock, INVOICE);
+        }
+        assertEq(adapter.anchorCount(agentId), 2, "one payment, at most two ratings");
+        address[] memory clients = new address[](1);
+        clients[0] = address(adapter);
+        (uint64 count,,) = reputation.getSummary(agentId, clients, TAG1, "");
+        assertEq(count, 2);
     }
 
     function test_registry_stillRefusesDirectSelfFeedback() public {
@@ -438,7 +469,11 @@ contract SettledInvoiceFeedbackTest is Test {
         assertTrue(revoked);
         // A revoked rating does not reopen the settlement for a new one.
         bytes32 key = vault.invoiceKey(INVOICE, VENDOR);
-        vm.expectRevert(abi.encodeWithSelector(SettledInvoiceFeedback.AlreadyRated.selector, key, operator));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SettledInvoiceFeedback.AlreadyRated.selector, key, SettledInvoiceFeedback.Role.Operator
+            )
+        );
         _give(operator, INVOICE);
     }
 

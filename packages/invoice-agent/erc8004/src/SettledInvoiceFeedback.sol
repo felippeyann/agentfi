@@ -68,7 +68,10 @@ interface IERC8004Reputation {
 ///           4. the rater is the vault's operator or the mandate's payee for that vendor, and is NOT the agent's owner,
 ///              an approved operator of it, or the agent wallet (the spec's self-feedback rule, applied to the real
 ///              rater, since the registry only sees this adapter);
-///           5. this rater has not already rated this settlement.
+///           5. this ROLE has not already rated this settlement: at most one rating from the operator and one from
+///              a payee per settlement. The payee is whoever the operator set as the current mandate's payee (the vault
+///              does not expose the settlement's own payee, and the operator is trusted to name it); capping by role
+///              means re-pointing the payee cannot turn one payment into more ratings.
 ///         Reading `getSummary(agentId, [adapter], TAG1, "")` therefore aggregates only feedback anchored in a
 ///         settlement of `vault()`. The trust root is the adapter's address: anyone can deploy another instance bound
 ///         to a contract of their choosing (even a fake vault), and its entries carry that other instance as
@@ -108,7 +111,7 @@ contract SettledInvoiceFeedback {
 
     /// @notice agentId => feedbackIndex (the Reputation Registry's, for clientAddress = this adapter) => anchor.
     mapping(uint256 agentId => mapping(uint64 feedbackIndex => Anchor)) internal _anchors;
-    /// @notice keccak256(vault, invoiceKey, rater) => already rated.
+    /// @notice keccak256(vault, invoiceKey, role) => already rated (one rating per role and settlement).
     mapping(bytes32 => bool) public rated;
 
     event AnchoredFeedback(
@@ -131,7 +134,7 @@ contract SettledInvoiceFeedback {
     error AgentMismatch(address settledBy, address agentWallet);
     error NotACounterparty(address rater);
     error SelfFeedback(address rater);
-    error AlreadyRated(bytes32 invoiceKey, address rater);
+    error AlreadyRated(bytes32 invoiceKey, Role role);
     error NotRater(address caller);
     error UnknownFeedback(uint256 agentId, uint64 feedbackIndex);
     error BadRegistry();
@@ -176,8 +179,8 @@ contract SettledInvoiceFeedback {
         if (role == Role.None) revert NotACounterparty(msg.sender);
         if (msg.sender == wallet || identity.isAuthorizedOrOwner(msg.sender, agentId)) revert SelfFeedback(msg.sender);
 
-        bytes32 once = keccak256(abi.encode(address(vault), key, msg.sender));
-        if (rated[once]) revert AlreadyRated(key, msg.sender);
+        bytes32 once = keccak256(abi.encode(address(vault), key, role));
+        if (rated[once]) revert AlreadyRated(key, role);
         rated[once] = true;
 
         reputation.giveFeedback(
@@ -222,7 +225,7 @@ contract SettledInvoiceFeedback {
     }
 
     /// @notice The original rater withdraws its entry (ERC-8004 `revokeFeedback`, which only the clientAddress -
-    ///         this adapter - may call). The settlement stays rated: it cannot be rated again.
+    ///         this adapter - may call). The settlement stays rated for that role: it cannot be rated again.
     function revokeSettledFeedback(uint256 agentId, uint64 feedbackIndex) external {
         Anchor storage a = _anchors[agentId][feedbackIndex];
         if (a.vault == address(0)) revert UnknownFeedback(agentId, feedbackIndex);
