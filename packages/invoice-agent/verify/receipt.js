@@ -14,8 +14,6 @@ import { isAddress, units6, verifyInvoice } from './verify.js';
 
 export const RECEIPT_FORMAT = 'agentfi.invoice-receipt';
 export const RECEIPT_VERSION = 1;
-/** How far behind a receipt's block a node may be and still be read as lagging (inconclusive) rather than not_paid. */
-export const MAX_NODE_LAG = 1000;
 
 const lower = (a) => String(a).toLowerCase();
 const isHash = (h) => typeof h === 'string' && /^0x[0-9a-fA-F]{64}$/.test(h);
@@ -118,6 +116,55 @@ export function compareClaims(r, x) {
   ].filter(([, a, b, eq = (m, n) => lower(m) === lower(n)]) => !eq(a, b)).map(([field, expected, receipt]) => ({ field, expected, receipt }));
 }
 
+const short = (e) => String(e?.message ?? e).split('\n')[0].slice(0, 160);
+
+/**
+ * Your vault, on this node, has no settlement of your invoice. That alone does not tell a receipt that is false from a
+ * node that has not seen the payment yet, so the node is asked about the receipt's OWN transaction and block:
+ *   - the node knows the transaction: its block is a fact. A block (or block hash) other than the receipt's is a
+ *     proven divergence (mismatch); the declared block, with no settlement of your invoice, is proven not_paid;
+ *   - the node does not know it, but has the declared block height: a block hash other than the receipt's is a proven
+ *     divergence (mismatch); the same hash without the transaction is a node that cannot answer (inconclusive);
+ *   - the node does not know it and is below the declared block: it may be behind (a genuine receipt) or the receipt
+ *     may name a transaction that does not exist (a forged one, e.g. a block in the future). One source cannot tell
+ *     these apart: inconclusive, with that uncertainty spelled out. The height difference alone never rejects.
+ */
+async function evidenceForUnsettled(rpc, r, v, { bad, done }) {
+  const D = r.payment.blockNumber, T = r.payment.txHash;
+  const none = `your vault has no settlement of "${v.invoiceId}" on this node`;
+  let txr, head;
+  try {
+    [txr, head] = await Promise.all([rpc('eth_getTransactionReceipt', [T]), rpc('eth_blockNumber').then((h) => Number(BigInt(h)))]);
+  } catch (e) {
+    return done('inconclusive', `Inconclusive: ${none}, and the node did not answer about the receipt's transaction (${short(e)}). Nothing is concluded.`, { verdict: v, evidence: 'unavailable' });
+  }
+  if (txr) {
+    const b = Number(BigInt(txr.blockNumber));
+    if (b !== D || lower(txr.blockHash) !== lower(r.payment.blockHash)) {
+      bad(`transaction ${T} is in block ${b} (${txr.blockHash}) on this node, not in block ${D} (${r.payment.blockHash}) as the receipt says`);
+      return done('mismatch', `Proven divergence: transaction ${T} is in block ${b} on this chain, not in block ${D} as the receipt says, and ${none}. Do not mark the invoice paid with this file.`, { verdict: v, evidence: 'transaction', chainTx: { blockNumber: b, blockHash: txr.blockHash, status: txr.status } });
+    }
+    bad(`transaction ${T} is in block ${D} as declared, but did not settle your invoice in your vault`);
+    return done('not_paid', `The chain does not back this receipt: transaction ${T} exists in block ${D} as declared, but ${none} (status ${txr.status}). It is not the payment of this invoice.`, { verdict: v, evidence: 'transaction' });
+  }
+  if (head >= D) {
+    let blk;
+    try {
+      blk = await rpc('eth_getBlockByNumber', ['0x' + D.toString(16), false]);
+    } catch (e) {
+      return done('inconclusive', `Inconclusive: ${none}, the node does not know transaction ${T}, and it did not return block ${D} (${short(e)}). Nothing is concluded.`, { verdict: v, evidence: 'unavailable' });
+    }
+    if (blk?.hash && lower(blk.hash) !== lower(r.payment.blockHash)) {
+      bad(`block ${D} on this chain is ${blk.hash}, not the receipt's ${r.payment.blockHash}`);
+      return done('mismatch', `Proven divergence: block ${D} on this chain is ${blk.hash}, not ${r.payment.blockHash} as the receipt says; the node does not know transaction ${T} and ${none}. Do not mark the invoice paid with this file.`, { verdict: v, evidence: 'block' });
+    }
+    bad(`the node has block ${D} but neither transaction ${T} nor a settlement of your invoice`);
+    return done('inconclusive', `Inconclusive: the node has block ${D}${blk?.hash ? ' with the receipt\'s block hash' : ''} but does not return transaction ${T}, and ${none}. This node cannot answer; nothing is concluded. Check with another RPC.`, { verdict: v, evidence: 'unavailable' });
+  }
+  bad(`the node is at block ${head}, below the receipt's block ${D}, and does not know transaction ${T}`);
+  return done('inconclusive', `Inconclusive: this node is at block ${head}, below the receipt's block ${D}, does not know transaction ${T}, and ${none}. From this one source a node that is behind (a genuine receipt) cannot be told apart from a receipt naming a transaction that does not exist (a forged one). Nothing is concluded: keep the invoice open and check with another RPC, or later.`, { verdict: v, evidence: 'unavailable', uncertainty: 'node_behind_or_receipt_invalid' });
+}
+
 /**
  * Can the consumer mark its invoice as paid with this receipt? Read-only.
  *   settle        the chain shows exactly the expected payment, finalized, and the receipt describes that payment
@@ -127,7 +174,10 @@ export function compareClaims(r, x) {
  *   pending       paid, not finalized yet: ask again later
  *   inconclusive  the chain could not be read (or answered for another chain): nothing concluded, retry
  *   invalid       the receipt or the expectation is malformed
- * `decision` is 'settle' only for settle; 'retry' for pending and inconclusive; 'reject' otherwise.
+ * `decision` is 'settle' only for settle; 'retry' for pending and inconclusive; 'reject' otherwise. `conclusive` is
+ * false exactly for 'retry': the chain gave no evidence either way (a reject always rests on evidence: a difference with
+ * your record, or a fact the node reports). Whether and when to check again is the CALLER's policy (the
+ * accounts-payable example caps the attempts and then parks the delivery for a person); this function never loops.
  *
  * @param {{ rpc: (m: string, p?: unknown[]) => Promise<any>, receipt: any, expected: any }} o
  */
@@ -135,10 +185,10 @@ export async function checkReceipt(o) {
   const checks = [];
   const ok = (what) => checks.push({ ok: true, what });
   const bad = (what) => checks.push({ ok: false, what });
-  const done = (state, answer, extra = {}) => ({
-    state, decision: state === 'settle' ? 'settle' : state === 'pending' || state === 'inconclusive' ? 'retry' : 'reject',
-    answer, checks, ...extra,
-  });
+  const done = (state, answer, extra = {}) => {
+    const decision = state === 'settle' ? 'settle' : state === 'pending' || state === 'inconclusive' ? 'retry' : 'reject';
+    return { state, decision, conclusive: decision !== 'retry', answer, checks, ...extra };
+  };
 
   const ex = validateExpected(o.expected);
   if (!ex.ok) return done('invalid', `The expected invoice record is incomplete or malformed: ${ex.problems.join(', ')}.`);
@@ -160,27 +210,7 @@ export async function checkReceipt(o) {
   const why = v.answer;
   if (v.state === 'cannot_verify_now') return done('inconclusive', `Inconclusive: ${why} Nothing is concluded; try again.`, { verdict: v });
   if (v.state === 'pending') return done('pending', `${why} Try again later.`, { verdict: v });
-  if (v.state === 'unknown_invoice' || v.state === 'failed') {
-    // A node behind the receipt's block cannot know the payment yet: that is not "not paid".
-    let head;
-    try {
-      head = Number(BigInt(await o.rpc('eth_blockNumber')));
-    } catch (e) {
-      return done('inconclusive', `Inconclusive: the vault reports no settlement, and the node's head could not be read (${String(e?.message ?? e).slice(0, 160)}). Try again.`, { verdict: v });
-    }
-    // The receipt's block number is the receipt's claim: only a SMALL lead over the head is read as a lagging node. A
-    // block far beyond the head is a block the chain has not produced: not_paid, so a forged receipt cannot stay in a
-    // retry loop by claiming a block in the future.
-    if (head < r.payment.blockNumber && r.payment.blockNumber - head <= MAX_NODE_LAG) {
-      bad(`the node's head ${head} is below the receipt's block ${r.payment.blockNumber}`);
-      return done('inconclusive', `Inconclusive: this node is at block ${head}, behind the receipt's block ${r.payment.blockNumber}; it cannot know that payment yet. Try again, or use another RPC.`, { verdict: v });
-    }
-    if (head < r.payment.blockNumber) {
-      bad(`the receipt's block ${r.payment.blockNumber} is more than ${MAX_NODE_LAG} blocks beyond the node's head ${head}`);
-      return done('not_paid', `The chain does not back this receipt: it names block ${r.payment.blockNumber}, more than ${MAX_NODE_LAG} blocks beyond the chain's head ${head}, and ${why[0].toLowerCase()}${why.slice(1)}`, { verdict: v });
-    }
-    return done('not_paid', `The chain does not back this receipt: ${why}`, { verdict: v });
-  }
+  if (v.state === 'unknown_invoice' || v.state === 'failed') return evidenceForUnsettled(o.rpc, r, v, { bad, done });
   if (v.state !== 'paid_verified') return done('mismatch', `The chain's records disagree: ${why}`, { verdict: v });
 
   // The payment on chain against the expected record (the vault settled this id, but was it this payment?).

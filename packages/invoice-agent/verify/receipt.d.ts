@@ -3,7 +3,6 @@ import type { PageVerdict, Rpc } from './verify.js';
 
 export const RECEIPT_FORMAT: 'agentfi.invoice-receipt';
 export const RECEIPT_VERSION: 1;
-export const MAX_NODE_LAG: number;
 
 export interface Receipt {
   format: 'agentfi.invoice-receipt';
@@ -46,6 +45,12 @@ export type ReceiptState = 'settle' | 'divergent' | 'not_paid' | 'mismatch' | 'p
 export interface ReceiptCheck {
   state: ReceiptState;
   decision: 'settle' | 'retry' | 'reject';
+  /** false exactly when decision is 'retry': the chain gave no evidence either way. */
+  conclusive: boolean;
+  /** For an invoice your vault has not settled: what the node said about the receipt's own transaction and block. */
+  evidence?: 'transaction' | 'block' | 'unavailable';
+  uncertainty?: 'node_behind_or_receipt_invalid';
+  chainTx?: { blockNumber: number; blockHash: string; status: string };
   answer: string;
   checks: { ok: boolean; what: string }[];
   differences?: { field: string; expected: unknown; receipt?: unknown; chain?: unknown }[];

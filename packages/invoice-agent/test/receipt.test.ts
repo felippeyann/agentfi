@@ -212,7 +212,7 @@ function degraded(method: string, answer: unknown): Rpc {
 }
 
 describe('degraded RPC answers are inconclusive, never a reject', () => {
-  it('no logs, no transaction receipt, an empty eth_call, a node behind the receipt\'s block', async () => {
+  it('no logs, no transaction receipt, an empty eth_call', async () => {
     const w = await world();
     const a = await w.deployVault();
     await a.pay('INV-D', '2');
@@ -224,22 +224,100 @@ describe('degraded RPC answers are inconclusive, never a reject', () => {
       assert.equal(c.state, 'inconclusive', `${method} -> ${JSON.stringify(answer)}: ${c.answer}`);
       assert.equal(c.decision, 'retry');
     }
-    // A node whose state is behind (it does not know the settlement yet) and whose head is below the receipt's block.
-    const behind: Rpc = async (m, params) => {
-      if (m === 'eth_blockNumber') return '0x1';
-      if (m === 'eth_call') return '0x' + '0'.repeat(64 * 6);
-      return rpcClient(RPC)(m, params);
-    };
-    const b = await checkReceipt({ rpc: behind, receipt: r, expected: x });
-    assert.equal(b.state, 'inconclusive', b.answer);
+  });
+});
 
-    // ... but a forged receipt that claims a block far in the future cannot keep itself in the retry loop.
+/**
+ * A node that has not seen the payment yet: its head is block 1, it knows no settlement (every eth_call answers zero
+ * words), no transaction receipt and no block above 1. Everything else is the real chain.
+ */
+const LAGGING = (real: Rpc): Rpc => async (m, params) => {
+  if (m === 'eth_blockNumber') return '0x1';
+  if (m === 'eth_call') return '0x' + '0'.repeat(64 * 6);
+  if (m === 'eth_getTransactionReceipt' || m === 'eth_getTransactionByHash') return null;
+  if (m === 'eth_getBlockByNumber' && typeof params?.[0] === 'string' && params[0].startsWith('0x') && Number(BigInt(params[0])) > 1) return null;
+  return real(m, params);
+};
+
+describe('the receipt\'s block: proven divergence vs evidence unavailable (no height rule)', () => {
+  it('1. the node knows the transaction and its block differs from the declared one: proven divergence (mismatch)', async () => {
+    const w = await world();
+    const a = await w.deployVault();
+    await a.pay('INV-S1', '2');
+    await w.finalize();
+    const r = await w.receiptFor(a.vault, 'INV-S1');
+
+    // a) the invoice is settled, the file declares another block for its transaction
+    const shifted = structuredClone(r);
+    shifted.payment.blockNumber += 1;
+    const c1 = await checkReceipt({ rpc: rpcClient(RPC), receipt: shifted, expected: w.expected(a.vault, 'INV-S1') });
+    assert.equal(c1.state, 'mismatch', c1.answer);
+    assert.equal(c1.conclusive, true);
+
+    // b) a copy that claims an unpaid invoice: the node knows its transaction, in another block than declared
+    const claim = structuredClone(r);
+    claim.invoice.id = 'INV-S1-NEVER';
+    claim.payment.blockNumber += 7;
+    const c2 = await checkReceipt({ rpc: rpcClient(RPC), receipt: claim, expected: w.expected(a.vault, 'INV-S1-NEVER') });
+    assert.equal(c2.state, 'mismatch', c2.answer);
+    assert.equal(c2.evidence, 'transaction');
+    assert.equal(c2.chainTx?.blockNumber, r.payment.blockNumber);
+    assert.match(c2.answer, /^Proven divergence/);
+
+    // c) the same copy in the declared block: the transaction is real but settled another invoice (proven not_paid)
+    const same = structuredClone(r);
+    same.invoice.id = 'INV-S1-NEVER';
+    const c3 = await checkReceipt({ rpc: rpcClient(RPC), receipt: same, expected: w.expected(a.vault, 'INV-S1-NEVER') });
+    assert.equal(c3.state, 'not_paid', c3.answer);
+    assert.equal(c3.evidence, 'transaction');
+
+    // d) the node does not know the transaction but HAS the declared block, with another hash: proven divergence
+    const otherHash = structuredClone(r);
+    otherHash.invoice.id = 'INV-S1-NEVER';
+    otherHash.payment.txHash = '0x' + 'ab'.repeat(32);
+    otherHash.payment.blockHash = '0x' + 'cd'.repeat(32);
+    const c4 = await checkReceipt({ rpc: rpcClient(RPC), receipt: otherHash, expected: w.expected(a.vault, 'INV-S1-NEVER') });
+    assert.equal(c4.state, 'mismatch', c4.answer);
+    assert.equal(c4.evidence, 'block');
+  });
+
+  it('2. a genuine receipt and a node that is behind: no verdict and no reject, settled once the node catches up', async () => {
+    const w = await world();
+    const a = await w.deployVault();
+    await a.pay('INV-S2', '2');
+    await w.finalize();
+    const r = await w.receiptFor(a.vault, 'INV-S2');
+    const x = w.expected(a.vault, 'INV-S2');
+    const behind = await checkReceipt({ rpc: LAGGING(rpcClient(RPC)), receipt: r, expected: x });
+    assert.equal(behind.state, 'inconclusive', behind.answer);
+    assert.equal(behind.decision, 'retry');
+    assert.equal(behind.conclusive, false);
+    assert.equal(behind.evidence, 'unavailable');
+    assert.equal(behind.uncertainty, 'node_behind_or_receipt_invalid');
+    // However far behind the node is, the height difference alone never rejects.
+    const far = structuredClone(r);
+    far.payment.blockNumber += 1_000_000;
+    const c = await checkReceipt({ rpc: LAGGING(rpcClient(RPC)), receipt: far, expected: x });
+    assert.equal(c.decision, 'retry', c.answer);
+    const caughtUp = await checkReceipt({ rpc: rpcClient(RPC), receipt: r, expected: x });
+    assert.equal(caughtUp.state, 'settle', caughtUp.answer);
+  });
+
+  it('3. a future block and an unknown transaction: inconclusive, with the uncertainty spelled out', async () => {
+    const w = await world();
+    const a = await w.deployVault();
+    await a.pay('INV-S3', '2');
+    await w.finalize();
+    const r = await w.receiptFor(a.vault, 'INV-S3');
     const future = structuredClone(r);
-    future.invoice.id = 'INV-NEVER-PAID';
+    future.invoice.id = 'INV-S3-NEVER';
+    future.payment.txHash = '0x' + 'ef'.repeat(32);
     future.payment.blockNumber = Number.MAX_SAFE_INTEGER;
-    const f = await checkReceipt({ rpc: rpcClient(RPC), receipt: future, expected: w.expected(a.vault, 'INV-NEVER-PAID') });
-    assert.equal(f.state, 'not_paid', f.answer);
-    assert.equal(f.decision, 'reject');
+    const f = await checkReceipt({ rpc: rpcClient(RPC), receipt: future, expected: w.expected(a.vault, 'INV-S3-NEVER') });
+    assert.equal(f.state, 'inconclusive', f.answer);
+    assert.equal(f.conclusive, false);
+    assert.equal(f.uncertainty, 'node_behind_or_receipt_invalid');
+    assert.match(f.answer, /cannot be told apart/);
   });
 });
 
@@ -247,7 +325,7 @@ const AP = join(PKG, 'examples', 'accounts-payable', 'ap.mjs');
 type ApRun = { code: number | null; result?: { outcome: string; state?: string; invoices?: Record<string, { status: string }>; settlements?: number; settledEvents?: number; inbox?: unknown[]; results?: { outcome: string }[] } };
 function apAsync(state: string, args: string[], env: Record<string, string> = {}): Promise<ApRun> {
   return new Promise((done) => {
-    const p = spawn(process.execPath, ['--no-warnings=ExperimentalWarning', AP, ...args], { env: { ...process.env, AP_STATE: state, AP_RPC: RPC, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawn(process.execPath, ['--no-warnings=ExperimentalWarning', AP, ...args], { env: { ...process.env, AP_STATE: state, AP_RPC: RPC, AP_RETRY_BASE_S: '0', ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     p.stdout.on('data', (d) => (out += d));
     p.on('close', (code) => {
@@ -279,10 +357,11 @@ describe('accounts-payable example', () => {
     });
     assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
     assert.match(run.stdout, /Every step behaved as expected/);
-    // The books on disk, read by a new process: one mark for the expected invoice, an empty inbox.
-    const s = (await apAsync(join(dir, '.state'), ['status'])).result as unknown as { invoices: Record<string, { status: string }>; settlements: number; inbox: unknown[] };
+    // The books on disk, read by a new process: one mark for the expected invoice; the only delivery left is the
+    // unconfirmable future-block copy, parked for review, with its invoice still open.
+    const s = (await apAsync(join(dir, '.state'), ['status'])).result as unknown as { invoices: Record<string, { status: string }>; settlements: number; inbox: { ref: string; parked: boolean }[] };
     assert.deepEqual(Object.fromEntries(Object.entries(s.invoices).map(([k, v]) => [k, v.status])), { 'AP-2026-0001': 'paid', 'AP-2026-0002': 'open' });
-    assert.equal(s.inbox.length, 0);
+    assert.deepEqual(s.inbox.map((q) => [q.ref, q.parked]), [['AP-2026-0002', true]]);
   });
 
   it('a process killed during the check leaves the delivery in the inbox; retry marks it once', async () => {
@@ -335,6 +414,67 @@ describe('accounts-payable example', () => {
     assert.equal(s.inbox.length, 0);
     assert.equal(Object.values(s.invoices).filter((v) => v.status === 'paid').length, 1);
     assert.ok(vault);
+  });
+
+  it('scenarios 2 and 3 in the books: a node that is behind keeps the invoice open; an unconfirmable receipt is parked', async () => {
+    const { dir, receipt, books } = await setup();
+    // An RPC proxy that is "behind" until told otherwise.
+    const { createServer } = await import('node:http');
+    let lagging = true;
+    const real = rpcClient(RPC);
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (d) => (body += d));
+      req.on('end', async () => {
+        const q = JSON.parse(body);
+        try {
+          const result = await (lagging ? LAGGING(real) : real)(q.method, q.params);
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: q.id, result }));
+        } catch (e) {
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: q.id, error: { code: -32000, message: String((e as Error).message) } }));
+        }
+      });
+    }).listen(0, '127.0.0.1');
+    await new Promise((r) => server.once('listening', r));
+    const proxy = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;
+    const env = { AP_RPC: proxy, AP_RETRY_BASE_S: '0', AP_MAX_ATTEMPTS: '3' };
+    try {
+      const state = join(dir, 'lag');
+      assert.equal((await apAsync(state, ['init'], { AP_BOOKS: books })).code, 0);
+      // 2: genuine receipt, node behind: queued (no reject), invoice open; once the node catches up, one mark.
+      const d = await apAsync(state, ['deliver', 'AP-2026-0001', receipt], env);
+      assert.equal(d.code, 3);
+      assert.equal(d.result?.state, 'inconclusive');
+      let s = (await apAsync(state, ['status'])).result!;
+      assert.equal(s.invoices?.['AP-2026-0001']?.status, 'open');
+      assert.equal(s.inbox?.length, 1);
+      lagging = false;
+      const r = await apAsync(state, ['retry'], env);
+      assert.equal(r.result?.results?.[0]?.outcome, 'settled');
+      s = (await apAsync(state, ['status'])).result!;
+      assert.equal(s.invoices?.['AP-2026-0001']?.status, 'paid');
+
+      // 3: a forged receipt with an unknown transaction in a future block: never rejected on height, never marked,
+      // and the retry policy parks it after AP_MAX_ATTEMPTS checks; `retry` then leaves it alone.
+      const forged = JSON.parse(readFileSync(receipt, 'utf8'));
+      forged.invoice.id = 'QDAY-2026-11-24-002';
+      forged.payment.txHash = '0x' + '12'.repeat(32);
+      forged.payment.blockNumber = 999_999_999;
+      const fpath = join(dir, 'future.json');
+      writeFileSync(fpath, JSON.stringify(forged));
+      const outcomes = [(await apAsync(state, ['deliver', 'AP-2026-0002', fpath], env)).result?.outcome];
+      for (let i = 0; i < 3; i++) {
+        const rr = await apAsync(state, ['retry'], env);
+        outcomes.push(rr.result?.results?.[0]?.outcome ?? `checked ${rr.result?.results?.length ?? 0}`);
+      }
+      assert.deepEqual(outcomes, ['queued', 'queued', 'needs_review', 'checked 0']);
+      s = (await apAsync(state, ['status'])).result!;
+      assert.equal(s.invoices?.['AP-2026-0002']?.status, 'open');
+      assert.equal(s.settlements, 1);
+      assert.deepEqual((s.inbox as { ref: string; parked: boolean; attempts: number }[]).map((q) => [q.ref, q.parked, q.attempts]), [['AP-2026-0002', true, 3]]);
+    } finally {
+      server.close();
+    }
   });
 
   it('the CLI scripts: receipt:fetch writes the receipt, receipt:check settles it and rejects an edited record', async () => {

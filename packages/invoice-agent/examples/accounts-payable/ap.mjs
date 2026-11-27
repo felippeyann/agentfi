@@ -4,11 +4,18 @@
 //
 //   node ap.mjs init                       create the state from the books (AP_BOOKS, default books.json)
 //   node ap.mjs deliver <ref> <receipt>    a receipt arrives for invoice <ref> of the books
-//   node ap.mjs retry                      re-check every delivery still in the inbox
+//   node ap.mjs retry                      re-check the deliveries in the inbox that are due (not parked)
 //   node ap.mjs status                     the books, the settlements, the inbox
 //
 // Environment: AP_STATE (state directory, default ./.state next to this file), AP_RPC (default: the public Aevum RPC),
-// AP_BOOKS (books file used by init), AP_RPC_DOWN=1 (simulates a network outage: every RPC call fails).
+// AP_BOOKS (books file used by init), AP_RPC_DOWN=1 (simulates a network outage: every RPC call fails),
+// AP_MAX_ATTEMPTS (default 5) and AP_RETRY_BASE_S (default 30): the retry policy below.
+//
+// Retry policy (the CALLER's, not the verifier's: checkReceipt never loops). A check that ends without evidence
+// (`retry`: pending, inconclusive) leaves the invoice open and the delivery in the inbox, due again after a backoff
+// (base x 2^(attempts-1) seconds, at most one hour). After AP_MAX_ATTEMPTS checks without evidence the delivery is
+// PARKED: it stays in the inbox, the invoice stays open, `retry` no longer checks it, and a `needs_review` event asks a
+// person to look (for instance with another RPC). Delivering the receipt again is that person's explicit re-check.
 //
 // Rules (what the example shows):
 //   - the expected data of an invoice come from the books, never from the receipt;
@@ -20,7 +27,7 @@
 //     the same time from another process, finds the invoice already paid and changes nothing, and one on-chain payment
 //     settles at most one invoice of the books.
 // Each command prints one line `RESULT {json}` for scripts. Exit code: 0 settled or already settled, 2 rejected,
-// 3 left in the inbox for retry, 1 usage or state error.
+// 3 left in the inbox for retry, 4 parked for review (invoice open, no automatic retry), 1 usage or state error.
 
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -34,6 +41,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const STATE = resolve(process.env.AP_STATE ?? join(HERE, '.state'));
 const DB_PATH = join(STATE, 'ap.sqlite');
 const RPC_URL = process.env.AP_RPC ?? DEFAULTS.rpcUrl;
+const MAX_ATTEMPTS = Number(process.env.AP_MAX_ATTEMPTS ?? 5);
+const RETRY_BASE_S = Number(process.env.AP_RETRY_BASE_S ?? 30);
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS invoices (ref TEXT PRIMARY KEY, description TEXT, expected TEXT NOT NULL);
@@ -45,7 +54,8 @@ const SCHEMA = `
   );
   CREATE TABLE IF NOT EXISTS inbox (
     delivery_id TEXT PRIMARY KEY, ref TEXT NOT NULL, receipt TEXT NOT NULL, received_at TEXT NOT NULL,
-    attempts INTEGER NOT NULL DEFAULT 0, last_state TEXT, last_answer TEXT
+    attempts INTEGER NOT NULL DEFAULT 0, last_state TEXT, last_answer TEXT,
+    next_attempt_at TEXT, parked INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, pid INTEGER NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL);
 `;
@@ -145,11 +155,17 @@ async function deliver(db, ref, receiptText, deliveryId) {
   const r = await checkReceipt({ rpc: rpc(), receipt, expected });
 
   if (r.decision === 'retry') {
-    tx(db, () => {
-      db.prepare('UPDATE inbox SET attempts = attempts + 1, last_state = ?, last_answer = ? WHERE delivery_id = ?').run(r.state, r.answer, id);
-      logEvent(db, 'queued', { ...base, state: r.state, answer: r.answer });
+    // No evidence either way: the invoice stays open. The policy decides when (and whether) to check again.
+    return tx(db, () => {
+      const q = db.prepare('SELECT attempts FROM inbox WHERE delivery_id = ?').get(id);
+      const attempts = (q?.attempts ?? 0) + 1;
+      const parked = attempts >= MAX_ATTEMPTS;
+      const next = parked ? null : new Date(Date.now() + Math.min(RETRY_BASE_S * 2 ** (attempts - 1), 3600) * 1000).toISOString();
+      db.prepare('UPDATE inbox SET attempts = ?, last_state = ?, last_answer = ?, next_attempt_at = ?, parked = ? WHERE delivery_id = ?').run(attempts, r.state, r.answer, next, parked ? 1 : 0, id);
+      const outcome = parked ? 'needs_review' : 'queued';
+      logEvent(db, outcome, { ...base, state: r.state, attempts, nextAttemptAt: next, answer: r.answer, ...(r.uncertainty ? { uncertainty: r.uncertainty } : {}) });
+      return { ...base, outcome, state: r.state, attempts, ...(next ? { nextAttemptAt: next } : {}), answer: parked ? `${r.answer} After ${attempts} checks without evidence the delivery is parked for review: the invoice stays open and is not checked again automatically.` : r.answer, ...(r.uncertainty ? { uncertainty: r.uncertainty } : {}) };
     });
-    return { ...base, outcome: 'queued', state: r.state, answer: r.answer };
   }
   if (r.decision === 'reject') return finish(db, base, 'rejected', r.state, r.answer, r.differences ? { differences: r.differences } : {});
 
@@ -181,7 +197,7 @@ async function deliver(db, ref, receiptText, deliveryId) {
 }
 
 async function retry(db) {
-  const rows = db.prepare('SELECT delivery_id, ref, receipt FROM inbox ORDER BY received_at, delivery_id').all();
+  const rows = db.prepare('SELECT delivery_id, ref, receipt FROM inbox WHERE parked = 0 AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY received_at, delivery_id').all(now());
   const results = [];
   for (const q of rows) results.push(await deliver(db, q.ref, q.receipt, q.delivery_id));
   return { outcome: 'retried', count: results.length, results };
@@ -192,11 +208,12 @@ function status(db) {
     .map((x) => [x.ref, x.tx_hash ? { status: 'paid', txHash: x.tx_hash, blockNumber: x.block_number, settlementId: x.settlement_id, settledAt: x.settled_at } : { status: 'open' }]));
   const settlements = db.prepare('SELECT COUNT(*) AS n FROM settlements').get().n;
   const settledEvents = db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'settled'").get().n;
-  const inbox = db.prepare('SELECT delivery_id AS deliveryId, ref, attempts, last_state AS lastState FROM inbox ORDER BY received_at').all();
+  const inbox = db.prepare('SELECT delivery_id AS deliveryId, ref, attempts, last_state AS lastState, next_attempt_at AS nextAttemptAt, parked FROM inbox ORDER BY received_at').all()
+    .map((q) => ({ ...q, parked: q.parked === 1 }));
   return { outcome: 'status', state: STATE, invoices, settlements, settledEvents, inbox };
 }
 
-const EXIT = { settled: 0, already_settled: 0, initialized: 0, exists: 0, status: 0, queued: 3, rejected: 2 };
+const EXIT = { settled: 0, already_settled: 0, initialized: 0, exists: 0, status: 0, queued: 3, needs_review: 4, rejected: 2 };
 
 const [cmd, a1, a2] = process.argv.slice(2);
 let db;
@@ -214,7 +231,8 @@ try {
   if (r) {
     console.log(`RESULT ${JSON.stringify(r)}`);
     // exitCode, not process.exit(): exiting with fetch sockets still open crashes Node on Windows (0xC0000409).
-    process.exitCode = cmd === 'retry' ? (r.results.some((x) => x.outcome === 'queued') ? 3 : r.results.some((x) => x.outcome === 'rejected') ? 2 : 0) : EXIT[r.outcome] ?? 1;
+    const worst = (rs) => (rs.some((x) => x.outcome === 'queued') ? 3 : rs.some((x) => x.outcome === 'needs_review') ? 4 : rs.some((x) => x.outcome === 'rejected') ? 2 : 0);
+    process.exitCode = cmd === 'retry' ? worst(r.results) : EXIT[r.outcome] ?? 1;
   }
 } catch (e) {
   console.error(`error: ${e.message}`);

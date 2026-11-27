@@ -413,11 +413,23 @@ The page's answer is for a person. A business system (accounts payable, an ERP) 
 |---|---|---|
 | `settle` | settle | mark the invoice paid; `settlementId` (`eip155:<chain>:<vault>:<invoiceKey>`) identifies the payment |
 | `divergent` | reject | the receipt, or the payment on chain, is for another invoice, vault, token, vendor, payee or amount |
-| `not_paid` | reject | your vault has no settlement of your invoice: the receipt is not backed by the chain |
-| `mismatch` | reject | the chain's records disagree, or the receipt names another transaction or event |
+| `not_paid` | reject | your vault has no settlement of your invoice, and the node shows the receipt's transaction in the declared block: it is not the payment of this invoice |
+| `mismatch` | reject | a proven divergence: the chain's records disagree, the receipt names another transaction or event, or the node places the receipt's transaction (or the declared block height) in another block than the file says |
 | `pending` | retry | paid, not finalized yet (about an hour on Aevum) |
-| `inconclusive` | retry | the chain could not be read, or the node answered in a degraded way (another chain, an empty `eth_call`, no event or no receipt for a settlement it reports, a head up to 1000 blocks below the receipt's block; a block further ahead is `not_paid`): nothing concluded, try again |
+| `inconclusive` | retry | no evidence either way: the chain could not be read, the node answered in a degraded way (another chain, an empty `eth_call`, no event or no receipt for a settlement it reports), or it does not know the receipt's transaction (see below) |
 | `invalid` | reject | the receipt or your record is malformed |
+
+Every result also says `conclusive` (false exactly for `retry`). A reject always rests on evidence: a difference with your record, or a fact the node reports. A `retry` means the node gave none; it is never a reason to reject, and when to check again is **your** policy (the check itself never loops).
+
+**When your vault has no settlement of your invoice**, the check asks the node about the receipt's own transaction (`eth_getTransactionReceipt` by its hash) and, if needed, the declared block (`eth_getBlockByNumber`). The node's height alone never decides anything:
+
+| Situation | Result |
+|---|---|
+| The node knows the transaction, in another block (number or hash) than the file declares | `mismatch`: proven divergence |
+| The node knows the transaction, in the declared block, but it settled nothing of yours | `not_paid` |
+| The node does not know the transaction, but has the declared block height with another hash | `mismatch`: proven divergence |
+| The node does not know the transaction and is below the declared block: a genuine receipt and a node that is behind, or a receipt naming a transaction that does not exist (for instance in a future block) | `inconclusive`, `uncertainty: node_behind_or_receipt_invalid`. One source cannot tell these apart: keep the invoice open, check with another RPC or later. |
+| The node has the declared block with the receipt's hash but not the transaction | `inconclusive`: this node cannot answer |
 
 **For a juror: download, check, try.** Work in `packages/invoice-agent`, after `npm ci` at the root. All three steps read the public Aevum RPC (the third one for its positive case).
 
@@ -436,7 +448,7 @@ The page's answer is for a person. A business system (accounts payable, an ERP) 
 
    - The expected output is `SETTLE (decision: settle)` followed by nine `ok` lines.
    - Edit one field of the expected file (the amount, the invoice id or the vault) and run it again: the result is `DIVERGENT`.
-   - Exit code: 0 settle, 2 reject, 3 retry.
+   - Exit code: 0 settle, 2 reject, 3 retry (no evidence either way).
 3. **Try the example** with `npm run ap:demo`.
    - **What it is:** a small accounts-payable system (`examples/accounts-payable/ap.mjs`) with two invoices in its own books (`books.json`). `AP-2026-0001` is the public invoice; `AP-2026-0002` was never paid.
    - **How it runs:** each step is a separate process, so every step is a restart. The state is one SQLite file, `examples/accounts-payable/.state/ap.sqlite`.
@@ -446,9 +458,13 @@ The page's answer is for a person. A business system (accounts payable, an ERP) 
      3. after a restart, the same receipt arrives again: `already_settled`, answered from the books without reading the chain; nothing changes;
      4. the valid receipt of `-001` is delivered for `AP-2026-0002`: `divergent` (`invoice.id`);
      5. a local copy claims another vault: `divergent` (`vault`);
-     6. a local copy is edited to claim `-002`, so it matches the books but not the chain: `not_paid`;
-     7. on a fresh state, two processes deliver the same receipt at the same time: one `settled`, one `already_settled`, one mark.
-   - **The end:** "Every step behaved as expected", then the books (`AP-2026-0001: paid`, `AP-2026-0002: open`). The audit log is the `events` table of that file; `node examples/accounts-payable/ap.mjs status` shows the books, the marks and the inbox (run directly, `ap.mjs` prints Node's `ExperimentalWarning` for `node:sqlite` on stderr; the demo hides it).
+     6. a local copy is edited to claim `-002`; its transaction exists in the declared block but settled `-001`: `not_paid`;
+     7. the same copy with another block number: the node knows the transaction in its real block, a proven divergence: `mismatch`;
+     8. a copy claiming `-002` with an unknown transaction in a future block: `queued (inconclusive)` with the uncertainty spelled out, no reject, the invoice stays open;
+     9. `retry` (the demo caps the attempts at 2): still no evidence, so the delivery is parked for review (`needs_review`, exit 4);
+     10. `retry` again: the parked delivery is not checked again;
+     11. on a fresh state, two processes deliver the same receipt at the same time: one `settled`, one `already_settled`, one mark.
+   - **The end:** "Every step behaved as expected", then the books (`AP-2026-0001: paid`, `AP-2026-0002: open`, one delivery parked for review). The audit log is the `events` table of that file; `node examples/accounts-payable/ap.mjs status` shows the books, the marks and the inbox (run directly, `ap.mjs` prints Node's `ExperimentalWarning` for `node:sqlite` on stderr; the demo hides it).
    - **If the public RPC does not answer:** a step that needs it is retried a few times; if the RPC still does not answer, the demo stops with exit 3 ("run the demo again later") and nothing is marked.
 
 **How the example keeps one mark per payment.**
@@ -459,6 +475,8 @@ The page's answer is for a person. A business system (accounts payable, an ERP) 
 - A second delivery, whether after a restart or at the same moment from another process, finds the invoice already marked by the same payment and changes nothing.
 - One payment can settle only one invoice of the books. An invoice already marked by *another* payment is refused as a conflict.
 
+**The example's retry policy** (separate from the check). A `retry` result leaves the invoice open and the delivery in the inbox, due again after a backoff (`AP_RETRY_BASE_S`, default 30 s, doubling per attempt, at most an hour). After `AP_MAX_ATTEMPTS` checks without evidence (default 5) the delivery is **parked**: it stays in the inbox, the invoice stays open, `retry` no longer checks it, and a `needs_review` event asks a person to look (for instance against another RPC). Delivering the receipt again is that person's explicit re-check. So a receipt that no node can confirm is neither marked, nor rejected on a guess, nor retried for ever.
+
 **Limits.**
 - The check trusts one RPC, as the page does: use the official one, or your own node.
 - The receipt is a claim. Without your own record, it proves only that *some* invoice was paid.
@@ -468,7 +486,9 @@ The page's answer is for a person. A business system (accounts payable, an ERP) 
 - the historical payee after a `setMandate`;
 - another invoice and another vault;
 - edited copies;
-- an outage, then a retry, and degraded RPC answers (no event, no receipt, an empty `eth_call`, a node behind the receipt);
+- an outage, then a retry, and degraded RPC answers (no event, no receipt, an empty `eth_call`);
+- the receipt's block: a known transaction in another block (proven divergence), a known transaction in the declared block (`not_paid`), the declared height with another hash (proven divergence), a genuine receipt and a node that is behind (no reject, however far; settled once it catches up), an unknown transaction in a future block (inconclusive with the uncertainty);
+- the same in the books, through an RPC proxy that lags then catches up: the invoice stays open, then one mark; the unconfirmable receipt is parked after the attempt cap and left alone by `retry`;
 - a payment not yet finalized;
 - the whole `ap:demo`;
 - a process killed during the check;

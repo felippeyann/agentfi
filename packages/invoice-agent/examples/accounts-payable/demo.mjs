@@ -22,7 +22,9 @@ const COPIES = join(BASE, '.state-copies');
 /** Runs `node ap.mjs …` as its own process; resolves with its exit code and parsed RESULT line. */
 function ap(args, env = {}, state = STATE) {
   return new Promise((done) => {
-    const p = spawn(process.execPath, ['--no-warnings=ExperimentalWarning', join(HERE, 'ap.mjs'), ...args], { env: { ...process.env, AP_STATE: state, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    // No backoff in the demo (AP_RETRY_BASE_S=0): `retry` re-checks at once. The attempt cap is the example's default
+    // unless a step sets it.
+    const p = spawn(process.execPath, ['--no-warnings=ExperimentalWarning', join(HERE, 'ap.mjs'), ...args], { env: { ...process.env, AP_RETRY_BASE_S: '0', AP_STATE: state, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     p.stdout.on('data', (d) => (out += d));
     p.stderr.on('data', (d) => (err += d));
@@ -95,6 +97,15 @@ const otherVault = copy('other-vault.json', (r) => {
 const forged = copy('forged-invoice-id.json', (r) => {
   r.invoice.id = 'QDAY-2026-11-24-002';
 });
+const otherBlock = copy('forged-other-block.json', (r) => {
+  r.invoice.id = 'QDAY-2026-11-24-002';
+  r.payment.blockNumber += 1;
+});
+const futureBlock = copy('forged-future-block.json', (r) => {
+  r.invoice.id = 'QDAY-2026-11-24-002';
+  r.payment.txHash = '0x' + 'f00d'.repeat(16);
+  r.payment.blockNumber = 999_999_999;
+});
 
 step('The network is down when the receipt arrives (simulated outage)', await ap(['deliver', 'AP-2026-0001', RECEIPT], { AP_RPC_DOWN: '1' }),
   (r) => r.code === 3 && r.result?.outcome === 'queued' && r.result.state === 'inconclusive');
@@ -120,12 +131,26 @@ step('The valid receipt of invoice -001 delivered for invoice AP-2026-0002 (-002
 step('A copy that claims another vault (and invoice -002)', await ap(['deliver', 'AP-2026-0002', otherVault]),
   (r) => r.code === 2 && r.result?.state === 'divergent' && r.result.differences?.some((d) => d.field === 'vault'));
 
-step('A copy edited to claim invoice -002 (matches the books, not the chain)', await withRpc(await ap(['deliver', 'AP-2026-0002', forged])),
+step('A copy edited to claim invoice -002: its transaction exists, in the declared block, but settled -001', await withRpc(await ap(['deliver', 'AP-2026-0002', forged])),
   (r) => r.code === 2 && r.result?.state === 'not_paid');
 
+step('A copy claiming -002 and another block: the node knows the transaction, in its real block (proven divergence)', await withRpc(await ap(['deliver', 'AP-2026-0002', otherBlock])),
+  (r) => r.code === 2 && r.result?.state === 'mismatch');
+
+// A transaction the node does not know, in a block the chain has not reached: one source cannot tell this from a node
+// that is behind. No verdict, no mark, no reject: the invoice stays open, and the retry policy (cap: 2 here) parks it.
+const fut1 = step('A copy claiming -002 with an unknown transaction in a future block (check 1 of 2)', await ap(['deliver', 'AP-2026-0002', futureBlock], { AP_MAX_ATTEMPTS: '2' }),
+  (r) => r.code === 3 && r.result?.state === 'inconclusive' && r.result.uncertainty === 'node_behind_or_receipt_invalid');
+if (fut1.outcome === 'queued' && !fut1.uncertainty) rpcGaveUp();
+step('retry: still no evidence, so the delivery is parked for review (check 2 of 2)', await ap(['retry'], { AP_MAX_ATTEMPTS: '2' }),
+  (r) => r.code === 4 && r.result?.results?.[0]?.outcome === 'needs_review');
+step('retry again: a parked delivery is not checked again automatically', await ap(['retry'], { AP_MAX_ATTEMPTS: '2' }),
+  (r) => r.code === 0 && r.result?.count === 0);
+
 const end = await status();
-console.log(`\n   Marks in the ledger: ${end.settlements} (expected 1); inbox: ${end.inbox.length} (expected 0)`);
-if (end.settlements !== 1 || end.inbox.length !== 0) failures.push(`expected 1 mark and an empty inbox, found ${end.settlements} and ${end.inbox.length}`);
+const parked = end.inbox.filter((q) => q.parked);
+console.log(`\n   Marks in the ledger: ${end.settlements} (expected 1); inbox: ${end.inbox.length} delivery, parked for review (expected 1); AP-2026-0002: ${end.invoices['AP-2026-0002']?.status} (expected open)`);
+if (end.settlements !== 1 || end.inbox.length !== 1 || parked.length !== 1 || end.invoices['AP-2026-0002']?.status !== 'open') failures.push(`expected 1 mark, 1 parked delivery and AP-2026-0002 open; found ${end.settlements}, ${parked.length}, ${end.invoices['AP-2026-0002']?.status}`);
 
 // Two processes deliver the same receipt at the same time, on a fresh state.
 await ap(['init'], {}, STATE2);
@@ -156,4 +181,4 @@ if (failures.length) {
   console.error(`\nFAILED: ${failures.join('; ')}`);
   process.exit(1);
 }
-console.log('\nEvery step behaved as expected: one mark for one payment, kept across restarts and concurrent deliveries; divergent receipts and an outage marked nothing.');
+console.log('\nEvery step behaved as expected: one mark for one payment, kept across restarts and concurrent deliveries; proven divergences were rejected; an outage and a receipt the node cannot confirm marked nothing and left the invoice open.');

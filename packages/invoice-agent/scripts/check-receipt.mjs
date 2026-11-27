@@ -31,6 +31,7 @@ const rpcUrl = arg('rpc') ?? DEFAULTS.rpcUrl;
 const result = await checkReceipt({ rpc: rpcClient(rpcUrl), receipt: readJson(receiptPath, 'receipt'), expected: readJson(expectPath, 'expected record') });
 console.log(`${result.state.toUpperCase()} (decision: ${result.decision}) via ${rpcUrl}`);
 console.log(result.answer);
+if (result.uncertainty) console.log(`  uncertainty: ${result.uncertainty} (no evidence either way from this RPC; check another one)`);
 for (const c of result.checks) console.log(`  ${c.ok ? 'ok ' : 'BAD'} ${c.what}`);
 if (result.differences) for (const d of result.differences) console.log(`  differs: ${d.field}: expected ${d.expected}, ${d.chain !== undefined ? `chain ${d.chain}` : `receipt ${d.receipt}`}`);
 process.exitCode = result.decision === 'settle' ? 0 : result.decision === 'retry' ? 3 : 2; // not process.exit(): see ap.mjs
