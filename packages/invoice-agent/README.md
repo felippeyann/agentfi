@@ -381,11 +381,11 @@ Step 6 of the vault session counts independently, since the session's first bloc
 
 For a `paid_verified` receipt the page also offers **"Simulate a resend after the payment"**: a read-only `eth_call` of the same `payInvoice` (id, vendor, payee, amount from the receipt) from the settling agent, at the latest block if the mandate is still valid there, otherwise a few blocks after the settlement block and before the mandate's expiry (`payInvoice` checks the expiry before the duplicate). It counts as shown only if the vault reverts `AlreadySettled` with the receipt's invoice key and settlement block; a control call one block before the settlement is shown alongside: it is expected to pass, a control that already reverts `AlreadySettled` makes the result inconclusive, and a control the node does not answer is reported as such. An RPC without that block's state, or any other answer, is reported as unavailable or inconclusive. Why the block matters: [the order of the vault's checks](#the-on-chain-vault-invoicemandate). Tested in `test/verify-page.test.ts` (valid mandate, mandate expired at the latest block, expiry inside the offset, RPC down, no historical state, unexpected answers).
 
-Try it locally: `npm run verify:fixture` (Anvil, a vault, INV-001 finalized and INV-002 not yet; it serves the page on 127.0.0.1 and prints the links; Ctrl+C stops it; ports 8571 and 8572 by default, or `FIXTURE_ANVIL_PORT` / `FIXTURE_PAGE_PORT`). `test/verify-page.test.ts` runs the page's logic against Anvil and checks its states against the agent's own answer and its hand-written selectors against the contract ABI. **Live** since 2026-11-25 at https://www.agentfi.cc/verify/index.html. The live copy is this folder as of commit `31d1c1a` (PR #220); the resend simulation and the receipt download go live with the next deploy of the page. For example, [the first public invoice](https://www.agentfi.cc/verify/index.html?vault=0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3&invoice=QDAY-2026-11-24-001).
+Try it locally: `npm run verify:fixture` (Anvil, a vault, INV-001 finalized and INV-002 not yet; it serves the page on 127.0.0.1 and prints the links; Ctrl+C stops it; ports 8571 and 8572 by default, or `FIXTURE_ANVIL_PORT` / `FIXTURE_PAGE_PORT`). `test/verify-page.test.ts` runs the page's logic against Anvil and checks its states against the agent's own answer and its hand-written selectors against the contract ABI. **Live** since 2026-11-25 at https://www.agentfi.cc/verify/index.html, updated on 2026-11-27. The live copy is this folder as of commit `2920f22` (PR #222), with the resend simulation and the receipt download. For example, [the first public invoice](https://www.agentfi.cc/verify/index.html?vault=0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3&invoice=QDAY-2026-11-24-001).
 
 ## Portable receipt: can another system mark its invoice paid?
 
-The page's answer is for a person. A business system (accounts payable, an ERP) needs a file it can keep and a rule it can run. This adds both: a versioned **receipt**, and a **read-only check** that decides whether *your* invoice can be marked paid. It is local for now: the page's download button goes live with the next deploy of the page, but the scripts below already work against the public chain.
+The page's answer is for a person. A business system (accounts payable, an ERP) needs a file it can keep and a rule it can run. This adds both: a versioned **receipt**, and a **read-only check** that decides whether *your* invoice can be marked paid. Both are available today against the public chain: the live page downloads the receipt, and the scripts below fetch and check it from a terminal. The steps are in **For a juror: download, check, try** below.
 
 **The receipt** (`agentfi.invoice-receipt`, version 1). `verify/receipt.js` builds it from a `paid_verified` check:
 
@@ -433,14 +433,14 @@ Every result also says `conclusive` (false exactly for `retry`). A reject always
 
 **For a juror: download, check, try.** Work in `packages/invoice-agent`, after `npm ci` at the root. All three steps read the public Aevum RPC (the third one for its positive case).
 
-1. **Get the receipt** of the public invoice. Once the page is redeployed, the page offers "Download receipt (JSON)" under a `paid_verified` result. Today you can get the same file from the terminal:
+1. **Get the receipt** of the public invoice. Open [the invoice on agentfi.cc/verify](https://www.agentfi.cc/verify/index.html?vault=0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3&invoice=QDAY-2026-11-24-001) (no wallet). Under the "Paid and verified" result, press **"Download receipt (JSON)"**; the browser saves `agentfi-receipt-QDAY-2026-11-24-001.json`. Or get the same receipt from the terminal (only `issued` and the finalized block at issue differ):
 
    ```
    npm run receipt:fetch -- --vault 0xA0BfD474378bB8F7Ee96294313a3832B26f4D7A3 --invoice QDAY-2026-11-24-001 --vendor vendor-1 --out receipt.json
    ```
 
    A copy made this way on 27 Nov is in `examples/accounts-payable/receipts/QDAY-2026-11-24-001.json`.
-2. **Check it** against an expected record. Use your own; the example's is `examples/accounts-payable/expected-QDAY-2026-11-24-001.json`:
+2. **Check it** against an expected record. Use your own; the example's is `examples/accounts-payable/expected-QDAY-2026-11-24-001.json`. Pass the downloaded file's path (or `receipt.json`) to `--receipt`:
 
    ```
    npm run receipt:check -- --receipt receipt.json --expect examples/accounts-payable/expected-QDAY-2026-11-24-001.json
